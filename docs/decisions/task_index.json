@@ -1,6 +1,26 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_L1_HF_REMOTE_OFFLOAD",
+      "date": "2026-09-08",
+      "adr_id": "ADR_20260908_L1_HF_REMOTE_OFFLOAD",
+      "domain": "data-infra",
+      "title": "L1 Parquet HuggingFace Dataset 자동 오프로드",
+      "why": "50GB→200GB VPS 라도 코인봇 공존 하에 체결+호가 L1(연 7~40GB)을 로컬 단독 보관 불가, 무인 관리·내구성 필요.",
+      "resolution": "HfDatasetArchiver 로 EOD 마다 L1 파티션을 HF private Dataset 에 업로드·바이트크기 검증; 원격 확인된 30일 초과 로컬 L1 만 prune_local_l1 로 삭제.",
+      "impact": "L1 이 HF 에 영구 이중화되어 hf:// 로 백테스트 조회 가능; HF_TOKEN 부재/업로드 실패 시 CRITICAL 로그 후 로컬 보존(무손실)."
+    },
+    {
+      "task_id": "TASK_L0_OFFLOAD_BEFORE_DELETE",
+      "date": "2026-09-08",
+      "adr_id": "ADR_20260908_L0_OFFLOAD_BEFORE_DELETE",
+      "domain": "data-infra",
+      "title": "L0 저널 offload-before-delete 게이트",
+      "why": "retain_days=3 슬라이딩 prune 이 L1 정규화 단계 부재로 백테스트 표본 축적을 원천 차단(항상 최근 3거래일만 잔존).",
+      "resolution": "prune_old_journals 에 archive_root 를 추가해 만료 L0 파티션을 dedup·typed Parquet(L1)로 정규화·검증 성공한 경우에만 삭제; archive_root=None 이면 무삭제 fail-closed.",
+      "impact": "L0 원본이 L1 Parquet 로 영구 축적되어 단타 백테스트 데이터셋 확보; 검증 실패 파티션은 보존 후 재시도."
+    },
+    {
       "task_id": "TASK_CLOUD_DAEMON_LIFECYCLE",
       "date": "2026-09-08",
       "adr_id": "ADR_20260908_CLOUD_DAEMON_LIFECYCLE",
