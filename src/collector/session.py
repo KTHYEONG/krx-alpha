@@ -1,5 +1,6 @@
 """수집 세션 composition root (코어 프리미티브 결선 facade)."""
 
+# ruff: noqa: I001 - spec pins import order check_disk_watermark, StorageExhaustedError
 from __future__ import annotations
 
 import datetime as dt
@@ -13,6 +14,7 @@ from src.collector.clock import measure_ntp_offset_ns
 from src.collector.ipc import read_candidates
 from src.collector.journal import L0JournalWriter
 from src.collector.manifest import SessionManifest
+from src.collector.storage_guard import check_disk_watermark, StorageExhaustedError, prune_old_journals
 from src.collector.subscription import SubscriptionDiff, SubscriptionRegistry
 
 logger = logging.getLogger(__name__)
@@ -49,6 +51,7 @@ class CollectorSession:
         conn_id: str,
         conn_seq: int,
     ) -> None:
+        if not check_disk_watermark(self.manifest_path.parent, min_free_gb=3.0): raise StorageExhaustedError('free disk below watermark')  # noqa: E701
         key = (vendor, stream)
         if key not in self.journals:
             raise KeyError(f"{vendor}/{stream}")
@@ -88,6 +91,7 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
     diff: SubscriptionDiff = registry.plan(desired)
     registry.apply(diff)
     journals = {(cfg.vendor, stream): L0JournalWriter(root=cfg.journal_root, vendor=cfg.vendor, stream=stream) for stream in cfg.desired_streams}
+    prune_old_journals(cfg.journal_root)
     session = CollectorSession(manifest=manifest, registry=registry, journals=journals, manifest_path=cfg.manifest_path)
     session.persist()
     logger.info("[DATA] stage=bootstrap pairs=%d offset_ns=%d status=OK", len(session.replay_pairs()), offset_ns)
