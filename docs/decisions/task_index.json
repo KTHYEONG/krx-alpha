@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_CLOUD_DOCKER_COLLECTOR_STORAGE",
+      "date": "2026-09-08",
+      "adr_id": "ADR_20260908_CLOUD_DOCKER_COLLECTOR_STORAGE",
+      "domain": "collector",
+      "title": "Cloud Docker Collector Storage Guard and Retention",
+      "why": "50GB 클라우드 VPS 및 코인 봇 공존 환경에서 디스크 고갈 방지 및 자율 보존 필요.",
+      "resolution": "shutil 기반 3GB 워터마크 fail-closed 가드 및 3일 슬라이딩 윈도우 파티션 prune 구현 및 세션 연동.",
+      "impact": "L0 원본 디스크 점유율을 ~1GB 내로 캡핑하여 코인 봇과의 충돌 없이 24시간 무인 수집 보장."
+    },
+    {
       "task_id": "TASK_REALTIME_COLLECTOR",
       "date": "2026-09-08",
       "adr_id": "ADR_20260908_REALTIME_COLLECTOR",
