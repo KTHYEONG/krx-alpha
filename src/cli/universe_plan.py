@@ -21,6 +21,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--decision-date", required=True)
     parser.add_argument("--out-path", required=True)
     parser.add_argument("--slot-budget", type=int, default=DEEP_SLOT_BUDGET)
+    parser.add_argument("--candidates-path", default=None)
     parser.set_defaults(handler=run)
 
 
@@ -37,4 +38,8 @@ def run(args: argparse.Namespace) -> int:
     selected = select_universe(featured, decision, slot_budget=int(args.slot_budget))
     logger.info("[DATA] stage=universe_plan decision=%s shape=%s status=OK", decision.isoformat(), str(selected.shape))
     selected.write_parquet(Path(str(args.out_path)), compression="zstd")
+    if getattr(args, "candidates_path", None):
+        from src.collector.scan_bridge import emit_candidates
+
+        emit_candidates(Path(str(args.candidates_path)), selected.to_dicts(), rev=int(decision.strftime("%Y%m%d")))
     return 0
