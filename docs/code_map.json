@@ -29,6 +29,9 @@
   "src/collector/session.py": {
     "testing": "tests/unit/collector/test_session.py"
   },
+  "src/collector/storage_guard.py": {
+    "testing": "tests/unit/collector/test_storage_guard.py"
+  },
   "src/collector/subscription.py": {
     "testing": "tests/unit/collector/test_subscription.py"
   },
