@@ -1,0 +1,69 @@
+"""collect-stream CLI 서브커맨드 (LS 실시간 수집 구동)."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import datetime as dt
+import json
+import os
+import pathlib
+
+import aiohttp
+
+from src.collector.session import SessionConfig, bootstrap_session
+from src.collector.streamer import RealtimeStreamer, SessionFrameSink
+from src.collector.ws_ls import LsRealtimeAdapter
+
+
+def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """'collect-stream' 서브커맨드를 등록한다."""
+    parser = subparsers.add_parser("collect-stream")
+    parser.add_argument("--session-date", required=True)
+    parser.add_argument("--journal-root", required=True)
+    parser.add_argument("--manifest-path", required=True)
+    parser.add_argument("--candidates-path", required=True)
+    parser.add_argument("--market-map", required=True)
+    parser.add_argument("--ntp-host", default="kr.pool.ntp.org")
+    parser.add_argument("--max-clock-offset-ns", type=int, default=2_000_000_000)
+    parser.add_argument("--max-cycles", type=int, default=None)
+    parser.set_defaults(handler=run)
+
+
+def run(args: argparse.Namespace) -> int:
+    """스트리머를 구동하고 종료 코드를 반환한다."""
+    return asyncio.run(_run_stream(args))
+
+
+async def _run_stream(args: argparse.Namespace) -> int:
+    cfg = SessionConfig(
+        session_date=dt.date.fromisoformat(str(args.session_date)),
+        journal_root=pathlib.Path(str(args.journal_root)),
+        manifest_path=pathlib.Path(str(args.manifest_path)),
+        candidates_path=pathlib.Path(str(args.candidates_path)),
+        ntp_host=str(args.ntp_host),
+        slot_budget=200,
+        max_clock_offset_ns=int(args.max_clock_offset_ns),
+        desired_streams=("H0STCNT0", "H0STASP0"),
+        vendor="ls",
+    )
+    session = bootstrap_session(cfg)
+    market_of = json.loads(pathlib.Path(str(args.market_map)).read_text(encoding="utf-8"))  # noqa: ASYNC240 - one-shot startup read
+    http = aiohttp.ClientSession()
+    try:
+        adapter = LsRealtimeAdapter(
+            app_key=os.environ["LS_APP_KEY"],
+            app_secret=os.environ["LS_APP_SECRET"],
+            http=http,
+            market_of=market_of,
+        )
+        streamer = RealtimeStreamer(
+            adapter=adapter,
+            sink=SessionFrameSink(session=session),
+            replay_pairs=session.replay_pairs(),
+        )
+        await streamer.run_forever(asyncio.Event(), max_cycles=args.max_cycles)
+    finally:
+        await http.close()
+    session.persist()
+    return 0
