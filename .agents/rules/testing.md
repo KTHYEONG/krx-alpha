@@ -36,4 +36,4 @@ This document defines testing directives focusing on observable behavior, interf
   2. Boundary values and failure modes
   3. High-risk regression paths
   4. Line coverage metrics
-- **Retry Budget Boundary:** If the automated fix budget is exhausted after test failures, STOP and report diagnostics to the user. **NEVER commit failing code or broken tests automatically.**
+- **Retry Budget Boundary:** The high-reasoning audit gate (`check`) may perform at most 1 deterministic surgical patch for mechanical discrepancies (wiring/lint/trivial imports) followed by immediate re-verification. If test failures persist or the automated fix budget (1 retry) is exhausted, STOP immediately and report diagnostics to the user. **NEVER commit failing code or broken tests automatically.**

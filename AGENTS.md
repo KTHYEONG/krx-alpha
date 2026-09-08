@@ -13,11 +13,10 @@
 - **Fact-Based Truth:** Do not fabricate APIs, files, results, or execution status. Rely strictly on empirical codebase facts and verified documentation.
 
 ## 3. Output Policy
-- **Language Policy:** Respond primarily in Korean as the user is Korean. Use English ONLY for technical terminology.
 - **Question:** Direct technical analysis first, then concise answer. Include key reasoning path (2-4 lines) when complexity warrants it.
 - **Bug Fix / Triage:** State root cause first. Suggest fix that addresses root cause — minimal only when scope-limited, holistic when systemic.
 - **Feature Request:** Follow active skill flow (Probe -> Spec -> Implement -> Check).
-- **Audit / Check Result:** Provide concise findings. PASS = 1 line. FAIL = root cause + impact + suggested fix (up to 5 lines).
+- **Audit / Check Result:** Provide concise findings. PASS = 1 line (includes surgical fix note if self-healed). FAIL = root cause + impact + suggested fix (up to 5 lines) only when unresolvable without human/architectural decision.
 
 ## 4. Execution & Environment Rules
 - **Environment Tooling:** All execution, linting, typing, and tests MUST use `uv run` prefix (`uv run ruff check`, `uv run mypy`, `uv run pytest`).
@@ -27,7 +26,6 @@
 - **Concise In-Code Comments & No Ephemeral Spec Refs:** In-line comments must be 1-2 lines maximum, explaining only immediate "Why" or domain constraints without multi-line storytelling. NEVER cite temporary `docs/specs/*.md` or `contract.json` paths in code, docstrings, CLI help, or comments (use persistent `ADR-XXXX` IDs or self-contained logic).
 
 ## 5. Domain & Skill Rule Routing
-- **Project Mission & Goals (소액 시드 복리 목표):** [project_goals.md](file:///docs/architecture/project_goals.md)
 - **Python Architecture & Standards:** [python.md](file:///.agents/rules/python.md)
 - **Financial & Quant Engineering:** [quant.md](file:///.agents/rules/quant.md)
 - **Testing & Coverage Directives:** [testing.md](file:///.agents/rules/testing.md)
