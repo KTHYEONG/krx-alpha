@@ -5,10 +5,12 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import pathlib
+import sys
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
 from src.collector.storage_guard import prune_old_journals
+from src.collector.supervisor import ProcessSupervisor, RestartCircuitBreaker
 
 logger = logging.getLogger(__name__)
 _KST = ZoneInfo("Asia/Seoul")
@@ -84,7 +86,68 @@ def run_eod_offload(
     return stats
 
 
-def run_collector_daemon(*, sleep_fn: Any = None, max_cycles: int | None = None) -> None:
+def run_session_orchestration(
+    *,
+    today: dt.date,
+    bars_store: pathlib.Path,
+    market_map_path: pathlib.Path,
+    candidates_path: pathlib.Path,
+    universe_out_path: pathlib.Path,
+    streams: tuple[str, ...] = ("H0STCNT0", "H0STASP0"),
+    ls_capacity: int = 200,
+) -> bool:
+    import argparse
+
+    import polars as pl
+
+    from src.cli import bars_refresh, universe_plan
+    from src.collector.vendor import SubscriptionPlanner, VendorCapacity
+
+    bars_rc = bars_refresh.run(
+        argparse.Namespace(
+            store_path=str(bars_store),
+            market_map_path=str(market_map_path),
+            ref_date=today.isoformat(),
+            window_days=90,
+        )
+    )
+    if bars_rc != 0:
+        logger.error("[DAEMON] stage=orchestration status=FAIL step=bars_refresh rc=%d", bars_rc)
+    if not bars_store.exists():
+        logger.critical("[DAEMON] stage=orchestration status=FAIL reason=no_bars_store")
+        return False
+    decision_date = pl.scan_parquet(bars_store).select(pl.col("date").max()).collect().item()
+    slot_budget = SubscriptionPlanner(streams=streams).symbol_budget([VendorCapacity("ls", ls_capacity)])
+    plan_rc = universe_plan.run(
+        argparse.Namespace(
+            bars_path=str(bars_store),
+            decision_date=decision_date.isoformat(),
+            out_path=str(universe_out_path),
+            slot_budget=slot_budget,
+            candidates_path=str(candidates_path),
+        )
+    )
+    if plan_rc != 0:
+        logger.error("[DAEMON] stage=orchestration status=FAIL step=universe_plan rc=%d", plan_rc)
+    ready = _candidates_ready(candidates_path)
+    logger.info(
+        "[DAEMON] stage=orchestration status=OK decision_date=%s ready=%s",
+        decision_date.isoformat(),
+        ready,
+    )
+    return ready
+
+
+def _candidates_ready(path: pathlib.Path) -> bool:
+    from src.collector.ipc import read_candidates
+
+    data = read_candidates(path)
+    return bool(data and data.get("candidates"))
+
+
+def run_collector_daemon(
+    *, sleep_fn: Any = None, max_cycles: int | None = None, now_fn: Any = None
+) -> None:
     import time
     sleeper = sleep_fn if sleep_fn is not None else time.sleep
     sched = CollectorDaemonSchedule()
@@ -93,9 +156,13 @@ def run_collector_daemon(*, sleep_fn: Any = None, max_cycles: int | None = None)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     logger.info("[DAEMON] stage=start status=ONLINE timezone=Asia/Seoul")
 
+    clock = now_fn if now_fn is not None else (lambda: dt.datetime.now(_KST))
+    orchestrated_for: dt.date | None = None
+    supervisor: ProcessSupervisor | None = None
+
     while True:
         cycle += 1
-        now = dt.datetime.now(_KST)
+        now = clock()
         state = get_target_state(now)
         logger.info("[DAEMON] cycle=%d now=%s state=%s", cycle, now.strftime("%Y-%m-%d %H:%M:%S"), state)
 
@@ -104,9 +171,52 @@ def run_collector_daemon(*, sleep_fn: Any = None, max_cycles: int | None = None)
         elif state == "PRE_MARKET_SLEEP":
             sleep_sec = min(calc_sleep_seconds(now, sched.streamer_start), 300.0)
         elif state in ("STREAMER_ACTIVE", "FULL_ACTIVE"):
-            # 장중 활성 주기 (추후 스캐너/스트리머 프로세스 감시)
+            today = now.date()
+            data_root = pathlib.Path("data")
+            if orchestrated_for != today:
+                bars_store = data_root / "bars" / "daily.parquet"
+                market_map_path = data_root / "market_map.json"
+                candidates_path = data_root / "candidates.json"
+                universe_out_path = data_root / "universe" / f"{today.isoformat()}.parquet"
+                ready = run_session_orchestration(
+                    today=today,
+                    bars_store=bars_store,
+                    market_map_path=market_map_path,
+                    candidates_path=candidates_path,
+                    universe_out_path=universe_out_path,
+                )
+                orchestrated_for = today
+                if ready:
+                    manifest_path = data_root / "manifest" / f"{today.isoformat()}.json"
+                    cmd = [
+                        sys.executable,
+                        "-m",
+                        "src.cli.main",
+                        "collect-stream",
+                        "--session-date",
+                        today.isoformat(),
+                        "--journal-root",
+                        str(data_root / "l0"),
+                        "--manifest-path",
+                        str(manifest_path),
+                        "--candidates-path",
+                        str(candidates_path),
+                        "--market-map",
+                        str(market_map_path),
+                    ]
+                    supervisor = ProcessSupervisor(cmd=cmd, breaker=RestartCircuitBreaker())
+                else:
+                    supervisor = None
+                    logger.critical("[DAEMON] stage=session status=FAIL reason=candidates_not_ready")
+            if supervisor is not None:
+                result = supervisor.ensure_running()
+                if result == "circuit_open":
+                    logger.critical("[DAEMON] stage=streamer status=FAIL reason=circuit_open")
             sleep_sec = 10.0
         elif state == "POST_MARKET_EOD":
+            if supervisor is not None:
+                stop_result = supervisor.stop(timeout_s=15.0)
+                logger.info("[DAEMON] stage=streamer_stop result=%s", stop_result)
             # 15:40 EOD 유지보수 (정규화 및 오래된 저널 prune)
             try:
                 data_root = pathlib.Path("data/l0")
