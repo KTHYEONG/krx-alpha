@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_KRX_BARS_MARKET_MAP",
+      "date": "2026-09-08",
+      "adr_id": "ADR_20260908_KRX_BARS_MARKET_MAP",
+      "domain": "data-infra",
+      "title": "KRX 공식 API 일별매매정보 수집 (pykrx 배제)",
+      "why": "select_universe 60일 롤링 요구 + LS market_of 를 pykrx(비공식) 없이 충족해야 함.",
+      "resolution": "data-dbg.krx.co.kr(AUTH_KEY) 로 KOSPI+KOSDAQ 일별매매정보 취득 -> REQUIRED_BAR_COLUMNS+market 정규화, T-1 역탐색 latest_trading_day, date 멱등 append_daily_bars, 90일 backfill_bars, bars-refresh CLI(실패 시 기존 산출물 보존).",
+      "impact": "universe-plan/collect-stream 이 공식 데이터만으로 구동 가능해짐; daemon 프로세스 감독(Part 2)의 선행 의존성 해소."
+    },
+    {
       "task_id": "TASK_REALTIME_COLLECTOR_DAEMONS",
       "date": "2026-09-08",
       "adr_id": "ADR_20260908_REALTIME_COLLECTOR_DAEMONS",
