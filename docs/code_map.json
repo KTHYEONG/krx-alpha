@@ -1,4 +1,7 @@
 {
+  "src/cli/bars_refresh.py": {
+    "testing": "tests/unit/cli/test_bars_refresh.py"
+  },
   "src/cli/collect_init.py": {
     "testing": "tests/unit/cli/test_collect_init.py"
   },
@@ -13,6 +16,9 @@
   },
   "src/cli/universe_plan.py": {
     "testing": "tests/unit/cli/test_universe_plan.py"
+  },
+  "src/collector/bars.py": {
+    "testing": "tests/unit/collector/test_bars.py"
   },
   "src/collector/clock.py": {
     "testing": "tests/unit/collector/test_clock.py"
