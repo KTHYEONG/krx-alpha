@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -67,15 +68,27 @@ class RealtimeStreamer:
                 self._sink.note_ack(self._adapter.name, ack)
             n = 0
             while not stop.is_set():
-                try:
-                    frame = await self._adapter.recv()
-                except VendorDisconnected:
-                    self._sink.flush()
-                    return "disconnect"
-                self._sink.record(frame)
-                n += 1
-                if n % self._flush_every == 0:
-                    self._sink.flush()
+                recv_task = asyncio.ensure_future(self._adapter.recv())
+                stop_task = asyncio.ensure_future(stop.wait())
+                done, pending = await asyncio.wait(
+                    {recv_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                for p in pending:
+                    p.cancel()
+                for p in pending:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await p
+                if recv_task in done:
+                    try:
+                        frame = recv_task.result()
+                    except VendorDisconnected:
+                        self._sink.flush()
+                        return "disconnect"
+                    self._sink.record(frame)
+                    n += 1
+                    if n % self._flush_every == 0:
+                        self._sink.flush()
+                    continue
             self._sink.flush()
             return "stopped"
         finally:

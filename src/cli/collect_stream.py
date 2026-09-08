@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import os
 import pathlib
+import signal
 
 import aiohttp
 
@@ -48,6 +49,9 @@ async def _run_stream(args: argparse.Namespace) -> int:
         vendor="ls",
     )
     session = bootstrap_session(cfg)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, stop.set)
     market_of = json.loads(pathlib.Path(str(args.market_map)).read_text(encoding="utf-8"))  # noqa: ASYNC240 - one-shot startup read
     http = aiohttp.ClientSession()
     try:
@@ -62,7 +66,7 @@ async def _run_stream(args: argparse.Namespace) -> int:
             sink=SessionFrameSink(session=session),
             replay_pairs=session.replay_pairs(),
         )
-        await streamer.run_forever(asyncio.Event(), max_cycles=args.max_cycles)
+        await streamer.run_forever(stop, max_cycles=args.max_cycles)
     finally:
         await http.close()
     session.persist()
