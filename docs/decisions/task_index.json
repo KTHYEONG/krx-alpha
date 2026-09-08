@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_REALTIME_COLLECTOR",
+      "date": "2026-09-08",
+      "adr_id": "ADR_20260908_REALTIME_COLLECTOR",
+      "domain": "data-infra",
+      "title": "실시간 2단계 수집기 코어",
+      "why": "동시호가(08:30~09:00) 데이터는 복구 불가라 스캐너 장애가 스트리머를 죽이면 안 되고, WSL2 클럭이 NTP 대비 +1089ms 안정적으로 빗나가 벽시계 신뢰 불가.",
+      "resolution": "스캐너/스트리머 2프로세스 + atomic-file IPC 구조로, L0 append-only 저널·세션 manifest(NTP clock gate)·구독 레지스트리·bootstrap_session facade 를 결선; NTP 불통·클럭 초과·저널 쓰기 실패·슬롯 초과는 named 예외로 fail-closed.",
+      "impact": "결정적 코어 9모듈 41테스트 diff-coverage 100%; 라이브 네트워크 루프(WS 매니저·PING·재접속·REST 폴링)는 CollectorSession 소비자인 후속 계약 realtime_collector_daemons 로 분리."
+    },
+    {
       "task_id": "TASK_UNIVERSE_POLICY",
       "date": "2026-09-08",
       "adr_id": "ADR_20260908_UNIVERSE_POLICY",
