@@ -31,26 +31,26 @@ Independent audit gate completing the main development loop (`probe` -> `spec` -
      5) **Domain Principle Compliance**: Cross-check against `.agents/rules/quant.md`, `.agents/rules/performance.md`, and `.agents/rules/python.md`.
      6) **Production Wire-up & No Ghost Paths**: Verify new logic is actually invoked in the production pipeline/entry-point and no unhandled branches or orphaned dead code remain.
 
-4. **Strict Audit Gate & Autonomous Surgical Patch (Self-Healing)**:
-   - **Autonomous Surgical Patch (Direct Resolution)**: If Tier 1 or Tier 2 reveals deterministic, low-risk defects (e.g. trivial import/wiring discrepancy, simple Ruff lint, or isolated 1-2 line mismatch that is 100% understood and mechanical):
-     - **Do NOT bounce back to the user or call subagents.**
-     - The high-reasoning auditor applies the pinpoint patch directly.
-     - Immediately re-run `lean_check.py` to confirm verification.
-     - If verified green, proceed directly to ✅ **PASS** output (record surgical fix in 1-line audit trail).
-   - **Triage and Route Non-Trivial Failures**:
+4. **Strict Audit Gate & Surgical Remediation Authority (Zero Human-Pingpong)**:
+   - **Full Surgical Remediation Authority**:
+     - The high-reasoning auditor (`check`) has full authority to perform pinpoint surgical patches when the diagnosis is 100% deterministic:
+       1) **Contract/Fixture Contradictions**: When the spec contract requirement contradicts its own test fixture (e.g. denominator counting, conflicting assertion constants, missing sentinel import handling), the auditor directly amends `contract.json` and the corresponding test fixture.
+       2) **Production Contortion Cleanup**: When the implementer introduced artificial hacks (e.g. `globals()[...]`, dead comments to appease matchers), the auditor cleanly reverts the hack and redirects the test mock/fixture appropriately.
+       3) **Mechanical Wiring/Lint Defects**: Fix simple imports, wiring anchors, or missing scenarios directly.
+     - Immediately re-run `lean_check.py` to confirm the fix is green and sound.
+     - When verified, emit ✅ **PASS** with a 1-line resolution summary. Do NOT bounce back to user or call subagents.
+   - **Escalation Boundary (When to FAIL)**:
      - Stop immediately and output `FAIL` ONLY when:
-       1) Defect requires complex algorithmic re-implementation or multi-branch test redesign (`/implement`).
-       2) Defect is architectural or missing specification (missing wiring test scenario in contract, wrong invariant, contract signature mismatch, performance budget breach → `/spec`).
-       3) Defect is fundamental hypothesis invalidation or mathematical instability under real data (`/probe`).
-       4) Surgical patch attempt fails or does not converge in 1 retry.
-       5) Ambiguity affects public financial contracts or destructive actions.
+       1) Fundamental business hypothesis invalidation or mathematical instability under real market data (`/probe`).
+       2) Deep architectural conflicts requiring trade-off decisions beyond the original spec scope (`/spec`).
+       3) Destructive actions or unresolvable financial correctness ambiguity affecting production money.
 
 ## Output
 
 Do NOT add any intro, preamble, sub-bullet checks, breakdown items, or conversational commentary.
 
 - **PASS** (Strict 1-Line ONLY):
-  ✅ PASS: <Audit Target> [Optional: (Fixed: <1-line pinpoint patch summary>)]
+  ✅ PASS: <Audit Target> [Optional: (Resolved: <1-line surgical fix summary>)]
 
 - **FAIL** (Compact 1-2 Lines format):
   ❌ FAIL: <Audit Target> | Root: <Cause> | Impact: <Scope> | Fix: <Action> → `/implement`, `/spec`, or `/probe`
