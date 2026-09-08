@@ -167,3 +167,37 @@ def test_collector_session_note_ack_and_gap_reach_manifest(tmp_path):
     reloaded = SessionManifest.load(cfg.manifest_path)
     assert reloaded.accepted_symbols() == {"005930"}
     assert reloaded.gaps[0]["reason"] == "ws_reconnect"
+
+
+def test_bootstrap_session_runs_eod_maintenance(tmp_path) -> None:
+    import datetime as dt
+    from src.collector.ipc import write_candidates
+    from src.collector.session import SessionConfig, bootstrap_session
+
+    class _FC:
+        def request(self, host, version=3, timeout=5):
+            class _S:
+                offset = 0.0
+            return _S()
+
+    root = tmp_path / 'l0'
+    old_part = root / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
+    old_part.mkdir(parents=True, exist_ok=True)
+    (old_part / '09.jsonl.zst').write_text('dummy')
+
+    cand_path = tmp_path / 'candidates.json'
+    write_candidates(cand_path, [{'symbol': '005930', 'selection_reasons': ['limit_up']}], rev=1)
+    cfg = SessionConfig(
+        session_date=dt.date(2026, 9, 8),
+        journal_root=root,
+        manifest_path=tmp_path / 'session.json',
+        candidates_path=cand_path,
+        ntp_host='pool.ntp.org',
+        slot_budget=41,
+        max_clock_offset_ns=2_000_000_000,
+        desired_streams=('H0STCNT0',),
+        vendor='kis',
+    )
+
+    bootstrap_session(cfg, ntp_client=_FC(), now_ns=999)
+    assert not old_part.exists()

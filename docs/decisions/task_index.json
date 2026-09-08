@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_CLOUD_DAEMON_LIFECYCLE",
+      "date": "2026-09-08",
+      "adr_id": "ADR_20260908_CLOUD_DAEMON_LIFECYCLE",
+      "domain": "collector",
+      "title": "Collector 24/7 Cloud Daemon Lifecycle and Scheduling",
+      "why": "클라우드 VPS 24시간 무인 구동을 위한 KST 상태 머신 및 단일 상주 스케줄러 필요.",
+      "resolution": "KST 시간대 기반 주말/장전/장중/EOD 상태 전이 머신 및 세션 부트스트랩 연동 구현.",
+      "impact": "사람의 수동 개입 없이 컨테이너 내부에서 정규장 시간표에 맞춰 자율 수집 및 유지보수 보장."
+    },
+    {
       "task_id": "TASK_CLOUD_DOCKER_COLLECTOR_STORAGE",
       "date": "2026-09-08",
       "adr_id": "ADR_20260908_CLOUD_DOCKER_COLLECTOR_STORAGE",
