@@ -1,0 +1,11 @@
+{
+  "src/cli/main.py": {
+    "testing": "tests/unit/cli/test_main.py"
+  },
+  "src/cli/universe_plan.py": {
+    "testing": "tests/unit/cli/test_universe_plan.py"
+  },
+  "src/universe/policy.py": {
+    "testing": "tests/unit/universe/test_policy.py"
+  }
+}
