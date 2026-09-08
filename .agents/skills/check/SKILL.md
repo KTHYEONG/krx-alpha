@@ -31,19 +31,26 @@ Independent audit gate completing the main development loop (`probe` -> `spec` -
      5) **Domain Principle Compliance**: Cross-check against `.agents/rules/quant.md`, `.agents/rules/performance.md`, and `.agents/rules/python.md`.
      6) **Production Wire-up & No Ghost Paths**: Verify new logic is actually invoked in the production pipeline/entry-point and no unhandled branches or orphaned dead code remain.
 
-4. **Strict Audit Gate (Strictly No Code Mutation & Clean Routing)**:
-   - **Zero Code Modification**: Perform auditing independently. **Do NOT edit code or tests during the check pass.** Modifying code in `check` causes workflow leakage and destroys accountability.
-   - **Triage and Route Failures Cleanly**:
-     - **Route to `/implement`**: Defect is purely implementation execution (unrequested dead defensive branch, broken syntax, failing assertion, incomplete wiring). Command: Provide exact root cause and instruction to simplify/fix.
-     - **Route to `/spec`**: Defect is architectural or missing specification (missing wiring test scenario in contract, wrong invariant, contract signature mismatch, performance budget breach). Command: Provide exact contract amendment required.
-     - **Route to `/probe`**: Defect is fundamental hypothesis invalidation, unexpected mathematical instability, or algorithmic failure under real data that requires re-experimentation before re-contracting (results to be updated in `scratch/probe_<feature>.json`).
+4. **Strict Audit Gate & Autonomous Surgical Patch (Self-Healing)**:
+   - **Autonomous Surgical Patch (Direct Resolution)**: If Tier 1 or Tier 2 reveals deterministic, low-risk defects (e.g. trivial import/wiring discrepancy, simple Ruff lint, or isolated 1-2 line mismatch that is 100% understood and mechanical):
+     - **Do NOT bounce back to the user or call subagents.**
+     - The high-reasoning auditor applies the pinpoint patch directly.
+     - Immediately re-run `lean_check.py` to confirm verification.
+     - If verified green, proceed directly to ✅ **PASS** output (record surgical fix in 1-line audit trail).
+   - **Triage and Route Non-Trivial Failures**:
+     - Stop immediately and output `FAIL` ONLY when:
+       1) Defect requires complex algorithmic re-implementation or multi-branch test redesign (`/implement`).
+       2) Defect is architectural or missing specification (missing wiring test scenario in contract, wrong invariant, contract signature mismatch, performance budget breach → `/spec`).
+       3) Defect is fundamental hypothesis invalidation or mathematical instability under real data (`/probe`).
+       4) Surgical patch attempt fails or does not converge in 1 retry.
+       5) Ambiguity affects public financial contracts or destructive actions.
 
 ## Output
 
 Do NOT add any intro, preamble, sub-bullet checks, breakdown items, or conversational commentary.
 
 - **PASS** (Strict 1-Line ONLY):
-  ✅ PASS: <Audit Target>
+  ✅ PASS: <Audit Target> [Optional: (Fixed: <1-line pinpoint patch summary>)]
 
 - **FAIL** (Compact 1-2 Lines format):
   ❌ FAIL: <Audit Target> | Root: <Cause> | Impact: <Scope> | Fix: <Action> → `/implement`, `/spec`, or `/probe`
