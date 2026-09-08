@@ -5,6 +5,9 @@
   "src/cli/collect_status.py": {
     "testing": "tests/unit/cli/test_collect_status.py"
   },
+  "src/cli/collect_stream.py": {
+    "testing": "tests/unit/cli/test_collect_stream.py"
+  },
   "src/cli/main.py": {
     "testing": "tests/unit/cli/test_main.py"
   },
@@ -38,8 +41,17 @@
   "src/collector/storage_guard.py": {
     "testing": "tests/unit/collector/test_storage_guard.py"
   },
+  "src/collector/streamer.py": {
+    "testing": "tests/unit/collector/test_streamer.py"
+  },
   "src/collector/subscription.py": {
     "testing": "tests/unit/collector/test_subscription.py"
+  },
+  "src/collector/vendor.py": {
+    "testing": "tests/unit/collector/test_vendor.py"
+  },
+  "src/collector/ws_ls.py": {
+    "testing": "tests/unit/collector/test_ws_ls.py"
   },
   "src/universe/policy.py": {
     "testing": "tests/unit/universe/test_policy.py"
