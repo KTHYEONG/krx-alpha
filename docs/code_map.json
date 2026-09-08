@@ -14,6 +14,9 @@
   "src/collector/clock.py": {
     "testing": "tests/unit/collector/test_clock.py"
   },
+  "src/collector/daemon.py": {
+    "testing": "tests/unit/collector/test_daemon.py"
+  },
   "src/collector/ipc.py": {
     "testing": "tests/unit/collector/test_ipc.py"
   },

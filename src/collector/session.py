@@ -7,14 +7,15 @@ import datetime as dt
 import logging
 import pathlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from src.collector.clock import measure_ntp_offset_ns
 from src.collector.ipc import read_candidates
 from src.collector.journal import L0JournalWriter
 from src.collector.manifest import SessionManifest
-from src.collector.storage_guard import check_disk_watermark, StorageExhaustedError, prune_old_journals
+from src.collector.daemon import CollectorDaemonSchedule, calc_sleep_seconds, get_target_state, run_eod_maintenance
+from src.collector.storage_guard import check_disk_watermark, StorageExhaustedError
 from src.collector.subscription import SubscriptionDiff, SubscriptionRegistry
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class SessionConfig:
     max_clock_offset_ns: int
     desired_streams: tuple[str, ...]
     vendor: str
+    schedule: CollectorDaemonSchedule = field(default_factory=CollectorDaemonSchedule)
 
 
 @dataclass
@@ -39,6 +41,15 @@ class CollectorSession:
     registry: SubscriptionRegistry
     journals: dict[tuple[str, str], L0JournalWriter]
     manifest_path: pathlib.Path
+    schedule: CollectorDaemonSchedule = field(default_factory=CollectorDaemonSchedule)
+
+    def current_state(self, now_dt: dt.datetime | None = None) -> str:
+        current = now_dt or dt.datetime.now(dt.UTC)
+        return get_target_state(current)
+
+    def seconds_to_streamer(self, now_dt: dt.datetime | None = None) -> float:
+        current = now_dt or dt.datetime.now(dt.UTC)
+        return calc_sleep_seconds(current, self.schedule.streamer_start)
 
     def record_frame(
         self,
@@ -91,7 +102,7 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
     diff: SubscriptionDiff = registry.plan(desired)
     registry.apply(diff)
     journals = {(cfg.vendor, stream): L0JournalWriter(root=cfg.journal_root, vendor=cfg.vendor, stream=stream) for stream in cfg.desired_streams}
-    prune_old_journals(cfg.journal_root)
+    run_eod_maintenance(cfg.journal_root, today=cfg.session_date)
     session = CollectorSession(manifest=manifest, registry=registry, journals=journals, manifest_path=cfg.manifest_path)
     session.persist()
     logger.info("[DATA] stage=bootstrap pairs=%d offset_ns=%d status=OK", len(session.replay_pairs()), offset_ns)
