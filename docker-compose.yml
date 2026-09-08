@@ -15,7 +15,7 @@ services:
       - ./logs:/app/logs
     # 50GB 클라우드 VPS 자원 보호: 메모리 500MB 한도 제한
     mem_limit: 500m
-    command: ["uv", "run", "python", "-m", "src.collector.daemon"]
+    command: ["uv", "run", "--no-dev", "python", "-m", "src.collector.daemon"]
     # 50GB 디스크 보호: 도커 컨테이너 로그 최대 30MB 캡
     logging:
       driver: json-file

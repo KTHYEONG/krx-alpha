@@ -25,5 +25,5 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY . .
 RUN uv sync --frozen --no-dev
 
-# 24/7 수집 데몬을 PID 1로 구동 (exec form)
-CMD ["uv", "run", "python", "-m", "src.collector.daemon"]
+# 24/7 수집 데몬을 PID 1로 구동 (exec form, --no-dev 로 불필요한 개발 도구 제외)
+CMD ["uv", "run", "--no-dev", "python", "-m", "src.collector.daemon"]
