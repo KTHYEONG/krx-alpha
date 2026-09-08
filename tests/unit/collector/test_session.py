@@ -171,6 +171,46 @@ def test_collector_session_note_ack_and_gap_reach_manifest(tmp_path):
 
 def test_bootstrap_session_runs_eod_maintenance(tmp_path) -> None:
     import datetime as dt
+    import json
+    import zstandard as zstd
+    from src.collector.ipc import write_candidates
+    from src.collector.session import SessionConfig, bootstrap_session
+
+    class _FC:
+        def request(self, host, version=3, timeout=5):
+            class _S:
+                offset = 0.0
+            return _S()
+
+    root = tmp_path / 'l0'
+    old_part = root / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
+    old_part.mkdir(parents=True, exist_ok=True)
+    rec = {'raw': 'a', 'recv_mono_ns': 1, 'recv_wall_ns': 2, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
+    (old_part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress((json.dumps(rec) + '\n').encode('utf-8')))
+
+    cand_path = tmp_path / 'candidates.json'
+    write_candidates(cand_path, [{'symbol': '005930', 'selection_reasons': ['limit_up']}], rev=1)
+    cfg = SessionConfig(
+        session_date=dt.date(2026, 9, 8),
+        journal_root=root,
+        manifest_path=tmp_path / 'session.json',
+        candidates_path=cand_path,
+        ntp_host='pool.ntp.org',
+        slot_budget=41,
+        max_clock_offset_ns=2_000_000_000,
+        desired_streams=('H0STCNT0',),
+        vendor='kis',
+        archive_root=tmp_path / 'l1',
+    )
+
+    bootstrap_session(cfg, ntp_client=_FC(), now_ns=999)
+
+    assert not old_part.exists()
+    assert (tmp_path / 'l1' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet').exists()
+
+
+def test_bootstrap_session_without_archive_root_retains_journals(tmp_path) -> None:
+    import datetime as dt
     from src.collector.ipc import write_candidates
     from src.collector.session import SessionConfig, bootstrap_session
 
@@ -200,4 +240,6 @@ def test_bootstrap_session_runs_eod_maintenance(tmp_path) -> None:
     )
 
     bootstrap_session(cfg, ntp_client=_FC(), now_ns=999)
-    assert not old_part.exists()
+
+    # Then: archive_root 없음 -> 만료 파티션 보존
+    assert old_part.exists()
