@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_COLLECTOR_PROCESS_SUPERVISOR",
+      "date": "2026-09-08",
+      "adr_id": "ADR_20260908_COLLECTOR_PROCESS_SUPERVISOR",
+      "domain": "data-infra",
+      "title": "daemon 프로세스 감독 (세션 오케스트레이션 + collect-stream 생존감독)",
+      "why": "push 후에도 daemon 이 bars/universe/collect-stream 을 자동 호출하지 않아 무인 수집이 성립하지 않았고, pump() 는 무데이터 구간 SIGTERM 무한대기 결함 보유.",
+      "resolution": "RestartCircuitBreaker+ProcessSupervisor 로 collect-stream subprocess 생존감독(SIGTERM->SIGKILL fallback); daemon 이 세션당 1회 bars-refresh->universe-plan(실제 최신봉 decision_date, SubscriptionPlanner slot_budget) 오케스트레이션; pump() 의 recv/stop 경합수정으로 SIGTERM 즉시반영.",
+      "impact": "push+배포만으로 매일 무인 자동 수집 파이프라인 완성; L0 offload-before-delete 원칙이 EOD 정상종료로 실제 보장됨."
+    },
+    {
       "task_id": "TASK_KRX_BARS_MARKET_MAP",
       "date": "2026-09-08",
       "adr_id": "ADR_20260908_KRX_BARS_MARKET_MAP",
