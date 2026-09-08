@@ -56,3 +56,14 @@ def test_cli_main_registers_collect_init_subcommand():
     assert args.command == "collect-init"
     assert args.session_date == "2026-09-08"
     assert callable(args.handler)
+
+
+def test_bars_refresh_subcommand_registered() -> None:
+    from src.cli.main import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(['bars-refresh', '--store-path', 'b.parquet',
+                              '--market-map-path', 'm.json', '--ref-date', '2026-09-08'])
+
+    assert args.command == 'bars-refresh'
+    assert callable(args.handler)
