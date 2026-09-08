@@ -25,6 +25,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--max-clock-offset-ns", type=int, default=2_000_000_000)
     parser.add_argument("--streams", default="H0STCNT0")
     parser.add_argument("--vendor", default="kis")
+    parser.add_argument("--archive-root", default=None)
     parser.set_defaults(handler=run)
 
 
@@ -40,6 +41,7 @@ def run(args: argparse.Namespace) -> int:
         max_clock_offset_ns=int(args.max_clock_offset_ns),
         desired_streams=tuple(str(args.streams).split(",")),
         vendor=str(args.vendor),
+        archive_root=(pathlib.Path(str(args.archive_root)) if getattr(args, "archive_root", None) else None),
     )
     try:
         session = bootstrap_session(cfg)

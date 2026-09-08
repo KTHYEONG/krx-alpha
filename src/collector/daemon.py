@@ -58,8 +58,30 @@ def run_eod_maintenance(
     *,
     retain_days: int = 3,
     today: dt.date | None = None,
+    archive_root: pathlib.Path | None = None,
 ) -> int:
-    return prune_old_journals(journal_root, retain_days=retain_days, reference_date=today)
+    return prune_old_journals(journal_root, retain_days=retain_days, reference_date=today, archive_root=archive_root)
+
+
+def run_eod_offload(
+    archive_root: pathlib.Path,
+    *,
+    archiver: Any = None,
+    reference_date: dt.date | None = None,
+) -> dict[str, int]:
+    from src.collector.remote_archive import HfDatasetArchiver
+    from src.collector.storage_guard import prune_local_l1
+
+    arc = archiver if archiver is not None else HfDatasetArchiver.try_from_env()
+    if arc is None:
+        logger.critical("[DAEMON] stage=eod_offload status=FAIL reason=hf_settings_missing")
+        return {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
+    stats = arc.sync_l1_tree(archive_root)
+    confirmed = arc.remote_files("l1/")
+    stats["purged"] = prune_local_l1(
+        archive_root, retain_days=30, reference_date=reference_date, confirmed_remote=confirmed
+    )
+    return stats
 
 
 def run_collector_daemon(*, sleep_fn: Any = None, max_cycles: int | None = None) -> None:
@@ -89,8 +111,12 @@ def run_collector_daemon(*, sleep_fn: Any = None, max_cycles: int | None = None)
             try:
                 data_root = pathlib.Path("data/l0")
                 if data_root.exists():
-                    deleted = run_eod_maintenance(data_root)
-                    logger.info("[DAEMON] stage=eod_maintenance deleted_partitions=%d status=OK", deleted)
+                    deleted = run_eod_maintenance(data_root, archive_root=pathlib.Path("data/l1"))
+                    offload = run_eod_offload(pathlib.Path("data/l1"))
+                    logger.info(
+                        "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=OK",
+                        deleted, offload["uploaded"], offload["purged"],
+                    )
             except Exception as e:  # noqa: BLE001
                 logger.error("[DAEMON] stage=eod_maintenance error=%s", str(e))
             sleep_sec = 60.0

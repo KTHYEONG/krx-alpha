@@ -32,6 +32,7 @@ class SessionConfig:
     max_clock_offset_ns: int
     desired_streams: tuple[str, ...]
     vendor: str
+    archive_root: pathlib.Path | None = None
     schedule: CollectorDaemonSchedule = field(default_factory=CollectorDaemonSchedule)
 
 
@@ -102,7 +103,7 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
     diff: SubscriptionDiff = registry.plan(desired)
     registry.apply(diff)
     journals = {(cfg.vendor, stream): L0JournalWriter(root=cfg.journal_root, vendor=cfg.vendor, stream=stream) for stream in cfg.desired_streams}
-    run_eod_maintenance(cfg.journal_root, today=cfg.session_date)
+    run_eod_maintenance(cfg.journal_root, today=cfg.session_date, archive_root=cfg.archive_root)
     session = CollectorSession(manifest=manifest, registry=registry, journals=journals, manifest_path=cfg.manifest_path)
     session.persist()
     logger.info("[DATA] stage=bootstrap pairs=%d offset_ns=%d status=OK", len(session.replay_pairs()), offset_ns)
