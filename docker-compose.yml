@@ -1,9 +1,6 @@
 services:
   krx-collector:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: krx-collector:latest
+    image: ghcr.io/kthyeong/krx-collector:latest
     container_name: krx-collector
     restart: unless-stopped
     stop_grace_period: 30s
