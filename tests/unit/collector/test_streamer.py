@@ -159,3 +159,52 @@ def test_streamer_pump_stops_on_event_and_flushes() -> None:
     reason = asyncio.run(streamer.pump(stop))
 
     assert reason == 'stopped' and sink.flushed >= 1  # noqa: PT018 - verbatim contract skeleton
+
+def test_streamer_pump_interrupts_blocked_recv_on_stop() -> None:
+    import asyncio
+    import time
+    from src.collector.streamer import RealtimeStreamer
+    from src.collector.vendor import VendorAck
+
+    class _Adapter:
+        name = 'ls'
+        capacity_pairs = 200
+        async def connect(self):
+            self.c = True
+        async def subscribe(self, pairs):
+            return [VendorAck(s, t, True, '00000') for s, t in pairs]
+        async def recv(self):
+            await asyncio.sleep(999)
+            raise AssertionError('unreachable')
+        async def aclose(self):
+            self.a = True
+
+    class _Sink:
+        def __init__(self):
+            self.flushed = 0
+        def record(self, f):
+            self.last = f
+        def note_ack(self, v, a):
+            self.ack = (v, a)
+        def note_gap(self, *a):
+            self.gap = a
+        def flush(self):
+            self.flushed += 1
+            return 0
+
+    async def _run() -> tuple[str, float, int]:
+        stop = asyncio.Event()
+        sink = _Sink()
+        streamer = RealtimeStreamer(adapter=_Adapter(), sink=sink, replay_pairs=[('005930', 'H0STCNT0')])
+        task = asyncio.ensure_future(streamer.pump(stop))
+        await asyncio.sleep(0.05)
+        t0 = time.monotonic()
+        stop.set()
+        reason = await asyncio.wait_for(task, timeout=1.0)
+        return reason, time.monotonic() - t0, sink.flushed
+
+    reason, elapsed, flushed = asyncio.run(_run())
+
+    assert reason == 'stopped'
+    assert elapsed < 0.5
+    assert flushed >= 1

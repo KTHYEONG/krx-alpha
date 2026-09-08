@@ -94,13 +94,17 @@ def test_run_eod_maintenance_invokes_prune(tmp_path) -> None:
 
 
 def test_run_collector_daemon_single_cycle() -> None:
+    import datetime as dt
     from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
     from src.collector.daemon import run_collector_daemon
 
     mock_sleep = MagicMock()
-    run_collector_daemon(sleep_fn=mock_sleep, max_cycles=1)
-    mock_sleep.assert_called_once()
+    night = dt.datetime(2026, 9, 8, 20, 0, 0, tzinfo=ZoneInfo('Asia/Seoul'))
 
+    run_collector_daemon(sleep_fn=mock_sleep, max_cycles=1, now_fn=lambda: night)
+
+    mock_sleep.assert_called_once()
 
 def test_run_eod_offload_syncs_and_prunes_with_injected_archiver(tmp_path) -> None:
     import datetime as dt
@@ -141,3 +145,200 @@ def test_run_eod_offload_returns_zeros_when_archiver_missing(tmp_path, caplog, m
     assert stats == {'uploaded': 0, 'skipped': 0, 'failed': 0, 'purged': 0}
     assert old_pq.exists()
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+
+def test_run_session_orchestration_returns_true_when_candidates_ready(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    import polars as pl
+    from src.collector.daemon import run_session_orchestration
+    from src.collector.ipc import write_candidates
+
+    bars_store = tmp_path / 'bars.parquet'
+    pl.DataFrame({'date': [dt.date(2026, 9, 7)], 'symbol': ['005930'], 'close': [1.0],
+                 'volume': [1], 'trade_value_100m': [1.0], 'daily_change_pct': [0.1]}).write_parquet(bars_store)
+    candidates_path = tmp_path / 'candidates.json'
+    write_candidates(candidates_path, [{'symbol': '005930', 'selection_reasons': ['limit_up']}], rev=1)
+
+    calls: dict[str, object] = {}
+
+    def _fake_bars_run(args):
+        calls['bars'] = args
+        return 0
+
+    def _fake_universe_run(args):
+        calls['universe'] = args
+        return 0
+
+    monkeypatch.setattr('src.cli.bars_refresh.run', _fake_bars_run)
+    monkeypatch.setattr('src.cli.universe_plan.run', _fake_universe_run)
+
+    ready = run_session_orchestration(
+        today=dt.date(2026, 9, 8),
+        bars_store=bars_store,
+        market_map_path=tmp_path / 'm.json',
+        candidates_path=candidates_path,
+        universe_out_path=tmp_path / 'u.parquet',
+    )
+
+    assert ready is True
+    assert calls['universe'].decision_date == '2026-09-07'
+    assert calls['universe'].slot_budget == 100
+
+def test_run_session_orchestration_returns_false_when_bars_store_missing(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from src.collector.daemon import run_session_orchestration
+
+    def _fake_bars_run(args):
+        return 4
+
+    monkeypatch.setattr('src.cli.bars_refresh.run', _fake_bars_run)
+
+    ready = run_session_orchestration(
+        today=dt.date(2026, 9, 8),
+        bars_store=tmp_path / 'missing.parquet',
+        market_map_path=tmp_path / 'm.json',
+        candidates_path=tmp_path / 'candidates.json',
+        universe_out_path=tmp_path / 'u.parquet',
+    )
+
+    assert ready is False
+
+def test_run_session_orchestration_reuses_existing_candidates_when_universe_plan_fails(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    import polars as pl
+    from src.collector.daemon import run_session_orchestration
+    from src.collector.ipc import write_candidates
+
+    bars_store = tmp_path / 'bars.parquet'
+    pl.DataFrame({'date': [dt.date(2026, 9, 7)], 'symbol': ['005930'], 'close': [1.0],
+                 'volume': [1], 'trade_value_100m': [1.0], 'daily_change_pct': [0.1]}).write_parquet(bars_store)
+    candidates_path = tmp_path / 'candidates.json'
+    write_candidates(candidates_path, [{'symbol': '005930', 'selection_reasons': ['limit_up']}], rev=1)
+
+    monkeypatch.setattr('src.cli.bars_refresh.run', lambda args: 0)
+    monkeypatch.setattr('src.cli.universe_plan.run', lambda args: 1)
+
+    ready = run_session_orchestration(
+        today=dt.date(2026, 9, 8),
+        bars_store=bars_store,
+        market_map_path=tmp_path / 'm.json',
+        candidates_path=candidates_path,
+        universe_out_path=tmp_path / 'u.parquet',
+    )
+
+    assert ready is True
+
+def test_run_collector_daemon_streamer_active_spawns_supervised_process(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+    import src.collector.daemon as daemon_mod
+    from src.collector.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(daemon_mod, 'run_session_orchestration', lambda **kw: True)
+
+    calls: list[str] = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            calls.append('constructed')
+        def ensure_running(self):
+            calls.append('ensure_running')
+            return 'started'
+
+    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _FakeSupervisor)
+
+    active = dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+
+    run_collector_daemon(sleep_fn=MagicMock(), max_cycles=1, now_fn=lambda: active)
+
+    assert calls == ['constructed', 'ensure_running']
+
+def test_run_collector_daemon_eod_stops_supervised_process(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+    import src.collector.daemon as daemon_mod
+    from src.collector.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(daemon_mod, 'run_session_orchestration', lambda **kw: True)
+
+    stop_calls: list[float] = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = cmd
+        def ensure_running(self):
+            self.checked = True
+            return 'started'
+        def stop(self, *, timeout_s=15.0):
+            stop_calls.append(timeout_s)
+            return 'graceful'
+
+    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _FakeSupervisor)
+
+    kst = ZoneInfo('Asia/Seoul')
+    times = iter([
+        dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=kst),
+        dt.datetime(2026, 9, 8, 15, 45, 0, tzinfo=kst),
+    ])
+
+    run_collector_daemon(sleep_fn=MagicMock(), max_cycles=2, now_fn=lambda: next(times))
+
+    assert stop_calls == [15.0]
+
+
+def test_run_collector_daemon_streamer_active_skips_spawn_when_not_ready(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+    import src.collector.daemon as daemon_mod
+    from src.collector.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(daemon_mod, 'run_session_orchestration', lambda **kw: False)
+
+    constructed: list[str] = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            constructed.append('constructed')
+        def ensure_running(self):
+            constructed.append('ensure_running')
+            return 'started'
+
+    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _FakeSupervisor)
+
+    active = dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+
+    run_collector_daemon(sleep_fn=MagicMock(), max_cycles=1, now_fn=lambda: active)
+
+    assert constructed == []
+
+
+def test_run_collector_daemon_streamer_active_logs_circuit_open(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+    import src.collector.daemon as daemon_mod
+    from src.collector.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(daemon_mod, 'run_session_orchestration', lambda **kw: True)
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = cmd
+        def ensure_running(self):
+            return 'circuit_open'
+
+    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _FakeSupervisor)
+
+    active = dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+
+    with caplog.at_level(logging.CRITICAL):
+        run_collector_daemon(sleep_fn=MagicMock(), max_cycles=1, now_fn=lambda: active)
+
+    assert any('circuit_open' in r.message for r in caplog.records)
