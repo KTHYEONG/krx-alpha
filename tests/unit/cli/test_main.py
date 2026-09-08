@@ -22,3 +22,37 @@ def test_cli_main_registers_universe_plan_subcommand():
     assert args.bars_path == "data/bars.parquet"
     assert args.decision_date == "2026-09-04"
     assert callable(args.handler)
+
+
+def test_cli_main_registers_collect_status_subcommand():
+    # Given: 최상위 파서
+    from src.cli.main import build_parser
+
+    parser = build_parser()
+
+    # When
+    args = parser.parse_args(["collect-status", "--manifest-path", "data/session.json"])
+
+    # Then: 서브커맨드 등록 + 핸들러 바인딩
+    assert args.command == "collect-status"
+    assert args.manifest_path == "data/session.json"
+    assert callable(args.handler)
+
+
+def test_cli_main_registers_collect_init_subcommand():
+    # Given: 최상위 파서
+    from src.cli.main import build_parser
+
+    parser = build_parser()
+
+    # When
+    args = parser.parse_args([
+        "collect-init", "--session-date", "2026-09-08",
+        "--journal-root", "data/l0", "--manifest-path", "data/session.json",
+        "--candidates-path", "data/candidates.json",
+    ])
+
+    # Then
+    assert args.command == "collect-init"
+    assert args.session_date == "2026-09-08"
+    assert callable(args.handler)
