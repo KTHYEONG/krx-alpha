@@ -1,9 +1,36 @@
 {
+  "src/cli/collect_init.py": {
+    "testing": "tests/unit/cli/test_collect_init.py"
+  },
+  "src/cli/collect_status.py": {
+    "testing": "tests/unit/cli/test_collect_status.py"
+  },
   "src/cli/main.py": {
     "testing": "tests/unit/cli/test_main.py"
   },
   "src/cli/universe_plan.py": {
     "testing": "tests/unit/cli/test_universe_plan.py"
+  },
+  "src/collector/clock.py": {
+    "testing": "tests/unit/collector/test_clock.py"
+  },
+  "src/collector/ipc.py": {
+    "testing": "tests/unit/collector/test_ipc.py"
+  },
+  "src/collector/journal.py": {
+    "testing": "tests/unit/collector/test_journal.py"
+  },
+  "src/collector/manifest.py": {
+    "testing": "tests/unit/collector/test_manifest.py"
+  },
+  "src/collector/scan_bridge.py": {
+    "testing": "tests/unit/collector/test_scan_bridge.py"
+  },
+  "src/collector/session.py": {
+    "testing": "tests/unit/collector/test_session.py"
+  },
+  "src/collector/subscription.py": {
+    "testing": "tests/unit/collector/test_subscription.py"
   },
   "src/universe/policy.py": {
     "testing": "tests/unit/universe/test_policy.py"
