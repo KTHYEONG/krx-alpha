@@ -26,6 +26,9 @@
   "src/collector/manifest.py": {
     "testing": "tests/unit/collector/test_manifest.py"
   },
+  "src/collector/remote_archive.py": {
+    "testing": "tests/unit/collector/test_remote_archive.py"
+  },
   "src/collector/scan_bridge.py": {
     "testing": "tests/unit/collector/test_scan_bridge.py"
   },
