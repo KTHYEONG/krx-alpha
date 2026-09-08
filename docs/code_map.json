@@ -53,6 +53,9 @@
   "src/collector/subscription.py": {
     "testing": "tests/unit/collector/test_subscription.py"
   },
+  "src/collector/supervisor.py": {
+    "testing": "tests/unit/collector/test_supervisor.py"
+  },
   "src/collector/vendor.py": {
     "testing": "tests/unit/collector/test_vendor.py"
   },
