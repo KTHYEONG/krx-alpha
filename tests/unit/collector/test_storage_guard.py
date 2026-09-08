@@ -19,22 +19,265 @@ def test_check_disk_watermark_returns_false_when_depleted(tmp_path) -> None:
         assert check_disk_watermark(tmp_path, min_free_gb=3.0) is False
 
 
-def test_prune_old_journals_removes_expired_partitions(tmp_path) -> None:
+def test_normalize_l0_partition_writes_dedup_sorted_parquet(tmp_path) -> None:
+    import json
+    import polars as pl
+    import zstandard as zstd
+    from src.collector.storage_guard import normalize_l0_partition
+
+    # Given: 같은 시간별 파일에 append 된 2개 zstd 프레임 (프레임2에 프레임1 레코드 중복 포함)
+    part = tmp_path / 'l0' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    rec_a = {'raw': 'a', 'recv_mono_ns': 10, 'recv_wall_ns': 100, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
+    rec_b = {'raw': 'b', 'recv_mono_ns': 20, 'recv_wall_ns': 90, 'conn_id': 'c1', 'conn_seq': 2, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
+
+    def _frame(recs: list[dict]) -> bytes:
+        payload = '\n'.join(json.dumps(r) for r in recs) + '\n'
+        return zstd.ZstdCompressor(level=3).compress(payload.encode('utf-8'))
+
+    with open(part / '09.jsonl.zst', 'ab') as fh:
+        fh.write(_frame([rec_a]))
+    with open(part / '09.jsonl.zst', 'ab') as fh:
+        fh.write(_frame([rec_b, rec_a]))
+    out_path = tmp_path / 'l1' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    # When
+    rows = normalize_l0_partition(part, out_path)
+
+    # Then: 중복 1건 제거되어 2행, recv_wall_ns 오름차순 정렬
+    assert rows == 2
+    assert out_path.exists()
+    df = pl.read_parquet(out_path)
+    assert df.height == 2
+    assert df['recv_wall_ns'].to_list() == [90, 100]
+    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id'}
+
+
+def test_normalize_l0_partition_raises_on_empty_partition(tmp_path) -> None:
+    import pytest
+    from src.collector.storage_guard import L1NormalizationError, normalize_l0_partition
+
+    # Given: 빈 파티션 디렉터리
+    part = tmp_path / 'l0' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    out_path = tmp_path / 'l1' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    # When / Then
+    with pytest.raises(L1NormalizationError):
+        normalize_l0_partition(part, out_path)
+    assert not out_path.exists()
+    assert list(out_path.parent.glob('*.tmp')) == []
+
+
+def test_normalize_l0_partition_raises_on_corrupt_frame(tmp_path) -> None:
+    import pytest
+    from src.collector.storage_guard import L1NormalizationError, normalize_l0_partition
+
+    # Given: zstd 매직바이트가 아닌 쓰레기 바이트
+    part = tmp_path / 'l0' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    (part / '09.jsonl.zst').write_bytes(b'not-a-zstd-frame')
+    out_path = tmp_path / 'l1' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    # When / Then
+    with pytest.raises(L1NormalizationError):
+        normalize_l0_partition(part, out_path)
+    assert not out_path.exists()
+
+
+def test_prune_old_journals_archives_then_deletes_expired(tmp_path) -> None:
+    import datetime as dt
+    import json
+    import zstandard as zstd
+    from src.collector.storage_guard import prune_old_journals
+
+    # Given: 만료(2026-09-01) 파티션에 유효 프레임 1개
+    part = tmp_path / 'l0' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    rec = {'raw': 'a', 'recv_mono_ns': 1, 'recv_wall_ns': 2, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
+    payload = (json.dumps(rec) + '\n').encode('utf-8')
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    archive_root = tmp_path / 'l1'
+
+    # When
+    deleted = prune_old_journals(tmp_path / 'l0', retain_days=3, reference_date=dt.date(2026, 9, 8), archive_root=archive_root)
+
+    # Then: 파티션 삭제 + L1 Parquet 생성
+    assert deleted == 1
+    assert not part.exists()
+    assert (archive_root / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet').exists()
+
+
+def test_prune_old_journals_without_archive_root_deletes_nothing(tmp_path) -> None:
     import datetime as dt
     from src.collector.storage_guard import prune_old_journals
 
-    # Setup: dt=2026-09-01 (old, > 3 days) and dt=2026-09-07 (recent)
-    root = tmp_path / 'l0' / 'kis' / 'H0STCNT0'
-    old_part = root / 'dt=2026-09-01'
-    recent_part = root / 'dt=2026-09-07'
-    old_part.mkdir(parents=True, exist_ok=True)
-    recent_part.mkdir(parents=True, exist_ok=True)
-    (old_part / '09.jsonl.zst').write_text('dummy')
-    (recent_part / '09.jsonl.zst').write_text('dummy')
+    # Given: 만료 파티션이지만 archive_root 미지정
+    part = tmp_path / 'l0' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    (part / '09.jsonl.zst').write_text('dummy')
 
-    ref_date = dt.date(2026, 9, 8)
-    deleted_count = prune_old_journals(tmp_path / 'l0', retain_days=3, reference_date=ref_date)
+    # When
+    deleted = prune_old_journals(tmp_path / 'l0', retain_days=3, reference_date=dt.date(2026, 9, 8))
 
-    assert deleted_count == 1
-    assert not old_part.exists()
-    assert recent_part.exists()
+    # Then: 원본 보존, 삭제 0
+    assert deleted == 0
+    assert part.exists()
+
+
+def test_prune_old_journals_retains_partition_when_normalization_fails(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+    from src.collector.storage_guard import prune_old_journals
+
+    # Given: 만료 파티션에 복원 불가한 손상 .zst
+    part = tmp_path / 'l0' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    (part / '09.jsonl.zst').write_bytes(b'corrupt')
+    archive_root = tmp_path / 'l1'
+
+    # When
+    with caplog.at_level(logging.CRITICAL):
+        deleted = prune_old_journals(tmp_path / 'l0', retain_days=3, reference_date=dt.date(2026, 9, 8), archive_root=archive_root)
+
+    # Then: 파티션 보존, 삭제 0, CRITICAL 로그
+    assert deleted == 0
+    assert part.exists()
+    assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+
+
+def test_prune_old_journals_keeps_recent_partition(tmp_path) -> None:
+    import datetime as dt
+    from src.collector.storage_guard import prune_old_journals
+
+    # Given: 최근(2026-09-07) 파티션
+    part = tmp_path / 'l0' / 'kis' / 'H0STCNT0' / 'dt=2026-09-07'
+    part.mkdir(parents=True, exist_ok=True)
+    (part / '09.jsonl.zst').write_text('dummy')
+    archive_root = tmp_path / 'l1'
+
+    # When
+    deleted = prune_old_journals(tmp_path / 'l0', retain_days=3, reference_date=dt.date(2026, 9, 8), archive_root=archive_root)
+
+    # Then: 보존, L1 미생성
+    assert deleted == 0
+    assert part.exists()
+    assert not (archive_root / 'kis' / 'H0STCNT0' / 'dt=2026-09-07.parquet').exists()
+
+
+def test_normalize_l0_partition_raises_on_zero_rows(tmp_path, monkeypatch) -> None:
+    import json
+    import polars as pl
+    import pytest
+    import zstandard as zstd
+    from src.collector.storage_guard import L1NormalizationError, normalize_l0_partition
+
+    # Given: 유효 프레임 1개이나 dedup 후 0행인 빈 프레임으로 판독되는 경우
+    part = tmp_path / 'l0' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    rec = {'raw': 'a', 'recv_mono_ns': 1, 'recv_wall_ns': 2, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress((json.dumps(rec) + '\n').encode('utf-8')))
+    out_path = tmp_path / 'l1' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+    empty = pl.DataFrame({
+        'raw': pl.Series([], dtype=pl.String),
+        'recv_mono_ns': pl.Series([], dtype=pl.Int64),
+        'recv_wall_ns': pl.Series([], dtype=pl.Int64),
+        'conn_id': pl.Series([], dtype=pl.String),
+        'conn_seq': pl.Series([], dtype=pl.Int64),
+        'vendor': pl.Series([], dtype=pl.String),
+        'tr_id': pl.Series([], dtype=pl.String),
+    })
+    monkeypatch.setattr(pl, 'read_ndjson', lambda *a, **k: empty)
+
+    # When / Then: 0행 fail-closed, tmp 미잔존
+    with pytest.raises(L1NormalizationError):
+        normalize_l0_partition(part, out_path)
+    assert not out_path.exists()
+    assert list(out_path.parent.glob('*.tmp')) == []
+
+
+def test_prune_old_journals_retains_when_archive_unverified(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import json
+    import logging
+    import zstandard as zstd
+    import src.collector.storage_guard as sg
+    from src.collector.storage_guard import prune_old_journals
+
+    # Given: 만료 파티션이나 정규화가 rows=0 미검증으로 끝나는 경우
+    part = tmp_path / 'l0' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    rec = {'raw': 'a', 'recv_mono_ns': 1, 'recv_wall_ns': 2, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress((json.dumps(rec) + '\n').encode('utf-8')))
+    monkeypatch.setattr(sg, 'normalize_l0_partition', lambda p, o: 0)
+
+    # When
+    with caplog.at_level(logging.CRITICAL):
+        deleted = prune_old_journals(tmp_path / 'l0', retain_days=3, reference_date=dt.date(2026, 9, 8), archive_root=tmp_path / 'l1')
+
+    # Then: 파티션 보존, 삭제 0, CRITICAL 로그
+    assert deleted == 0
+    assert part.exists()
+    assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+
+
+def test_prune_local_l1_deletes_old_confirmed_parquet(tmp_path) -> None:
+    import datetime as dt
+    from src.collector.storage_guard import prune_local_l1
+
+    root = tmp_path / 'l1' / 'kis' / 'H0STCNT0'
+    root.mkdir(parents=True)
+    old_pq = root / 'dt=2026-07-01.parquet'
+    old_pq.write_bytes(b'x')
+    confirmed = {'l1/kis/H0STCNT0/dt=2026-07-01.parquet'}
+
+    purged = prune_local_l1(tmp_path / 'l1', retain_days=30, reference_date=dt.date(2026, 9, 8), confirmed_remote=confirmed)
+
+    assert purged == 1
+    assert not old_pq.exists()
+
+
+def test_prune_local_l1_keeps_unconfirmed_parquet(tmp_path) -> None:
+    import datetime as dt
+    from src.collector.storage_guard import prune_local_l1
+
+    root = tmp_path / 'l1' / 'kis' / 'H0STCNT0'
+    root.mkdir(parents=True)
+    old_pq = root / 'dt=2026-07-01.parquet'
+    old_pq.write_bytes(b'x')
+
+    purged = prune_local_l1(tmp_path / 'l1', retain_days=30, reference_date=dt.date(2026, 9, 8), confirmed_remote=set())
+
+    assert purged == 0
+    assert old_pq.exists()
+
+
+def test_prune_local_l1_without_confirmed_remote_is_noop(tmp_path) -> None:
+    import datetime as dt
+    from src.collector.storage_guard import prune_local_l1
+
+    root = tmp_path / 'l1' / 'kis' / 'H0STCNT0'
+    root.mkdir(parents=True)
+    old_pq = root / 'dt=2026-07-01.parquet'
+    old_pq.write_bytes(b'x')
+
+    purged = prune_local_l1(tmp_path / 'l1', retain_days=30, reference_date=dt.date(2026, 9, 8))
+
+    assert purged == 0
+    assert old_pq.exists()
+
+
+def test_prune_local_l1_keeps_recent_parquet(tmp_path) -> None:
+    import datetime as dt
+    from src.collector.storage_guard import prune_local_l1
+
+    root = tmp_path / 'l1' / 'kis' / 'H0STCNT0'
+    root.mkdir(parents=True)
+    recent_pq = root / 'dt=2026-09-05.parquet'
+    recent_pq.write_bytes(b'x')
+    confirmed = {'l1/kis/H0STCNT0/dt=2026-09-05.parquet'}
+
+    purged = prune_local_l1(tmp_path / 'l1', retain_days=30, reference_date=dt.date(2026, 9, 8), confirmed_remote=confirmed)
+
+    assert purged == 0
+    assert recent_pq.exists()
