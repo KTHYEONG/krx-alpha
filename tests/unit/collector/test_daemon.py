@@ -66,3 +66,12 @@ def test_run_eod_maintenance_invokes_prune(tmp_path) -> None:
     assert deleted == 1
     assert not old_part.exists()
     assert recent_part.exists()
+
+
+def test_run_collector_daemon_single_cycle() -> None:
+    from unittest.mock import MagicMock
+    from src.collector.daemon import run_collector_daemon
+
+    mock_sleep = MagicMock()
+    run_collector_daemon(sleep_fn=mock_sleep, max_cycles=1)
+    mock_sleep.assert_called_once()
