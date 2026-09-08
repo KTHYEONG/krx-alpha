@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_REALTIME_COLLECTOR_DAEMONS",
+      "date": "2026-09-08",
+      "adr_id": "ADR_20260908_REALTIME_COLLECTOR_DAEMONS",
+      "domain": "data-infra",
+      "title": "실시간 수집기 v1 (LS 주 수집 + 벤더 어댑터 + 스트리머 루프)",
+      "why": "KIS WS 는 appkey당 동시 커넥션 1·구독쌍 41 하드캡(실측)이라 체결+호가 24종목 수용 불가; LS 는 단일 커넥션 220+ 무거부(실측).",
+      "resolution": "VendorAdapter Protocol + L0Frame/VendorAck DTO + SubscriptionPlanner(pair→종목예산 유도, primary=LS 전량/crosscheck 상위N) + LsRealtimeAdapter(토큰·구독·PINGPONG 에코·평문 L0Frame·CLOSE→VendorDisconnected) + RealtimeStreamer(재접속·replay 재구독·사이클간 note_gap·flush) + collect-stream CLI.",
+      "impact": "LS 단일 커넥션으로 전체 단타 유니버스 실시간 체결+호가 수집 가능; KIS/키움 어댑터·스캐너·daemon 감독은 동일 Protocol 로 후속."
+    },
+    {
       "task_id": "TASK_L1_HF_REMOTE_OFFLOAD",
       "date": "2026-09-08",
       "adr_id": "ADR_20260908_L1_HF_REMOTE_OFFLOAD",
