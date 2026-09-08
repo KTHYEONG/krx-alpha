@@ -1,0 +1,14 @@
+{
+  "tasks": [
+    {
+      "task_id": "TASK_UNIVERSE_POLICY",
+      "date": "2026-09-08",
+      "adr_id": "ADR_20260908_UNIVERSE_POLICY",
+      "domain": "quant-research",
+      "title": "단기투자 수집 유니버스 선정 정책",
+      "why": "상한가 단독 유니버스는 인트라데이 백필 불가 + 500표본까지 50개월로 검증 불가능; 일봉만으로는 TP/SL 경로 모호가 55~65%.",
+      "resolution": "상한가·급등10%·거래대금급증·60일신고가 합집합에 거래대금 50억 유동성 하한을 걸어 selection_reasons 태그로 수집; lookahead·슬롯예산 초과는 예외로 fail-closed.",
+      "impact": "일 평균 3.6종목/최대 24종목으로 WS 심층 40슬롯에 100% 수용, 저장 9.2GB/년(목표 38GB의 1/4), 상한가는 태그로 분리 식별."
+    }
+  ]
+}
