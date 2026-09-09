@@ -52,3 +52,25 @@ def test_bars_refresh_run_preserves_market_map_on_krx_failure(tmp_path, monkeypa
 
     assert rc == 4
     assert mm.read_text() == '{"005930": "KOSPI"}'
+
+
+def test_bars_refresh_run_returns_rc4_when_krx_key_missing(tmp_path, monkeypatch, caplog) -> None:
+    import argparse
+    import logging
+    from src.cli import bars_refresh
+
+    monkeypatch.delenv('KRX_OPENAPI_KEY', raising=False)
+
+    mm = tmp_path / 'market_map.json'
+    mm.write_text('{"005930": "KOSPI"}', encoding='utf-8')
+    store = tmp_path / 'bars.parquet'
+    store.write_bytes(b'existing')
+    args = argparse.Namespace(store_path=str(store), market_map_path=str(mm),
+                              ref_date='2026-09-08', window_days=90)
+
+    with caplog.at_level(logging.ERROR):
+        rc = bars_refresh.run(args)
+
+    assert rc == 4
+    assert mm.read_text() == '{"005930": "KOSPI"}'
+    assert any('missing_env' in r.message for r in caplog.records)
