@@ -52,6 +52,7 @@ class LsRealtimeAdapter:
         self._ws: Any = None
         self._token: str | None = None
         self._seq = 0
+        self._pending: list[L0Frame] = []  # subscribe 중 끼어든 데이터 프레임 (recv 가 먼저 소진)
 
     async def connect(self) -> None:
         async with self._http.post(
@@ -67,6 +68,24 @@ class LsRealtimeAdapter:
         self._token = str(data["access_token"])
         self._ws = await (self._http.ws_connect(self._ws_url)).__aenter__()
         self._seq = 0
+        self._pending = []
+
+    def _build_frame(self, o: dict[str, Any], raw: str) -> L0Frame:
+        self._seq += 1
+        return L0Frame(
+            "ls",
+            _REV_TR_CD[o["header"]["tr_cd"]],
+            o["header"]["tr_key"],
+            raw,
+            time.monotonic_ns(),
+            time.time_ns(),
+            self._seq,
+        )
+
+    @staticmethod
+    def _is_data_frame(o: dict[str, Any]) -> bool:
+        header = o.get("header", {})
+        return header.get("tr_cd") in _REV_TR_CD and "tr_key" in header
 
     async def subscribe(self, pairs: list[tuple[str, str]]) -> list[VendorAck]:
         acks: list[VendorAck] = []
@@ -80,12 +99,30 @@ class LsRealtimeAdapter:
                     }
                 )
             )
-            resp = json.loads(await self._ws.receive_str())
+            # 구독 응답 대기 중에도 이미 구독된 심볼의 실시간 데이터가 끼어들 수 있어
+            # ACK 로 인식될 때까지 프레임을 분류하며 소비한다 (데이터 유실 방지).
+            resp: dict[str, Any] | None = None
+            while resp is None:
+                raw = await self._ws.receive_str()
+                o = json.loads(raw)
+                header = o.get("header", {})
+                if header.get("tr_cd") == "PINGPONG":
+                    await self._ws.send_str(raw)
+                    continue
+                if self._is_data_frame(o):
+                    self._pending.append(self._build_frame(o, raw))
+                    continue
+                if "rsp_cd" in header:
+                    resp = o
+                    continue
+                # 인식 불가 시스템 프레임: 크래시 대신 스킵.
             rsp_cd = str(resp["header"].get("rsp_cd"))
             acks.append(VendorAck(symbol, stream, resp["header"].get("rsp_cd") == "00000", rsp_cd))
         return acks
 
     async def recv(self) -> L0Frame:
+        if self._pending:
+            return self._pending.pop(0)
         # keepalive 는 재귀가 아닌 루프로 소비한다: 무데이터 구간의 연속 PING 이 스택을 쌓지 않도록.
         while True:
             msg = await self._ws.receive()
@@ -94,19 +131,14 @@ class LsRealtimeAdapter:
                 continue
             if msg.type == aiohttp.WSMsgType.TEXT:
                 o = json.loads(msg.data)
-                if o["header"].get("tr_cd") == "PINGPONG":
+                header = o.get("header", {})
+                if header.get("tr_cd") == "PINGPONG":
                     await self._ws.send_str(msg.data)
                     continue
-                self._seq += 1
-                return L0Frame(
-                    "ls",
-                    _REV_TR_CD[o["header"]["tr_cd"]],
-                    o["header"]["tr_key"],
-                    msg.data,
-                    time.monotonic_ns(),
-                    time.time_ns(),
-                    self._seq,
-                )
+                if self._is_data_frame(o):
+                    return self._build_frame(o, msg.data)
+                # ACK 지연 도착 등 데이터가 아닌 프레임은 스킵하고 계속 수신 (크래시 방지).
+                continue
             raise VendorDisconnected(str(msg.type))
 
     async def aclose(self) -> None:

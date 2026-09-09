@@ -208,3 +208,80 @@ def test_ls_adapter_aclose_closes_ws() -> None:
     asyncio.run(adapter.aclose())
 
     assert adapter._ws.closed is True  # type: ignore[attr-defined]
+
+
+def test_ls_adapter_subscribe_stashes_interleaved_data_frame_instead_of_dropping() -> None:
+    import asyncio
+    import json
+    from src.collector.ws_ls import LsRealtimeAdapter
+
+    stray_data = json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '000660'}, 'body': {'price': '1000'}})
+    real_ack = json.dumps({'header': {'tr_cd': 'S3_', 'rsp_cd': '00000', 'rsp_msg': 'ok'}, 'body': {}})
+
+    class _WS:
+        def __init__(self):
+            self._q = [stray_data, real_ack]
+            self.sent: list[str] = []
+        async def send_str(self, s):
+            self.sent.append(s)
+        async def receive_str(self):
+            return self._q.pop(0)
+        async def close(self):
+            self.sent.append('__closed__')
+
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'})
+    adapter._ws = _WS()  # type: ignore[attr-defined]
+    adapter._token = 'TOK'  # type: ignore[attr-defined]
+
+    acks = asyncio.run(adapter.subscribe([('005930', 'H0STCNT0')]))
+
+    assert acks[0].accepted is True
+    assert len(adapter._pending) == 1  # type: ignore[attr-defined]
+    assert adapter._pending[0].symbol == '000660'  # type: ignore[attr-defined]
+
+
+def test_ls_adapter_recv_drains_pending_before_reading_socket() -> None:
+    import asyncio
+    from src.collector.ws_ls import LsRealtimeAdapter
+    from src.collector.vendor import L0Frame
+
+    class _WS:
+        async def receive(self):
+            raise AssertionError('socket must not be read while pending queue is non-empty')
+
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'})
+    adapter._ws = _WS()  # type: ignore[attr-defined]
+    stashed = L0Frame('ls', 'H0STCNT0', '000660', '{}', 1, 2, 1)
+    adapter._pending.append(stashed)  # type: ignore[attr-defined]
+
+    frame = asyncio.run(adapter.recv())
+
+    assert frame is stashed
+
+
+def test_ls_adapter_recv_skips_late_ack_frame_without_crashing() -> None:
+    import asyncio
+    import json
+    import aiohttp
+    from src.collector.ws_ls import LsRealtimeAdapter
+
+    late_ack = json.dumps({'header': {'tr_cd': 'S3_', 'rsp_cd': '00000', 'rsp_msg': 'ok'}, 'body': {}})
+    data = json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': {'price': '70000'}})
+
+    class _Msg:
+        def __init__(self, t, d):
+            self.type = t
+            self.data = d
+
+    class _WS:
+        def __init__(self):
+            self._q = [_Msg(aiohttp.WSMsgType.TEXT, late_ack), _Msg(aiohttp.WSMsgType.TEXT, data)]
+        async def receive(self):
+            return self._q.pop(0)
+
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'})
+    adapter._ws = _WS()  # type: ignore[attr-defined]
+
+    frame = asyncio.run(adapter.recv())
+
+    assert frame.symbol == '005930'
