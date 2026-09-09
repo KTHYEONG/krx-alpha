@@ -363,10 +363,13 @@ def test_normalize_l0_partition_logs_extended_tick_quality_fields(tmp_path, capl
     import zstandard as zstd
     from src.storage.retention import normalize_l0_partition
 
-    # Given: 체결(H0STCNT0) 파티션에 정상 틱 1건 (drate 포함)
+    # Given: 체결(H0STCNT0) 파티션에 정상 틱 1건 (drate/mdchecnt/mschecnt 포함)
     part = tmp_path / 'l0' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
     part.mkdir(parents=True, exist_ok=True)
-    body = {'shcode': '005930', 'price': '70000', 'cvolume': '10', 'volume': '100', 'change': '0', 'sign': '3', 'drate': '0.00'}
+    body = {
+        'shcode': '005930', 'price': '70000', 'cvolume': '10', 'volume': '100', 'change': '0',
+        'sign': '3', 'drate': '0.00', 'mdchecnt': '10', 'mschecnt': '5',
+    }
     raw = json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': body}, ensure_ascii=False)
     rec = {'raw': raw, 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
     payload = (json.dumps(rec) + '\n').encode('utf-8')
@@ -382,6 +385,5 @@ def test_normalize_l0_partition_logs_extended_tick_quality_fields(tmp_path, capl
     assert 'decode_fail=0' in caplog.text
     assert 'schema_disagree=0' in caplog.text
     assert 'tick_loss=0' in caplog.text
-    assert 'tick_duplicate=0' in caplog.text
     assert 'lost_volume=0' in caplog.text
     assert 'status=OK' in caplog.text

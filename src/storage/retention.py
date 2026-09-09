@@ -65,9 +65,9 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path) -> in
             raise ValueError(f"zero rows after dedup: {part}")
         quality: TickQualitySummary | None = decode_and_flag_ticks(df)
         if quality is not None:
-            status = "WARN" if any((quality.decode_fail, quality.zero_volume, quality.price_band_violation, quality.cum_volume_regression, quality.schema_disagree, quality.tick_loss, quality.tick_duplicate, quality.lost_volume)) else "OK"
+            status = "WARN" if any((quality.decode_fail, quality.zero_volume, quality.price_band_violation, quality.cum_volume_regression, quality.schema_disagree, quality.tick_loss, quality.lost_volume)) else "OK"
             (logger.warning if status == "WARN" else logger.info)(
-                "[DATA] stage=quality tr_id=%s rows=%d decode_fail=%d zero_volume=%d price_band_violation=%d cum_volume_regression=%d schema_disagree=%d tick_loss=%d tick_duplicate=%d lost_volume=%d status=%s",
+                "[DATA] stage=quality tr_id=%s rows=%d decode_fail=%d zero_volume=%d price_band_violation=%d cum_volume_regression=%d schema_disagree=%d tick_loss=%d lost_volume=%d status=%s",
                 "H0STCNT0",
                 quality.rows,
                 quality.decode_fail,
@@ -76,7 +76,6 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path) -> in
                 quality.cum_volume_regression,
                 quality.schema_disagree,
                 quality.tick_loss,
-                quality.tick_duplicate,
                 quality.lost_volume,
                 status,
             )
