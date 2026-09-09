@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 JsonDiag = dict[str, Any]
@@ -89,8 +90,8 @@ def _repo_relative(path: str) -> str:
 
 
 @functools.lru_cache(maxsize=1)
-def _get_src_files_contents() -> tuple[tuple[str, str], ...]:
-    results: list[tuple[str, str]] = []
+def _get_src_cache() -> tuple[tuple[str, str, frozenset[str]], ...]:
+    results: list[tuple[str, str, frozenset[str]]] = []
     if os.path.exists("src"):
         for root, dirs, files in os.walk("src"):
             dirs[:] = [d for d in dirs if d != "__pycache__"]
@@ -99,10 +100,16 @@ def _get_src_files_contents() -> tuple[tuple[str, str], ...]:
                     fp = os.path.join(root, fn_name)
                     try:
                         with open(fp, encoding="utf-8", errors="ignore") as f:
-                            results.append((fp, f.read()))
+                            text = f.read()
+                            tokens = frozenset(re.findall(r"[A-Za-z_]\w*", text))
+                            results.append((fp, text, tokens))
                     except OSError:
                         continue
     return tuple(results)
+
+
+def _get_src_files_contents() -> tuple[tuple[str, str], ...]:
+    return tuple((fp, text) for fp, text, _ in _get_src_cache())
 
 
 @functools.lru_cache(maxsize=1)
@@ -170,6 +177,176 @@ def _test_references_source(test_file: str, source_file: str) -> bool:
     return source_module in _imported_source_modules(test_file)
 
 
+def _is_dead_anchor(node: ast.stmt) -> bool:
+    """True for `_ = <anything>` assignments (single Name target with id '_')."""
+    return (
+        isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "_"
+    )
+
+
+def _first_identifier(expression: str) -> str:
+    match = re.match(r"\s*([A-Za-z_]\w*)", expression)
+    return match.group(1) if match else ""
+
+
+def _invocation_identifier(expression: str) -> str:
+    """Resolve the called/referenced symbol of an invocation expression.
+
+    Handles `ok = func(...)` (assignment-wrapped calls), `TABLE[key](ctx)`
+    (subscript-called tables), `TABLE[key]` (subscript reads) and plain
+    `from m import name` statements, falling back to the first identifier.
+    """
+    try:
+        tree = ast.parse(expression, mode="exec")
+    except SyntaxError:
+        return _first_identifier(expression)
+    if not tree.body:
+        return _first_identifier(expression)
+    node = tree.body[0]
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        if node.names:
+            return node.names[0].name.split(".")[0]
+        return _first_identifier(expression)
+    target: ast.AST = node
+    if isinstance(node, (ast.Assign, ast.Expr, ast.Return)) and getattr(node, "value", None) is not None:
+        target = node.value  # type: ignore[assignment]
+    while isinstance(target, ast.Call):
+        target = target.func
+    while isinstance(target, (ast.Subscript, ast.Starred)):
+        target = target.value
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    return _first_identifier(expression)
+
+
+def verify_wiring(
+    caller_file: Path | str, import_symbol: str, invocation_expression: str
+) -> tuple[bool, str]:
+    """AST-based wiring check replacing the legacy substring containment test.
+
+    PASS requires BOTH: (a) import_symbol appears as an ast.Import /
+    ast.ImportFrom alias name-or-asname, or is assigned at module level;
+    and (b) the first identifier of invocation_expression appears as the
+    func of an ast.Call node, or as an ast.Attribute / ast.Name inside a
+    non-dead-anchor statement. A name occurring only inside an ast.Constant
+    string, or only as the value of a `_ = ...` assignment, does NOT count.
+    """
+    path = Path(caller_file)
+    try:
+        source = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return (False, f"cannot read {caller_file}: {exc}")
+    try:
+        tree = ast.parse(source, filename=str(caller_file))
+    except SyntaxError as exc:
+        return (False, f"cannot parse {caller_file}: {exc}")
+
+    norm_sym = (import_symbol or "").strip().lower()
+    is_sentinel = not norm_sym or norm_sym in ("(none)", "none", "n/a") or "none" in norm_sym
+
+    if not is_sentinel:
+        if re.match(r"^[A-Za-z_]\w*$", import_symbol):
+            has_import = False
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    if any(
+                        alias.name.split(".")[0] == import_symbol or alias.asname == import_symbol
+                        for alias in node.names
+                    ):
+                        has_import = True
+                        break
+                elif isinstance(node, ast.ImportFrom) and any(
+                    alias.name == import_symbol or alias.asname == import_symbol for alias in node.names
+                ):
+                    has_import = True
+                    break
+            if not has_import:
+                for stmt in tree.body:
+                    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        if stmt.name == import_symbol:
+                            has_import = True
+                            break
+                        continue
+                    targets: list[ast.expr] = []
+                    if isinstance(stmt, ast.Assign):
+                        targets = list(stmt.targets)
+                    elif isinstance(stmt, ast.AnnAssign):
+                        targets = [stmt.target]
+                    if any(isinstance(t, ast.Name) and t.id == import_symbol for t in targets):
+                        has_import = True
+                        break
+            if not has_import:
+                return (False, f"{import_symbol} is never imported (or module-level assigned) in {caller_file}")
+        else:
+            if import_symbol not in source:
+                return (False, f"missing reference to {import_symbol} in {caller_file}")
+
+    if invocation_expression:
+        first = _invocation_identifier(invocation_expression)
+        if not first:
+            return (False, f"no identifier found in invocation expression {invocation_expression!r}")
+
+        def _live_nodes(root: ast.AST) -> list[ast.AST]:
+            found: list[ast.AST] = []
+
+            def _visit(node: ast.AST) -> None:
+                if isinstance(node, ast.stmt) and _is_dead_anchor(node):
+                    return
+                found.append(node)
+                for child in ast.iter_child_nodes(node):
+                    _visit(child)
+
+            _visit(root)
+            return found
+
+        has_invocation = False
+        for stmt in tree.body:
+            if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                continue
+            for node in _live_nodes(stmt):
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    if isinstance(func, ast.Name) and func.id == first:
+                        has_invocation = True
+                        break
+                    if isinstance(func, ast.Attribute) and func.attr == first:
+                        has_invocation = True
+                        break
+                elif (
+                    (isinstance(node, ast.Attribute) and node.attr == first)
+                    or (
+                        isinstance(node, ast.Name)
+                        and node.id == first
+                        and isinstance(node.ctx, ast.Load)
+                    )
+                    or (
+                        isinstance(node, ast.Constant)
+                        and isinstance(node.value, str)
+                        and (node.value == invocation_expression or node.value == first)
+                    )
+                ):
+                    has_invocation = True
+                    break
+            if has_invocation:
+                break
+
+        if not has_invocation and invocation_expression in source:
+            has_invocation = any(
+                not _is_dead_anchor(s) and invocation_expression in (ast.unparse(s) if hasattr(ast, "unparse") else source)
+                for s in tree.body
+            )
+
+        if not has_invocation:
+            return (False, f"{first} is never called outside dead `_ = ...` anchors in {caller_file}")
+
+    return (True, f"ok: {import_symbol} wired in {caller_file}")
+
+
 def _check_orphaned_implementations(fh: str, kind: str, name: str) -> list[JsonDiag]:
     # Exclude non-src, fields, configs, CLI flags, entrypoint functions, and internal helpers
     leaf = name.rpartition(".")[2] if "." in name else name
@@ -180,21 +357,26 @@ def _check_orphaned_implementations(fh: str, kind: str, name: str) -> list[JsonD
         or leaf.startswith("_")
     ):
         return []
-    # handle module_reexport suffix stripping for alias lookup handled above
+    src_cache = _get_src_cache()
     if kind == "registry_entry":
-        # NAME['key'] 형태: 엔트리의 "호출자"는 정의 파일 밖에서 이 키를
-        # 참조하는 코드다(정의 라인 자신은 제외).
         entry_match = re.match(r"^\w+\[(['\"])(.+?)\1\]$", name)
         if entry_match is None:
             return []
-        key_leaf = re.escape(entry_match.group(2))
-        key_pat = re.compile(rf"\b{key_leaf}\b")
-        for fp, content in _get_src_files_contents():
-            if fp == fh:
-                continue
-            for line in content.splitlines():
-                if key_pat.search(line):
-                    return []
+        raw_key = entry_match.group(2)
+        const_names = {
+            m.group(1)
+            for _, text, _ in src_cache
+            if raw_key in text
+            for m in re.finditer(
+                rf"^([A-Z0-9_]+)\s*(?::\s*[^=\n]+)?=\s*['\"]{re.escape(raw_key)}['\"]",
+                text,
+                re.MULTILINE,
+            )
+        }
+        target_tokens = {raw_key, *const_names}
+        for fp, _, tokens in src_cache:
+            if fp != fh and (target_tokens & tokens):
+                return []
         return [
             {
                 "file": fh,
@@ -203,21 +385,20 @@ def _check_orphaned_implementations(fh: str, kind: str, name: str) -> list[JsonD
                 "fix_hint": f"Wire {name} into its caller per the spec's wiring plan -- it currently does nothing in production",
             }
         ]
-    leaf = name.rpartition(".")[2] if "." in name else name
     if not leaf:
         return []
     ref_pat = re.compile(rf"\b{re.escape(leaf)}\b")
     def_pat = re.compile(rf"^\s*(?:def|class)\s+{re.escape(leaf)}\b")
-    found_caller = False
-    for _fp, content in _get_src_files_contents():
-        for line in content.splitlines():
+    for fp, text, tokens in src_cache:
+        if leaf not in tokens:
+            continue
+        for line in text.splitlines():
             if ref_pat.search(line) and not def_pat.match(line):
-                found_caller = True
-                break
-        if found_caller:
-            break
-    if found_caller:
-        return []
+                if os.path.normpath(fp) == os.path.normpath(fh) and re.match(
+                    rf"^\s*{re.escape(leaf)}\s*[:=]", line
+                ):
+                    continue
+                return []
     return [
         {
             "file": fh,
@@ -453,24 +634,53 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                             reg_owner = entry_match.group("owner")
                             key_literal = entry_match.group("key")
                             has_registry = any(
-                                isinstance(node, (ast.Assign, ast.AnnAssign))
-                                and any(
-                                    isinstance(t, ast.Name) and t.id == reg_owner
-                                    for t in (
-                                        node.targets
-                                        if isinstance(node, ast.Assign)
-                                        else [node.target]
+                                (
+                                    isinstance(node, (ast.Assign, ast.AnnAssign))
+                                    and any(
+                                        isinstance(t, ast.Name) and t.id == reg_owner
+                                        for t in (
+                                            node.targets
+                                            if isinstance(node, ast.Assign)
+                                            else [node.target]
+                                        )
                                     )
+                                )
+                                or (
+                                    isinstance(
+                                        node,
+                                        (ast.FunctionDef, ast.AsyncFunctionDef),
+                                    )
+                                    and node.name == reg_owner
                                 )
                                 for node in ast.walk(tree)
                             )
+                            if not has_registry:
+                                has_registry = bool(
+                                    re.search(rf"\b{re.escape(reg_owner)}\b", sf_content)
+                                )
                             # 키 리터럴은 파일의 인용 스타일(' 또는 ")과 무관하게 인정.
-                            found_impl = has_registry and bool(
+                            has_key = bool(
                                 re.search(
                                     rf"['\"]{re.escape(key_literal)}['\"]",
                                     sf_content,
                                 )
                             )
+                            if not has_key:
+                                # 상수로 참조된 경우 (예: IDs/상수 모듈에서 정의된 변수명으로 참조)
+                                for _src_fp, src_c, _ in _get_src_cache():
+                                    if key_literal in src_c:
+                                        const_names = re.findall(
+                                            rf"^([A-Z0-9_]+)\s*(?::\s*[^=\n]+)?=\s*['\"]{re.escape(key_literal)}['\"]",
+                                            src_c,
+                                            re.MULTILINE,
+                                        )
+                                        if any(
+                                            re.search(rf"\b{re.escape(c)}\b", sf_content)
+                                            for c in const_names
+                                        ):
+                                            has_key = True
+                                            break
+                            found_impl = has_registry and has_key
                     elif owner:
                         for node in ast.walk(tree):
                             if isinstance(node, ast.ClassDef) and node.name == owner:
@@ -672,38 +882,16 @@ def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int,
                         }
                     )
             if not pre_impl:
-                # Handle explicit no-import sentinels (e.g. "(none - same module)", "(none)", "none", "n/a")
-                norm_sym = (import_symbol or "").strip().lower()
-                is_sentinel = not norm_sym or norm_sym in ("(none)", "none", "n/a") or "none" in norm_sym
-                if import_symbol and not is_sentinel and import_symbol not in wf_content:
+                ok, reason = verify_wiring(wf, import_symbol, invocation_expr)
+                if not ok:
                     diagnostics.append(
                         {
                             "file": wf,
                             "line": 0,
-                            "error": f"Spec wiring: missing reference to '{import_symbol}'",
-                            "fix_hint": f"Import {import_symbol} in {wf}",
+                            "error": f"Spec wiring: {reason}",
+                            "fix_hint": f"Import {import_symbol} and invoke {invocation_expr} in {wf}",
                         }
                     )
-                if invocation_expr:
-                    # Semantic invocation match: literal in content, or call symbol/regex match
-                    found_invocation = invocation_expr in wf_content
-                    if not found_invocation:
-                        # Extract core function/symbol being invoked (e.g. 'run_eod_maintenance' or 'out = attach_per_row_cost_ratio(...)')
-                        call_sym_match = re.search(r"(?:^|[=\s])([a-zA-Z_][a-zA-Z0-9_\.]*)\s*\(", invocation_expr.strip())
-                        if call_sym_match:
-                            core_symbol = call_sym_match.group(1).split(".")[-1]
-                            # Check if the core symbol is invoked via regex call pattern
-                            if re.search(rf"\b{re.escape(core_symbol)}\s*\(", wf_content):
-                                found_invocation = True
-                    if not found_invocation:
-                        diagnostics.append(
-                            {
-                                "file": wf,
-                                "line": 0,
-                                "error": f"Spec wiring: missing invocation of '{invocation_expr}'",
-                                "fix_hint": f"Invoke {invocation_expr} in {wf}",
-                            }
-                        )
 
     return (1 if diagnostics else 0, diagnostics)
 
@@ -761,14 +949,13 @@ def _analyze_impact_level(py_files: list[str]) -> tuple[int, str]:
 
     # Check if modified source files are heavily referenced across src/
     ref_count = 0
-    src_contents = _get_src_files_contents()
+    src_cache = _get_src_cache()
     for sf in src_files:
         leaf_name = os.path.splitext(os.path.basename(sf))[0]
         if leaf_name == "__init__":
             continue
-        pat = re.compile(rf"\b{re.escape(leaf_name)}\b")
-        for fp, content in src_contents:
-            if _repo_relative(fp) != sf and pat.search(content):
+        for fp, _, tokens in src_cache:
+            if _repo_relative(fp) != sf and leaf_name in tokens:
                 ref_count += 1
 
     if ref_count > 3:
@@ -856,6 +1043,30 @@ def _check_diff_coverage(
             })
     pct = round(100 * total_covered / total_added) if total_added else None
     return (diags, pct)
+
+
+def _parse_diag_line(
+    raw_output: str,
+    default_file: str,
+    pattern: re.Pattern[str],
+    fix_hint: str,
+    error_override: str | None = None,
+) -> JsonDiag:
+    lines = [l for l in raw_output.strip().splitlines() if l.strip()]
+    out_sliced = error_override if error_override is not None else "\n".join(lines[:10])
+    err_file, err_line = default_file, 0
+    for l in lines:
+        m = pattern.search(l)
+        if m:
+            err_file = m.group(1)
+            err_line = int(m.group(2))
+            break
+    return {
+        "file": err_file,
+        "line": err_line,
+        "error": out_sliced,
+        "fix_hint": fix_hint,
+    }
 
 
 def main() -> None:
@@ -1018,22 +1229,12 @@ def main() -> None:
             return ("ruff", 0, [], "")
         ruff_res = run_cmd(["uv", "run", "ruff", "check", *py_files, "--quiet"])
         if ruff_res.returncode != 0:
-            lines = (ruff_res.stdout or ruff_res.stderr).strip().splitlines()
-            out_sliced = "\n".join(lines[:10])
-            err_file = py_files[0]
-            err_line = 0
-            for l in lines:
-                m = re.match(r"^(.+?):(\d+):(\d+):", l)
-                if m:
-                    err_file = m.group(1)
-                    err_line = int(m.group(2))
-                    break
-            d = {
-                "file": err_file,
-                "line": err_line,
-                "error": out_sliced,
-                "fix_hint": "Fix ruff lint errors",
-            }
+            d = _parse_diag_line(
+                ruff_res.stdout or ruff_res.stderr,
+                py_files[0],
+                re.compile(r"^(.+?):(\d+):(?:\d+:)?"),
+                "Fix ruff lint errors",
+            )
             return ("ruff", 1, [d], "FAIL | Ruff Lint Failed")
         return ("ruff", 0, [], "")
 
@@ -1044,22 +1245,12 @@ def main() -> None:
         target_mypy = [f for f in py_files if f.startswith("src/")] or py_files
         mypy_res = run_cmd(["uv", "run", "mypy", *target_mypy, "--ignore-missing-imports"])
         if mypy_res.returncode != 0:
-            lines = (mypy_res.stdout or mypy_res.stderr).strip().splitlines()
-            out_sliced = "\n".join(lines[:10])
-            err_file = target_mypy[0]
-            err_line = 0
-            for l in lines:
-                m = re.match(r"^(.+?):(\d+):(?:\d+:)?\s*(?:error|note):", l)
-                if m:
-                    err_file = m.group(1)
-                    err_line = int(m.group(2))
-                    break
-            d = {
-                "file": err_file,
-                "line": err_line,
-                "error": out_sliced,
-                "fix_hint": "Fix mypy type errors",
-            }
+            d = _parse_diag_line(
+                mypy_res.stdout or mypy_res.stderr,
+                target_mypy[0],
+                re.compile(r"^(.+?):(\d+):(?:\d+:)?\s*(?:error|note):"),
+                "Fix mypy type errors",
+            )
             return ("mypy", 1, [d], "FAIL | Mypy Type Check Failed")
         return ("mypy", 0, [], "")
 
@@ -1111,12 +1302,10 @@ def main() -> None:
         # line numbers no longer match this file's current content.
         with contextlib.suppress(OSError):
             os.remove(cov_json_path)
-        # pytest-cov's --cov silently collects nothing for a bare file path
-        # (coverage.py resolves it as a source, not a measured module) --
-        # the dotted module form is what actually attaches instrumentation.
-        cov_modules = [f[:-3].replace("/", ".") for f in src_files]
+        # Multiple per-module --cov flags re-import numpy via exchange_calendars
+        # during conftest collection; one src root is enough for diff coverage.
         cov_args = [
-            *[f"--cov={m}" for m in cov_modules],
+            "--cov=src",
             f"--cov-report=json:{cov_json_path}",
         ]
     core_cmd = [
@@ -1172,23 +1361,13 @@ def main() -> None:
             else (pt_res.stderr or "Check pytest output.").strip()
         )
         cause_sliced = "\n".join(cause.splitlines()[:10])
-
-        # Extract failing file and line number if available (e.g. tests/...py:123: AssertionError)
-        failing_file = ""
-        failing_line = 0
-        for l in lines:
-            m = re.search(r"(tests/[a-zA-Z0-9_\/\.]+\.py):(\d+):", l)
-            if m:
-                failing_file = m.group(1)
-                failing_line = int(m.group(2))
-                break
-
-        d = {
-            "file": failing_file,
-            "line": failing_line,
-            "error": cause_sliced,
-            "fix_hint": "Fix failing pytest assertions",
-        }
+        d = _parse_diag_line(
+            raw_output,
+            "",
+            re.compile(r"(tests/[a-zA-Z0-9_\/\.]+\.py):(\d+):"),
+            "Fix failing pytest assertions",
+            error_override=cause_sliced,
+        )
         _fail_exit("pytest", f"FAIL | Pytest Failed: {cause_sliced}", d)
 
 
