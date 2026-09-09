@@ -37,7 +37,9 @@ def run(args: argparse.Namespace) -> int:
     featured = compute_selection_features(bars)
     selected = select_universe(featured, decision, slot_budget=int(args.slot_budget))
     logger.info("[DATA] stage=universe_plan decision=%s shape=%s status=OK", decision.isoformat(), str(selected.shape))
-    selected.write_parquet(Path(str(args.out_path)), compression="zstd")
+    out_path = Path(str(args.out_path))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    selected.write_parquet(out_path, compression="zstd")
     if getattr(args, "candidates_path", None):
         from src.collector.scan_bridge import emit_candidates
 

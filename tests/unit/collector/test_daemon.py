@@ -342,3 +342,34 @@ def test_run_collector_daemon_streamer_active_logs_circuit_open(tmp_path, monkey
         run_collector_daemon(sleep_fn=MagicMock(), max_cycles=1, now_fn=lambda: active)
 
     assert any('circuit_open' in r.message for r in caplog.records)
+
+
+def test_run_collector_daemon_streamer_active_survives_orchestration_exception(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+    import src.collector.daemon as daemon_mod
+    from src.collector.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+
+    def _raise(**kw):
+        raise FileNotFoundError("data/universe/2026-09-08.parquet")
+
+    monkeypatch.setattr(daemon_mod, 'run_session_orchestration', _raise)
+
+    constructed: list[str] = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            constructed.append('constructed')
+        def ensure_running(self):
+            return 'started'
+
+    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _FakeSupervisor)
+
+    active = dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+
+    run_collector_daemon(sleep_fn=MagicMock(), max_cycles=1, now_fn=lambda: active)
+
+    assert constructed == []
