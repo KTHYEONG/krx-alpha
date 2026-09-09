@@ -178,13 +178,17 @@ def run_collector_daemon(
                 market_map_path = data_root / "market_map.json"
                 candidates_path = data_root / "candidates.json"
                 universe_out_path = data_root / "universe" / f"{today.isoformat()}.parquet"
-                ready = run_session_orchestration(
-                    today=today,
-                    bars_store=bars_store,
-                    market_map_path=market_map_path,
-                    candidates_path=candidates_path,
-                    universe_out_path=universe_out_path,
-                )
+                try:
+                    ready = run_session_orchestration(
+                        today=today,
+                        bars_store=bars_store,
+                        market_map_path=market_map_path,
+                        candidates_path=candidates_path,
+                        universe_out_path=universe_out_path,
+                    )
+                except Exception as e:  # noqa: BLE001 - 오케스트레이션 실패가 데몬 전체를 죽이지 않도록 격리
+                    logger.error("[DAEMON] stage=session status=FAIL reason=orchestration_error error=%s", str(e))
+                    ready = False
                 orchestrated_for = today
                 if ready:
                     manifest_path = data_root / "manifest" / f"{today.isoformat()}.json"
