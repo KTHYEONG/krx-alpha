@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "stream_integrity_v2",
+      "date": "2026-09-09",
+      "adr_id": "ADR_20260909_stream_integrity_v2",
+      "domain": "realtime_storage",
+      "title": "체결 보존법칙+호가 정합성+sign교차검증 확장",
+      "why": "1차 라운드에서 미룬 스키마재검증/호가/gap탐지 3항목을 벤더문서 없이 자기검증으로 해결 필요",
+      "resolution": "체결에 tick_loss/duplicate/schema_disagree 추가, 호가(H0STASP0) 청킹 디코드+사다리/크로스북/잔량 검증 신규, gap탐지는 H1로 충족되어 streamer.py 미접촉",
+      "impact": "quality.py 확장+retention.py 로그 2줄 추가, 파케이 스키마/리턴 계약 불변, 호가는 20000행 청크 필수"
+    },
+    {
       "task_id": "data_integrity_validation",
       "date": "2026-09-09",
       "adr_id": "ADR_20260909_data_integrity_validation",
