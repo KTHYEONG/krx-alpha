@@ -165,13 +165,17 @@ def test_decode_and_flag_ticks_flags_tick_loss_and_quantifies_lost_volume() -> N
     import polars as pl
     from src.storage.quality import decode_and_flag_ticks
 
-    def _tick(wall, volume, cvolume):
-        b = {'shcode': '005930', 'price': '70000', 'cvolume': str(cvolume), 'volume': str(volume), 'change': '0', 'sign': '3', 'drate': '0.00'}
+    def _tick(volume, cvolume, mdchecnt, mschecnt):
+        b = {
+            'shcode': '005930', 'price': '70000', 'cvolume': str(cvolume), 'volume': str(volume),
+            'change': '0', 'sign': '3', 'drate': '0.00', 'mdchecnt': str(mdchecnt), 'mschecnt': str(mschecnt),
+        }
         return json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': b}, ensure_ascii=False)
 
-    # Given: volume 500 -> 520 (델타 20) 인데 cvolume=10 -> 10 만큼 유실
+    # Given: volume 500 -> 520 (델타 20) 인데 cvolume=10, 실제 체결건수(mdchecnt+mschecnt) 델타는 1건 뿐
+    # -> 벤더 배치 전송(여러 체결이 한 메시지로 묶임)이 아닌 진짜 물량 불일치
     df = pl.DataFrame({
-        'raw': [_tick(100, 500, 10), _tick(200, 520, 10)],
+        'raw': [_tick(500, 10, 100, 50), _tick(520, 10, 101, 50)],
         'tr_id': ['H0STCNT0', 'H0STCNT0'],
         'recv_wall_ns': [100, 200],
     })
@@ -183,22 +187,31 @@ def test_decode_and_flag_ticks_flags_tick_loss_and_quantifies_lost_volume() -> N
     assert summary is not None
     assert summary.decode_fail == 0
     assert summary.tick_loss == 1
-    assert summary.tick_duplicate == 0
     assert summary.lost_volume == 10
 
 
-def test_decode_and_flag_ticks_flags_tick_duplicate() -> None:
+def test_decode_and_flag_ticks_ignores_vendor_batched_ticks() -> None:
+    """실측(ADR_20260909_stream_integrity_v2 정정) 회귀 테스트.
+
+    실데이터 검증 결과 volume-cvolume 델타 불일치의 99.99%는 벤더가 짧은 시간 내
+    여러 체결을 한 메시지로 배치 전송(mdchecnt+mschecnt 델타>1)한 정상 현상이었다 —
+    이걸 tick_loss로 오탐하면 안 된다.
+    """
     import json
     import polars as pl
     from src.storage.quality import decode_and_flag_ticks
 
-    def _tick(wall, volume, cvolume):
-        b = {'shcode': '005930', 'price': '70000', 'cvolume': str(cvolume), 'volume': str(volume), 'change': '0', 'sign': '3', 'drate': '0.00'}
+    def _tick(volume, cvolume, mdchecnt, mschecnt):
+        b = {
+            'shcode': '005930', 'price': '70000', 'cvolume': str(cvolume), 'volume': str(volume),
+            'change': '0', 'sign': '3', 'drate': '0.00', 'mdchecnt': str(mdchecnt), 'mschecnt': str(mschecnt),
+        }
         return json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': b}, ensure_ascii=False)
 
-    # Given: volume 500 -> 505 (델타 5) 인데 cvolume=10 -> 중복 전달 의심
+    # Given: volume 500 -> 520 (델타 20) 이고 cvolume=10 이지만,
+    # 실제 체결건수(mdchecnt+mschecnt)가 3건 늘어 여러 체결이 배치로 묶인 정상 상황
     df = pl.DataFrame({
-        'raw': [_tick(100, 500, 10), _tick(200, 505, 10)],
+        'raw': [_tick(500, 10, 100, 50), _tick(520, 10, 102, 51)],
         'tr_id': ['H0STCNT0', 'H0STCNT0'],
         'recv_wall_ns': [100, 200],
     })
@@ -206,10 +219,11 @@ def test_decode_and_flag_ticks_flags_tick_duplicate() -> None:
     # When
     summary = decode_and_flag_ticks(df)
 
-    # Then
+    # Then: 배치 전송이므로 오탐 없음
     assert summary is not None
-    assert summary.tick_duplicate == 1
+    assert summary.decode_fail == 0
     assert summary.tick_loss == 0
+    assert summary.lost_volume == 0
 
 
 def test_decode_and_flag_ticks_conservation_law_skips_zero_volume_rows() -> None:
@@ -217,13 +231,16 @@ def test_decode_and_flag_ticks_conservation_law_skips_zero_volume_rows() -> None
     import polars as pl
     from src.storage.quality import decode_and_flag_ticks
 
-    def _tick(wall, volume, cvolume):
-        b = {'shcode': '005930', 'price': '70000', 'cvolume': str(cvolume), 'volume': str(volume), 'change': '0', 'sign': '3', 'drate': '0.00'}
+    def _tick(volume, cvolume, mdchecnt, mschecnt):
+        b = {
+            'shcode': '005930', 'price': '70000', 'cvolume': str(cvolume), 'volume': str(volume),
+            'change': '0', 'sign': '3', 'drate': '0.00', 'mdchecnt': str(mdchecnt), 'mschecnt': str(mschecnt),
+        }
         return json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': b}, ensure_ascii=False)
 
-    # Given: 두번째 행이 cvolume=0 이면서 volume이 동일(변화 없음)
+    # Given: 두번째 행이 cvolume=0 이면서 volume이 동일(변화 없음), 체결건수도 불변(checnt_delta=0)
     df = pl.DataFrame({
-        'raw': [_tick(100, 500, 10), _tick(200, 500, 0)],
+        'raw': [_tick(500, 10, 100, 50), _tick(500, 0, 100, 50)],
         'tr_id': ['H0STCNT0', 'H0STCNT0'],
         'recv_wall_ns': [100, 200],
     })
@@ -231,11 +248,10 @@ def test_decode_and_flag_ticks_conservation_law_skips_zero_volume_rows() -> None
     # When
     summary = decode_and_flag_ticks(df)
 
-    # Then: zero_volume=1 이지만 보존법칙 판정 대상에서는 제외되어 tick_loss/tick_duplicate 는 0
+    # Then: zero_volume=1 이지만 보존법칙 판정 대상에서는 제외되어 tick_loss는 0
     assert summary is not None
     assert summary.zero_volume == 1
     assert summary.tick_loss == 0
-    assert summary.tick_duplicate == 0
 
 
 def test_decode_and_flag_ticks_flags_schema_disagree_on_sign_drate_mismatch() -> None:

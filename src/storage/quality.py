@@ -11,7 +11,7 @@ import polars as pl
 _TICK_STREAM: str = "H0STCNT0"
 _PRICE_BAND_RATIO: float = 0.30
 
-_TICK_BODY_FIELDS: tuple[str, ...] = ("shcode", "price", "cvolume", "volume", "change", "sign", "drate")
+_TICK_BODY_FIELDS: tuple[str, ...] = ("shcode", "price", "cvolume", "volume", "change", "sign", "drate", "mdchecnt", "mschecnt")
 _QUOTE_STREAM: str = "H0STASP0"
 _SCHEMA_DISAGREE_TOLERANCE: float = 0.01
 _QUOTE_LEVELS: int = 10
@@ -38,7 +38,6 @@ class TickQualitySummary:
     cum_volume_regression: int
     schema_disagree: int
     tick_loss: int
-    tick_duplicate: int
     lost_volume: int
 
 
@@ -55,15 +54,10 @@ class QuoteQualitySummary:
 def _safe_parse_ls_body(raw: str) -> dict[str, object] | None:
     try:
         body = json.loads(raw)["body"]
-        return {
-            "shcode": body["shcode"],
-            "price": body["price"],
-            "cvolume": body["cvolume"],
-            "volume": body["volume"],
-            "change": body["change"],
-            "sign": body["sign"],
-            "drate": body["drate"],
-        }
+        # 벡터화 경로(str.json_decode)는 struct dtype에 없는 키를 null로 관대하게 처리한다 —
+        # 폴백도 동일하게 .get()으로 맞춰야 mdchecnt/mschecnt 같은 보조 필드 부재가
+        # shcode/price 등 핵심 필드까지 통째로 decode_fail 처리하는 비대칭을 만들지 않는다.
+        return {field: body.get(field) for field in _TICK_BODY_FIELDS}
     except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
         return None
 
@@ -92,7 +86,12 @@ def decode_and_flag_ticks(df: pl.DataFrame) -> TickQualitySummary | None:
             change_raw=pl.col("decoded").struct.field("body").struct.field("change"),
             sign=pl.col("decoded").struct.field("body").struct.field("sign"),
             drate_raw=pl.col("decoded").struct.field("body").struct.field("drate"),
-        ).select("shcode", "price_raw", "cvolume_raw", "volume_raw", "change_raw", "sign", "drate_raw", "recv_wall_ns")
+            mdchecnt_raw=pl.col("decoded").struct.field("body").struct.field("mdchecnt"),
+            mschecnt_raw=pl.col("decoded").struct.field("body").struct.field("mschecnt"),
+        ).select(
+            "shcode", "price_raw", "cvolume_raw", "volume_raw", "change_raw", "sign", "drate_raw",
+            "mdchecnt_raw", "mschecnt_raw", "recv_wall_ns",
+        )
     except pl.exceptions.ComputeError:
         # 벤더 JSON 파싱 자체가 실패한 배치: 행 단위 폴백은 문자열 그대로 남기고
         # 숫자 캐스팅은 아래 strict=False cast 한 곳에서만 수행한다 (ValueError 이중 발생 지점 제거).
@@ -100,7 +99,10 @@ def decode_and_flag_ticks(df: pl.DataFrame) -> TickQualitySummary | None:
         for raw, wall in zip(ticks["raw"].to_list(), ticks["recv_wall_ns"].to_list(), strict=True):
             row = _safe_parse_ls_body(raw)
             if row is None:
-                row = {"shcode": None, "price": None, "cvolume": None, "volume": None, "change": None, "sign": None, "drate": None}
+                row = {
+                    "shcode": None, "price": None, "cvolume": None, "volume": None, "change": None,
+                    "sign": None, "drate": None, "mdchecnt": None, "mschecnt": None,
+                }
             fallback.append({
                 "shcode": row["shcode"],
                 "price_raw": row["price"],
@@ -109,6 +111,8 @@ def decode_and_flag_ticks(df: pl.DataFrame) -> TickQualitySummary | None:
                 "change_raw": row["change"],
                 "sign": row["sign"],
                 "drate_raw": row["drate"],
+                "mdchecnt_raw": row["mdchecnt"],
+                "mschecnt_raw": row["mschecnt"],
                 "recv_wall_ns": wall,
             })
         raw_fields = pl.DataFrame(
@@ -116,7 +120,8 @@ def decode_and_flag_ticks(df: pl.DataFrame) -> TickQualitySummary | None:
             schema={
                 "shcode": pl.String, "price_raw": pl.String, "cvolume_raw": pl.String,
                 "volume_raw": pl.String, "change_raw": pl.String, "sign": pl.String,
-                "drate_raw": pl.String, "recv_wall_ns": pl.Int64,
+                "drate_raw": pl.String, "mdchecnt_raw": pl.String, "mschecnt_raw": pl.String,
+                "recv_wall_ns": pl.Int64,
             },
             strict=False,
         )
@@ -126,6 +131,8 @@ def decode_and_flag_ticks(df: pl.DataFrame) -> TickQualitySummary | None:
         volume=pl.col("volume_raw").cast(pl.Int64, strict=False),
         change=pl.col("change_raw").cast(pl.Float64, strict=False),
         drate=pl.col("drate_raw").cast(pl.Float64, strict=False),
+        mdchecnt=pl.col("mdchecnt_raw").cast(pl.Int64, strict=False),
+        mschecnt=pl.col("mschecnt_raw").cast(pl.Int64, strict=False),
     )
     flagged = frame.with_columns(
         dq_decode_fail=(
@@ -157,15 +164,30 @@ def decode_and_flag_ticks(df: pl.DataFrame) -> TickQualitySummary | None:
     )
     flagged = flagged.sort(["shcode", "recv_wall_ns"]).with_columns(
         volume_prev=pl.col("volume").shift(1).over("shcode"),
+        total_checnt=pl.col("mdchecnt") + pl.col("mschecnt"),
+    )
+    flagged = flagged.with_columns(
+        checnt_prev=pl.col("total_checnt").shift(1).over("shcode"),
     )
     flagged = flagged.with_columns(
         vol_delta=pl.col("volume") - pl.col("volume_prev"),
+        checnt_delta=pl.col("total_checnt") - pl.col("checnt_prev"),
+    )
+    # 실측(scratch/data1_check, ADR_20260909_stream_integrity_v2 정정): 단순 volume-cvolume 비교는
+    # 벤더가 짧은 시간 내 여러 체결을 한 메시지로 배치 전송할 때(checnt_delta>1) 대량 오탐(7.1%)을 낸다.
+    # mdchecnt+mschecnt(누적 체결건수) 델타로 "실제로 새 체결이 1건 이하였는지"를 게이트해야
+    # 진짜 이상만 남는다(재검증 후 0.0006%).
+    loss_applicable = (
+        (~pl.col("dq_decode_fail"))
+        & (pl.col("cvolume") > 0)
+        & pl.col("volume_prev").is_not_null()
+        & pl.col("checnt_prev").is_not_null()
+        & (pl.col("checnt_delta") <= 1)
     )
     flagged = flagged.with_columns(
         dq_cum_volume_regression=(~pl.col("dq_decode_fail")) & pl.col("volume_prev").is_not_null() & (pl.col("volume") < pl.col("volume_prev")),
-        dq_tick_loss=(~pl.col("dq_decode_fail")) & (pl.col("cvolume") > 0) & pl.col("volume_prev").is_not_null() & (pl.col("vol_delta") > pl.col("cvolume")),
-        dq_tick_duplicate=(~pl.col("dq_decode_fail")) & (pl.col("cvolume") > 0) & pl.col("volume_prev").is_not_null() & (pl.col("vol_delta") < pl.col("cvolume")),
-        lost_volume=pl.when((~pl.col("dq_decode_fail")) & (pl.col("cvolume") > 0) & pl.col("volume_prev").is_not_null() & (pl.col("vol_delta") > pl.col("cvolume")))
+        dq_tick_loss=loss_applicable & (pl.col("vol_delta") > pl.col("cvolume")),
+        lost_volume=pl.when(loss_applicable & (pl.col("vol_delta") > pl.col("cvolume")))
         .then(pl.col("vol_delta") - pl.col("cvolume"))
         .otherwise(0),
     )
@@ -177,7 +199,6 @@ def decode_and_flag_ticks(df: pl.DataFrame) -> TickQualitySummary | None:
         cum_volume_regression=int(flagged["dq_cum_volume_regression"].sum()),
         schema_disagree=int(flagged["dq_schema_disagree"].sum()),
         tick_loss=int(flagged["dq_tick_loss"].sum()),
-        tick_duplicate=int(flagged["dq_tick_duplicate"].sum()),
         lost_volume=int(flagged["lost_volume"].sum()),
     )
 
