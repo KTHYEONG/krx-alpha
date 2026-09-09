@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ast
 import json
 import pathlib
 import os
@@ -10,6 +11,36 @@ if os.getcwd() not in sys.path:
     sys.path.insert(0, os.getcwd())
 
 from tools.agent_skills import lean_check  # noqa: E402
+
+
+def _module_layer(source_file: str) -> int | None:
+    """Return the LAYER_RANK layer for ``source_file`` (None when unlisted)."""
+    from tests.architecture.layers import LAYER_RANK
+
+    return LAYER_RANK.get(source_file)
+
+
+def _module_deps(source_file: str, known_files: set[str]) -> list[str]:
+    """Return sorted internal direct dependencies of ``source_file``."""
+    try:
+        tree = ast.parse(pathlib.Path(source_file).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return []
+    dotted: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("src"):
+            dotted.add(node.module)
+        elif isinstance(node, ast.Import):
+            dotted.update(alias.name for alias in node.names if alias.name.startswith("src"))
+    deps: set[str] = set()
+    for mod in dotted:
+        parts = mod.split(".")
+        for i in range(len(parts), 1, -1):
+            candidate = "/".join(parts[:i]) + ".py"
+            if candidate in known_files and candidate != source_file:
+                deps.add(candidate)
+                break
+    return sorted(deps)
 
 
 def _matching_tests(source_file: str, test_files: list[str]) -> list[str]:
@@ -46,6 +77,7 @@ def main() -> None:
     test_files = lean_check._repository_test_files()
 
     code_map: dict[str, object] = {}
+    known = set(py_files)
     for source_file in py_files:
         if source_file.endswith("__init__.py"):
             continue
@@ -53,6 +85,12 @@ def main() -> None:
         entry: dict[str, object] = {}
         if matched:
             entry["testing"] = matched[0] if len(matched) == 1 else matched
+        layer = _module_layer(source_file)
+        if layer is not None:
+            entry["layer"] = layer
+        deps = _module_deps(source_file, known)
+        if deps:
+            entry["deps"] = deps
         code_map[source_file] = entry
 
     # Tolerate absent active code_map.json; do not recreate archived records under docs/
@@ -65,7 +103,7 @@ def main() -> None:
             docs_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(docs_path, "w", encoding="utf-8") as handle:
-            json.dump(code_map, handle, indent=2, sort_keys=True)
+            json.dump(code_map, handle, sort_keys=True, separators=(",", ":"))
             handle.write("\n")
         print(f"regenerated docs/code_map.json with {len(code_map)} canonical sources")
     except FileNotFoundError:
