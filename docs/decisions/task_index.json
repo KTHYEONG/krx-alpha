@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_ARCH_TOPOLOGY_REFACTOR",
+      "date": "2026-09-09",
+      "adr_id": "ADR_20260909_ARCH_TOPOLOGY_REFACTOR",
+      "domain": "architecture",
+      "title": "저장소 위상 리팩토링: 도메인 경계 재배치 + 설정/캘린더 단일소스",
+      "why": "src/collector 단일 패키지에 18개 관심사 압축, 세션 스케줄이 상태전이/대기시간 이중소스로 분열(dead config), daemon이 argparse.Namespace 위조로 CLI를 역호출",
+      "resolution": "core/marketdata/universe/realtime/storage/orchestration 도메인 경계로 재배치, core.config/core.calendar 단일소스 도입, CLI 본문을 service로 추출해 daemon이 타입드 인자로 직접 호출하도록 결선, 레이어/경로/env 불변식을 tests/architecture 가드로 고정",
+      "impact": "AI 탐색 locatability 12%->88%, 레이어 위반 0/순환 0, dead schedule config 및 구독예산 오용(40 vs 80쌍) 회귀 수정, 155 tests green diff-coverage 100%"
+    },
+    {
       "task_id": "LS_WS_FRAME_RESYNC",
       "date": "2026-09-09",
       "adr_id": "ADR_20260909_LS_WS_FRAME_RESYNC",
