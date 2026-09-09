@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "LS_WS_FRAME_RESYNC",
+      "date": "2026-09-09",
+      "adr_id": "ADR_20260909_LS_WS_FRAME_RESYNC",
+      "domain": "data-infra",
+      "title": "LS 실시간 프레임 오분류 크래시 수정",
+      "why": "subscribe 응답을 순서 매칭으로 가정해 끼어든 데이터 프레임을 ACK으로 오인, 지연 ACK이 recv에서 KeyError로 데몬을 크래시시킴",
+      "resolution": "subscribe/recv 공유 프레임 분류기와 pending 큐를 도입해 데이터 유실 없이 비정형 프레임을 안전하게 처리",
+      "impact": "실시간 스트리머가 장중 크래시 루프 없이 지속 수집 가능"
+    },
+    {
       "task_id": "TASK_COLLECTOR_PROCESS_SUPERVISOR",
       "date": "2026-09-08",
       "adr_id": "ADR_20260908_COLLECTOR_PROCESS_SUPERVISOR",
