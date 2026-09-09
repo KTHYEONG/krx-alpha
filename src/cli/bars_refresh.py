@@ -32,9 +32,13 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
 
 def run(args: argparse.Namespace) -> int:
     """bars store 누적 + market-map 갱신을 수행한다."""
-    auth_key = os.environ["KRX_OPENAPI_KEY"]
     ref = dt.date.fromisoformat(str(args.ref_date))
     store = pathlib.Path(str(args.store_path))
+    try:
+        auth_key = os.environ["KRX_OPENAPI_KEY"]
+    except KeyError as exc:
+        logger.error("[DATA] stage=bars_refresh status=FAIL reason=missing_env:%s", str(exc))
+        return 4
     try:
         if not store.exists():
             result = backfill_bars(store, auth_key=auth_key, end_date=ref - dt.timedelta(days=1), window_days=int(args.window_days))
