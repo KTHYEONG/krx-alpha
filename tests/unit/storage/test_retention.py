@@ -311,3 +311,77 @@ def test_normalize_l0_partition_logs_tick_quality_summary(tmp_path, caplog) -> N
     assert 'stage=quality' in caplog.text
     assert 'decode_fail=0' in caplog.text
     assert 'status=OK' in caplog.text
+
+
+def test_normalize_l0_partition_logs_quote_quality_summary(tmp_path, caplog) -> None:
+    import json
+    import logging
+    import polars as pl
+    import zstandard as zstd
+    from src.storage.retention import normalize_l0_partition
+
+    def _quote_body(hotime, offerho, bidho):
+        b = {'shcode': '005930', 'hotime': str(hotime).zfill(6)}
+        for k in range(10):
+            b[f'offerho{k + 1}'] = str(offerho[k])
+            b[f'bidho{k + 1}'] = str(bidho[k])
+            b[f'offerrem{k + 1}'] = '100'
+            b[f'bidrem{k + 1}'] = '100'
+        b['totofferrem'] = '1000'
+        b['totbidrem'] = '1000'
+        return b
+
+    # Given: 호가(H0STASP0) 파티션에 정상 프레임 1건
+    part = tmp_path / 'l0' / 'kis' / 'H0STASP0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    clean_offer = [70100 + k * 100 for k in range(10)]
+    clean_bid = [69900 - k * 100 for k in range(10)]
+    body = _quote_body(101500, clean_offer, clean_bid)
+    raw = json.dumps({'header': {'tr_cd': 'H1_', 'tr_key': '005930'}, 'body': body}, ensure_ascii=False)
+    rec = {'raw': raw, 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STASP0'}
+    payload = (json.dumps(rec) + '\n').encode('utf-8')
+    (part / '10.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    out_path = tmp_path / 'l1' / 'kis' / 'H0STASP0' / 'dt=2026-09-01.parquet'
+
+    # When
+    with caplog.at_level(logging.INFO):
+        rows = normalize_l0_partition(part, out_path)
+
+    # Then: 정상 처리 + 기존 컬럼 스키마 불변 + 호가 전용 [DATA] quality 요약 로그
+    assert rows == 1
+    df = pl.read_parquet(out_path)
+    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id'}
+    assert 'stage=quality' in caplog.text
+    assert 'tr_id=H0STASP0' in caplog.text
+    assert 'ladder_disorder=0' in caplog.text
+    assert 'status=OK' in caplog.text
+
+
+def test_normalize_l0_partition_logs_extended_tick_quality_fields(tmp_path, caplog) -> None:
+    import json
+    import logging
+    import zstandard as zstd
+    from src.storage.retention import normalize_l0_partition
+
+    # Given: 체결(H0STCNT0) 파티션에 정상 틱 1건 (drate 포함)
+    part = tmp_path / 'l0' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    body = {'shcode': '005930', 'price': '70000', 'cvolume': '10', 'volume': '100', 'change': '0', 'sign': '3', 'drate': '0.00'}
+    raw = json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': body}, ensure_ascii=False)
+    rec = {'raw': raw, 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
+    payload = (json.dumps(rec) + '\n').encode('utf-8')
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    out_path = tmp_path / 'l1' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    # When
+    with caplog.at_level(logging.INFO):
+        rows = normalize_l0_partition(part, out_path)
+
+    # Then: 기존 필드에 더해 확장 필드도 로그에 포함
+    assert rows == 1
+    assert 'decode_fail=0' in caplog.text
+    assert 'schema_disagree=0' in caplog.text
+    assert 'tick_loss=0' in caplog.text
+    assert 'tick_duplicate=0' in caplog.text
+    assert 'lost_volume=0' in caplog.text
+    assert 'status=OK' in caplog.text
