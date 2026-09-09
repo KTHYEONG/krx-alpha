@@ -15,6 +15,7 @@ import polars as pl
 import zstandard as zstd
 
 from src.core.errors import KrxAlphaError
+from src.storage.quality import TickQualitySummary, decode_and_flag_ticks
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,19 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path) -> in
         df = df.sort("recv_wall_ns")
         if df.height == 0:
             raise ValueError(f"zero rows after dedup: {part}")
+        quality: TickQualitySummary | None = decode_and_flag_ticks(df)
+        if quality is not None:
+            status = "WARN" if any((quality.decode_fail, quality.zero_volume, quality.price_band_violation, quality.cum_volume_regression)) else "OK"
+            (logger.warning if status == "WARN" else logger.info)(
+                "[DATA] stage=quality tr_id=%s rows=%d decode_fail=%d zero_volume=%d price_band_violation=%d cum_volume_regression=%d status=%s",
+                "H0STCNT0",
+                quality.rows,
+                quality.decode_fail,
+                quality.zero_volume,
+                quality.price_band_violation,
+                quality.cum_volume_regression,
+                status,
+            )
         out.parent.mkdir(parents=True, exist_ok=True)
         df.write_parquet(tmp_path, compression="zstd")
         os.replace(tmp_path, out)

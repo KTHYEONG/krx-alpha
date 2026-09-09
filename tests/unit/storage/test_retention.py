@@ -281,3 +281,33 @@ def test_prune_local_l1_keeps_recent_parquet(tmp_path) -> None:
 
     assert purged == 0
     assert recent_pq.exists()
+
+
+def test_normalize_l0_partition_logs_tick_quality_summary(tmp_path, caplog) -> None:
+    import json
+    import logging
+    import polars as pl
+    import zstandard as zstd
+    from src.storage.retention import normalize_l0_partition
+
+    # Given: 체결(H0STCNT0) 파티션에 정상 틱 1건
+    part = tmp_path / 'l0' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    body = {'shcode': '005930', 'price': '70000', 'cvolume': '10', 'volume': '100', 'change': '0', 'sign': '3'}
+    raw = json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': body}, ensure_ascii=False)
+    rec = {'raw': raw, 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
+    payload = (json.dumps(rec) + '\n').encode('utf-8')
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    out_path = tmp_path / 'l1' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    # When
+    with caplog.at_level(logging.INFO):
+        rows = normalize_l0_partition(part, out_path)
+
+    # Then: 정상 처리 + 기존 컬럼 스키마 불변 + [DATA] quality 요약 로그
+    assert rows == 1
+    df = pl.read_parquet(out_path)
+    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id'}
+    assert 'stage=quality' in caplog.text
+    assert 'decode_fail=0' in caplog.text
+    assert 'status=OK' in caplog.text
