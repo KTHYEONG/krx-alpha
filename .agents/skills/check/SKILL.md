@@ -28,7 +28,7 @@ Independent audit gate completing the main development loop (`probe` -> `spec` -
      2) **Contract & Invariant Integrity**: Verify core business invariants, division by zero / None handling, and boundary edge cases specified in `requirements`. Verify each entry in `design_rationale.failure_modes` has a corresponding guard in the diff.
      3) **No Dead Defensive Code (Defensive Sprawl Audit)**: Flag unrequested `try-except Exception` catches, silent `except: return None`, or speculative null checks that hide bugs or skirt coverage.
      4) **Performance Budget Honored**: Confirm actual use of `dtype_precision`/`storage_format`/`chunking_strategy`, and flag any `timeout`, `max_iterations`/`n_epochs` cap, sample-size reduction, or shortened date-range introduced without technical justification (`.agents/rules/performance.md` §0).
-     5) **Domain Principle Compliance**: Cross-check against `.agents/rules/quant.md`, `.agents/rules/performance.md`, and `.agents/rules/python.md`.
+     5) **Domain Principle Compliance**: Cross-check against `.agents/rules/quant.md`, `.agents/rules/performance.md`, and `.agents/rules/code-style.md`.
      6) **Production Wire-up & No Ghost Paths**: Verify new logic is actually invoked in the production pipeline/entry-point and no unhandled branches or orphaned dead code remain.
 
 4. **Strict Audit Gate & Surgical Remediation Authority (Zero Human-Pingpong)**:
