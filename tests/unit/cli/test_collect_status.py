@@ -10,7 +10,7 @@ def test_collect_status_run_summarizes_manifest(tmp_path, caplog):
     import logging
 
     from src.cli.collect_status import run
-    from src.collector.manifest import SessionManifest
+    from src.realtime.manifest import SessionManifest
 
     m = SessionManifest(session_date=dt.date(2026, 9, 8), clock_offset_ns=1_089_000_000, started_at_ns=1)
     m.record_ack(vendor="kis", tr_id="H0STCNT0", symbol="005930", rt_cd="0", accepted=True)

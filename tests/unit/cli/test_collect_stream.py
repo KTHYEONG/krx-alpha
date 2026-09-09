@@ -13,12 +13,12 @@ def test_collect_stream_run_drives_streamer_one_cycle(tmp_path, monkeypatch) -> 
     import argparse
     import json
     from src.cli import collect_stream
-    from src.collector.ipc import write_candidates
-    from src.collector.vendor import VendorAck, VendorDisconnected
+    from src.universe.ipc import write_candidates
+    from src.realtime.contracts import VendorAck, VendorDisconnected
 
     monkeypatch.setenv('LS_APP_KEY', 'k')
     monkeypatch.setenv('LS_APP_SECRET', 's')
-    monkeypatch.setattr('src.collector.session.measure_ntp_offset_ns', lambda *a, **k: 0)
+    monkeypatch.setattr('src.realtime.session.measure_ntp_offset_ns', lambda *a, **k: 0)
 
     cp = tmp_path / 'c.json'
     write_candidates(cp, [{'symbol': '005930', 'selection_reasons': ['limit_up']}], rev=1)
@@ -63,12 +63,12 @@ def test_collect_stream_installs_sigterm_handler(tmp_path, monkeypatch) -> None:
     import json
     import signal
     from src.cli import collect_stream
-    from src.collector.ipc import write_candidates
-    from src.collector.vendor import VendorAck, VendorDisconnected
+    from src.universe.ipc import write_candidates
+    from src.realtime.contracts import VendorAck, VendorDisconnected
 
     monkeypatch.setenv('LS_APP_KEY', 'k')
     monkeypatch.setenv('LS_APP_SECRET', 's')
-    monkeypatch.setattr('src.collector.session.measure_ntp_offset_ns', lambda *a, **k: 0)
+    monkeypatch.setattr('src.realtime.session.measure_ntp_offset_ns', lambda *a, **k: 0)
 
     cp = tmp_path / 'c.json'
     write_candidates(cp, [{'symbol': '005930', 'selection_reasons': ['limit_up']}], rev=1)

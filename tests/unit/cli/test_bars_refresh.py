@@ -1,76 +1,61 @@
-def test_bars_refresh_run_backfills_when_store_missing_and_writes_market_map(tmp_path, monkeypatch) -> None:
+def test_bars_refresh_cli_delegates_to_service_and_maps_exit_code(tmp_path, monkeypatch) -> None:
+    # Given: service 를 대체한 CLI 호출
     import argparse
     import datetime as dt
-    import json
-    import polars as pl
+
     from src.cli import bars_refresh
+    from src.marketdata.krx_bars import KrxBarsError
 
-    monkeypatch.setenv('KRX_OPENAPI_KEY', 'k')
+    monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
+    seen: dict[str, object] = {}
 
-    def _fake_backfill(store_path, *, auth_key, end_date, window_days, session=None):
-        return {'trading_days': window_days, 'appended_rows': window_days}
+    def _ok(**kwargs):
+        seen.update(kwargs)
+        return bars_refresh.BarsRefreshResult(trading_day=dt.date(2026, 9, 9), appended_rows=2, backfilled_days=0)
 
-    def _fake_latest(ref_date, *, auth_key, max_lookback=10, session=None):
-        bars = pl.DataFrame({'date': [ref_date], 'symbol': ['005930'], 'close': [100.0],
-                             'volume': [1], 'trade_value_100m': [1.0], 'daily_change_pct': [0.1], 'market': ['KOSPI']})
-        return ref_date - dt.timedelta(days=1), bars
+    monkeypatch.setattr(bars_refresh, "refresh_bars", _ok)
+    args = argparse.Namespace(
+        store_path=str(tmp_path / "bars.parquet"),
+        market_map_path=str(tmp_path / "market_map.json"),
+        ref_date="2026-09-10",
+        window_days=90,
+    )
 
-    monkeypatch.setattr(bars_refresh, 'backfill_bars', _fake_backfill)
-    monkeypatch.setattr(bars_refresh, 'latest_trading_day', _fake_latest)
+    # When / Then: 정상 경로 rc=0
+    assert bars_refresh.run(args) == 0
+    assert seen["ref_date"] == dt.date(2026, 9, 10)
+    assert seen["window_days"] == 90
 
-    store = tmp_path / 'bars.parquet'
-    mm = tmp_path / 'market_map.json'
-    args = argparse.Namespace(store_path=str(store), market_map_path=str(mm),
-                              ref_date='2026-09-08', window_days=90)
+    # When / Then: 도메인 실패는 rc=4 로 매핑된다
+    def _fail(**kwargs):
+        raise KrxBarsError("down")
 
-    rc = bars_refresh.run(args)
-
-    assert rc == 0
-    assert json.loads(mm.read_text()) == {'005930': 'KOSPI'}
-
-
-def test_bars_refresh_run_preserves_market_map_on_krx_failure(tmp_path, monkeypatch) -> None:
-    import argparse
-    from src.cli import bars_refresh
-    from src.collector.bars import KrxBarsError
-
-    monkeypatch.setenv('KRX_OPENAPI_KEY', 'k')
-
-    def _fail(*a, **k):
-        raise KrxBarsError('down')
-
-    monkeypatch.setattr(bars_refresh, 'latest_trading_day', _fail)
-
-    store = tmp_path / 'bars.parquet'
-    store.write_bytes(b'existing')
-    mm = tmp_path / 'market_map.json'
-    mm.write_text('{"005930": "KOSPI"}', encoding='utf-8')
-    args = argparse.Namespace(store_path=str(store), market_map_path=str(mm),
-                              ref_date='2026-09-08', window_days=90)
-
-    rc = bars_refresh.run(args)
-
-    assert rc == 4
-    assert mm.read_text() == '{"005930": "KOSPI"}'
+    monkeypatch.setattr(bars_refresh, "refresh_bars", _fail)
+    assert bars_refresh.run(args) == 4
 
 
-def test_bars_refresh_run_returns_rc4_when_krx_key_missing(tmp_path, monkeypatch, caplog) -> None:
+def test_bars_refresh_cli_returns_rc4_when_credentials_missing(tmp_path, monkeypatch, caplog) -> None:
+    # Given: 자격증명 env 부재
     import argparse
     import logging
+
     from src.cli import bars_refresh
 
-    monkeypatch.delenv('KRX_OPENAPI_KEY', raising=False)
+    monkeypatch.delenv("KRX_OPENAPI_KEY", raising=False)
+    market_map = tmp_path / "market_map.json"
+    market_map.write_text('{"005930": "KOSPI"}', encoding="utf-8")
+    args = argparse.Namespace(
+        store_path=str(tmp_path / "bars.parquet"),
+        market_map_path=str(market_map),
+        ref_date="2026-09-10",
+        window_days=90,
+    )
 
-    mm = tmp_path / 'market_map.json'
-    mm.write_text('{"005930": "KOSPI"}', encoding='utf-8')
-    store = tmp_path / 'bars.parquet'
-    store.write_bytes(b'existing')
-    args = argparse.Namespace(store_path=str(store), market_map_path=str(mm),
-                              ref_date='2026-09-08', window_days=90)
-
+    # When
     with caplog.at_level(logging.ERROR):
         rc = bars_refresh.run(args)
 
+    # Then: 기존 산출물 보존 + 구조화 로그
     assert rc == 4
-    assert mm.read_text() == '{"005930": "KOSPI"}'
-    assert any('missing_env' in r.message for r in caplog.records)
+    assert market_map.read_text(encoding="utf-8") == '{"005930": "KOSPI"}'
+    assert any("missing_credentials" in record.message for record in caplog.records)

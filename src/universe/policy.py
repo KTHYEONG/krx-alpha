@@ -7,9 +7,11 @@ import logging
 
 import polars as pl
 
+from src.core.errors import SlotBudgetExceededError
+from src.marketdata.schema import REQUIRED_BAR_COLUMNS
+
 logger = logging.getLogger(__name__)
 
-REQUIRED_BAR_COLUMNS: tuple[str, ...] = ("date", "symbol", "close", "volume", "trade_value_100m", "daily_change_pct")
 FEATURE_COLUMNS: tuple[str, ...] = ("tv_median_20", "close_max_60", "tv_ratio")
 SELECTION_REASONS: tuple[str, ...] = ("limit_up", "surge10", "volsurge", "newhigh60")
 PRICE_LIMIT_GUARD_PCT: float = 31.0
@@ -22,10 +24,6 @@ NEWHIGH_MIN_CHANGE_PCT: float = 5.0
 TV_MEDIAN_WINDOW: int = 20
 LIQUIDITY_FLOOR_100M: float = 50.0
 DEEP_SLOT_BUDGET: int = 40
-
-
-class SlotBudgetExceededError(RuntimeError):
-    """선정 종목 수가 슬롯 예산을 초과했다."""
 
 
 def compute_selection_features(bars: pl.DataFrame) -> pl.DataFrame:

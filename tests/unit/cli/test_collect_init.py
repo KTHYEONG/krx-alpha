@@ -8,16 +8,16 @@ def test_collect_init_run_bootstraps_and_reports(tmp_path, caplog, monkeypatch):
     import argparse
     import logging
 
-    import src.collector.clock as clock_mod
+    import src.realtime.clock as clock_mod
     from src.cli.collect_init import run
-    from src.collector.ipc import write_candidates
+    from src.universe.ipc import write_candidates
 
     def _fake_offset(host, *, samples=5, timeout_s=3.0, client=None):
         assert host
         return 500_000_000
 
     monkeypatch.setattr(clock_mod, "measure_ntp_offset_ns", _fake_offset)
-    monkeypatch.setattr("src.collector.session.measure_ntp_offset_ns", _fake_offset)
+    monkeypatch.setattr("src.realtime.session.measure_ntp_offset_ns", _fake_offset)
 
     cp = tmp_path / "candidates.json"
     write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
@@ -45,13 +45,13 @@ def test_collect_init_run_rejects_unsynced_clock_returns_3(tmp_path, caplog, mon
     import logging
 
     from src.cli.collect_init import run
-    from src.collector.ipc import write_candidates
+    from src.universe.ipc import write_candidates
 
     def _big_offset(host, *, samples=5, timeout_s=3.0, client=None):
         assert host
         return 3_000_000_000
 
-    monkeypatch.setattr("src.collector.session.measure_ntp_offset_ns", _big_offset)
+    monkeypatch.setattr("src.realtime.session.measure_ntp_offset_ns", _big_offset)
 
     cp = tmp_path / "candidates.json"
     write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
@@ -75,16 +75,16 @@ def test_collect_init_run_rejects_unsynced_clock_returns_3(tmp_path, caplog, mon
 def test_collect_init_accepts_archive_root_arg(tmp_path, caplog, monkeypatch) -> None:
     import argparse
     import logging
-    import src.collector.clock as clock_mod
+    import src.realtime.clock as clock_mod
     from src.cli.collect_init import run
-    from src.collector.ipc import write_candidates
+    from src.universe.ipc import write_candidates
 
     def _fake_offset(host, *, samples=5, timeout_s=3.0, client=None):
         assert host
         return 500_000_000
 
     monkeypatch.setattr(clock_mod, 'measure_ntp_offset_ns', _fake_offset)
-    monkeypatch.setattr('src.collector.session.measure_ntp_offset_ns', _fake_offset)
+    monkeypatch.setattr('src.realtime.session.measure_ntp_offset_ns', _fake_offset)
 
     cp = tmp_path / 'candidates.json'
     write_candidates(cp, [{'symbol': '005930', 'selection_reasons': ['limit_up']}], rev=1)
