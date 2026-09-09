@@ -7,10 +7,13 @@ import datetime as dt
 import logging
 import pathlib
 
-from src.collector.clock import ClockUnsyncedError
-from src.collector.session import SessionConfig, bootstrap_session
+from src.core.config import CollectorSettings
+from src.realtime.clock import ClockUnsyncedError
+from src.realtime.session import SessionConfig, bootstrap_session
 
 logger = logging.getLogger(__name__)
+
+_DEFAULTS = CollectorSettings()
 
 
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -20,11 +23,11 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--journal-root", required=True)
     parser.add_argument("--manifest-path", required=True)
     parser.add_argument("--candidates-path", required=True)
-    parser.add_argument("--ntp-host", default="kr.pool.ntp.org")
-    parser.add_argument("--slot-budget", type=int, default=41)
-    parser.add_argument("--max-clock-offset-ns", type=int, default=2_000_000_000)
-    parser.add_argument("--streams", default="H0STCNT0")
-    parser.add_argument("--vendor", default="kis")
+    parser.add_argument("--ntp-host", default=_DEFAULTS.ntp_host)
+    parser.add_argument("--slot-budget", type=int, default=_DEFAULTS.subscription_pair_budget)
+    parser.add_argument("--max-clock-offset-ns", type=int, default=_DEFAULTS.max_clock_offset_ns)
+    parser.add_argument("--streams", default=",".join(_DEFAULTS.streams))
+    parser.add_argument("--vendor", default=_DEFAULTS.vendor)
     parser.add_argument("--archive-root", default=None)
     parser.set_defaults(handler=run)
 

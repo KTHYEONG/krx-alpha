@@ -6,15 +6,15 @@ import argparse
 import asyncio
 import datetime as dt
 import json
-import os
 import pathlib
 import signal
 
 import aiohttp
 
-from src.collector.session import SessionConfig, bootstrap_session
-from src.collector.streamer import RealtimeStreamer, SessionFrameSink
-from src.collector.ws_ls import LsRealtimeAdapter
+from src.core.config import CollectorSettings, LsCredentials, load_credentials
+from src.realtime.adapters.ls import LsRealtimeAdapter
+from src.realtime.session import SessionConfig, bootstrap_session
+from src.realtime.streamer import RealtimeStreamer, SessionFrameSink
 
 
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -37,16 +37,18 @@ def run(args: argparse.Namespace) -> int:
 
 
 async def _run_stream(args: argparse.Namespace) -> int:
+    settings = CollectorSettings()
+    creds = load_credentials(LsCredentials)
     cfg = SessionConfig(
         session_date=dt.date.fromisoformat(str(args.session_date)),
         journal_root=pathlib.Path(str(args.journal_root)),
         manifest_path=pathlib.Path(str(args.manifest_path)),
         candidates_path=pathlib.Path(str(args.candidates_path)),
         ntp_host=str(args.ntp_host),
-        slot_budget=200,
+        slot_budget=settings.subscription_pair_budget,  # SubscriptionRegistry 는 (symbol, tr_id) 쌍을 계수한다
         max_clock_offset_ns=int(args.max_clock_offset_ns),
-        desired_streams=("H0STCNT0", "H0STASP0"),
-        vendor="ls",
+        desired_streams=settings.streams,
+        vendor=settings.vendor,
     )
     session = bootstrap_session(cfg)
     stop = asyncio.Event()
@@ -56,8 +58,8 @@ async def _run_stream(args: argparse.Namespace) -> int:
     http = aiohttp.ClientSession()
     try:
         adapter = LsRealtimeAdapter(
-            app_key=os.environ["LS_APP_KEY"],
-            app_secret=os.environ["LS_APP_SECRET"],
+            app_key=creds.ls_app_key,
+            app_secret=creds.ls_app_secret,
             http=http,
             market_of=market_of,
         )

@@ -1,0 +1,5 @@
+"""레이어 랭크 단일 계약 (tests/architecture/test_layering 의 fail-closed 기준)."""
+
+from __future__ import annotations
+
+LAYER_RANK: dict[str, int] = {'src/core/config.py': 0, 'src/core/calendar.py': 0, 'src/core/errors.py': 0, 'src/marketdata/schema.py': 0, 'src/marketdata/krx_bars.py': 1, 'src/universe/policy.py': 1, 'src/realtime/contracts.py': 1, 'src/realtime/subscription.py': 1, 'src/realtime/clock.py': 1, 'src/storage/journal.py': 2, 'src/storage/retention.py': 2, 'src/storage/remote.py': 2, 'src/universe/ipc.py': 2, 'src/realtime/manifest.py': 2, 'src/realtime/adapters/ls.py': 3, 'src/marketdata/service.py': 4, 'src/universe/service.py': 4, 'src/realtime/session.py': 4, 'src/realtime/streamer.py': 4, 'src/orchestration/supervisor.py': 5, 'src/orchestration/eod.py': 5, 'src/orchestration/daemon.py': 6, 'src/cli/main.py': 7, 'src/cli/bars_refresh.py': 7, 'src/cli/collect_init.py': 7, 'src/cli/collect_status.py': 7, 'src/cli/collect_stream.py': 7, 'src/cli/universe_plan.py': 7}

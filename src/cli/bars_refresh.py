@@ -5,17 +5,13 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import logging
-import os
 import pathlib
 
-from src.collector.bars import (
-    KrxBarsError,
-    append_daily_bars,
-    backfill_bars,
-    derive_market_map,
-    latest_trading_day,
-    write_market_map,
-)
+from src.core.config import KrxCredentials, load_credentials
+from src.core.errors import MissingCredentialsError
+from src.marketdata.krx_bars import KrxBarsError
+from src.marketdata.service import BarsRefreshResult as BarsRefreshResult
+from src.marketdata.service import refresh_bars
 
 logger = logging.getLogger(__name__)
 
@@ -31,27 +27,26 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
 
 
 def run(args: argparse.Namespace) -> int:
-    """bars store 누적 + market-map 갱신을 수행한다."""
+    """인자 파싱 + 자격증명 로드 + service 위임 + 종료코드 매핑만 수행한다."""
     ref = dt.date.fromisoformat(str(args.ref_date))
     store = pathlib.Path(str(args.store_path))
+    market_map_path = pathlib.Path(str(args.market_map_path))
+    window_days = int(args.window_days)
     try:
-        auth_key = os.environ["KRX_OPENAPI_KEY"]
-    except KeyError as exc:
-        logger.error("[DATA] stage=bars_refresh status=FAIL reason=missing_env:%s", str(exc))
+        creds = load_credentials(KrxCredentials)
+    except MissingCredentialsError as exc:
+        logger.error("[DATA] stage=bars_refresh status=FAIL reason=missing_credentials:%s", str(exc))
         return 4
     try:
-        if not store.exists():
-            result = backfill_bars(store, auth_key=auth_key, end_date=ref - dt.timedelta(days=1), window_days=int(args.window_days))
-            logger.info(
-                "[DATA] stage=bars_backfill trading_days=%d appended=%d status=OK",
-                result["trading_days"],
-                result["appended_rows"],
-            )
-        day, bars = latest_trading_day(ref, auth_key=auth_key)
+        result = refresh_bars(
+            store_path=store,
+            market_map_path=market_map_path,
+            ref_date=ref,
+            window_days=window_days,
+            auth_key=creds.krx_openapi_key,
+        )
     except KrxBarsError as exc:
         logger.error("[DATA] stage=bars_refresh status=FAIL reason=%s", str(exc))
         return 4
-    appended = append_daily_bars(store, bars)
-    write_market_map(pathlib.Path(str(args.market_map_path)), derive_market_map(bars))
-    logger.info("[DATA] stage=bars_refresh date=%s appended=%d status=OK", day.isoformat(), appended)
+    logger.info("[DATA] stage=bars_refresh date=%s appended=%d status=OK", result.trading_day.isoformat(), result.appended_rows)
     return 0

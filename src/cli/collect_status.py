@@ -18,7 +18,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
 
 def run(args: argparse.Namespace) -> int:
     """세션 manifest 요약을 출력한다."""
-    from src.collector.manifest import SessionManifest
+    from src.realtime.manifest import SessionManifest
 
     try:
         manifest = SessionManifest.load(pathlib.Path(str(args.manifest_path)))

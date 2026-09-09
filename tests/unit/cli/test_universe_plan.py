@@ -49,7 +49,7 @@ def test_universe_plan_run_emits_candidates_when_path_given(tmp_path):
     import polars as pl
 
     from src.cli.universe_plan import run
-    from src.collector.ipc import read_candidates
+    from src.universe.ipc import read_candidates
 
     n = 60
     base = dt.date(2026, 1, 5)
@@ -108,3 +108,36 @@ def test_universe_plan_run_creates_missing_out_dir(tmp_path) -> None:
 
     assert rc == 0
     assert out_path.exists()
+
+
+def test_universe_plan_cli_delegates_to_service(tmp_path, monkeypatch) -> None:
+    # Given: service 를 대체한 CLI 호출
+    import argparse
+    import datetime as dt
+
+    from src.cli import universe_plan
+
+    seen: dict[str, object] = {}
+
+    def _ok(**kwargs):
+        seen.update(kwargs)
+        return universe_plan.UniversePlanResult(
+            decision_date=dt.date(2026, 1, 5), selected=3, out_path=kwargs["out_path"], candidates_emitted=3
+        )
+
+    monkeypatch.setattr(universe_plan, "plan_universe", _ok)
+    args = argparse.Namespace(
+        bars_path=str(tmp_path / "bars.parquet"),
+        decision_date="2026-01-05",
+        out_path=str(tmp_path / "universe.parquet"),
+        slot_budget=40,
+        candidates_path=str(tmp_path / "candidates.json"),
+    )
+
+    # When
+    rc = universe_plan.run(args)
+
+    # Then
+    assert rc == 0
+    assert seen["decision_date"] == dt.date(2026, 1, 5)
+    assert seen["slot_budget"] == 40
