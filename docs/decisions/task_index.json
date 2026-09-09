@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "data_integrity_validation",
+      "date": "2026-09-09",
+      "adr_id": "ADR_20260909_data_integrity_validation",
+      "domain": "realtime_storage",
+      "title": "체결 틱 L1 정합성 검증(디코드+가격제한폭+거래량역행)",
+      "why": "라이브 수집이 몇 달간 무검증으로 쌓이면 결측/이상치를 사후에 발견해도 되돌릴 수 없음",
+      "resolution": "L1 정규화 단계에 LS 체결(S3_/K3_) 디코더+dq_* 검증 요약 로그 추가, 라이브 수집 루프는 미접촉",
+      "impact": "retention.py normalize_l0_partition 호출부에 quality 요약 [DATA] 로그 1줄 추가, 파케이 스키마/리턴 계약 불변"
+    },
+    {
       "task_id": "TASK_ARCH_TOPOLOGY_REFACTOR",
       "date": "2026-09-09",
       "adr_id": "ADR_20260909_ARCH_TOPOLOGY_REFACTOR",

@@ -177,6 +177,9 @@
     "layer": 2,
     "testing": "tests/unit/storage/test_journal.py"
   },
+  "src/storage/quality.py": {
+    "testing": "tests/unit/storage/test_quality.py"
+  },
   "src/storage/remote.py": {
     "deps": [
       "src/core/config.py",
@@ -187,7 +190,8 @@
   },
   "src/storage/retention.py": {
     "deps": [
-      "src/core/errors.py"
+      "src/core/errors.py",
+      "src/storage/quality.py"
     ],
     "layer": 2,
     "testing": "tests/unit/storage/test_retention.py"
