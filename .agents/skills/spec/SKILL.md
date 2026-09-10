@@ -58,36 +58,36 @@ Keep chat response ultra-compact, scannable, and contract-focused. Strictly avoi
 **Output Directives:**
 - **Terminal-Safe Tables**: Keep table cells to single-line values (no `<br>` or nested bullets).
 - **Single Source of Truth**: Point directly to `docs/specs/<feature>_contract.json` for full skeletons and AST anchors.
-- **Telegraphic Bullets**: Verb-first or keyword-first, max 1-2 lines per bullet.
-- **Language Requirement**: All output rendered to the user MUST be written in English.
+- **Telegraphic Bullets**: Use concise, telegraphic bullets (명사형/종결형 축약, 최대 1-2줄).
+- **Language Requirement**: All output rendered to the user MUST be written in Korean (한국어). Template titles and labels below MUST be presented in Korean as shown.
 
 ---
 
-### 📐 [SPEC] <Feature Name>
-> 📄 **Contract**: [`docs/specs/<feature>_contract.json`](file:///docs/specs/<feature>_contract.json)  
-> 📊 **Scale**: <N> files · <N> changes · <N> wiring · <N> scenarios (Unit: <U>, Wiring: <W>)  
-> 🚦 **Gate Check**: `lean_check --pre-impl` **PASS** (<N>/<N> AST valid)
+### 📐 [SPEC] <기능명>
+> 📄 **계약 문서**: [`docs/specs/<feature>_contract.json`](file:///docs/specs/<feature>_contract.json)  
+> 📊 **작업 규모**: <N>개 파일 · <N>개 변경점 · <N>개 배선 · <N>개 시나리오 (단위: <U>, 배선: <W>)  
+> 🚦 **게이트 검증**: `lean_check --pre-impl` **PASS** (<N>/<N> AST 유효)
 
-#### 1. Plan Summary
-- 🎯 **Objective**: <1-line summary of what is being specified>
-- ⚠️ **Breaking Impact**: <None or 1-line impact warning>
-- 🚫 **Out of Scope**: <Excluded or deferred items in 1 line>
+#### 1. 계획 요약 (Plan Summary)
+- 🎯 **목표**: <구체화 대상 1줄 요약>
+- ⚠️ **영향도/파괴적 변경**: <없음 또는 핵심 영향 1줄>
+- 🚫 **범위 제외 (Out of Scope)**: <제외 또는 이연 항목 1줄>
 
-#### 2. Changes & Wiring Matrix
-| File / Path | Type | Target Symbols / Anchors |
+#### 2. 변경 및 배선 매트릭스 (Changes & Wiring)
+| 파일 경로 | 유형 | 대상 심볼 / 앵커 |
 | :--- | :--- | :--- |
 | `[<target_file>](file:///<target_file>)` | Target | `<symbol_1>`, `<symbol_2>` |
-| `[<caller_file>](file:///<caller_file>)` | Wiring | `<anchor_symbol>` (call-site injection) |
+| `[<caller_file>](file:///<caller_file>)` | Wiring | `<anchor_symbol>` (호출부 주입) |
 
-#### 3. Core Invariants & Guardrails
-- 🛡️ **<INV-NAME>**: <Fail-Closed condition or boundary rule in 1 line>
-- 🚪 **<GATE-RULE>**: <Parameter validation or early-abort criteria in 1 line>
+#### 3. 핵심 불변식 및 가드레일 (Invariants & Guardrails)
+- 🛡️ **<INV-NAME>**: <Fail-Closed 조건 또는 경계 규칙 1줄 요약>
+- 🚪 **<GATE-RULE>**: <파라미터 검증 또는 조기 중단 기준 1줄 요약>
 
-#### 4. Verification Scenarios
-| Scope | Count | Target Test Suite | Key Test Focus |
+#### 4. 검증 시나리오 (Verification Scenarios)
+| 구분 | 건수 | 대상 테스트 스위트 | 주요 검증 초점 |
 | :--- | :---: | :--- | :--- |
-| **Unit** | <U> | `[<test_unit_file>](file:///<test_unit_file>)` | `<Normal + boundary + fail-closed cases>` |
-| **Wiring** | <W> | `[<test_caller_file>](file:///<test_caller_file>)` | `<End-to-end caller integration + option pass>` |
+| **단위 (Unit)** | <U> | `[<test_unit_file>](file:///<test_unit_file>)` | `<정상 + 경계 + fail-closed 케이스>` |
+| **배선 (Wiring)** | <W> | `[<test_caller_file>](file:///<test_caller_file>)` | `<호출부 통합 + 옵션 전달 케이스>` |
 
 ---
-👉 Next Step: `/implement docs/specs/<feature>_contract.json`
+👉 다음 단계: `/implement docs/specs/<feature>_contract.json`
