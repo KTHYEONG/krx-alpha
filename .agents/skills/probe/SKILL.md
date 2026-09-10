@@ -65,34 +65,34 @@ Keep chat response ultra-compact, scannable, and evidence-focused. Strictly avoi
 Detailed logs, benchmark payloads, and raw traces MUST be dumped to `scratch/probe_<topic>.json` and referenced via link, not pasted into chat.
 
 **Output Directives:**
-- **Terminal-Safe Tables**: Never put multiline descriptions or long code snippets inside Markdown tables. Keep columns short (`Item / Target`, `Evidence / Metric`, `Verdict`).
-- **Concise Bullet Points**: Use concise, telegraphic bullets (verb-first or keyword-first, max 1-2 lines per bullet).
+- **Terminal-Safe Tables**: Never put multiline descriptions or long code snippets inside Markdown tables. Keep columns short (`검증 항목 / 대상`, `실증 측정치 / 근거`, `판정`).
+- **Concise Bullet Points**: Use concise, telegraphic bullets (명사형/종결형 축약, 최대 1-2줄).
 - **Zero Redundancy**: Do not repeat explanations across Summary, Matrix, and Traps.
-- **Language Requirement**: All output rendered to the user MUST be written in English.
+- **Language Requirement**: All output rendered to the user MUST be written in Korean (한국어). Template titles and labels below MUST be presented in Korean as shown.
 
 ---
 
-### 🔬 [PROBE] <Feature/Topic Title>
+### 🔬 [PROBE] <기능/토픽 제목>
 
-#### 1. Triage Summary
-- 🎯 **Core Finding**: <Root cause or empirical defect in 1 line>
-- 📦 **Scope**: <In-scope targets vs out-of-scope / backlogged debt>
+#### 1. 판정 요약 (Triage)
+- 🎯 **핵심 결론**: <발견된 근본 원인 및 채택 방향 1줄 요약>
+- 📦 **작업 범위**: <포함 대상 및 제외/백로그 대상 명시>
 
-#### 2. Empirical Verification Matrix
-> 📁 Trace/Payload Details: [`scratch/probe_<topic>.json`](file:///scratch/probe_<topic>.json)
+#### 2. 실증 검증 매트릭스 (Empirical Matrix)
+> 📁 상세 로그/페이로드: [`scratch/probe_<topic>.json`](file:///scratch/probe_<topic>.json)
 
-| Target / Item | Empirical Evidence / Metric | Verdict |
+| 검증 항목 / 대상 | 실증 측정치 / 근거 | 판정 (Verdict) |
 | :--- | :--- | :--- |
-| `<Target module/issue>` | `<Compact measurement, failing line, exit code>` | `CONFIRMED / REJECTED / BUG` |
+| `<모듈 or 이슈>` | `<측정값, 실패 라인, exit code 등 컴팩트한 근거>` | `CONFIRMED / REJECTED / BUG` |
 
-#### 3. Core Invariants & Boundaries
-- 🛡️ **<INV-NAME>**: <Fail-Closed condition or boundary rule in 1 line>
-- 🧩 **<STATE-RULE>**: <State transition or schema contract in 1 line>
+#### 3. 핵심 불변식 (Invariants & Boundaries)
+- 🛡️ **<INV-NAME>**: <Fail-Closed 조건 또는 경계 규칙 1줄 요약>
+- 🧩 **<STATE-RULE>**: <상태 전이 또는 스키마 규약 1줄 요약>
 
-#### 4. Implementation Traps
-*Only use when critical. Maximum 2 alert callouts. Never repeat info from Summary or Matrix.*
+#### 4. 구현 함정 및 주의사항 (Traps)
+*필요한 경우에만 최대 2개 이하의 콜아웃 박스 사용. 요약/매트릭스에 적은 내용 중복 금지.*
 > [!CRITICAL]
-> **<Trap / Risk Title>**: <Specific implementation caution or regression warning>
+> **<핵심 위험/주의 제목>**: <구현 시 주의점 또는 회귀 경고 1줄 요약>
 
 ---
-👉 Next Step: `/spec --feature <feature_name> --domain <domain>`
+👉 다음 단계: `/spec --feature <feature_name> --domain <domain>`
