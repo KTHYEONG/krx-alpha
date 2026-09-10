@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "UNIVERSE_SLOT_BUDGET_INCIDENT_20260910",
+      "date": "2026-09-11",
+      "adr_id": "ADR_20260911_UNIVERSE_SLOT_BUDGET_INCIDENT_20260910",
+      "domain": "data-infra",
+      "title": "유니버스 슬롯 예산 40->90 실측 기술상한 정렬",
+      "why": "9/10 08:20 44종목 선정이 과거통계 기반 40 슬롯 예산을 초과해 당일 실시간 수집 전체가 fail-closed로 취소됨",
+      "resolution": "universe_slot_budget/DEEP_SLOT_BUDGET을 LS 기술상한(subscription_symbol_budget=100) 대비 10종목 마진인 90으로 상향하고, 상한 초과 시 CollectorSettings 생성시점에 SlotBudgetExceededError로 fail-closed하는 model_validator 추가",
+      "impact": "동일 규모 변동성 급증일에도 수집이 중단되지 않으며, 두 예산(전략 선정 vs WS 기술용량) 혼동 재발을 코드 검증으로 차단"
+    },
+    {
       "task_id": "stream_integrity_v2",
       "date": "2026-09-09",
       "adr_id": "ADR_20260909_stream_integrity_v2",
