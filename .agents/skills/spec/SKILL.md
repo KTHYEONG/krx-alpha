@@ -53,29 +53,41 @@ Downstream `implement` models have low reasoning capacity and cannot extrapolate
 
 ## Chat Output Format
 
-Keep chat response structured, scannable, and actionable using tables and clear bullet points (avoid dense wall-of-text paragraphs).
-**Language Requirement:** All instructions and template fields below are written in English, but the actual rendered chat response to the user MUST be translated and presented in Korean (한국어) for intuitive review.
+Keep chat response ultra-compact, scannable, and contract-focused. Strictly avoid narrative walls of text, multi-line table cells (`<br>`), or repeating full code skeletons that already exist in `contract.json`.
 
-### 📐 [SPEC] <Feature Name>
-
-#### 1. 변경 요약 (Changes & Wiring)
-| 구분 (Category) | 대상 파일 / 심볼 (Target / Symbol) | 변경 핵심 (Core Logic) |
-| :--- | :--- | :--- |
-| **Target** | `<target_file>` / `<symbol_name>` | <Summary of role and behavior in Korean> |
-| **Wiring** | `<caller_file>` / `<anchor_location>` | <Summary of caller hookup in Korean> |
-
-#### 2. 핵심 요구사항 (Key Requirements)
-- <Core domain constraints, invariants, or performance criteria in Korean>
-
-#### 3. 검증 시나리오 (Test Scenarios: Total <N>)
-- **Unit (<N>):**
-  - `<test_scenario_1>`: <Condition and expected behavior in Korean>
-  - `<test_scenario_2>`: <Boundary and edge case handling in Korean>
-- **Wiring (<N>):**
-  - `<test_scenario_wiring>`: <Caller and pipeline integration behavior in Korean>
+**Output Directives:**
+- **Terminal-Safe Tables**: Keep table cells to single-line values (no `<br>` or nested bullets).
+- **Single Source of Truth**: Point directly to `docs/specs/<feature>_contract.json` for full skeletons and AST anchors.
+- **Telegraphic Bullets**: Verb-first or keyword-first, max 1-2 lines per bullet.
+- **Language Requirement**: All output rendered to the user MUST be written in English.
 
 ---
-👉 다음 단계: `/implement docs/specs/<feature>_contract.json`
 
+### 📐 [SPEC] <Feature Name>
+> 📄 **Contract**: [`docs/specs/<feature>_contract.json`](file:///docs/specs/<feature>_contract.json)  
+> 📊 **Scale**: <N> files · <N> changes · <N> wiring · <N> scenarios (Unit: <U>, Wiring: <W>)  
+> 🚦 **Gate Check**: `lean_check --pre-impl` **PASS** (<N>/<N> AST valid)
 
+#### 1. Plan Summary
+- 🎯 **Objective**: <1-line summary of what is being specified>
+- ⚠️ **Breaking Impact**: <None or 1-line impact warning>
+- 🚫 **Out of Scope**: <Excluded or deferred items in 1 line>
 
+#### 2. Changes & Wiring Matrix
+| File / Path | Type | Target Symbols / Anchors |
+| :--- | :--- | :--- |
+| `[<target_file>](file:///<target_file>)` | Target | `<symbol_1>`, `<symbol_2>` |
+| `[<caller_file>](file:///<caller_file>)` | Wiring | `<anchor_symbol>` (call-site injection) |
+
+#### 3. Core Invariants & Guardrails
+- 🛡️ **<INV-NAME>**: <Fail-Closed condition or boundary rule in 1 line>
+- 🚪 **<GATE-RULE>**: <Parameter validation or early-abort criteria in 1 line>
+
+#### 4. Verification Scenarios
+| Scope | Count | Target Test Suite | Key Test Focus |
+| :--- | :---: | :--- | :--- |
+| **Unit** | <U> | `[<test_unit_file>](file:///<test_unit_file>)` | `<Normal + boundary + fail-closed cases>` |
+| **Wiring** | <W> | `[<test_caller_file>](file:///<test_caller_file>)` | `<End-to-end caller integration + option pass>` |
+
+---
+👉 Next Step: `/implement docs/specs/<feature>_contract.json`

@@ -61,30 +61,38 @@ Focus on: *Is the hypothesis sound? What does the real data/runtime look like? W
 
 ## Chat Output Format
 
-Keep chat response structured, scannable, and evidence-focused using tables and clear bullet points (avoid dense wall-of-text paragraphs).
-**Language Requirement:** All instructions and template fields below are written in English, but the actual rendered chat response to the user MUST be translated and presented in Korean (한국어) for intuitive review.
+Keep chat response ultra-compact, scannable, and evidence-focused. Strictly avoid conversational prose and narrative walls of text.
+Detailed logs, benchmark payloads, and raw traces MUST be dumped to `scratch/probe_<topic>.json` and referenced via link, not pasted into chat.
+
+**Output Directives:**
+- **Terminal-Safe Tables**: Never put multiline descriptions or long code snippets inside Markdown tables. Keep columns short (`Item / Target`, `Evidence / Metric`, `Verdict`).
+- **Concise Bullet Points**: Use concise, telegraphic bullets (verb-first or keyword-first, max 1-2 lines per bullet).
+- **Zero Redundancy**: Do not repeat explanations across Summary, Matrix, and Traps.
+- **Language Requirement**: All output rendered to the user MUST be written in English.
+
+---
 
 ### 🔬 [PROBE] <Feature/Topic Title>
 
-#### 1. 설계 결정 (Architecture)
-| 구분 (Category) | 내용 (Details) |
-| :--- | :--- |
-| **채택 설계 (Chosen Architecture)** | <Summary of the selected approach in Korean> |
-| **격리/범위 (Scope & Isolation)** | <Preservation of existing hot-paths or scope boundary in Korean> |
-| **선택 이유 (Rationale)** | <Core rationale for choosing this approach over alternatives in Korean> |
+#### 1. Triage Summary
+- 🎯 **Core Finding**: <Root cause or empirical defect in 1 line>
+- 📦 **Scope**: <In-scope targets vs out-of-scope / backlogged debt>
 
-#### 2. 실측 검증 (Empirical Benchmark)
-- **스크립트 (Script)**: `scratch/probe_<topic>.py` (`.json` recorded)
-- **실측 성능/처리량 (Throughput & Latency)**: <Observed benchmark figures in Korean>
-- **검증 & 결함 검출 (Verification)**: <Tested edge cases and defect detection in Korean>
-- **발견된 버그 & 사전 수정 (Preempted Bugs)**: <Bugs identified and fixed during probing in Korean>
+#### 2. Empirical Verification Matrix
+> 📁 Trace/Payload Details: [`scratch/probe_<topic>.json`](file:///scratch/probe_<topic>.json)
 
-#### 3. 핵심 불변식 & 주의점 (Invariants & Risks)
-- **핵심 불변식 (Invariants)**: <Fail-closed rules, conservation laws, or critical boundaries in Korean>
-- **다운스트림 주의 (Downstream Risks)**: <Dependencies, edge cases, or out-of-scope notes for spec/implement in Korean>
+| Target / Item | Empirical Evidence / Metric | Verdict |
+| :--- | :--- | :--- |
+| `<Target module/issue>` | `<Compact measurement, failing line, exit code>` | `CONFIRMED / REJECTED / BUG` |
+
+#### 3. Core Invariants & Boundaries
+- 🛡️ **<INV-NAME>**: <Fail-Closed condition or boundary rule in 1 line>
+- 🧩 **<STATE-RULE>**: <State transition or schema contract in 1 line>
+
+#### 4. Implementation Traps
+*Only use when critical. Maximum 2 alert callouts. Never repeat info from Summary or Matrix.*
+> [!CRITICAL]
+> **<Trap / Risk Title>**: <Specific implementation caution or regression warning>
 
 ---
-👉 다음 단계: `/spec --feature <feature_name> --domain <domain>`
-
-
-
+👉 Next Step: `/spec --feature <feature_name> --domain <domain>`
