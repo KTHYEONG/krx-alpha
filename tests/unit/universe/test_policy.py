@@ -264,3 +264,34 @@ def test_select_universe_raises_on_missing_feature_columns():
     # When / Then: 결측 피처 컬럼명을 담은 ValueError 로 fail-closed
     with pytest.raises(ValueError, match="tv_ratio"):
         select_universe(bars, dt.date(2026, 1, 5))
+
+
+def test_select_universe_accepts_44_candidates_with_default_budget() -> None:
+    # Given: 2026-09-09 결정일에 상한가 조건을 만족하는 44개 종목 (9/10 08:20 장애 재현)
+    import datetime as dt
+
+    import polars as pl
+
+    from src.universe.policy import DEEP_SLOT_BUDGET, compute_selection_features, select_universe
+
+    n = 60
+    base = dt.date(2026, 1, 5)
+    decision = base + dt.timedelta(days=n - 1)
+    symbols = [f"{i:06d}" for i in range(44)]
+    bars = pl.DataFrame({
+        "date": [base + dt.timedelta(days=i) for i in range(n)] * len(symbols),
+        "symbol": [s for s in symbols for _ in range(n)],
+        "close": ([1000.0] * (n - 1) + [1300.0]) * len(symbols),
+        "volume": [1000] * (n * len(symbols)),
+        "trade_value_100m": ([100.0] * (n - 1) + [1000.0]) * len(symbols),
+        "daily_change_pct": ([0.0] * (n - 1) + [29.9]) * len(symbols),
+    })
+    featured = compute_selection_features(bars)
+
+    # When: slot_budget 인자를 생략해 기본값(DEEP_SLOT_BUDGET)을 사용한다
+    result = select_universe(featured, decision)
+
+    # Then: 기본 예산이 90으로 상향되어 44종목 전부가 예외 없이 선정된다
+    assert DEEP_SLOT_BUDGET == 90
+    assert result.height == 44
+    assert sorted(result["symbol"].to_list()) == sorted(symbols)

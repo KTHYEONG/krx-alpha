@@ -23,7 +23,7 @@ NEWHIGH_LOOKBACK: int = 60
 NEWHIGH_MIN_CHANGE_PCT: float = 5.0
 TV_MEDIAN_WINDOW: int = 20
 LIQUIDITY_FLOOR_100M: float = 50.0
-DEEP_SLOT_BUDGET: int = 40
+DEEP_SLOT_BUDGET: int = 90
 
 
 def compute_selection_features(bars: pl.DataFrame) -> pl.DataFrame:
