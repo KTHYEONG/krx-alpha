@@ -49,7 +49,7 @@ def test_symbol_and_pair_budgets_are_distinct_named_settings() -> None:
     assert settings.ls_capacity_pairs == 200
     assert settings.subscription_pair_budget == 200
     assert settings.subscription_symbol_budget == 100
-    assert settings.universe_slot_budget == 40
+    assert settings.universe_slot_budget == 90
 
 
 def test_subscription_pair_budget_admits_full_universe_across_streams() -> None:
@@ -60,7 +60,7 @@ def test_subscription_pair_budget_admits_full_universe_across_streams() -> None:
 
     settings = CollectorSettings()
     symbols = [f"{i:06d}" for i in range(settings.universe_slot_budget)]
-    desired = {symbol: settings.streams for symbol in symbols}
+    desired = dict.fromkeys(symbols, settings.streams)
     required_pairs = settings.universe_slot_budget * len(settings.streams)
 
     # When / Then: 쌍 예산은 쌍 단위 수요를 수용하고 심볼 예산과 쌍 예산이 스트림수로 일관된다
@@ -75,3 +75,32 @@ def test_subscription_pair_budget_admits_full_universe_across_streams() -> None:
     assert len(diff.to_add) == required_pairs
     with pytest.raises(SlotBudgetExceededError, match="exceeds slot_budget"):
         SubscriptionRegistry(slot_budget=settings.universe_slot_budget).plan(desired)
+
+
+def test_universe_slot_budget_default_stays_within_technical_capacity_margin() -> None:
+    # Given: 기본 설정
+    from src.core.config import CollectorSettings
+
+    settings = CollectorSettings()
+
+    # When / Then: 90은 과거 선정분포가 아니라 실측 기술 상한(100) 아래 10종목 마진으로 설정된다
+    assert settings.universe_slot_budget == 90
+    assert settings.subscription_symbol_budget == 100
+    assert settings.subscription_symbol_budget - settings.universe_slot_budget == 10
+    assert settings.universe_slot_budget <= settings.subscription_symbol_budget
+
+
+def test_universe_slot_budget_exceeding_technical_capacity_raises_fail_closed() -> None:
+    # Given: LS 기술 용량(100종목)을 초과하는 universe_slot_budget
+    import pytest
+
+    from src.core.config import CollectorSettings
+    from src.core.errors import SlotBudgetExceededError
+
+    # When / Then: 생성 시점에 즉시 fail-closed 한다 (SubscriptionRegistry 단계까지 미루지 않음)
+    with pytest.raises(SlotBudgetExceededError, match="universe_slot_budget"):
+        CollectorSettings(universe_slot_budget=101)
+
+    # And: 상한 이하는 정상 생성된다
+    ok = CollectorSettings(universe_slot_budget=100)
+    assert ok.universe_slot_budget == 100

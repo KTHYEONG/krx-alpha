@@ -7,11 +7,11 @@ import pathlib
 from dataclasses import dataclass
 from typing import TypeVar
 
-from pydantic import ValidationError
+from pydantic import ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.core.calendar import SessionSchedule
-from src.core.errors import MissingCredentialsError
+from src.core.errors import MissingCredentialsError, SlotBudgetExceededError
 
 SettingsT = TypeVar("SettingsT", bound=BaseSettings)
 
@@ -68,7 +68,7 @@ class CollectorSettings(BaseSettings):
     vendor: str = "ls"
     streams: tuple[str, ...] = ("H0STCNT0", "H0STASP0")
     ls_capacity_pairs: int = 200
-    universe_slot_budget: int = 40
+    universe_slot_budget: int = 90
     bars_window_days: int = 90
     journal_retain_days: int = 3
     archive_retain_days: int = 30
@@ -86,6 +86,15 @@ class CollectorSettings(BaseSettings):
     @property
     def subscription_symbol_budget(self) -> int:
         return self.ls_capacity_pairs // len(self.streams)
+
+    @model_validator(mode="after")
+    def check_universe_budget_within_technical_capacity(self) -> CollectorSettings:
+        if self.universe_slot_budget > self.subscription_symbol_budget:
+            raise SlotBudgetExceededError(
+                f"universe_slot_budget {self.universe_slot_budget} exceeds "
+                f"subscription_symbol_budget {self.subscription_symbol_budget}"
+            )
+        return self
 
 
 class KrxCredentials(BaseSettings):
