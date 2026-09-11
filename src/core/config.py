@@ -5,15 +5,23 @@ from __future__ import annotations
 import datetime as dt
 import pathlib
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TypeVar
 
 from pydantic import ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.core.calendar import SessionSchedule
-from src.core.errors import MissingCredentialsError, SlotBudgetExceededError
+from src.core.errors import LiveNotArmedError, MissingCredentialsError, SlotBudgetExceededError
 
 SettingsT = TypeVar("SettingsT", bound=BaseSettings)
+
+
+class ExecutionMode(StrEnum):
+    """주문집행 모드 (기본 paper fail-closed)."""
+
+    PAPER = "paper"
+    LIVE = "live"
 
 
 @dataclass(frozen=True)
@@ -55,6 +63,22 @@ class DataPaths:
 
     def manifest_path(self, day: dt.date) -> pathlib.Path:
         return self.manifest_dir / f"{day.isoformat()}.json"
+
+    @property
+    def execution_dir(self) -> pathlib.Path:
+        return self.root / "execution"
+
+    @property
+    def order_journal_dir(self) -> pathlib.Path:
+        return self.execution_dir / "journal"
+
+    @property
+    def kis_token_cache(self) -> pathlib.Path:
+        return self.execution_dir / "kis_token.json"
+
+    @property
+    def kill_switch_file(self) -> pathlib.Path:
+        return self.execution_dir / "KILL_SWITCH"
 
 
 class CollectorSettings(BaseSettings):
@@ -121,6 +145,47 @@ class HfArchiveSettings(BaseSettings):
 
     hf_token: str
     hf_dataset_repo: str
+
+
+class KisCredentials(BaseSettings):
+    """KIS 실전 자격증명 (필수, 빈 기본값 금지)."""
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+    kis_app_key: str
+    kis_app_secret: str
+    kis_account_no: str
+    kis_account_product_code: str
+
+
+class ExecutionSettings(BaseSettings):
+    """주문집행 설정 (env_prefix='KRX_ALPHA_EXEC_')."""
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_EXEC_", extra="ignore")
+
+    mode: ExecutionMode = ExecutionMode.PAPER
+    live_armed: bool = False
+    data_root: pathlib.Path = pathlib.Path("data")
+    rest_rate_per_s: float = 18.0
+    request_timeout_s: float = 5.0
+    commission_bps: float = 0.36396
+    sell_tax_bps: float = 20.0
+    paper_initial_cash_krw: int = 10_000_000
+    max_order_notional_krw: int = 1_000_000
+    max_position_notional_krw: int = 3_000_000
+    max_orders_per_minute: int = 10
+    max_daily_loss_krw: int = 300_000
+    symbol_whitelist: tuple[str, ...] = ()
+
+    @property
+    def paths(self) -> DataPaths:
+        return DataPaths(self.data_root)
+
+    @model_validator(mode="after")
+    def check_live_armed(self) -> ExecutionSettings:
+        if self.mode is ExecutionMode.LIVE and not self.live_armed:
+            raise LiveNotArmedError("live mode requires KRX_ALPHA_EXEC_LIVE_ARMED=true")
+        return self
 
 
 def load_credentials(model: type[SettingsT]) -> SettingsT:

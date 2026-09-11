@@ -67,3 +67,19 @@ def test_bars_refresh_subcommand_registered() -> None:
 
     assert args.command == 'bars-refresh'
     assert callable(args.handler)
+
+def test_cli_main_registers_order_subcommand() -> None:
+    # Given: 최상위 CLI 파서
+    from src.cli.main import build_parser
+
+    parser = build_parser()
+
+    # When
+    args = parser.parse_args(["order", "--symbol", "005930", "--side", "buy", "--qty", "3", "--price", "10000"])
+    market = parser.parse_args(["order", "--symbol", "005930", "--side", "sell", "--qty", "1", "--type", "market"])
+
+    # Then
+    assert args.command == "order"
+    assert (args.symbol, args.side, args.qty, args.type, args.price) == ("005930", "buy", 3, "limit", 10_000)
+    assert callable(args.handler)
+    assert (market.type, market.price) == ("market", None)
