@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_KIS_ORDER_EXECUTION_PAPER",
+      "date": "2026-09-11",
+      "adr_id": "ADR_20260911_KIS_ORDER_EXECUTION_PAPER",
+      "domain": "execution",
+      "title": "KIS 실계좌 기반 주문집행 레이어 (paper 섀도 모드)",
+      "why": "전략/신호 확정 전에도 정확·신속한 주문집행과 실금액 투입 전 안전한 검증 경로가 필요했음",
+      "resolution": "단일 OMS+리스크게이트 위에 PaperGateway(실계좌 조회+주문 미전송·기록+10단계호가 모의체결)/LiveGateway(무장 필요) 두 전송기만 분기, 브로커 누적체결 대사로 상태 확정",
+      "impact": "paper 에서 검증된 로직이 live 에 그대로 적용되며 실수 주문이 구조적으로 불가능, 34 시나리오 diff-coverage 100%"
+    },
+    {
       "task_id": "UNIVERSE_SLOT_BUDGET_INCIDENT_20260910",
       "date": "2026-09-11",
       "adr_id": "ADR_20260911_UNIVERSE_SLOT_BUDGET_INCIDENT_20260910",

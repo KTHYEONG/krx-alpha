@@ -193,9 +193,11 @@ custtype: P
 > [!IMPORTANT]
 > 주문 및 계좌 관련 TR은 실전계좌(`TTTC...`)와 모의투자(`VTTC...`)에서 서로 다른 `tr_id`를 사용합니다.
 
-### 6.1 `TTTC0802U` / `VTTC0802U` — 주식 현금 매수 주문 (Buy Order)
+### 6.1 `TTTC0012U` / `VTTC0012U` — 주식 현금 매수 주문 (Buy Order)
+> [!NOTE]
+> 2026-09-11 기준 공식 저장소(`koreainvestment/open-trading-api`) 재확인 결과 이 문서의 구 TR(`TTTC0802U` 등)은 최신 규격이 아니며, 실제 구현(`src/execution/kis_client.py`)은 `TTTC0012U`/`TTTC0011U`/`TTTC0013U`/`TTTC0081R`을 사용한다.
 * **Path:** `POST /uapi/domestic-stock/v1/trading/order-cash`
-* **Headers:** `tr_id: "TTTC0802U"` (실전) / `"VTTC0802U"` (모의투자), `custtype: "P"`
+* **Headers:** `tr_id: "TTTC0012U"` (실전) / `"VTTC0012U"` (모의투자), `custtype: "P"`
 * **Body:**
   ```json
   {
@@ -204,7 +206,10 @@ custtype: P
     "PDNO": "005930",
     "ORD_DVSN": "00",
     "ORD_QTY": "10",
-    "ORD_UNPR": "70000"
+    "ORD_UNPR": "70000",
+    "EXCG_ID_DVSN_CD": "KRX",
+    "SLL_TYPE": "",
+    "CNDT_PRIC": ""
   }
   ```
 * **Order Type (`ORD_DVSN`):**
@@ -221,15 +226,15 @@ custtype: P
   * `ODNO`: 주문번호 (Order Number)
   * `ORD_TMD`: 주문시각 (`HHMMSS`)
 
-### 6.2 `TTTC0801U` / `VTTC0801U` — 주식 현금 매도 주문 (Sell Order)
+### 6.2 `TTTC0011U` / `VTTC0011U` — 주식 현금 매도 주문 (Sell Order)
 * **Path:** `POST /uapi/domestic-stock/v1/trading/order-cash`
-* **Headers:** `tr_id: "TTTC0801U"` (실전) / `"VTTC0801U"` (모의투자), `custtype: "P"`
-* **Body:** `CANO`, `ACNT_PRDT_CD`, `PDNO`, `ORD_DVSN`, `ORD_QTY`, `ORD_UNPR`
+* **Headers:** `tr_id: "TTTC0011U"` (실전) / `"VTTC0011U"` (모의투자), `custtype: "P"`
+* **Body:** `CANO`, `ACNT_PRDT_CD`, `PDNO`, `ORD_DVSN`, `ORD_QTY`, `ORD_UNPR`, `EXCG_ID_DVSN_CD`, `SLL_TYPE`(`"01"` 일반매도), `CNDT_PRIC`
 * **Response Body (`output`):** `ODNO` (주문번호), `ORD_TMD`.
 
-### 6.3 `TTTC0803U` / `VTTC0803U` — 주식 정정 / 취소 주문 (Modify / Cancel)
+### 6.3 `TTTC0013U` / `VTTC0013U` — 주식 정정 / 취소 주문 (Modify / Cancel)
 * **Path:** `POST /uapi/domestic-stock/v1/trading/order-rvsecncl`
-* **Headers:** `tr_id: "TTTC0803U"` (실전) / `"VTTC0803U"` (모의투자)
+* **Headers:** `tr_id: "TTTC0013U"` (실전) / `"VTTC0013U"` (모의투자)
 * **Body:**
   ```json
   {
@@ -282,9 +287,9 @@ custtype: P
     * `evlu_amt_smtl_amt`: 평가금액합계
     * `evlu_pfls_smtl_amt`: 평가손익합계
 
-### 6.5 `TTTC8908R` / `VTTC8908R` — 주식 체결 / 미체결 내역 조회 (Fills & Open Orders)
+### 6.5 `TTTC0081R` / `VTTC0081R` — 주식 체결 / 미체결 내역 조회 (Fills & Open Orders, 3개월 이내)
 * **Path:** `GET /uapi/domestic-stock/v1/trading/inquire-daily-ccld`
-* **Headers:** `tr_id: "TTTC8908R"` (실전) / `"VTTC8908R"` (모의투자)
+* **Headers:** `tr_id: "TTTC0081R"` (실전) / `"VTTC0081R"` (모의투자) — 3개월 이전 조회는 `CTSC9215R`/`VTSC9215R`
 * **Query Params:**
   * `CANO`, `ACNT_PRDT_CD`
   * `INQR_STRT_DT`: 조회시작일 (`YYYYMMDD`)

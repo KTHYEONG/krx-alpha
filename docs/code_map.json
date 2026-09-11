@@ -39,6 +39,16 @@
     "layer": 7,
     "testing": "tests/unit/cli/test_main.py"
   },
+  "src/cli/order.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/core/errors.py",
+      "src/execution/contracts.py",
+      "src/execution/service.py"
+    ],
+    "layer": 7,
+    "testing": "tests/unit/cli/test_order.py"
+  },
   "src/cli/universe_plan.py": {
     "deps": [
       "src/core/config.py",
@@ -68,6 +78,85 @@
       "tests/unit/core/test_calendar.py",
       "tests/unit/core/test_config.py"
     ]
+  },
+  "src/execution/contracts.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/core/errors.py"
+    ],
+    "layer": 1,
+    "testing": "tests/unit/execution/test_contracts.py"
+  },
+  "src/execution/gateways.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/execution/contracts.py",
+      "src/execution/journal.py",
+      "src/execution/kis_client.py",
+      "src/execution/ledger.py",
+      "src/execution/risk.py"
+    ],
+    "layer": 4,
+    "testing": "tests/unit/execution/test_gateways.py"
+  },
+  "src/execution/journal.py": {
+    "deps": [
+      "src/core/config.py"
+    ],
+    "layer": 2,
+    "testing": "tests/unit/execution/test_journal.py"
+  },
+  "src/execution/kis_client.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/execution/contracts.py"
+    ],
+    "layer": 3,
+    "testing": "tests/unit/execution/test_kis_client.py"
+  },
+  "src/execution/ledger.py": {
+    "deps": [
+      "src/execution/contracts.py"
+    ],
+    "layer": 2,
+    "testing": "tests/unit/execution/test_ledger.py"
+  },
+  "src/execution/oms.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/execution/contracts.py",
+      "src/execution/journal.py",
+      "src/execution/ledger.py",
+      "src/execution/risk.py"
+    ],
+    "layer": 5,
+    "testing": "tests/unit/execution/test_oms.py"
+  },
+  "src/execution/risk.py": {
+    "deps": [
+      "src/execution/contracts.py",
+      "src/execution/ticks.py"
+    ],
+    "layer": 2,
+    "testing": "tests/unit/execution/test_risk.py"
+  },
+  "src/execution/service.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/execution/contracts.py",
+      "src/execution/gateways.py",
+      "src/execution/journal.py",
+      "src/execution/kis_client.py",
+      "src/execution/ledger.py",
+      "src/execution/oms.py",
+      "src/execution/risk.py"
+    ],
+    "layer": 6,
+    "testing": "tests/unit/execution/test_service.py"
+  },
+  "src/execution/ticks.py": {
+    "layer": 1,
+    "testing": "tests/unit/execution/test_ticks.py"
   },
   "src/marketdata/krx_bars.py": {
     "deps": [
@@ -178,6 +267,7 @@
     "testing": "tests/unit/storage/test_journal.py"
   },
   "src/storage/quality.py": {
+    "layer": 2,
     "testing": "tests/unit/storage/test_quality.py"
   },
   "src/storage/remote.py": {
