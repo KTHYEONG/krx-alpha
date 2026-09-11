@@ -104,3 +104,44 @@ def test_universe_slot_budget_exceeding_technical_capacity_raises_fail_closed() 
     # And: 상한 이하는 정상 생성된다
     ok = CollectorSettings(universe_slot_budget=100)
     assert ok.universe_slot_budget == 100
+
+def test_execution_settings_default_paper_and_live_requires_arming(monkeypatch) -> None:
+    # Given: 실행 관련 env 전부 제거
+    import pathlib
+
+    from src.core.config import ExecutionMode, ExecutionSettings, KisCredentials, load_credentials
+    from src.core.errors import LiveNotArmedError, MissingCredentialsError
+
+    for name in (
+        "KRX_ALPHA_EXEC_MODE", "KRX_ALPHA_EXEC_LIVE_ARMED", "KRX_ALPHA_EXEC_COMMISSION_BPS",
+        "KIS_APP_KEY", "KIS_APP_SECRET", "KIS_ACCOUNT_NO", "KIS_ACCOUNT_PRODUCT_CODE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    # When (명시 commission 없이 기본값 검증; 스켈레톤의 commission_bps=1.5 명시 인자는
+    # CONFIG-EXEC-SETTINGS 기본값 0.36396 단언과 모순되어 제거)
+    settings = ExecutionSettings(data_root=pathlib.Path("var/krx"))
+
+    # Then: 기본값과 단일 루트 파생 경로
+    assert settings.mode is ExecutionMode.PAPER
+    assert settings.live_armed is False
+    assert settings.commission_bps == 0.36396
+    assert settings.sell_tax_bps == 20.0
+    assert settings.rest_rate_per_s == 18.0
+    assert settings.paths.order_journal_dir == pathlib.Path("var/krx/execution/journal")
+    assert settings.paths.kis_token_cache == pathlib.Path("var/krx/execution/kis_token.json")
+    assert settings.paths.kill_switch_file == pathlib.Path("var/krx/execution/KILL_SWITCH")
+
+    # Then: live 는 무장 플래그가 있어야만 생성
+    with pytest.raises(LiveNotArmedError):
+        ExecutionSettings(mode=ExecutionMode.LIVE)
+    assert ExecutionSettings(mode=ExecutionMode.LIVE, live_armed=True).mode is ExecutionMode.LIVE
+    monkeypatch.setenv("KRX_ALPHA_EXEC_MODE", "live")
+    with pytest.raises(LiveNotArmedError):
+        ExecutionSettings()
+    monkeypatch.delenv("KRX_ALPHA_EXEC_MODE")
+
+    # Then: 수수료는 env 미설정 시 편도 기본값, KIS 자격증명은 기본값 없이 fail-closed
+    assert load_credentials(ExecutionSettings).commission_bps == 0.36396
+    with pytest.raises(MissingCredentialsError, match="kis_account_no"):
+        load_credentials(KisCredentials)

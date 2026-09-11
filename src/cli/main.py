@@ -12,13 +12,14 @@ logger = logging.getLogger(__name__)
 
 def register_subcommands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """서브커맨드를 파서에 등록한다."""
-    from src.cli import bars_refresh, collect_init, collect_status, collect_stream, universe_plan
+    from src.cli import bars_refresh, collect_init, collect_status, collect_stream, order, universe_plan
 
     universe_plan.add_parser(subparsers)
     collect_status.add_parser(subparsers)
     collect_init.add_parser(subparsers)
     collect_stream.add_parser(subparsers)
     bars_refresh.add_parser(subparsers)
+    order.add_parser(subparsers)
 
 
 def build_parser() -> argparse.ArgumentParser:

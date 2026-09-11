@@ -17,3 +17,7 @@ class MissingCredentialsError(KrxAlphaError):
 
 class ScheduleOrderError(KrxAlphaError):
     """세션 스케줄 단조성 위반 fail-closed 신호."""
+
+
+class LiveNotArmedError(KrxAlphaError):
+    """live 모드 무장 플래그 누락 fail-closed 신호."""
