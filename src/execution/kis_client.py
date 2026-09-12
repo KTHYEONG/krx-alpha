@@ -10,7 +10,7 @@ import pathlib
 import time
 from collections.abc import Callable
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import requests
@@ -41,6 +41,7 @@ TR_BALANCE: str = "TTTC8434R"
 TR_ORDERABLE: str = "TTTC8408R"
 TR_PRICE: str = "FHKST01010100"
 TR_ASKING: str = "FHKST01010200"
+TR_DAILY_CHART: str = "FHKST03010100"
 
 ORD_DVSN: dict[OrderType, str] = {OrderType.LIMIT: "00", OrderType.MARKET: "01"}
 
@@ -48,6 +49,7 @@ _PATH_ORDER_CASH = "/uapi/domestic-stock/v1/trading/order-cash"
 _PATH_RVSECNCL = "/uapi/domestic-stock/v1/trading/order-rvsecncl"
 _PATH_PRICE = "/uapi/domestic-stock/v1/quotations/inquire-price"
 _PATH_ASKING = "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
+_PATH_DAILY_CHART: str = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
 _PATH_BALANCE = "/uapi/domestic-stock/v1/trading/inquire-balance"
 _PATH_ORDERABLE = "/uapi/domestic-stock/v1/trading/inquire-psbl-order"
 _PATH_DAILY = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
@@ -291,6 +293,26 @@ class KisRestClient:
             "[EXEC] stage=quote symbol=%s last=%d halted=%s", symbol, quote.last, str(quote.halted)
         )
         return quote
+
+    def get_daily_bar(self, symbol: str, day: dt.date) -> dict[str, str] | None:
+        """일자별 itemchartprice(output2 선두행)를 조회한다 (무효 심볼의 전필드 0 응답은 None)."""
+        stamp = day.strftime("%Y%m%d")
+        params = {
+            "fid_cond_mrkt_div_code": "J",
+            "fid_input_iscd": symbol,
+            "fid_input_date_1": stamp,
+            "fid_input_date_2": stamp,
+            "fid_period_div_code": "D",
+            "fid_org_adj_prc": "1",
+        }
+        body, _ = self._get(_PATH_DAILY_CHART, TR_DAILY_CHART, params)
+        rows = body.get("output2") or []
+        if not rows:
+            return None
+        row = rows[0]
+        if str(row.get("stck_clpr", "0")) == "0":
+            return None
+        return cast("dict[str, str]", row)
 
     def get_holdings(self) -> list[Holding]:
         """실계좌 보유잔고를 조회한다."""

@@ -121,6 +121,10 @@ def asking_body(*, asks: list[tuple[int, int]], bids: list[tuple[int, int]]) -> 
     return FakeResponse({"rt_cd": "0", "msg_cd": "MCA00000", "msg1": "정상처리 되었습니다.", "output1": out, "output2": {}})
 
 
+def daily_chart_body(*, date: str, close: str, volume: str, trade_value: str, prdy_vrss: str = "0") -> FakeResponse:
+    return FakeResponse({"rt_cd": "0", "msg_cd": "MCA00000", "msg1": "정상처리 되었습니다.", "output1": {}, "output2": [{"stck_bsop_date": date, "stck_clpr": close, "stck_oprc": close, "stck_hgpr": close, "stck_lwpr": close, "acml_vol": volume, "acml_tr_pbmn": trade_value, "prdy_vrss": prdy_vrss}]})
+
+
 def balance_body(rows: list[dict[str, str]]) -> FakeResponse:
     return FakeResponse(
         {
