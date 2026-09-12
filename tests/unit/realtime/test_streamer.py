@@ -21,7 +21,7 @@ def test_session_frame_sink_routes_frame_to_session_journal(tmp_path) -> None:
     sink = SessionFrameSink(session=session)
 
     sink.record(L0Frame(vendor='ls', stream='H0STCNT0', symbol='005930', raw='{"x":1}',
-                        recv_mono_ns=10, recv_wall_ns=1_735_954_200_000_000_000, conn_seq=1))
+                        recv_mono_ns=10, recv_wall_ns=1_735_954_200_000_000_000, conn_seq=1, conn_id='ls-1'))
     written = sink.flush()
 
     assert written == 1
@@ -31,8 +31,8 @@ def test_streamer_pump_subscribes_records_frames_and_returns_on_disconnect() -> 
     from src.realtime.streamer import RealtimeStreamer
     from src.realtime.contracts import L0Frame, VendorAck, VendorDisconnected
 
-    frames = [L0Frame('ls', 'H0STCNT0', '005930', 'a', 1, 2, 1),
-              L0Frame('ls', 'H0STCNT0', '005930', 'b', 3, 4, 2)]
+    frames = [L0Frame('ls', 'H0STCNT0', '005930', 'a', 1, 2, 1, 'ls-1'),
+              L0Frame('ls', 'H0STCNT0', '005930', 'b', 3, 4, 2, 'ls-1')]
 
     class _Adapter:
         name = 'ls'
@@ -136,7 +136,7 @@ def test_streamer_pump_stops_on_event_and_flushes() -> None:
             return [VendorAck(s, t, True, '00000') for s, t in pairs]
         async def recv(self):
             stop.set()
-            return L0Frame('ls', 'H0STCNT0', '005930', 'a', 1, 2, 1)
+            return L0Frame('ls', 'H0STCNT0', '005930', 'a', 1, 2, 1, 'ls-1')
         async def aclose(self):
             self.a = True
 
@@ -208,3 +208,48 @@ def test_streamer_pump_interrupts_blocked_recv_on_stop() -> None:
     assert reason == 'stopped'
     assert elapsed < 0.5
     assert flushed >= 1
+
+
+def test_session_frame_sink_persists_frame_conn_id(tmp_path) -> None:
+    # Given: 서로 다른 접속에서 온 동일 conn_seq 프레임 2건
+    import datetime as dt
+    import json
+
+    import zstandard as zstd
+
+    from src.realtime.contracts import L0Frame
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.realtime.streamer import SessionFrameSink
+    from src.universe.ipc import write_candidates
+
+    class _FC:
+        def request(self, host, version=3, timeout=5):
+            class _S:
+                offset = 0.0
+
+            return _S()
+
+    cp = tmp_path / 'c.json'
+    write_candidates(cp, [{'symbol': '005930', 'selection_reasons': ['limit_up']}], rev=1)
+    cfg = SessionConfig(session_date=dt.date(2026, 9, 8), journal_root=tmp_path / 'l0',
+                        manifest_path=tmp_path / 's.json', candidates_path=cp, ntp_host='h',
+                        slot_budget=200, max_clock_offset_ns=2_000_000_000,
+                        desired_streams=('H0STCNT0',), vendor='ls')
+    session = bootstrap_session(cfg, ntp_client=_FC(), now_ns=1)
+    sink = SessionFrameSink(session=session)
+
+    # When: vendor 는 같지만 conn_id 가 다른 두 프레임을 기록한다
+    sink.record(L0Frame(vendor='ls', stream='H0STCNT0', symbol='005930', raw='{"x":1}',
+                        recv_mono_ns=10, recv_wall_ns=1_735_954_200_000_000_000, conn_seq=1, conn_id='ls-111'))
+    sink.record(L0Frame(vendor='ls', stream='H0STCNT0', symbol='005930', raw='{"x":2}',
+                        recv_mono_ns=20, recv_wall_ns=1_735_954_200_000_000_001, conn_seq=1, conn_id='ls-222'))
+    written = sink.flush()
+
+    # Then: 저널에 vendor 가 아닌 접속 고유 conn_id 가 기록된다
+    assert written == 2
+    zst = next((tmp_path / 'l0').rglob('*.jsonl.zst'))
+    dctx = zstd.ZstdDecompressor()
+    with open(zst, 'rb') as fh, dctx.stream_reader(fh, read_across_frames=True) as reader:
+        lines = reader.read().decode('utf-8').strip().splitlines()
+    conn_ids = [json.loads(x)['conn_id'] for x in lines]
+    assert conn_ids == ['ls-111', 'ls-222']

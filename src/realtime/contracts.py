@@ -26,6 +26,7 @@ class L0Frame:
     recv_mono_ns: int
     recv_wall_ns: int
     conn_seq: int
+    conn_id: str
 
 
 @dataclass(frozen=True)

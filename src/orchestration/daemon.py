@@ -181,6 +181,7 @@ def run_collector_daemon(
                     retain_days=cfg.journal_retain_days,
                     today=ref_day,
                     archive_root=paths.archive_root,
+                    quarantine_root=paths.quarantine_root,
                 )
                 offload = run_eod_offload(
                     paths.archive_root, retain_days=cfg.archive_retain_days, reference_date=ref_day

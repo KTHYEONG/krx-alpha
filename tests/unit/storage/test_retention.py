@@ -387,3 +387,156 @@ def test_normalize_l0_partition_logs_extended_tick_quality_fields(tmp_path, capl
     assert 'tick_loss=0' in caplog.text
     assert 'lost_volume=0' in caplog.text
     assert 'status=OK' in caplog.text
+
+
+def test_normalize_l0_partition_raises_on_conn_seq_collision(tmp_path) -> None:
+    # Given: 동일 (conn_id, conn_seq) 인데 raw 내용이 다른 레코드 (접속 식별 붕괴 신호)
+    import json
+
+    import pytest
+    import zstandard as zstd
+
+    from src.storage.retention import L1NormalizationError, normalize_l0_partition
+
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    recs = [
+        {'raw': '{"v":1}', 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'ls', 'conn_seq': 1, 'vendor': 'ls', 'tr_id': 'H0STCNT0'},
+        {'raw': '{"v":2}', 'recv_mono_ns': 2, 'recv_wall_ns': 200, 'conn_id': 'ls', 'conn_seq': 1, 'vendor': 'ls', 'tr_id': 'H0STCNT0'},
+    ]
+    payload = ('\n'.join(json.dumps(r) for r in recs) + '\n').encode('utf-8')
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    out_path = tmp_path / 'l1' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    # When / Then: 조용한 행 삭제 대신 fail-closed 하고 산출물을 쓰지 않는다
+    with pytest.raises(L1NormalizationError, match='conn_seq'):
+        normalize_l0_partition(part, out_path)
+    assert out_path.exists() is False
+
+
+def test_normalize_l0_partition_allows_identical_duplicate_resend(tmp_path) -> None:
+    # Given: 동일 (conn_id, conn_seq) + 동일 raw 인 정상 벤더 재전송
+    import json
+
+    import polars as pl
+    import zstandard as zstd
+
+    from src.storage.retention import normalize_l0_partition
+
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    rec = {'raw': '{"v":1}', 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'ls-1', 'conn_seq': 1, 'vendor': 'ls', 'tr_id': 'H0STCNT0'}
+    payload = ((json.dumps(rec) + '\n') * 2).encode('utf-8')
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    out_path = tmp_path / 'l1' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    # When
+    rows = normalize_l0_partition(part, out_path)
+
+    # Then: 값 기반이 아닌 신원 기반 dedup 이므로 정상 재전송은 1행으로 수렴하고 통과한다
+    assert rows == 1
+    assert pl.read_parquet(out_path).height == 1
+
+
+def test_normalize_l0_partition_logs_reconciliation_counters(tmp_path, caplog) -> None:
+    # Given: 원시 3건 중 1건이 동일 신원 중복인 파티션
+    import json
+    import logging
+
+    import zstandard as zstd
+
+    from src.storage.retention import normalize_l0_partition
+
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    rec_a = {'raw': '{"v":1}', 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'ls-1', 'conn_seq': 1, 'vendor': 'ls', 'tr_id': 'H0STCNT0'}
+    rec_b = {'raw': '{"v":2}', 'recv_mono_ns': 2, 'recv_wall_ns': 200, 'conn_id': 'ls-1', 'conn_seq': 2, 'vendor': 'ls', 'tr_id': 'H0STCNT0'}
+    payload = ('\n'.join(json.dumps(r) for r in (rec_a, rec_b, rec_a)) + '\n').encode('utf-8')
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    out_path = tmp_path / 'l1' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    # When
+    with caplog.at_level(logging.INFO):
+        rows = normalize_l0_partition(part, out_path)
+
+    # Then: L0 대비 L1 대조 카운터가 구조화 로그로 남는다
+    assert rows == 2
+    assert 'stage=normalize' in caplog.text
+    assert 'raw_records=3' in caplog.text
+    assert 'l1_rows=2' in caplog.text
+    assert 'dedup_dropped=1' in caplog.text
+    assert 'conn_seq_conflict=0' in caplog.text
+
+
+def test_prune_old_journals_quarantines_failed_partition(tmp_path, caplog) -> None:
+    # Given: 정규화가 실패하는 만료 파티션 + 격리 경로 지정
+    import datetime as dt
+    import logging
+
+    import src.storage.retention as retention_mod
+    from src.storage.retention import L1NormalizationError, prune_old_journals
+
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    (part / '09.jsonl.zst').write_bytes(b'broken')
+
+    def _fail(part_dir, out_path):
+        raise L1NormalizationError('conn_seq collision')
+
+    original = retention_mod.normalize_l0_partition
+    retention_mod.normalize_l0_partition = _fail
+    try:
+        quarantine = tmp_path / 'quarantine'
+        # When
+        with caplog.at_level(logging.CRITICAL):
+            deleted = prune_old_journals(
+                tmp_path / 'l0', archive_root=tmp_path / 'l1', retain_days=3,
+                reference_date=dt.date(2026, 9, 30), quarantine_root=quarantine,
+            )
+    finally:
+        retention_mod.normalize_l0_partition = original
+
+    # Then: 삭제 대신 격리 경로로 이동하고 원본이 보존된다
+    assert deleted == 0
+    assert part.exists() is False
+    moved = quarantine / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    assert moved.exists()
+    assert (moved / '09.jsonl.zst').read_bytes() == b'broken'
+    assert 'stage=quarantine' in caplog.text
+
+
+def test_prune_old_journals_keeps_partition_when_quarantine_destination_exists(tmp_path, caplog) -> None:
+    # Given: 격리 목적지에 동일 이름 파티션이 이미 존재
+    import datetime as dt
+    import logging
+
+    import src.storage.retention as retention_mod
+    from src.storage.retention import L1NormalizationError, prune_old_journals
+
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    (part / '09.jsonl.zst').write_bytes(b'new')
+    existing = tmp_path / 'quarantine' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    existing.mkdir(parents=True, exist_ok=True)
+    (existing / '09.jsonl.zst').write_bytes(b'old')
+
+    def _fail(part_dir, out_path):
+        raise L1NormalizationError('conn_seq collision')
+
+    original = retention_mod.normalize_l0_partition
+    retention_mod.normalize_l0_partition = _fail
+    try:
+        # When
+        with caplog.at_level(logging.CRITICAL):
+            deleted = prune_old_journals(
+                tmp_path / 'l0', archive_root=tmp_path / 'l1', retain_days=3,
+                reference_date=dt.date(2026, 9, 30), quarantine_root=tmp_path / 'quarantine',
+            )
+    finally:
+        retention_mod.normalize_l0_partition = original
+
+    # Then: 기존 격리 증거를 덮어쓰지 않고 원본을 제자리에 보존한다
+    assert deleted == 0
+    assert part.exists()
+    assert (existing / '09.jsonl.zst').read_bytes() == b'old'
+    assert 'quarantine_exists' in caplog.text

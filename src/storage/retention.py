@@ -59,10 +59,21 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path) -> in
             pl.col("vendor").cast(pl.String),
             pl.col("tr_id").cast(pl.String),
         ])
+        raw_records = df.height
+        conn_seq_conflict = (
+            df.group_by(["conn_id", "conn_seq"])
+            .agg(pl.col("raw").n_unique().alias("nuniq"))
+            .filter(pl.col("nuniq") > 1)
+            .height
+        )
+        if conn_seq_conflict > 0:
+            raise L1NormalizationError(f"conn_seq collision in {part}: {conn_seq_conflict} groups")
         df = df.unique(subset=["conn_id", "conn_seq"], keep="first", maintain_order=True)
         df = df.sort("recv_wall_ns")
         if df.height == 0:
             raise ValueError(f"zero rows after dedup: {part}")
+        l1_rows = df.height
+        dedup_dropped = raw_records - l1_rows
         quality: TickQualitySummary | None = decode_and_flag_ticks(df)
         if quality is not None:
             status = "WARN" if any((quality.decode_fail, quality.zero_volume, quality.price_band_violation, quality.cum_volume_regression, quality.schema_disagree, quality.tick_loss, quality.lost_volume)) else "OK"
@@ -96,6 +107,14 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path) -> in
         out.parent.mkdir(parents=True, exist_ok=True)
         df.write_parquet(tmp_path, compression="zstd")
         os.replace(tmp_path, out)
+        logger.info(
+            "[DATA] stage=normalize part=%s raw_records=%d l1_rows=%d dedup_dropped=%d conn_seq_conflict=%d status=OK",
+            str(part),
+            raw_records,
+            l1_rows,
+            dedup_dropped,
+            conn_seq_conflict,
+        )
     except (zstd.ZstdError, OSError, ValueError, pl.exceptions.ComputeError) as exc:
         tmp_path.unlink(missing_ok=True)
         raise L1NormalizationError(f"normalize failed: {part} ({exc})") from exc
@@ -103,7 +122,12 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path) -> in
 
 
 def prune_old_journals(
-    root: pathlib.Path, archive_root: pathlib.Path | None = None, *, retain_days: int = 3, reference_date: dt.date | None = None
+    root: pathlib.Path,
+    archive_root: pathlib.Path | None = None,
+    *,
+    retain_days: int = 3,
+    reference_date: dt.date | None = None,
+    quarantine_root: pathlib.Path | None = None,
 ) -> int:
     if archive_root is None:
         return 0
@@ -123,6 +147,18 @@ def prune_old_journals(
             rows = normalize_l0_partition(part, out_path)
         except L1NormalizationError as exc:
             logger.critical("[DATA] stage=prune status=FAIL reason=%s part=%s", str(exc), str(part))
+            if quarantine_root is not None:
+                dest = pathlib.Path(quarantine_root) / vendor / stream / part.name
+                if dest.exists():
+                    logger.critical(
+                        "[DATA] stage=quarantine part=%s status=FAIL reason=quarantine_exists", str(part)
+                    )
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(part), str(dest))
+                logger.critical(
+                    "[DATA] stage=quarantine part=%s dest=%s status=MOVED", str(part), str(dest)
+                )
             continue
         if rows <= 0 or not out_path.exists():
             logger.critical("[DATA] stage=prune status=FAIL reason=unverified part=%s", str(part))

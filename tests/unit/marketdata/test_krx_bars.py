@@ -1,36 +1,44 @@
 def test_fetch_daily_bars_maps_krx_response_to_required_columns() -> None:
+    # Given: 양 시장 모두 데이터가 존재하는 정상 응답 (완결성 게이트 통과 조건)
     import datetime as dt
+
     from src.marketdata.krx_bars import fetch_daily_bars
 
     kospi_payload = {'OutBlock_1': [{'BAS_DD': '20260907', 'ISU_CD': '005930', 'ISU_NM': '삼성전자', 'MKT_NM': 'KOSPI',
                                      'TDD_CLSPRC': '270000', 'ACC_TRDVOL': '18314016', 'ACC_TRDVAL': '4900114076282', 'FLUC_RT': '5.68'}]}
-    kosdaq_payload = {'OutBlock_1': []}
+    kosdaq_payload = {'OutBlock_1': [{'BAS_DD': '20260907', 'ISU_CD': '035720', 'ISU_NM': '카카오', 'MKT_NM': 'KOSDAQ',
+                                      'TDD_CLSPRC': '50000', 'ACC_TRDVOL': '1000', 'ACC_TRDVAL': '50000000', 'FLUC_RT': '-1.20'}]}
 
     class _Resp:
         def __init__(self, payload):
             self._payload = payload
+
         def raise_for_status(self):
             self._checked = True
+
         def json(self):
             return self._payload
 
     class _Session:
         def __init__(self):
             self.urls: list[str] = []
+
         def post(self, url, **kw):
             self.urls.append(url)
             return _Resp(kospi_payload if 'stk_bydd_trd' in url else kosdaq_payload)
 
     session = _Session()
 
+    # When
     out = fetch_daily_bars(dt.date(2026, 9, 7), auth_key='k', session=session)
 
-    assert out['symbol'].to_list() == ['005930']
-    assert out['close'].to_list() == [270000.0]
-    assert out['volume'].to_list() == [18314016]
+    # Then: 양 시장 행이 필수 컬럼으로 정규화된다
+    assert out['symbol'].to_list() == ['005930', '035720']
+    assert out['close'].to_list() == [270000.0, 50000.0]
+    assert out['volume'].to_list() == [18314016, 1000]
     assert round(out['trade_value_100m'][0], 5) == round(4900114076282 / 1e8, 5)
-    assert out['daily_change_pct'].to_list() == [5.68]
-    assert out['market'].to_list() == ['KOSPI']
+    assert out['daily_change_pct'].to_list() == [5.68, -1.20]
+    assert out['market'].to_list() == ['KOSPI', 'KOSDAQ']
     assert len(session.urls) == 2
 
 
@@ -157,21 +165,6 @@ def test_append_daily_bars_creates_new_store_file(tmp_path) -> None:
     assert stored.columns == ['date', 'symbol', 'close', 'volume', 'trade_value_100m', 'daily_change_pct']
 
 
-def test_append_daily_bars_is_idempotent_for_existing_date(tmp_path) -> None:
-    import datetime as dt
-    import polars as pl
-    from src.marketdata.krx_bars import append_daily_bars
-
-    store = tmp_path / 'bars.parquet'
-    bars = pl.DataFrame({'date': [dt.date(2026, 9, 7)], 'symbol': ['005930'], 'close': [270000.0],
-                         'volume': [100], 'trade_value_100m': [1.0], 'daily_change_pct': [5.68]})
-
-    first = append_daily_bars(store, bars)
-    second = append_daily_bars(store, bars)
-
-    assert first == 1
-    assert second == 0
-    assert pl.read_parquet(store).height == 1
 
 
 def test_append_daily_bars_appends_new_date_alongside_existing(tmp_path) -> None:
@@ -238,3 +231,162 @@ def test_write_market_map_writes_atomic_json(tmp_path) -> None:
 
     assert json.loads(path.read_text(encoding='utf-8')) == {'005930': 'KOSPI', '247540': 'KOSDAQ'}
     assert list(path.parent.glob('.*.tmp')) == []
+
+
+def test_fetch_daily_bars_raises_incomplete_market_when_one_market_empty() -> None:
+    # Given: KOSPI 만 응답하고 KOSDAQ 은 빈 배열인 부분 수집
+    import datetime as dt
+
+    import pytest
+
+    from src.marketdata.krx_bars import IncompleteMarketError, fetch_daily_bars
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            self._checked = True
+
+        def json(self):
+            return self._payload
+
+    class _Session:
+        def post(self, url, **kw):
+            rows = [{'ISU_CD': '005930', 'MKT_NM': 'KOSPI', 'TDD_CLSPRC': '100', 'ACC_TRDVOL': '1',
+                     'ACC_TRDVAL': '100', 'FLUC_RT': '0.0'}] if 'stk_bydd_trd' in url else []
+            return _Resp({'OutBlock_1': rows})
+
+    # When / Then: 부분 저장 대신 fail-closed
+    with pytest.raises(IncompleteMarketError, match='KOSDAQ'):
+        fetch_daily_bars(dt.date(2026, 9, 7), auth_key='k', session=_Session())
+
+
+def test_incomplete_market_error_is_not_swallowed_by_latest_trading_day(monkeypatch) -> None:
+    # Given: 특정 일자에서 부분 수집이 발생
+    import datetime as dt
+
+    import pytest
+
+    import src.marketdata.krx_bars as bars_mod
+    from src.marketdata.krx_bars import IncompleteMarketError, latest_trading_day
+
+    def _partial(date, *, auth_key, session=None):
+        raise IncompleteMarketError(f'partial market data for {date}')
+
+    monkeypatch.setattr(bars_mod, 'fetch_daily_bars', _partial)
+
+    # When / Then: 비영업일 워크백으로 오인해 삼키지 않고 그대로 전파한다
+    with pytest.raises(IncompleteMarketError):
+        latest_trading_day(dt.date(2026, 9, 8), auth_key='k')
+
+
+def test_append_daily_bars_recovers_missing_symbols_for_existing_date(tmp_path) -> None:
+    # Given: 과거에 KOSPI 만 저장된 거래일
+    import datetime as dt
+
+    import polars as pl
+
+    from src.marketdata.krx_bars import append_daily_bars
+
+    store = tmp_path / 'bars.parquet'
+    partial = pl.DataFrame({'date': [dt.date(2026, 9, 7)], 'symbol': ['005930'], 'close': [1.0],
+                            'volume': [1], 'trade_value_100m': [1.0], 'daily_change_pct': [0.1]})
+    full = pl.DataFrame({'date': [dt.date(2026, 9, 7), dt.date(2026, 9, 7)], 'symbol': ['005930', '035720'],
+                         'close': [1.0, 2.0], 'volume': [1, 2], 'trade_value_100m': [1.0, 2.0],
+                         'daily_change_pct': [0.1, 0.2]})
+
+    first = append_daily_bars(store, partial)
+
+    # When: 동일 날짜의 완전 데이터로 재적재
+    second = append_daily_bars(store, full)
+
+    # Then: date 단위 락인 없이 누락 심볼이 복구된다
+    assert first == 1
+    assert second == 1
+    stored = pl.read_parquet(store)
+    assert sorted(stored['symbol'].to_list()) == ['005930', '035720']
+    assert stored.height == 2
+
+
+def test_append_daily_bars_is_idempotent_for_identical_rows(tmp_path) -> None:
+    # Given: 동일 (date, symbol) 데이터를 두 번 적재
+    import datetime as dt
+
+    import polars as pl
+
+    from src.marketdata.krx_bars import append_daily_bars
+
+    store = tmp_path / 'bars.parquet'
+    bars = pl.DataFrame({'date': [dt.date(2026, 9, 7)], 'symbol': ['005930'], 'close': [270000.0],
+                         'volume': [100], 'trade_value_100m': [1.0], 'daily_change_pct': [5.68]})
+
+    # When
+    first = append_daily_bars(store, bars)
+    second = append_daily_bars(store, bars)
+
+    # Then: 신규 키가 없으면 재기록하지 않는다
+    assert first == 1
+    assert second == 0
+    assert pl.read_parquet(store).height == 1
+
+
+def test_append_daily_bars_raises_on_implausible_rowcount(tmp_path) -> None:
+    # Given: 직전 거래일 10행이 저장된 스토어
+    import datetime as dt
+
+    import polars as pl
+
+    import pytest
+
+    from src.marketdata.krx_bars import ImplausibleRowCountError, append_daily_bars
+
+    store = tmp_path / 'bars.parquet'
+    prev = pl.DataFrame({
+        'date': [dt.date(2026, 9, 7)] * 10,
+        'symbol': [f'{i:06d}' for i in range(10)],
+        'close': [1.0] * 10, 'volume': [1] * 10,
+        'trade_value_100m': [1.0] * 10, 'daily_change_pct': [0.1] * 10,
+    })
+    append_daily_bars(store, prev)
+
+    truncated = pl.DataFrame({'date': [dt.date(2026, 9, 8)], 'symbol': ['000000'], 'close': [1.0],
+                              'volume': [1], 'trade_value_100m': [1.0], 'daily_change_pct': [0.1]})
+
+    # When / Then: 직전 거래일 대비 하한 비율 미만이면 절단 응답으로 판정해 거부한다
+    with pytest.raises(ImplausibleRowCountError):
+        append_daily_bars(store, truncated)
+
+    assert pl.read_parquet(store).height == 10
+
+
+def test_append_daily_bars_accepts_rowcount_within_ratio(tmp_path) -> None:
+    # Given: 직전 거래일 10행, 신규일 9행 (비율 0.9 = 하한 경계)
+    import datetime as dt
+
+    import polars as pl
+
+    from src.marketdata.krx_bars import MIN_ROWCOUNT_RATIO, append_daily_bars
+
+    store = tmp_path / 'bars.parquet'
+    prev = pl.DataFrame({
+        'date': [dt.date(2026, 9, 7)] * 10,
+        'symbol': [f'{i:06d}' for i in range(10)],
+        'close': [1.0] * 10, 'volume': [1] * 10,
+        'trade_value_100m': [1.0] * 10, 'daily_change_pct': [0.1] * 10,
+    })
+    append_daily_bars(store, prev)
+    nxt = pl.DataFrame({
+        'date': [dt.date(2026, 9, 8)] * 9,
+        'symbol': [f'{i:06d}' for i in range(9)],
+        'close': [1.0] * 9, 'volume': [1] * 9,
+        'trade_value_100m': [1.0] * 9, 'daily_change_pct': [0.1] * 9,
+    })
+
+    # When
+    appended = append_daily_bars(store, nxt)
+
+    # Then: 경계값은 정상 상장폐지/거래정지 변동으로 수용한다
+    assert MIN_ROWCOUNT_RATIO == 0.90
+    assert appended == 9
+    assert pl.read_parquet(store).height == 19
