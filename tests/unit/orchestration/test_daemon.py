@@ -435,6 +435,8 @@ def test_run_session_orchestration_blocks_stale_bars_against_calendar(tmp_path, 
 
     monkeypatch.setattr(daemon, "refresh_bars", _fake_refresh)
     monkeypatch.setattr(daemon, "plan_universe", _fake_plan)
+    monkeypatch.setattr(daemon, "_build_kis_client", lambda paths: object())
+    monkeypatch.setattr(daemon, "refresh_bars_via_kis_fallback", lambda **kw: (_ for _ in ()).throw(daemon.KisFallbackError("boom")))
 
     trading_day = TradingDay(
         date=dt.date(2026, 9, 14),
@@ -685,3 +687,131 @@ def test_run_collector_daemon_eod_passes_quarantine_root(tmp_path, monkeypatch) 
     # Then: 설정에서 파생된 격리 경로가 EOD 유지보수로 전달된다
     assert seen['quarantine_root'] == settings.paths.quarantine_root
     assert seen['archive_root'] == settings.paths.archive_root
+
+
+def test_build_kis_client_wires_shared_token_cache_path(tmp_path, monkeypatch) -> None:
+    import pathlib
+
+    from src.core.config import CollectorSettings, ExecutionSettings
+    from src.execution.kis_client import KisRestClient
+    from src.orchestration import daemon
+
+    monkeypatch.setenv("KIS_APP_KEY", "k")
+    monkeypatch.setenv("KIS_APP_SECRET", "s")
+    monkeypatch.setenv("KIS_ACCOUNT_NO", "12345678")
+    monkeypatch.setenv("KIS_ACCOUNT_PRODUCT_CODE", "01")
+    data_root = pathlib.Path(tmp_path) / "data"
+    collector = CollectorSettings(data_root=data_root)
+    execution = ExecutionSettings(data_root=data_root)
+
+    client = daemon._build_kis_client(collector.paths)
+
+    assert isinstance(client, KisRestClient)
+    assert client._token_cache_path == collector.paths.kis_token_cache
+    assert client._token_cache_path == execution.paths.kis_token_cache
+
+def test_run_session_orchestration_falls_back_to_kis_when_bars_stale(tmp_path, monkeypatch) -> None:
+    # Given: store 최신일이 2026-09-09 인데 직전 영업일은 2026-09-11 (KRX 장애 상황)
+    import datetime as dt
+    import pathlib
+
+    import polars as pl
+
+    from src.core.config import CollectorSettings
+    from src.marketdata.toss_calendar import TradingDay
+    from src.orchestration import daemon
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "date": [dt.date(2026, 9, 9)], "symbol": ["000001"], "close": [1000.0],
+        "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0],
+    }).write_parquet(settings.paths.bars_store)
+
+    def _fake_refresh(**kwargs):
+        return daemon.BarsRefreshResult(trading_day=dt.date(2026, 9, 9), appended_rows=0, backfilled_days=0)
+
+    fallback_calls: dict[str, object] = {}
+
+    def _fake_fallback(**kwargs):
+        fallback_calls.update(kwargs)
+        return daemon.BarsRefreshResult(trading_day=kwargs["target_date"], appended_rows=1, backfilled_days=0)
+
+    def _fake_plan(**kwargs):
+        settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+        write_candidates(settings.paths.candidates, [{"symbol": "000001", "selection_reasons": ["limit_up"]}], rev=1)
+        return daemon.UniversePlanResult(
+            decision_date=kwargs["decision_date"], selected=1, out_path=kwargs["out_path"], candidates_emitted=1
+        )
+
+    monkeypatch.setattr(daemon, "refresh_bars", _fake_refresh)
+    monkeypatch.setattr(daemon, "refresh_bars_via_kis_fallback", _fake_fallback)
+    monkeypatch.setattr(daemon, "_build_kis_client", lambda paths: object())
+    monkeypatch.setattr(daemon, "plan_universe", _fake_plan)
+
+    trading_day = TradingDay(
+        date=dt.date(2026, 9, 14), is_business_day=True,
+        previous_business_day=dt.date(2026, 9, 11), next_business_day=dt.date(2026, 9, 15),
+    )
+
+    # When
+    ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 14), settings=settings, trading_day=trading_day)
+
+    # Then: 폴백 성공 -> 직전영업일로 갱신되어 정상 진행
+    assert ready is True
+    assert fallback_calls["target_date"] == dt.date(2026, 9, 11)
+
+def test_run_session_orchestration_blocks_stale_bars_when_kis_fallback_also_fails(tmp_path, monkeypatch, caplog) -> None:
+    # Given: store 최신일이 2026-09-09 인데 직전 영업일은 2026-09-11, KIS 폴백도 실패
+    import datetime as dt
+    import logging
+    import pathlib
+
+    import polars as pl
+
+    from src.core.config import CollectorSettings
+    from src.marketdata.service import KisFallbackError
+    from src.marketdata.toss_calendar import TradingDay
+    from src.orchestration import daemon
+
+    monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "date": [dt.date(2026, 9, 9)], "symbol": ["000001"], "close": [1000.0],
+        "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0],
+    }).write_parquet(settings.paths.bars_store)
+
+    def _fake_refresh(**kwargs):
+        return daemon.BarsRefreshResult(trading_day=dt.date(2026, 9, 9), appended_rows=0, backfilled_days=0)
+
+    def _fail_fallback(**kwargs):
+        raise KisFallbackError("no prior market_map for kis fallback")
+
+    planned: list[object] = []
+
+    def _fail_plan(**kwargs):
+        planned.append(kwargs)
+        raise AssertionError("fallback도 실패한 상태에서 유니버스를 계획하면 안 된다")
+
+    monkeypatch.setattr(daemon, "refresh_bars", _fake_refresh)
+    monkeypatch.setattr(daemon, "refresh_bars_via_kis_fallback", _fail_fallback)
+    monkeypatch.setattr(daemon, "_build_kis_client", lambda paths: object())
+    monkeypatch.setattr(daemon, "plan_universe", _fail_plan)
+
+    trading_day = TradingDay(
+        date=dt.date(2026, 9, 14), is_business_day=True,
+        previous_business_day=dt.date(2026, 9, 11), next_business_day=dt.date(2026, 9, 15),
+    )
+
+    # When
+    with caplog.at_level(logging.CRITICAL):
+        ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 14), settings=settings, trading_day=trading_day)
+
+    # Then: 여전히 fail-closed
+    assert ready is False
+    assert planned == []
+    assert settings.paths.candidates.exists() is False
+    assert "stale_bars_fallback_failed" in caplog.text

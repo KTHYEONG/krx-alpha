@@ -368,3 +368,73 @@ def test_build_order_body_matches_official_fields() -> None:
         "ORD_DVSN": "00", "RVSE_CNCL_DVSN_CD": "02", "ORD_QTY": "0", "ORD_UNPR": "0", "QTY_ALL_ORD_YN": "Y",
         "EXCG_ID_DVSN_CD": "KRX",
     }
+
+
+def test_get_daily_bar_parses_valid_response(tmp_path) -> None:
+    import datetime as dt
+
+    from tests.unit.execution.fakes import daily_chart_body, make_client
+
+    client, session, _ = make_client(
+        tmp_path,
+        [daily_chart_body(date="20260910", close="269000", volume="22517075", trade_value="6028310398811", prdy_vrss="-500")],
+    )
+
+    row = client.get_daily_bar("005930", dt.date(2026, 9, 10))
+
+    # Then: 실측(broker_kis.md 3.3, 005930 실계정 검증)과 동일한 소문자 파라미터 + 시작/종료일 동일값을 그대로 보낸다
+    assert session.calls[-1]["params"] == {
+        "fid_cond_mrkt_div_code": "J",
+        "fid_input_iscd": "005930",
+        "fid_input_date_1": "20260910",
+        "fid_input_date_2": "20260910",
+        "fid_period_div_code": "D",
+        "fid_org_adj_prc": "1",
+    }
+    assert row is not None
+    assert row["stck_clpr"] == "269000"
+    assert row["acml_vol"] == "22517075"
+    assert row["acml_tr_pbmn"] == "6028310398811"
+    assert row["prdy_vrss"] == "-500"
+
+def test_get_daily_bar_returns_none_when_output2_empty(tmp_path) -> None:
+    import datetime as dt
+
+    from tests.unit.execution.fakes import FakeResponse, make_client
+
+    empty = FakeResponse({"rt_cd": "0", "msg_cd": "MCA00000", "msg1": "ok", "output1": {}, "output2": []})
+    client, session, _ = make_client(tmp_path, [empty])
+
+    row = client.get_daily_bar("999999", dt.date(2026, 9, 10))
+
+    assert row is None
+
+def test_get_daily_bar_returns_none_on_zero_close_price(tmp_path) -> None:
+    import datetime as dt
+
+    from tests.unit.execution.fakes import daily_chart_body, make_client
+
+    client, session, _ = make_client(
+        tmp_path,
+        [daily_chart_body(date="20260910", close="0", volume="0", trade_value="0")],
+    )
+
+    row = client.get_daily_bar("999999", dt.date(2026, 9, 10))
+
+    assert row is None
+
+def test_get_daily_bar_keeps_zero_volume_when_price_valid(tmp_path) -> None:
+    import datetime as dt
+
+    from tests.unit.execution.fakes import daily_chart_body, make_client
+
+    client, session, _ = make_client(
+        tmp_path,
+        [daily_chart_body(date="20260910", close="11700", volume="0", trade_value="0", prdy_vrss="0")],
+    )
+
+    row = client.get_daily_bar("0011A0", dt.date(2026, 9, 10))
+
+    assert row is not None
+    assert row["stck_clpr"] == "11700"
+    assert row["acml_vol"] == "0"

@@ -10,13 +10,25 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import polars as pl
+import requests
 
 from src.core.calendar import SessionState, calc_sleep_seconds, get_target_state
-from src.core.config import CollectorSettings, KrxCredentials, TossCredentials, load_credentials
+from src.core.config import (
+    CollectorSettings,
+    DataPaths,
+    ExecutionSettings,
+    KisCredentials,
+    KrxCredentials,
+    TossCredentials,
+    load_credentials,
+)
 from src.core.errors import MissingCredentialsError
+from src.execution.contracts import KisApiError
+from src.execution.kis_client import KisRestClient, RateLimiter
 from src.marketdata.krx_bars import KrxBarsError
 from src.marketdata.service import BarsRefreshResult as BarsRefreshResult
-from src.marketdata.service import refresh_bars
+from src.marketdata.service import KisFallbackError as KisFallbackError
+from src.marketdata.service import refresh_bars, refresh_bars_via_kis_fallback
 from src.marketdata.toss_calendar import TossCalendarError, TradingDay, fetch_trading_day
 from src.orchestration.eod import run_eod_maintenance, run_eod_offload
 from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker
@@ -35,6 +47,20 @@ def resolve_trading_day(ref_date: dt.date) -> TradingDay | None:
     except (MissingCredentialsError, TossCalendarError) as exc:
         logger.warning("[DATA] stage=trading_day_probe status=DEGRADED reason=%s", str(exc))
         return None
+
+
+def _build_kis_client(paths: DataPaths) -> KisRestClient:
+    """execution 모듈과 동일한 토큰 캐시를 공유하는 KIS 클라이언트를 생성한다."""
+    creds = load_credentials(KisCredentials)
+    execution = ExecutionSettings(data_root=paths.root)
+    return KisRestClient(
+        creds=creds,
+        session=requests,
+        token_cache_path=paths.kis_token_cache,
+        limiter=RateLimiter(execution.rest_rate_per_s),
+        now=lambda: dt.datetime.now(_KST),
+        timeout_s=execution.request_timeout_s,
+    )
 
 
 def run_session_orchestration(
@@ -59,12 +85,26 @@ def run_session_orchestration(
         return False
     decision_date: dt.date = pl.scan_parquet(paths.bars_store).select(pl.col("date").max()).collect().item()
     if trading_day is not None and decision_date != trading_day.previous_business_day:
-        logger.critical(
-            "[DAEMON] stage=orchestration status=FAIL reason=stale_bars decision_date=%s expected=%s",
+        try:
+            fallback = refresh_bars_via_kis_fallback(
+                store_path=paths.bars_store,
+                market_map_path=paths.market_map,
+                target_date=trading_day.previous_business_day,
+                kis_client=_build_kis_client(paths),
+            )
+        except (MissingCredentialsError, KisFallbackError, KisApiError) as exc:
+            logger.critical(
+                "[DAEMON] stage=orchestration status=FAIL reason=stale_bars_fallback_failed decision_date=%s expected=%s error=%s",
+                decision_date.isoformat(),
+                trading_day.previous_business_day.isoformat(),
+                str(exc),
+            )
+            return False
+        decision_date = fallback.trading_day
+        logger.warning(
+            "[DAEMON] stage=orchestration status=OK reason=kis_fallback_used decision_date=%s",
             decision_date.isoformat(),
-            trading_day.previous_business_day.isoformat(),
         )
-        return False
     # 선정 실패는 흡수하지 않는다: 직전 세션의 stale candidates 로 스트리밍하는 fail-open 을 차단.
     plan_universe(
         bars_path=paths.bars_store,
