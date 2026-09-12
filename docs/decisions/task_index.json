@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "backup_and_reconciliation_hardening",
+      "date": "2026-09-12",
+      "adr_id": "ADR_20260912_backup_and_reconciliation_hardening",
+      "domain": "storage",
+      "title": "gdrive 백업 교체 및 세션 재조정 게이트",
+      "why": "죽은 HuggingFace 오프로드로 L1이 어디에도 백업되지 않았고, 일봉은 있는데 세션이 통째로 빈 09-10 유형 사고를 감지할 방법이 없었음",
+      "resolution": "rclone(gdrive) 기반 RcloneArchiver로 오프로드를 교체하고, 오늘 하루치 bars/manifest 정합성만 검사하는 관측 게이트를 EOD에 추가",
+      "impact": "run_eod_offload가 rclone CLI로 L1을 gdrive에 검증업로드하고, daemon POST_MARKET_EOD가 session_data_gap CRITICAL을 남길 수 있게 됨"
+    },
+    {
       "task_id": "ADR_20260912_kis_daily_bars_fallback",
       "date": "2026-09-12",
       "adr_id": "ADR_20260912_ADR_20260912_kis_daily_bars_fallback",
