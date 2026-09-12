@@ -23,6 +23,17 @@ class KrxBarsError(KrxAlphaError):
     """KRX 요청 실패/빈 응답(비영업일)/거래일 미발견 fail-closed 신호."""
 
 
+class IncompleteMarketError(KrxAlphaError):
+    """KOSPI/KOSDAQ 중 일부 시장만 응답한 부분 수집 fail-closed 신호."""
+
+
+class ImplausibleRowCountError(KrxAlphaError):
+    """직전 거래일 대비 행수 급감(절단 응답) fail-closed 신호."""
+
+
+MIN_ROWCOUNT_RATIO: float = 0.90
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=0.01, max=0.1),
@@ -47,6 +58,13 @@ def fetch_daily_bars(date: dt.date, *, auth_key: str, session: Any | None = None
         kosdaq = _post_krx(sess, KOSDAQ_URL, auth_key, date)
     except requests.RequestException as exc:
         raise KrxBarsError(f"krx request failed for {date}: {exc}") from exc
+    kospi_rows = kospi.get("OutBlock_1", [])
+    kosdaq_rows = kosdaq.get("OutBlock_1", [])
+    if not kospi_rows and not kosdaq_rows:
+        raise KrxBarsError(f"no trading data for {date}")
+    if not kospi_rows or not kosdaq_rows:
+        empty = "KOSPI" if not kospi_rows else "KOSDAQ"
+        raise IncompleteMarketError(f"partial market data for {date}: empty {empty}")
     rows: list[dict[str, object]] = []
     for payload, market in ((kospi, "KOSPI"), (kosdaq, "KOSDAQ")):
         rows.extend(
@@ -61,8 +79,6 @@ def fetch_daily_bars(date: dt.date, *, auth_key: str, session: Any | None = None
             }
             for row in payload.get("OutBlock_1", [])
         )
-    if not rows:
-        raise KrxBarsError(f"no trading data for {date}")
     return pl.DataFrame(rows, schema=BAR_SCHEMA)
 
 
@@ -98,11 +114,22 @@ def append_daily_bars(store_path: pathlib.Path, bars: pl.DataFrame) -> int:
     )
     if store.exists():
         existing = pl.read_parquet(store)
-        existing_dates = existing["date"].to_list()
-        new_rows = incoming.filter(~pl.col("date").is_in(existing_dates))
+        incoming_dates = incoming["date"].unique().to_list()
+        prior = existing.filter(~pl.col("date").is_in(incoming_dates))
+        if prior.height > 0:
+            reference_date = prior["date"].max()
+            reference_height = prior.filter(pl.col("date") == reference_date).height
+            if incoming.height < reference_height * MIN_ROWCOUNT_RATIO:
+                raise ImplausibleRowCountError(
+                    f"implausible row count for {incoming_dates}: {incoming.height} < {reference_height} * {MIN_ROWCOUNT_RATIO}"
+                )
+        new_rows = incoming.join(
+            existing.select(["date", "symbol"]), on=["date", "symbol"], how="anti"
+        )
         if new_rows.height == 0:
             return 0
-        combined = pl.concat([existing, new_rows]).sort(["symbol", "date"])
+        kept = existing.join(incoming.select(["date", "symbol"]), on=["date", "symbol"], how="anti")
+        combined = pl.concat([kept, incoming]).sort(["symbol", "date"])
     else:
         new_rows = incoming
         combined = incoming.sort(["symbol", "date"])

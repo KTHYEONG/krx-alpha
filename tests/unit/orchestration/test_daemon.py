@@ -651,3 +651,37 @@ def test_resolve_trading_day_degrades_to_none_when_vendor_fails(monkeypatch, cap
         daemon.resolve_trading_day(dt.date(2026, 9, 14))
 
 
+
+
+def test_run_collector_daemon_eod_passes_quarantine_root(tmp_path, monkeypatch) -> None:
+    # Given: EOD 시각에 진입한 데몬
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    import src.orchestration.daemon as daemon_mod
+    from src.core.config import CollectorSettings
+    from src.orchestration.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(daemon_mod, 'resolve_trading_day', lambda ref_date: None)
+
+    seen: dict[str, object] = {}
+
+    def _fake_maintenance(journal_root, *, retain_days=3, today=None, archive_root=None, quarantine_root=None):
+        seen.update({'quarantine_root': quarantine_root, 'archive_root': archive_root})
+        return 0
+
+    monkeypatch.setattr(daemon_mod, 'run_eod_maintenance', _fake_maintenance)
+    monkeypatch.setattr(daemon_mod, 'run_eod_offload', lambda *a, **kw: {'uploaded': 0, 'skipped': 0, 'failed': 0, 'purged': 0})
+
+    settings = CollectorSettings()
+    mock_sleep = MagicMock()
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+
+    # When
+    run_collector_daemon(settings=settings, sleep_fn=mock_sleep, max_cycles=1, now_fn=lambda: eod_time)
+
+    # Then: 설정에서 파생된 격리 경로가 EOD 유지보수로 전달된다
+    assert seen['quarantine_root'] == settings.paths.quarantine_root
+    assert seen['archive_root'] == settings.paths.archive_root

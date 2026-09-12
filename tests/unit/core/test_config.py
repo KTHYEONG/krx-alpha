@@ -167,3 +167,15 @@ def test_load_credentials_is_fail_closed_for_toss(monkeypatch) -> None:
     assert creds.toss_app_secret == "tssk_test"
 
 
+
+
+def test_data_paths_expose_quarantine_root() -> None:
+    # Given: data_root 만 지정한 설정
+    import pathlib
+
+    from src.core.config import CollectorSettings
+
+    settings = CollectorSettings(data_root=pathlib.Path('var/krx'))
+
+    # Then: 격리 경로도 단일 루트에서 파생된다
+    assert settings.paths.quarantine_root == pathlib.Path('var/krx/quarantine')

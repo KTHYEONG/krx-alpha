@@ -19,8 +19,9 @@ def run_eod_maintenance(
     retain_days: int = 3,
     today: dt.date | None = None,
     archive_root: pathlib.Path | None = None,
+    quarantine_root: pathlib.Path | None = None,
 ) -> int:
-    return prune_old_journals(journal_root, retain_days=retain_days, reference_date=today, archive_root=archive_root)
+    return prune_old_journals(journal_root, retain_days=retain_days, reference_date=today, archive_root=archive_root, quarantine_root=quarantine_root)
 
 
 def run_eod_offload(

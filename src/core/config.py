@@ -58,6 +58,10 @@ class DataPaths:
     def archive_root(self) -> pathlib.Path:
         return self.root / "l1"
 
+    @property
+    def quarantine_root(self) -> pathlib.Path:
+        return self.root / "quarantine"
+
     def universe_out(self, day: dt.date) -> pathlib.Path:
         return self.universe_dir / f"{day.isoformat()}.parquet"
 

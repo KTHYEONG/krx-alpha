@@ -30,7 +30,7 @@ class SessionFrameSink:
             raw=frame.raw,
             recv_mono_ns=frame.recv_mono_ns,
             recv_wall_ns=frame.recv_wall_ns,
-            conn_id=frame.vendor,
+            conn_id=frame.conn_id,
             conn_seq=frame.conn_seq,
         )
 

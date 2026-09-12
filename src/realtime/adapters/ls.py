@@ -52,6 +52,7 @@ class LsRealtimeAdapter:
         self._ws: Any = None
         self._token: str | None = None
         self._seq = 0
+        self._conn_id: str = ""
         self._pending: list[L0Frame] = []  # subscribe 중 끼어든 데이터 프레임 (recv 가 먼저 소진)
 
     async def connect(self) -> None:
@@ -68,6 +69,7 @@ class LsRealtimeAdapter:
         self._token = str(data["access_token"])
         self._ws = await (self._http.ws_connect(self._ws_url)).__aenter__()
         self._seq = 0
+        self._conn_id = f"{self.name}-{time.time_ns()}"
         self._pending = []
 
     def _build_frame(self, o: dict[str, Any], raw: str) -> L0Frame:
@@ -80,6 +82,7 @@ class LsRealtimeAdapter:
             time.monotonic_ns(),
             time.time_ns(),
             self._seq,
+            conn_id=self._conn_id,
         )
 
     @staticmethod

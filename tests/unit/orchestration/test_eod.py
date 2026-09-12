@@ -81,3 +81,37 @@ def test_run_eod_offload_returns_zeros_when_archiver_missing(tmp_path, caplog, m
     assert stats == {'uploaded': 0, 'skipped': 0, 'failed': 0, 'purged': 0}
     assert old_pq.exists()
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+
+
+def test_run_eod_maintenance_forwards_quarantine_root(tmp_path, monkeypatch) -> None:
+    # Given: prune 호출 인자를 포착하는 스텁
+    import datetime as dt
+    import pathlib
+
+    import src.orchestration.eod as eod_mod
+    from src.orchestration.eod import run_eod_maintenance
+
+    seen: dict[str, object] = {}
+
+    def _fake_prune(root, archive_root=None, *, retain_days=3, reference_date=None, quarantine_root=None):
+        seen.update({
+            'root': root, 'archive_root': archive_root, 'retain_days': retain_days,
+            'reference_date': reference_date, 'quarantine_root': quarantine_root,
+        })
+        return 7
+
+    monkeypatch.setattr(eod_mod, 'prune_old_journals', _fake_prune)
+
+    # When
+    deleted = run_eod_maintenance(
+        pathlib.Path(tmp_path) / 'l0',
+        retain_days=3,
+        today=dt.date(2026, 9, 30),
+        archive_root=pathlib.Path(tmp_path) / 'l1',
+        quarantine_root=pathlib.Path(tmp_path) / 'quarantine',
+    )
+
+    # Then: 격리 경로가 보존 계층까지 전달된다
+    assert deleted == 7
+    assert seen['quarantine_root'] == pathlib.Path(tmp_path) / 'quarantine'
+    assert seen['reference_date'] == dt.date(2026, 9, 30)

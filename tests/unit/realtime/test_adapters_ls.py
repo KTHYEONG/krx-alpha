@@ -251,7 +251,7 @@ def test_ls_adapter_recv_drains_pending_before_reading_socket() -> None:
 
     adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'})
     adapter._ws = _WS()  # type: ignore[attr-defined]
-    stashed = L0Frame('ls', 'H0STCNT0', '000660', '{}', 1, 2, 1)
+    stashed = L0Frame('ls', 'H0STCNT0', '000660', '{}', 1, 2, 1, 'ls-1')
     adapter._pending.append(stashed)  # type: ignore[attr-defined]
 
     frame = asyncio.run(adapter.recv())
@@ -315,3 +315,63 @@ def test_ls_adapter_subscribe_skips_pingpong_before_ack() -> None:
 
     assert out[0].accepted is True
     assert ws.sent[1] == ping
+
+
+def test_ls_adapter_assigns_unique_conn_id_per_connect() -> None:
+    # Given: 동일 어댑터가 두 번 접속(재접속)하며 conn_seq 를 0 으로 리셋한다
+    import asyncio
+    import json
+
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+
+    class _Resp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self):
+            return {'access_token': 'TOK', 'expires_in': 86400}
+
+    class _WS:
+        async def send_str(self, s):
+            self.last = s
+
+        async def close(self):
+            self.closed = True
+
+    class _WSCtx:
+        def __init__(self, ws):
+            self._ws = ws
+
+        async def __aenter__(self):
+            return self._ws
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Http:
+        def __init__(self):
+            self.ws = _WS()
+
+        def post(self, url, **kw):
+            return _Resp()
+
+        def ws_connect(self, url, **kw):
+            return _WSCtx(self.ws)
+
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=_Http(), market_of={'005930': 'KOSPI'})
+    payload = {'header': {'tr_cd': 'S3_', 'tr_key': '005930'}}
+
+    # When: 두 접속에서 각각 첫 프레임을 만든다
+    asyncio.run(adapter.connect())
+    frame1 = adapter._build_frame(payload, json.dumps(payload))
+    asyncio.run(adapter.connect())
+    frame2 = adapter._build_frame(payload, json.dumps(payload))
+
+    # Then: conn_seq 는 리셋되지만 conn_id 는 접속마다 달라 (conn_id, conn_seq) 가 충돌하지 않는다
+    assert frame1.conn_seq == frame2.conn_seq == 1
+    assert frame1.conn_id != frame2.conn_id
+    assert frame1.conn_id.startswith('ls-')
+    assert frame2.conn_id.startswith('ls-')
