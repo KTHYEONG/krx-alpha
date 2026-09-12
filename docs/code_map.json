@@ -171,7 +171,11 @@
   },
   "src/marketdata/service.py": {
     "deps": [
-      "src/marketdata/krx_bars.py"
+      "src/core/errors.py",
+      "src/execution/contracts.py",
+      "src/execution/kis_client.py",
+      "src/marketdata/krx_bars.py",
+      "src/marketdata/schema.py"
     ],
     "layer": 4,
     "testing": "tests/unit/marketdata/test_service.py"
@@ -188,6 +192,8 @@
       "src/core/calendar.py",
       "src/core/config.py",
       "src/core/errors.py",
+      "src/execution/contracts.py",
+      "src/execution/kis_client.py",
       "src/marketdata/krx_bars.py",
       "src/marketdata/service.py",
       "src/marketdata/toss_calendar.py",
