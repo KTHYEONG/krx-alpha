@@ -176,6 +176,13 @@
     "layer": 4,
     "testing": "tests/unit/marketdata/test_service.py"
   },
+  "src/marketdata/toss_calendar.py": {
+    "deps": [
+      "src/core/errors.py"
+    ],
+    "layer": 1,
+    "testing": "tests/unit/marketdata/test_toss_calendar.py"
+  },
   "src/orchestration/daemon.py": {
     "deps": [
       "src/core/calendar.py",
@@ -183,6 +190,7 @@
       "src/core/errors.py",
       "src/marketdata/krx_bars.py",
       "src/marketdata/service.py",
+      "src/marketdata/toss_calendar.py",
       "src/orchestration/eod.py",
       "src/orchestration/supervisor.py",
       "src/universe/ipc.py",
