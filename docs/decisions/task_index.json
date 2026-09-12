@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "toss_calendar_gate",
+      "date": "2026-09-12",
+      "adr_id": "ADR_20260912_toss_calendar_gate",
+      "domain": "marketdata",
+      "title": "토스 영업일 캘린더 게이트 편입",
+      "why": "토스 API 키 추가로 KRX 단일벤더 fail-open과 공휴일 무판정 구멍을 메울 보완 벤더 확보 필요",
+      "resolution": "토스 market-calendar 를 메타데이터 전용 게이트로 편입해 휴장일 스킵과 stale bars 차단을 fail-closed 화",
+      "impact": "daemon 이 휴장일 오기동/과거 유니버스 스트리밍을 방지, 토스 장애는 게이트 비활성(None)으로 열화되어 신규 SPOF 없음"
+    },
+    {
       "task_id": "TASK_KIS_ORDER_EXECUTION_PAPER",
       "date": "2026-09-11",
       "adr_id": "ADR_20260911_KIS_ORDER_EXECUTION_PAPER",
