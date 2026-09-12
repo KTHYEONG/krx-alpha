@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "ingest_integrity_barrier",
+      "date": "2026-09-12",
+      "adr_id": "ADR_20260912_ingest_integrity_barrier",
+      "domain": "marketdata",
+      "title": "수집-저장 3층 무결성 배리어",
+      "why": "부분수집 락인, conn_id 결함으로 인한 재접속 프레임 소실, 손상 파티션 증거 삭제 등 값 검증 배리어 부재 확인",
+      "resolution": "일봉 완결성/행수 타당성/(date,symbol) 멱등 upsert, 접속 고유 conn_id, L1 conn_seq 충돌 게이트 및 비파괴 격리 도입",
+      "impact": "재접속 시 실데이터 소실 차단, 부분수집 영구 락인 해소, 손상 파티션 원본 보존"
+    },
+    {
       "task_id": "toss_calendar_gate",
       "date": "2026-09-12",
       "adr_id": "ADR_20260912_toss_calendar_gate",
