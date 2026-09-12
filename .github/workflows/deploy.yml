@@ -89,6 +89,12 @@ jobs:
             echo "Created empty .env. Please configure API credentials if not already set."
           fi
 
+          # rclone.conf 마운트 대상이 없으면 Docker가 디렉터리로 오생성하므로 빈 파일 부트스트랩
+          if [ ! -f rclone.conf ]; then
+            touch rclone.conf
+            echo "Created empty rclone.conf. Please fill in rclone remote credentials manually."
+          fi
+
           echo '$GHCR_PAT' | docker login ghcr.io -u '$GHCR_USER' --password-stdin
           if docker compose version >/dev/null 2>&1; then C="docker compose"; else C="docker-compose"; fi
           \$C pull

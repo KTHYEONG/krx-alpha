@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     ca-certificates \
     curl \
+    rclone \
     && ln -fs /usr/share/zoneinfo/Asia/Seoul /etc/localtime \
     && dpkg-reconfigure --frontend noninteractive tzdata \
     && rm -rf /var/lib/apt/lists/*

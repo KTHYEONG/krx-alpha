@@ -13,6 +13,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      - ./rclone.conf:/root/.config/rclone/rclone.conf:ro
     # 195GB 클라우드 VPS 자원 보호: 메모리 500MB 한도 제한
     mem_limit: 500m
     command: ["uv", "run", "--no-dev", "python", "-m", "src.orchestration.daemon"]
