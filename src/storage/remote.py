@@ -1,65 +1,84 @@
-"""L1 Parquet -> HuggingFace private Dataset 오프로드 (업로드 후 바이트 크기 검증)."""
+"""L1 Parquet -> rclone 원격 오프로드 (업로드 후 바이트 크기 검증)."""
 
 from __future__ import annotations
 
+import json
 import logging
 import pathlib
+import shutil
+import subprocess
+from collections.abc import Callable
+from typing import Any
 
-from huggingface_hub import HfApi
-from huggingface_hub.errors import HfHubHTTPError
-from pydantic import ValidationError
-
-from src.core.config import HfArchiveSettings
+from src.core.config import RcloneArchiveSettings
 from src.core.errors import KrxAlphaError
 
 logger = logging.getLogger(__name__)
 
 
 class RemoteArchiveError(KrxAlphaError):
-    """HF 업로드/조회 실패 fail-closed 신호."""
+    """원격 업로드/조회 실패 fail-closed 신호."""
 
 
-class HfDatasetArchiver:
-    """L1 파티션을 HF Dataset repo 로 업로드하고 원격 크기로 검증한다."""
+class RcloneArchiver:
+    """L1 파티션을 rclone CLI 서브프로세스로 원격에 업로드하고 원격 크기로 검증한다."""
 
-    def __init__(self, *, token: str, repo_id: str, api: HfApi | None = None) -> None:
-        self._api = api if api is not None else HfApi(token=token)
-        self._repo_id = repo_id
+    def __init__(
+        self,
+        *,
+        remote_name: str,
+        remote_path: str,
+        runner: Callable[..., Any] = subprocess.run,
+    ) -> None:
+        self._remote_name = remote_name
+        self._remote_path = remote_path
+        self._runner = runner
 
     @classmethod
-    def try_from_env(cls) -> HfDatasetArchiver | None:
-        try:
-            settings = HfArchiveSettings()  # type: ignore[call-arg]
-        except ValidationError:
+    def try_from_env(cls) -> RcloneArchiver | None:
+        if shutil.which("rclone") is None:
             return None
-        return cls(token=settings.hf_token, repo_id=settings.hf_dataset_repo)
+        settings = RcloneArchiveSettings()
+        return cls(remote_name=settings.remote_name, remote_path=settings.remote_path)
 
     def repo_path_for(self, archive_root: pathlib.Path, local_parquet: pathlib.Path) -> str:
         rel = pathlib.Path(local_parquet).relative_to(archive_root).as_posix()
         return f"l1/{rel}"
 
+    def _remote_size(self, repo_path: str) -> int:
+        dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
+        result = self._runner(["rclone", "lsjson", dest], capture_output=True, text=True, check=False)
+        entries = json.loads(result.stdout) if result.returncode == 0 else []
+        if not entries:
+            raise RemoteArchiveError(f"verify failed: {repo_path}")
+        return int(entries[0]["Size"])
+
     def upload_and_verify(self, local_parquet: pathlib.Path, repo_path: str) -> bool:
         local = pathlib.Path(local_parquet)
-        try:
-            self._api.upload_file(
-                path_or_fileobj=str(local),
-                path_in_repo=repo_path,
-                repo_id=self._repo_id,
-                repo_type="dataset",
-                commit_message=f"l1 offload {repo_path}",
-            )
-        except (HfHubHTTPError, OSError) as exc:
-            raise RemoteArchiveError(f"upload failed: {repo_path}") from exc
-        info = self._api.get_paths_info(self._repo_id, [repo_path], repo_type="dataset")
-        remote_size = next((getattr(i, "size", None) for i in info if getattr(i, "path", None) == repo_path), None)
-        return remote_size == local.stat().st_size
+        dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
+        result = self._runner(
+            ["rclone", "copyto", str(local), dest], capture_output=True, text=True, check=False
+        )
+        if result.returncode != 0:
+            raise RemoteArchiveError(f"upload failed: {repo_path} {result.stderr}")
+        return self._remote_size(repo_path) == local.stat().st_size
 
     def remote_files(self, prefix: str) -> set[str]:
+        remote = f"{self._remote_name}:{self._remote_path}"
+        result = self._runner(
+            ["rclone", "lsjson", remote, "--recursive"], capture_output=True, text=True, check=False
+        )
+        if result.returncode != 0:
+            raise RemoteArchiveError(f"lsjson failed: {prefix} {result.stderr}")
         try:
-            files = self._api.list_repo_files(self._repo_id, repo_type="dataset")
-        except (HfHubHTTPError, OSError) as exc:
-            raise RemoteArchiveError("list_repo_files failed") from exc
-        return {f for f in files if f.startswith(prefix)}
+            entries = json.loads(result.stdout)
+        except ValueError as exc:
+            raise RemoteArchiveError(f"lsjson failed: {prefix} invalid JSON") from exc
+        return {
+            str(entry["Path"])
+            for entry in entries
+            if not entry.get("IsDir", False) and str(entry.get("Path", "")).startswith(prefix)
+        }
 
     def sync_l1_tree(self, archive_root: pathlib.Path) -> dict[str, int]:
         root = pathlib.Path(archive_root)
@@ -73,12 +92,12 @@ class HfDatasetArchiver:
             try:
                 verified = self.upload_and_verify(pq, repo_path)
             except RemoteArchiveError:
-                logger.critical("[DATA] stage=hf_offload status=FAIL path=%s", repo_path)
+                logger.critical("[DATA] stage=rclone_offload status=FAIL path=%s", repo_path)
                 stats["failed"] += 1
                 continue
             if verified:
                 stats["uploaded"] += 1
             else:
-                logger.critical("[DATA] stage=hf_offload status=FAIL reason=size_mismatch path=%s", repo_path)
+                logger.critical("[DATA] stage=rclone_offload status=FAIL reason=size_mismatch path=%s", repo_path)
                 stats["failed"] += 1
         return stats

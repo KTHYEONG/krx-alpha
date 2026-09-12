@@ -30,7 +30,7 @@ from src.marketdata.service import BarsRefreshResult as BarsRefreshResult
 from src.marketdata.service import KisFallbackError as KisFallbackError
 from src.marketdata.service import refresh_bars, refresh_bars_via_kis_fallback
 from src.marketdata.toss_calendar import TossCalendarError, TradingDay, fetch_trading_day
-from src.orchestration.eod import run_eod_maintenance, run_eod_offload
+from src.orchestration.eod import check_session_reconciliation, run_eod_maintenance, run_eod_offload
 from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker
 from src.universe.ipc import read_candidates
 from src.universe.service import UniversePlanResult as UniversePlanResult
@@ -226,6 +226,14 @@ def run_collector_daemon(
                 offload = run_eod_offload(
                     paths.archive_root, retain_days=cfg.archive_retain_days, reference_date=ref_day
                 )
+                reconciled = check_session_reconciliation(
+                    bars_store=paths.bars_store, manifest_path=paths.manifest_path(ref_day), date=ref_day
+                )
+                if not reconciled:
+                    logger.critical(
+                        "[DAEMON] stage=eod_maintenance status=FAIL reason=session_data_gap date=%s",
+                        ref_day.isoformat(),
+                    )
                 logger.info(
                     "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=OK",
                     deleted,
