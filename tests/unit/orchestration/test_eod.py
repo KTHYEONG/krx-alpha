@@ -73,7 +73,7 @@ def test_run_eod_offload_returns_zeros_when_archiver_missing(tmp_path, caplog, m
     old_pq = root / 'dt=2026-07-01.parquet'
     old_pq.write_bytes(b'x')
 
-    monkeypatch.setattr('src.storage.remote.HfDatasetArchiver.try_from_env', staticmethod(lambda: None))
+    monkeypatch.setattr('src.storage.remote.RcloneArchiver.try_from_env', staticmethod(lambda: None))
 
     with caplog.at_level(logging.CRITICAL):
         stats = run_eod_offload(tmp_path / 'l1')
@@ -115,3 +115,103 @@ def test_run_eod_maintenance_forwards_quarantine_root(tmp_path, monkeypatch) -> 
     assert deleted == 7
     assert seen['quarantine_root'] == pathlib.Path(tmp_path) / 'quarantine'
     assert seen['reference_date'] == dt.date(2026, 9, 30)
+
+
+def test_run_eod_offload_uses_rclone_archiver_by_default(tmp_path, caplog, monkeypatch) -> None:
+    import logging
+
+    from src.orchestration.eod import run_eod_offload
+
+    # 이 환경(개발머신)에는 실제 rclone 바이너리+자격증명이 있을 수 있으므로 반드시 hermetic 하게 차단한다
+    # (실제 gdrive 원격에 쓰기 시도가 절대 발생하면 안 된다).
+    monkeypatch.setattr("src.storage.remote.shutil.which", lambda name: None)
+
+    root = tmp_path / "l1" / "kis" / "H0STCNT0"
+    root.mkdir(parents=True)
+    old_pq = root / "dt=2026-07-01.parquet"
+    old_pq.write_bytes(b"x")
+
+    with caplog.at_level(logging.CRITICAL):
+        stats = run_eod_offload(tmp_path / "l1")
+
+    assert stats == {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
+    assert old_pq.exists()
+    assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+
+
+def test_check_session_reconciliation_true_when_bars_store_missing(tmp_path) -> None:
+    import datetime as dt
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    ok = check_session_reconciliation(
+        bars_store=tmp_path / "bars" / "daily.parquet",
+        manifest_path=tmp_path / "manifest" / "2026-09-10.json",
+        date=dt.date(2026, 9, 10),
+    )
+
+    assert ok is True
+
+
+def test_check_session_reconciliation_true_when_no_bars_rows_for_date(tmp_path) -> None:
+    import datetime as dt
+
+    import polars as pl
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    store = tmp_path / "bars" / "daily.parquet"
+    store.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "date": [dt.date(2026, 9, 9)], "symbol": ["000001"], "close": [1000.0],
+        "volume": [1000], "trade_value_100m": [1.0], "daily_change_pct": [0.0],
+    }).write_parquet(store)
+
+    ok = check_session_reconciliation(
+        bars_store=store, manifest_path=tmp_path / "manifest" / "2026-09-10.json", date=dt.date(2026, 9, 10)
+    )
+
+    assert ok is True
+
+
+def test_check_session_reconciliation_false_when_bars_exist_without_manifest(tmp_path) -> None:
+    import datetime as dt
+
+    import polars as pl
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    store = tmp_path / "bars" / "daily.parquet"
+    store.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "date": [dt.date(2026, 9, 10)], "symbol": ["000001"], "close": [1000.0],
+        "volume": [1000], "trade_value_100m": [1.0], "daily_change_pct": [0.0],
+    }).write_parquet(store)
+
+    ok = check_session_reconciliation(
+        bars_store=store, manifest_path=tmp_path / "manifest" / "2026-09-10.json", date=dt.date(2026, 9, 10)
+    )
+
+    assert ok is False
+
+
+def test_check_session_reconciliation_true_when_manifest_present(tmp_path) -> None:
+    import datetime as dt
+
+    import polars as pl
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    store = tmp_path / "bars" / "daily.parquet"
+    store.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "date": [dt.date(2026, 9, 10)], "symbol": ["000001"], "close": [1000.0],
+        "volume": [1000], "trade_value_100m": [1.0], "daily_change_pct": [0.0],
+    }).write_parquet(store)
+    manifest_path = tmp_path / "manifest" / "2026-09-10.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    ok = check_session_reconciliation(bars_store=store, manifest_path=manifest_path, date=dt.date(2026, 9, 10))
+
+    assert ok is True

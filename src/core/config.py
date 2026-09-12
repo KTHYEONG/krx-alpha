@@ -151,13 +151,13 @@ class LsCredentials(BaseSettings):
     ls_app_secret: str
 
 
-class HfArchiveSettings(BaseSettings):
-    """HuggingFace 아카이브 자격증명 (필수, 빈 기본값 금지)."""
+class RcloneArchiveSettings(BaseSettings):
+    """Rclone 원격 아카이브 설정 (기본값 존재, ValidationError 불가)."""
 
-    model_config = SettingsConfigDict(extra="ignore", case_sensitive=False)
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_BACKUP_", extra="ignore")
 
-    hf_token: str
-    hf_dataset_repo: str
+    remote_name: str = "gdrive"
+    remote_path: str = "quant-lake/live/krx-alpha/data"
 
 
 class KisCredentials(BaseSettings):
