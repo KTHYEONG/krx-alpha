@@ -12,11 +12,12 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from src.core.calendar import SessionState, calc_sleep_seconds, get_target_state
-from src.core.config import CollectorSettings, KrxCredentials, load_credentials
+from src.core.config import CollectorSettings, KrxCredentials, TossCredentials, load_credentials
 from src.core.errors import MissingCredentialsError
 from src.marketdata.krx_bars import KrxBarsError
 from src.marketdata.service import BarsRefreshResult as BarsRefreshResult
 from src.marketdata.service import refresh_bars
+from src.marketdata.toss_calendar import TossCalendarError, TradingDay, fetch_trading_day
 from src.orchestration.eod import run_eod_maintenance, run_eod_offload
 from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker
 from src.universe.ipc import read_candidates
@@ -27,7 +28,18 @@ logger = logging.getLogger(__name__)
 _KST = ZoneInfo("Asia/Seoul")
 
 
-def run_session_orchestration(*, today: dt.date, settings: CollectorSettings) -> bool:
+def resolve_trading_day(ref_date: dt.date) -> TradingDay | None:
+    try:
+        creds = load_credentials(TossCredentials)
+        return fetch_trading_day(ref_date, app_key=creds.toss_app_key, app_secret=creds.toss_app_secret)
+    except (MissingCredentialsError, TossCalendarError) as exc:
+        logger.warning("[DATA] stage=trading_day_probe status=DEGRADED reason=%s", str(exc))
+        return None
+
+
+def run_session_orchestration(
+    *, today: dt.date, settings: CollectorSettings, trading_day: TradingDay | None = None
+) -> bool:
     """bars 갱신 + 유니버스 선정을 타입드 인자로 직접 호출하고 후보 준비 여부를 반환한다."""
     paths = settings.paths
     # bars 갱신 실패는 기존 store 로 진행 가능하므로 도메인 예외만 흡수한다 (광역 포획 금지).
@@ -46,6 +58,13 @@ def run_session_orchestration(*, today: dt.date, settings: CollectorSettings) ->
         logger.critical("[DAEMON] stage=orchestration status=FAIL reason=no_bars_store")
         return False
     decision_date: dt.date = pl.scan_parquet(paths.bars_store).select(pl.col("date").max()).collect().item()
+    if trading_day is not None and decision_date != trading_day.previous_business_day:
+        logger.critical(
+            "[DAEMON] stage=orchestration status=FAIL reason=stale_bars decision_date=%s expected=%s",
+            decision_date.isoformat(),
+            trading_day.previous_business_day.isoformat(),
+        )
+        return False
     # 선정 실패는 흡수하지 않는다: 직전 세션의 stale candidates 로 스트리밍하는 fail-open 을 차단.
     plan_universe(
         bars_path=paths.bars_store,
@@ -88,6 +107,7 @@ def run_collector_daemon(
 
     clock = now_fn if now_fn is not None else (lambda: dt.datetime.now(_KST))
     orchestrated_for: dt.date | None = None
+    holiday_for: dt.date | None = None
     supervisor: ProcessSupervisor | None = None
 
     while True:
@@ -103,39 +123,52 @@ def run_collector_daemon(
         elif state in (SessionState.STREAMER_ACTIVE, SessionState.FULL_ACTIVE):
             today = now.date()
             if orchestrated_for != today:
-                try:
-                    ready = run_session_orchestration(today=today, settings=cfg)
-                except Exception as e:  # noqa: BLE001 - 오케스트레이션 실패가 데몬 전체를 죽이지 않도록 격리
-                    logger.error("[DAEMON] stage=session status=FAIL reason=orchestration_error error=%s", str(e))
-                    ready = False
-                orchestrated_for = today
-                if ready:
-                    manifest_path = paths.manifest_path(today)
-                    cmd = [
-                        sys.executable,
-                        "-m",
-                        "src.cli.main",
-                        "collect-stream",
-                        "--session-date",
-                        today.isoformat(),
-                        "--journal-root",
-                        str(paths.journal_root),
-                        "--manifest-path",
-                        str(manifest_path),
-                        "--candidates-path",
-                        str(paths.candidates),
-                        "--market-map",
-                        str(paths.market_map),
-                    ]
-                    supervisor = ProcessSupervisor(cmd=cmd, breaker=RestartCircuitBreaker())
-                else:
+                trading_day = resolve_trading_day(today)
+                if trading_day is not None and not trading_day.is_business_day:
+                    logger.info(
+                        "[DAEMON] stage=session status=SKIP reason=market_holiday date=%s", today.isoformat()
+                    )
+                    orchestrated_for = today
+                    holiday_for = today
                     supervisor = None
-                    logger.critical("[DAEMON] stage=session status=FAIL reason=candidates_not_ready")
-            if supervisor is not None:
-                result = supervisor.ensure_running()
-                if result == "circuit_open":
-                    logger.critical("[DAEMON] stage=streamer status=FAIL reason=circuit_open")
-            sleep_sec = 10.0
+                else:
+                    try:
+                        ready = run_session_orchestration(today=today, settings=cfg, trading_day=trading_day)
+                    except Exception as e:  # noqa: BLE001 - 오케스트레이션 실패가 데몬 전체를 죽이지 않도록 격리
+                        logger.error("[DAEMON] stage=session status=FAIL reason=orchestration_error error=%s", str(e))
+                        ready = False
+                    orchestrated_for = today
+                    holiday_for = None
+                    if ready:
+                        manifest_path = paths.manifest_path(today)
+                        cmd = [
+                            sys.executable,
+                            "-m",
+                            "src.cli.main",
+                            "collect-stream",
+                            "--session-date",
+                            today.isoformat(),
+                            "--journal-root",
+                            str(paths.journal_root),
+                            "--manifest-path",
+                            str(manifest_path),
+                            "--candidates-path",
+                            str(paths.candidates),
+                            "--market-map",
+                            str(paths.market_map),
+                        ]
+                        supervisor = ProcessSupervisor(cmd=cmd, breaker=RestartCircuitBreaker())
+                    else:
+                        supervisor = None
+                        logger.critical("[DAEMON] stage=session status=FAIL reason=candidates_not_ready")
+            if holiday_for == today:
+                sleep_sec = 3600.0
+            else:
+                if supervisor is not None:
+                    result = supervisor.ensure_running()
+                    if result == "circuit_open":
+                        logger.critical("[DAEMON] stage=streamer status=FAIL reason=circuit_open")
+                sleep_sec = 10.0
         elif state == SessionState.POST_MARKET_EOD:
             if supervisor is not None:
                 stop_result = supervisor.stop(timeout_s=15.0)
