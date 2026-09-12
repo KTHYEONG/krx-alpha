@@ -70,6 +70,7 @@ def test_run_collector_daemon_streamer_active_spawns_supervised_process(tmp_path
     from src.orchestration.daemon import run_collector_daemon
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(daemon_mod, 'resolve_trading_day', lambda ref_date: None)
     monkeypatch.setattr(daemon_mod, 'run_session_orchestration', lambda **kw: True)
 
     calls: list[str] = []
@@ -98,6 +99,7 @@ def test_run_collector_daemon_eod_stops_supervised_process(tmp_path, monkeypatch
     from src.orchestration.daemon import run_collector_daemon
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(daemon_mod, 'resolve_trading_day', lambda ref_date: None)
     monkeypatch.setattr(daemon_mod, 'run_session_orchestration', lambda **kw: True)
 
     stop_calls: list[float] = []
@@ -133,6 +135,7 @@ def test_run_collector_daemon_streamer_active_skips_spawn_when_not_ready(tmp_pat
     from src.orchestration.daemon import run_collector_daemon
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(daemon_mod, 'resolve_trading_day', lambda ref_date: None)
     monkeypatch.setattr(daemon_mod, 'run_session_orchestration', lambda **kw: False)
 
     constructed: list[str] = []
@@ -162,6 +165,7 @@ def test_run_collector_daemon_streamer_active_logs_circuit_open(tmp_path, monkey
     from src.orchestration.daemon import run_collector_daemon
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(daemon_mod, 'resolve_trading_day', lambda ref_date: None)
     monkeypatch.setattr(daemon_mod, 'run_session_orchestration', lambda **kw: True)
 
     class _FakeSupervisor:
@@ -188,6 +192,7 @@ def test_run_collector_daemon_streamer_active_survives_orchestration_exception(t
     from src.orchestration.daemon import run_collector_daemon
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(daemon_mod, 'resolve_trading_day', lambda ref_date: None)
 
     def _raise(**kw):
         raise FileNotFoundError("data/universe/2026-09-08.parquet")
@@ -394,3 +399,255 @@ def test_run_collector_daemon_main_invokes_runner(monkeypatch) -> None:
     daemon_mod.main()
 
     assert calls == ["ran"]
+
+def test_run_session_orchestration_blocks_stale_bars_against_calendar(tmp_path, monkeypatch, caplog) -> None:
+    # Given: store 최신일이 2026-09-09 인데 직전 영업일은 2026-09-11
+    import datetime as dt
+    import logging
+    import pathlib
+
+    import polars as pl
+
+    from src.core.config import CollectorSettings
+    from src.marketdata.toss_calendar import TradingDay
+    from src.orchestration import daemon
+
+    monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "date": [dt.date(2026, 9, 9)],
+        "symbol": ["000001"],
+        "close": [1000.0],
+        "volume": [1000],
+        "trade_value_100m": [100.0],
+        "daily_change_pct": [1.0],
+    }).write_parquet(settings.paths.bars_store)
+
+    def _fake_refresh(**kwargs):
+        return daemon.BarsRefreshResult(trading_day=dt.date(2026, 9, 9), appended_rows=0, backfilled_days=0)
+
+    planned: list[object] = []
+
+    def _fake_plan(**kwargs):
+        planned.append(kwargs)
+        raise AssertionError("stale bars 상태에서 유니버스를 계획하면 안 된다")
+
+    monkeypatch.setattr(daemon, "refresh_bars", _fake_refresh)
+    monkeypatch.setattr(daemon, "plan_universe", _fake_plan)
+
+    trading_day = TradingDay(
+        date=dt.date(2026, 9, 14),
+        is_business_day=True,
+        previous_business_day=dt.date(2026, 9, 11),
+        next_business_day=dt.date(2026, 9, 15),
+    )
+
+    # When
+    with caplog.at_level(logging.CRITICAL):
+        ready = daemon.run_session_orchestration(
+            today=dt.date(2026, 9, 14), settings=settings, trading_day=trading_day
+        )
+
+    # Then: 후보 발행 없이 fail-closed 종료한다
+    assert ready is False
+    assert planned == []
+    assert settings.paths.candidates.exists() is False
+    assert "stale_bars" in caplog.text
+
+
+def test_run_session_orchestration_proceeds_when_decision_date_matches_previous_business_day(tmp_path, monkeypatch) -> None:
+    # Given: store 최신일 == 직전 영업일 (2026-09-11)
+    import datetime as dt
+    import pathlib
+
+    import polars as pl
+
+    from src.core.config import CollectorSettings
+    from src.marketdata.toss_calendar import TradingDay
+    from src.orchestration import daemon
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "date": [dt.date(2026, 9, 11)],
+        "symbol": ["000001"],
+        "close": [1000.0],
+        "volume": [1000],
+        "trade_value_100m": [100.0],
+        "daily_change_pct": [1.0],
+    }).write_parquet(settings.paths.bars_store)
+
+    calls: dict[str, object] = {}
+
+    def _fake_refresh(**kwargs):
+        return daemon.BarsRefreshResult(trading_day=dt.date(2026, 9, 11), appended_rows=1, backfilled_days=0)
+
+    def _fake_plan(**kwargs):
+        calls["plan"] = kwargs
+        settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+        write_candidates(settings.paths.candidates, [{"symbol": "000001", "selection_reasons": ["limit_up"]}], rev=1)
+        return daemon.UniversePlanResult(
+            decision_date=dt.date(2026, 9, 11), selected=1, out_path=kwargs["out_path"], candidates_emitted=1
+        )
+
+    monkeypatch.setattr(daemon, "refresh_bars", _fake_refresh)
+    monkeypatch.setattr(daemon, "plan_universe", _fake_plan)
+
+    trading_day = TradingDay(
+        date=dt.date(2026, 9, 14),
+        is_business_day=True,
+        previous_business_day=dt.date(2026, 9, 11),
+        next_business_day=dt.date(2026, 9, 15),
+    )
+
+    # When
+    ready = daemon.run_session_orchestration(
+        today=dt.date(2026, 9, 14), settings=settings, trading_day=trading_day
+    )
+
+    # Then
+    assert ready is True
+    assert calls["plan"]["decision_date"] == dt.date(2026, 9, 11)
+
+
+def test_run_collector_daemon_skips_orchestration_on_market_holiday(tmp_path, monkeypatch) -> None:
+    # Given: 평일 08:30 이지만 캘린더상 휴장일
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    import src.orchestration.daemon as daemon_mod
+    from src.marketdata.toss_calendar import TradingDay
+    from src.orchestration.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+
+    holiday = TradingDay(
+        date=dt.date(2026, 9, 14),
+        is_business_day=False,
+        previous_business_day=dt.date(2026, 9, 11),
+        next_business_day=dt.date(2026, 9, 15),
+    )
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: holiday)
+
+    orchestrated: list[object] = []
+
+    def _fail_orchestration(**kwargs):
+        orchestrated.append(kwargs)
+        raise AssertionError("휴장일에 오케스트레이션을 호출하면 안 된다")
+
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", _fail_orchestration)
+
+    mock_sleep = MagicMock()
+    weekday_morning = dt.datetime(2026, 9, 14, 8, 30, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    # When
+    run_collector_daemon(sleep_fn=mock_sleep, max_cycles=1, now_fn=lambda: weekday_morning)
+
+    # Then: 수집을 건너뛰고 1시간 대기한다
+    assert orchestrated == []
+    mock_sleep.assert_called_once_with(3600.0)
+
+
+def test_run_collector_daemon_runs_orchestration_on_business_day(tmp_path, monkeypatch) -> None:
+    # Given: 평일 08:30, 캘린더상 영업일
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    import src.orchestration.daemon as daemon_mod
+    from src.marketdata.toss_calendar import TradingDay
+    from src.orchestration.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+
+    business = TradingDay(
+        date=dt.date(2026, 9, 14),
+        is_business_day=True,
+        previous_business_day=dt.date(2026, 9, 11),
+        next_business_day=dt.date(2026, 9, 15),
+    )
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: business)
+
+    seen: list[dict] = []
+
+    def _fake_orchestration(**kwargs):
+        seen.append(kwargs)
+        return False
+
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", _fake_orchestration)
+
+    mock_sleep = MagicMock()
+    weekday_morning = dt.datetime(2026, 9, 14, 8, 30, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    # When
+    run_collector_daemon(sleep_fn=mock_sleep, max_cycles=1, now_fn=lambda: weekday_morning)
+
+    # Then: 조회된 영업일 컨텍스트가 오케스트레이션으로 전달된다
+    assert len(seen) == 1
+    assert seen[0]["today"] == dt.date(2026, 9, 14)
+    assert seen[0]["trading_day"] is business
+    mock_sleep.assert_called_once_with(10.0)
+
+
+def test_resolve_trading_day_degrades_to_none_when_credentials_missing(monkeypatch, caplog) -> None:
+    # Given: 토스 자격증명 env 부재
+    import datetime as dt
+    import logging
+
+    from src.orchestration import daemon
+
+    monkeypatch.delenv("TOSS_APP_KEY", raising=False)
+    monkeypatch.delenv("TOSS_APP_SECRET", raising=False)
+
+    def _must_not_call(*args, **kwargs):
+        raise AssertionError("자격증명 없이 벤더를 호출하면 안 된다")
+
+    monkeypatch.setattr(daemon, "fetch_trading_day", _must_not_call)
+
+    # When
+    with caplog.at_level(logging.WARNING):
+        out = daemon.resolve_trading_day(dt.date(2026, 9, 14))
+
+    # Then: 게이트 비활성 신호(None) + DEGRADED 로깅
+    assert out is None
+    assert "DEGRADED" in caplog.text
+
+
+def test_resolve_trading_day_degrades_to_none_when_vendor_fails(monkeypatch, caplog) -> None:
+    # Given: 자격증명은 있으나 벤더가 실패
+    import datetime as dt
+    import logging
+
+    import pytest
+
+    from src.marketdata.toss_calendar import TossCalendarError
+    from src.orchestration import daemon
+
+    monkeypatch.setenv("TOSS_APP_KEY", "tsck_test")
+    monkeypatch.setenv("TOSS_APP_SECRET", "tssk_test")
+
+    def _raise_vendor(*args, **kwargs):
+        raise TossCalendarError("403 forbidden")
+
+    monkeypatch.setattr(daemon, "fetch_trading_day", _raise_vendor)
+
+    # When
+    with caplog.at_level(logging.WARNING):
+        out = daemon.resolve_trading_day(dt.date(2026, 9, 14))
+
+    # Then: 도메인 예외만 흡수한다
+    assert out is None
+    assert "DEGRADED" in caplog.text
+
+    def _raise_unexpected(*args, **kwargs):
+        raise ValueError("unexpected")
+
+    monkeypatch.setattr(daemon, "fetch_trading_day", _raise_unexpected)
+    with pytest.raises(ValueError, match="unexpected"):
+        daemon.resolve_trading_day(dt.date(2026, 9, 14))
+
+

@@ -145,3 +145,25 @@ def test_execution_settings_default_paper_and_live_requires_arming(monkeypatch) 
     assert load_credentials(ExecutionSettings).commission_bps == 0.36396
     with pytest.raises(MissingCredentialsError, match="kis_account_no"):
         load_credentials(KisCredentials)
+
+def test_load_credentials_is_fail_closed_for_toss(monkeypatch) -> None:
+    # Given: 토스 자격증명 env 부재
+    import pytest
+
+    from src.core.config import TossCredentials, load_credentials
+    from src.core.errors import MissingCredentialsError
+
+    monkeypatch.delenv("TOSS_APP_KEY", raising=False)
+    monkeypatch.delenv("TOSS_APP_SECRET", raising=False)
+
+    # When / Then: 빈 기본값으로 새지 않는다
+    with pytest.raises(MissingCredentialsError, match="toss_app_key"):
+        load_credentials(TossCredentials)
+
+    monkeypatch.setenv("TOSS_APP_KEY", "tsck_test")
+    monkeypatch.setenv("TOSS_APP_SECRET", "tssk_test")
+    creds = load_credentials(TossCredentials)
+    assert creds.toss_app_key == "tsck_test"
+    assert creds.toss_app_secret == "tssk_test"
+
+

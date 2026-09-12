@@ -129,6 +129,15 @@ class KrxCredentials(BaseSettings):
     krx_openapi_key: str
 
 
+class TossCredentials(BaseSettings):
+    """토스증권 자격증명 (필수, 빈 기본값 금지)."""
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+    toss_app_key: str
+    toss_app_secret: str
+
+
 class LsCredentials(BaseSettings):
     """LS증권 자격증명 (필수, 빈 기본값 금지)."""
 
