@@ -16,6 +16,7 @@ _QUOTE_STREAM: str = "H0STASP0"
 _SCHEMA_DISAGREE_TOLERANCE: float = 0.01
 _QUOTE_LEVELS: int = 10
 _QUOTE_CHUNK_ROWS: int = 20_000
+_TICK_CHUNK_ROWS: int = 20_000
 _AUCTION_WINDOWS: tuple[tuple[int, int], ...] = ((83000, 90000), (152000, 153000))
 _QUOTE_BODY_FIELDS: tuple[str, ...] = (
     "shcode",
@@ -70,14 +71,11 @@ def _safe_parse_ls_quote_body(raw: str) -> dict[str, object] | None:
         return None
 
 
-def decode_and_flag_ticks(df: pl.DataFrame) -> TickQualitySummary | None:
-    ticks = df.filter(pl.col("tr_id") == _TICK_STREAM)
-    if ticks.height == 0:
-        return None
+def _decode_tick_chunk(chunk: pl.DataFrame) -> pl.DataFrame:
     body_dtype = pl.Struct(dict.fromkeys(_TICK_BODY_FIELDS, pl.String))
     raw_dtype = pl.Struct({"header": pl.Struct({"tr_cd": pl.String, "tr_key": pl.String}), "body": body_dtype})
     try:
-        decoded = ticks.with_columns(pl.col("raw").str.json_decode(raw_dtype).alias("decoded"))
+        decoded = chunk.with_columns(pl.col("raw").str.json_decode(raw_dtype).alias("decoded"))
         raw_fields = decoded.with_columns(
             shcode=pl.col("decoded").struct.field("body").struct.field("shcode"),
             price_raw=pl.col("decoded").struct.field("body").struct.field("price"),
@@ -96,7 +94,7 @@ def decode_and_flag_ticks(df: pl.DataFrame) -> TickQualitySummary | None:
         # 벤더 JSON 파싱 자체가 실패한 배치: 행 단위 폴백은 문자열 그대로 남기고
         # 숫자 캐스팅은 아래 strict=False cast 한 곳에서만 수행한다 (ValueError 이중 발생 지점 제거).
         fallback: list[dict[str, object]] = []
-        for raw, wall in zip(ticks["raw"].to_list(), ticks["recv_wall_ns"].to_list(), strict=True):
+        for raw, wall in zip(chunk["raw"].to_list(), chunk["recv_wall_ns"].to_list(), strict=True):
             row = _safe_parse_ls_body(raw)
             if row is None:
                 row = {
@@ -125,6 +123,10 @@ def decode_and_flag_ticks(df: pl.DataFrame) -> TickQualitySummary | None:
             },
             strict=False,
         )
+    return raw_fields
+
+
+def _summarize_tick_fields(raw_fields: pl.DataFrame, *, rows: int) -> TickQualitySummary:
     frame = raw_fields.with_columns(
         price=pl.col("price_raw").cast(pl.Float64, strict=False),
         cvolume=pl.col("cvolume_raw").cast(pl.Int64, strict=False),
@@ -192,7 +194,7 @@ def decode_and_flag_ticks(df: pl.DataFrame) -> TickQualitySummary | None:
         .otherwise(0),
     )
     return TickQualitySummary(
-        rows=ticks.height,
+        rows=rows,
         decode_fail=int(flagged["dq_decode_fail"].sum()),
         zero_volume=int(flagged["dq_zero_volume"].sum()),
         price_band_violation=int(flagged["dq_price_band_violation"].sum()),
@@ -201,6 +203,17 @@ def decode_and_flag_ticks(df: pl.DataFrame) -> TickQualitySummary | None:
         tick_loss=int(flagged["dq_tick_loss"].sum()),
         lost_volume=int(flagged["lost_volume"].sum()),
     )
+
+
+def decode_and_flag_ticks(df: pl.DataFrame, *, chunk_rows: int = _TICK_CHUNK_ROWS) -> TickQualitySummary | None:
+    ticks = df.filter(pl.col("tr_id") == _TICK_STREAM)
+    if ticks.height == 0:
+        return None
+    if chunk_rows <= 0:
+        raise ValueError(f"chunk_rows must be > 0, got {chunk_rows}")
+    parts: list[pl.DataFrame] = [_decode_tick_chunk(ticks.slice(offset, chunk_rows)) for offset in range(0, ticks.height, chunk_rows)]
+    raw_fields = pl.concat(parts)
+    return _summarize_tick_fields(raw_fields, rows=ticks.height)
 
 
 def _flag_quote_invariants(frame: pl.DataFrame) -> pl.DataFrame:
