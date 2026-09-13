@@ -14,11 +14,13 @@ KRX(KOSPI/KOSDAQ) 고빈도 틱(체결·10단계 호가) 데이터 수집·정�
 
 ## 2. Why This Project / Problem
 
-1. **리테일 API의 물리적 구독 한도와 전종목 수집의 불가능성**: 국내 전종목(2,500+)의 실시간 틱/호가를 동시 수집하는 것은 증권사 웹소켓 세션 한도(LS: 200쌍, KIS: 41쌍)상 불가능합니다. 따라서 모멘텀과 유동성을 사전에 선별하여 브로커 기술용량 내로 압축하는 2단계 수집 전략이 필수적입니다.
-2. **시계열 Look-Ahead Bias 차단**: 유니버스 선정 피처 계산 시 당일 및 미래 데이터가 혼입되면 백테스트 수익률이 왜곡됩니다. $T-1$ 거래일 종가까지만 엄격히 참조하는 시점 검증기가 요구됩니다.
-3. **가상머신/컨테이너 클럭 드리프트**: WSL2나 클라우드 VPS는 호스트 절전 및 하이퍼바이저 타임슬라이싱으로 시스템 시계가 실제보다 +1000ms 이상 틀어질 수 있습니다. 고빈도 틱 데이터의 시계열 역전을 방지하기 위한 외부 타임서버(NTP) 오프셋 검증이 필요합니다.
-4. **저사양 VPS 디스크 고갈과 데이터 영구 유실 딜레마**: 원시 틱 스트림은 빠르게 디스크를 점유하지만, 단순 기간 경과로 삭제하면 정규화나 백업 실패 시 원본이 영구 소실됩니다. 정규화 및 원격 바이트 크기 일치가 입증된 파일만 안전하게 순환 삭제하는 보증 구조가 필요합니다.
-5. **실전 알고리즘 트레이딩의 주문 누출 위험**: 개발/검증 단계에서 실수로 거래소에 시장가 실주문이 전송되는 금융 사고를 방지하기 위해, 동일한 OMS 인터페이스 위에서 실전 전송기(`LiveGateway`)와 완벽히 격리된 실계좌 섀도 모의체결(`PaperGateway`)이 요구됩니다.
+| 핵심 난제 (Challenge) | 일반적 접근법의 한계 | krx-alpha 엔지니어링 솔루션 |
+| :--- | :--- | :--- |
+| **리테일 API 웹소켓 한도** | 국내 전종목(2,500+) 동시 수집은 증권사 웹소켓 세션 한도(LS 200쌍, KIS 41쌍)상 불가능 | **장전 2단계 유니버스 선별**: 08:20 일봉 기반 4대 모멘텀 + 50억 유동성 필터로 최대 90종목 압축, 단일 연결 100% 수용 |
+| **Look-Ahead Bias 시점 오염** | 유니버스 선정 시 당일/미래 데이터가 혼입되어 백테스트 수익률 왜곡 | **엄격한 시점 분리 가드**: $T-1$ 거래일 종가까지만 참조하고 미래 일봉 유입 시 즉시 중단되는 `assert_pit` Fail-Closed 검증 |
+| **클라우드 VPS 클럭 드리프트** | 호스트 절전 및 하이퍼바이저 타임슬라이싱으로 시스템 시계가 +1000ms 이상 왜곡 | **NTP 실측 클럭 게이트**: 부트스트랩 시 `kr.pool.ntp.org` 5회 샘플 중간값 측정, 오프셋 2초 초과 시 세션 시작 거부 |
+| **디스크 고갈 & 영구 유실 딜레마** | 단순 기간 경과 삭제 시 정규화/백업 실패 시 원본 영구 소실 | **3계층 스토리지 & Offload-before-Delete**: L0 저널 보존 $\to$ EOD 정규화 $\to$ Google Drive 바이트 일치 검증 후 로컬 순환 삭제 |
+| **실전 주문 누출 위험** | 모의와 실전 코드가 분리될 경우 프로덕션 전환 시 구현 불일치 및 오주문 발생 | **단일 OMS 위 Dual Gateway**: 동일 리스크 게이트 하에 Paper(10단계 호가 모의체결)와 Live(환경변수 무장 검증) 엄격 분기 |
 
 ---
 
@@ -82,17 +84,17 @@ flowchart TD
 
 ## 5. End-to-End Flow
 
-| 단계 | 실행 시각 (KST) | 처리 내용 | 주요 모듈 및 파일 경로 |
-| :--- | :--- | :--- | :--- |
-| **1. 영업일 검증** | 08:20:00 | 토스 마켓 캘린더 조회로 휴장일 여부 선제 판정 | [`src/marketdata/toss_calendar.py`](file:///home/kth/krx-alpha/src/marketdata/toss_calendar.py) |
-| **2. 일봉 데이터 갱신** | 08:20:05 | KRX 공식 API로 일봉 수집 (장애 시 KIS REST 일봉 1회 폴백) | [`src/marketdata/krx_bars.py`](file:///home/kth/krx-alpha/src/marketdata/krx_bars.py), [`src/marketdata/service.py`](file:///home/kth/krx-alpha/src/marketdata/service.py) |
-| **3. 유니버스 선정** | 08:21:00 | 롤링 피처 계산, 4대 모멘텀 조건 + 50억 유동성 필터, 원자적 IPC 기록 | [`src/universe/policy.py`](file:///home/kth/krx-alpha/src/universe/policy.py), [`src/universe/ipc.py`](file:///home/kth/krx-alpha/src/universe/ipc.py) |
-| **4. 세션 부트스트랩** | 08:50:00 | NTP 타임서버 오프셋 검증, 세션 매니페스트 초기화, 디스크 워터마크(3GB) 확인 | [`src/realtime/clock.py`](file:///home/kth/krx-alpha/src/realtime/clock.py), [`src/realtime/session.py`](file:///home/kth/krx-alpha/src/realtime/session.py) |
-| **5. 실시간 스트리밍** | 08:50 ~ 15:40 | LS 웹소켓 수신, 180스트림 쌍 구독, 시간대별 zstd 압축 L0 저널 저장 | [`src/realtime/adapters/ls.py`](file:///home/kth/krx-alpha/src/realtime/adapters/ls.py), [`src/realtime/streamer.py`](file:///home/kth/krx-alpha/src/realtime/streamer.py) |
-| **6. 스트리머 정상종료** | 15:40:00 | 데몬 감독기가 스트리머에 SIGTERM 전송 (15초 타임아웃 초과 시 SIGKILL) | [`src/orchestration/supervisor.py`](file:///home/kth/krx-alpha/src/orchestration/supervisor.py) |
-| **7. L1 정규화 & DQ** | 15:40:30 | L0 역압축, `(conn_id, conn_seq)` 충돌 검증, 틱 보존법칙/호가 단조성 검증, L1 Parquet 생성 | [`src/storage/quality.py`](file:///home/kth/krx-alpha/src/storage/quality.py), [`src/storage/retention.py`](file:///home/kth/krx-alpha/src/storage/retention.py) |
-| **8. 원격 백업 & 순환** | 15:45:00 | Google Drive(rclone) 업로드, 원격 크기 확인 후 로컬 L0(3일)/L1(30일) prune | [`src/storage/remote.py`](file:///home/kth/krx-alpha/src/storage/remote.py), [`src/orchestration/eod.py`](file:///home/kth/krx-alpha/src/orchestration/eod.py) |
-| **9. 주문집행 (독립)** | 필요 시 수시 | 사전 리스크 검증 통과 후 Paper 10단계 호가 모의체결 또는 Live KIS 발송 | [`src/execution/risk.py`](file:///home/kth/krx-alpha/src/execution/risk.py), [`src/execution/gateways.py`](file:///home/kth/krx-alpha/src/execution/gateways.py), [`src/execution/oms.py`](file:///home/kth/krx-alpha/src/execution/oms.py) |
+| 단계 | 실행 시각 (KST) | 처리 내용 | 무결성 제약 및 안전장치 |
+| :--- | :---: | :--- | :--- |
+| **1. 영업일 검증** | `08:20:00` | 토스 마켓 캘린더 조회로 휴장일 여부 선제 판정 | 휴장일 판정 시 당일 오케스트레이션 안전 대기 |
+| **2. 일봉 데이터 갱신** | `08:20:05` | KRX 공식 API 일봉 수집 (장애 시 KIS REST 1회 폴백) | 직전일 대비 90% 미만 행수 절단 시 Fail-Closed 거부 |
+| **3. 유니버스 선정** | `08:21:00` | 롤링 피처 계산, 4대 모멘텀 + 50억 유동성 필터 적용 | 최대 90종목 슬롯 예산 강제, 원자적 IPC (`candidates.json`) |
+| **4. 세션 부트스트랩** | `08:50:00` | NTP 타임서버 오프셋 검증, 세션 매니페스트 초기화 | 클럭 드리프트 2.0초 초과 시 거부, 잔여 디스크 3GB 확인 |
+| **5. 실시간 스트리밍** | `08:50 ~ 15:40` | LS 웹소켓 수신, 180스트림 쌍 구독, 시간대별 zstd 압축 | 비동기 이벤트 루프 무블로킹, L0 저널 append-only 기록 |
+| **6. 스트리머 정상종료** | `15:40:00` | 데몬 감독기가 스트리머에 SIGTERM 전송 및 버퍼 플러시 | 15초 타임아웃 초과 시 SIGKILL 강제 종료 |
+| **7. L1 정규화 & DQ** | `15:40:30` | L0 역압축, 틱 보존법칙/호가 단조성 검증, L1 Parquet 생성 | 검증 실패 파티션은 `quarantine/` 비파괴 격리 |
+| **8. 원격 백업 & 순환** | `15:45:00` | Google Drive(rclone) 업로드 및 원격 바이트 대조 | 원격 크기 100% 일치 확인 시에만 로컬 L0/L1 순환 삭제 |
+| **9. 주문집행 (독립)** | 필요 시 수시 | 사전 리스크 검증 통과 후 Paper 호가 스윕 또는 Live 발송 | Live 플래그 누락 시 차단, 킬스위치 및 호가단위 래더 검증 |
 
 ---
 
@@ -120,7 +122,17 @@ tests/
 
 ---
 
-## 7. Technical Decisions
+## 7. Technical Decisions (ADR Summary)
+
+| ADR | 주제 | 채택된 솔루션 | 기각된 대안 | 엔지니어링 근거 및 트레이드오프 |
+| :--- | :--- | :--- | :--- | :--- |
+| **ADR-01** | **유니버스 수집 정책** | **장전 08:20 일봉 기반 최대 90종목 선별** 후 실시간 WS 수집 | 전종목(2,500+) 상시 수집, 상한가 단독 수집 | 브로커 단일 연결(LS 200쌍) 내 100% 수용 및 트래픽 안정화. 장중 급등주는 제외 |
+| **ADR-02** | **스토리지 무결성** | **3계층 스토리지 & Offload-before-Delete** | 실시간 즉시 Parquet 압축, 단순 기간 경과 삭제 | 장중 이벤트 루프 블로킹 0% 보장. 원격 바이트 일치 확인 전까지 로컬 원본 영구 보존 |
+| **ADR-03** | **시계열 클럭 동기화** | **NTP 실측 기반 Fail-Closed 클럭 게이트** | 로컬 시스템 시계 의존, 비차단 경고 로그 | 가상머신 클럭 드리프트(+1000ms)로 인한 틱 역전 방어. 2초 초과 시 부트스트랩 거부 |
+| **ADR-04** | **주문집행 안전 분기** | **단일 OMS 위 Dual Gateway (Paper vs Armed Live)** | 모의/실전 코드 분리, 실전 플래그 미검증 전송 | 프로덕션 전환 시 구현 불일치 및 오주문 원천 차단. Live 플래그 누락 시 인스턴스화 거부 |
+| **ADR-05** | **아키텍처 불변식** | **정적 AST 분석 기반 pytest 불변식 강제** | 수동 코드 리뷰, 런타임 경로 검증 | 계층 순환 0건, 상위 역참조 0건, 설정 파일 외부 경로 리터럴 0건을 CI에서 기계적 강제 |
+
+---
 
 ### Decision 1: 장전 일봉 기반 유니버스 선별 (최대 90종목)
 * **Why**: 국내 주식 전종목 동시 틱 수집은 리테일 브로커 웹소켓 용량(LS: 200쌍) 한도상 불가능합니다. 당일 단타 대상이 될 유력 종목군(상한가·급등·거래대금급증·신고가 + 50억 필터)을 선별해 브로커 단일 연결에 100% 수용합니다.
