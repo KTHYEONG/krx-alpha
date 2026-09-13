@@ -540,3 +540,47 @@ def test_prune_old_journals_keeps_partition_when_quarantine_destination_exists(t
     assert part.exists()
     assert (existing / '09.jsonl.zst').read_bytes() == b'old'
     assert 'quarantine_exists' in caplog.text
+
+
+def test_normalize_l0_partition_uses_chunked_tick_quality_without_output_change(tmp_path, monkeypatch) -> None:
+    import json
+
+    import polars as pl
+    import zstandard as zstd
+    import src.storage.retention as retention_mod
+    from src.storage.quality import decode_and_flag_ticks as real_decode
+
+    part = tmp_path / "l0" / "kis" / "H0STCNT0" / "dt=2026-09-01"
+    part.mkdir(parents=True)
+    records = []
+    for seq, wall in ((1, 300), (2, 100), (3, 200)):
+        body = {
+            "shcode": "005930", "price": "70000", "cvolume": "10",
+            "volume": str(seq * 100), "change": "0", "sign": "3",
+            "drate": "0.00", "mdchecnt": str(seq), "mschecnt": "0",
+        }
+        records.append({
+            "raw": json.dumps({"header": {"tr_cd": "S3_", "tr_key": "005930"}, "body": body}),
+            "recv_mono_ns": wall + 1, "recv_wall_ns": wall, "conn_id": "c1",
+            "conn_seq": seq, "vendor": "kis", "tr_id": "H0STCNT0",
+        })
+    payload = ("\n".join(json.dumps(row) for row in records) + "\n").encode()
+    (part / "09.jsonl.zst").write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    out = tmp_path / "l1" / "kis" / "H0STCNT0" / "dt=2026-09-01.parquet"
+    calls = []
+
+    def observed(frame):
+        calls.append(frame.height)
+        return real_decode(frame)
+
+    monkeypatch.setattr(retention_mod, "decode_and_flag_ticks", observed)
+
+    row_count = retention_mod.normalize_l0_partition(part, out)
+
+    persisted = pl.read_parquet(out)
+    assert calls == [3]
+    assert row_count == 3
+    assert persisted["recv_wall_ns"].to_list() == [100, 200, 300]
+    expected_raw_by_wall = {row["recv_wall_ns"]: row["raw"] for row in records}
+    assert persisted["raw"].to_list() == [expected_raw_by_wall[100], expected_raw_by_wall[200], expected_raw_by_wall[300]]
+    assert not (out.parent / (out.name + ".tmp")).exists()

@@ -593,3 +593,102 @@ def test_decode_and_flag_quotes_fallback_batch_survives_non_numeric_body_field()
     assert summary is not None
     assert summary.rows == 2
     assert summary.decode_fail == 2
+
+
+def test_decode_and_flag_ticks_chunk_sizes_are_exact_across_state_boundaries() -> None:
+    import json
+
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_ticks
+
+    def tick(symbol, wall, volume, cvolume, mdchecnt, mschecnt, *, price=70000, change=0, sign="3", drate="0.00"):
+        body = {
+            "shcode": symbol, "price": str(price), "cvolume": str(cvolume),
+            "volume": str(volume), "change": str(change), "sign": sign,
+            "drate": drate, "mdchecnt": str(mdchecnt), "mschecnt": str(mschecnt),
+        }
+        return {
+            "raw": json.dumps({"header": {"tr_cd": "S3_", "tr_key": symbol}, "body": body}),
+            "tr_id": "H0STCNT0", "recv_wall_ns": wall,
+        }
+
+    rows = [
+        tick("005930", 100, 500, 10, 100, 50),
+        tick("000660", 90, 1000, 20, 200, 40),
+        tick("005930", 200, 520, 10, 101, 50),
+        {"raw": "not-json", "tr_id": "H0STCNT0", "recv_wall_ns": 250},
+        tick("000660", 300, 900, 20, 201, 40),
+        tick("005930", 400, 540, 10, 103, 51),
+    ]
+    frame = pl.DataFrame(rows)
+
+    whole = decode_and_flag_ticks(frame, chunk_rows=frame.height)
+    by_two = decode_and_flag_ticks(frame, chunk_rows=2)
+    by_one = decode_and_flag_ticks(frame, chunk_rows=1)
+
+    assert whole is not None
+    assert whole == by_two == by_one
+    assert whole.rows == 6
+    assert whole.decode_fail == 1
+    assert whole.cum_volume_regression == 1
+    assert whole.tick_loss == 1
+    assert whole.lost_volume == 10
+
+
+def test_decode_and_flag_ticks_never_decodes_more_than_chunk_rows(monkeypatch) -> None:
+    import json
+
+    import polars as pl
+    import src.storage.quality as quality_mod
+
+    rows = []
+    for index in range(5):
+        body = {
+            "shcode": "005930", "price": "70000", "cvolume": "10",
+            "volume": str(100 + index * 10), "change": "0", "sign": "3",
+            "drate": "0.00", "mdchecnt": str(100 + index), "mschecnt": "50",
+        }
+        rows.append({
+            "raw": json.dumps({"header": {"tr_cd": "S3_", "tr_key": "005930"}, "body": body}),
+            "tr_id": "H0STCNT0", "recv_wall_ns": 100 + index,
+        })
+    frame = pl.DataFrame(rows)
+    observed_heights = []
+    original = quality_mod._decode_tick_chunk
+
+    def observed(chunk):
+        observed_heights.append(chunk.height)
+        return original(chunk)
+
+    monkeypatch.setattr(quality_mod, "_decode_tick_chunk", observed)
+
+    summary = quality_mod.decode_and_flag_ticks(frame, chunk_rows=2)
+
+    assert summary is not None
+    assert summary.rows == 5
+    assert observed_heights == [2, 2, 1]
+    assert max(observed_heights) <= 2
+
+
+def test_decode_and_flag_ticks_rejects_non_positive_chunk_rows() -> None:
+    import json
+
+    import polars as pl
+    import pytest
+
+    from src.storage.quality import decode_and_flag_ticks
+
+    body = {
+        "shcode": "005930", "price": "70000", "cvolume": "10",
+        "volume": "100", "change": "0", "sign": "3",
+        "drate": "0.00", "mdchecnt": "1", "mschecnt": "1",
+    }
+    frame = pl.DataFrame({
+        "raw": [json.dumps({"header": {"tr_cd": "S3_", "tr_key": "005930"}, "body": body})],
+        "tr_id": ["H0STCNT0"], "recv_wall_ns": [100],
+    })
+
+    for chunk_rows in (0, -1):
+        with pytest.raises(ValueError, match="chunk_rows"):
+            decode_and_flag_ticks(frame, chunk_rows=chunk_rows)
