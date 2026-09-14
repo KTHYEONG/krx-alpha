@@ -207,6 +207,7 @@
   },
   "src/orchestration/eod.py": {
     "deps": [
+      "src/storage/normalize_worker.py",
       "src/storage/remote.py",
       "src/storage/retention.py"
     ],
@@ -279,6 +280,12 @@
     ],
     "layer": 2,
     "testing": "tests/unit/storage/test_journal.py"
+  },
+  "src/storage/normalize_worker.py": {
+    "deps": [
+      "src/storage/retention.py"
+    ],
+    "testing": "tests/unit/storage/test_normalize_worker.py"
   },
   "src/storage/quality.py": {
     "layer": 2,
