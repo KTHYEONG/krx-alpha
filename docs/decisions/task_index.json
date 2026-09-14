@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "eod_bounded_normalize",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_eod_bounded_normalize",
+      "domain": "storage",
+      "title": "EOD L0→L1 정규화 메모리 상한 및 자식 프로세스 격리",
+      "why": "500MB 컨테이너에서 EOD 정규화가 하루치를 통째 메모리에 올려 daemon이 OOM SIGKILL로 크래시 루프에 빠짐(9/14 재시작 116회)",
+      "resolution": "배치 spill+키 전용 numpy dedup/sort+bounded gather로 피크를 파티션 크기와 무관하게 묶고, 정규화를 파티션별 자식 프로세스로 격리해 OOM이 daemon을 죽이지 못하게 함",
+      "impact": "500MB cgroup에서 실측 통과(anon peak ~400MB), 컨테이너 한도 1GB로 조정, EOD는 거래일당 1회 시도하며 정리 실패해도 오프로드/정합성 검사는 계속됨"
+    },
+    {
       "task_id": "tick_decode_memory_bound",
       "date": "2026-09-13",
       "adr_id": "ADR_20260913_tick_decode_memory_bound",
