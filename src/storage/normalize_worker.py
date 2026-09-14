@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
-import os
 import pathlib
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
 
+from src.core.config import CollectorSettings, ObservabilitySettings, child_process_env
+from src.core.observability import configure_logging
 from src.storage.retention import L1NormalizationError, L1WorkerCrashError, normalize_l0_partition
 
 EXIT_DATA_FAULT: int = 3
@@ -43,7 +43,7 @@ def run_isolated_normalize(
     if work_root is not None:
         cmd += ["--work-root", str(work_root)]
     # jemalloc dirty-page를 즉시 반환해야 500MB cgroup에서 살아남는다
-    env = {**os.environ, "_RJEM_MALLOC_CONF": CHILD_MALLOC_CONF}
+    env = child_process_env({"_RJEM_MALLOC_CONF": CHILD_MALLOC_CONF})
     run = runner if runner is not None else subprocess.run
     # 자식 [DATA] 로그는 컨테이너 로그로 흘려보내야 하므로 stderr를 계승한다
     result = run(cmd, stdout=subprocess.PIPE, text=True, check=False, env=env)
@@ -71,7 +71,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--work-root", default=None)
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", stream=sys.stderr)
+    configure_logging(
+        "normalize-worker",
+        log_dir=CollectorSettings().paths.logs_dir if ObservabilitySettings().persistent_logs else None,
+    )
     try:
         rows = normalize_l0_partition(
             pathlib.Path(args.part),

@@ -191,3 +191,87 @@ def test_data_paths_expose_work_root_outside_journal_and_archive_roots() -> None
     assert not settings.paths.work_root.is_relative_to(settings.paths.archive_root)
     assert not settings.paths.work_root.is_relative_to(settings.paths.journal_root)
 
+
+
+def test_data_paths_expose_logs_dir() -> None:
+    import pathlib
+
+    from src.core.config import CollectorSettings
+
+    assert CollectorSettings(data_root=pathlib.Path("var/krx")).paths.logs_dir == pathlib.Path("var/krx/logs")
+
+
+def test_observability_settings_defaults_and_env_override(monkeypatch) -> None:
+    from src.core.config import ObservabilitySettings
+
+    monkeypatch.delenv("KRX_ALPHA_PERSISTENT_LOGS", raising=False)
+    monkeypatch.delenv("KRX_ALPHA_RUN_ID", raising=False)
+    defaults = ObservabilitySettings()
+    assert defaults.persistent_logs is False
+    assert defaults.run_id == ""
+
+    monkeypatch.setenv("KRX_ALPHA_PERSISTENT_LOGS", "true")
+    monkeypatch.setenv("KRX_ALPHA_RUN_ID", "daemon-1")
+    loaded = ObservabilitySettings()
+    assert loaded.persistent_logs is True
+    assert loaded.run_id == "daemon-1"
+
+
+def test_alert_settings_enabled_only_when_all_gmail_fields_present(monkeypatch) -> None:
+    from src.core.config import AlertSettings
+
+    for name in ("ALERT_GMAIL_USER", "ALERT_GMAIL_APP_PASSWORD", "ALERT_GMAIL_TO"):
+        monkeypatch.delenv(name, raising=False)
+    assert AlertSettings().enabled is False
+
+    monkeypatch.setenv("ALERT_GMAIL_USER", "u@x")
+    monkeypatch.setenv("ALERT_GMAIL_APP_PASSWORD", "pw")
+    assert AlertSettings().enabled is False
+
+    monkeypatch.setenv("ALERT_GMAIL_TO", "t@x")
+    settings = AlertSettings()
+    assert settings.enabled is True
+    assert settings.alert_gmail_user == "u@x"
+
+
+def test_child_process_env_overrides_inherited_environment(monkeypatch) -> None:
+    from src.core.config import child_process_env
+
+    monkeypatch.setenv("KRX_PROBE_INHERITED", "1")
+    monkeypatch.setenv("KRX_PROBE_OVERRIDDEN", "old")
+
+    env = child_process_env({"KRX_PROBE_OVERRIDDEN": "new", "_RJEM_MALLOC_CONF": "dirty_decay_ms:0"})
+
+    assert env["KRX_PROBE_INHERITED"] == "1"
+    assert env["KRX_PROBE_OVERRIDDEN"] == "new"
+    assert env["_RJEM_MALLOC_CONF"] == "dirty_decay_ms:0"
+
+
+def test_export_run_id_is_visible_to_observability_settings(monkeypatch) -> None:
+    from src.core.config import RUN_ID_ENV, ObservabilitySettings, export_run_id
+
+    monkeypatch.delenv(RUN_ID_ENV, raising=False)
+
+    export_run_id("daemon-42")
+
+    assert RUN_ID_ENV == "KRX_ALPHA_RUN_ID"
+    assert ObservabilitySettings().run_id == "daemon-42"
+
+
+def test_collector_settings_expose_fallback_policy_and_calendar_cache() -> None:
+    import pathlib
+
+    from src.core.config import CollectorSettings
+
+    settings = CollectorSettings(data_root=pathlib.Path("var/krx"))
+
+    assert settings.paths.calendar_cache == pathlib.Path("var/krx/calendar_cache.json")
+    assert settings.orchestration_retry_s == 300.0
+    assert settings.degraded_candidates_max_age_days == 7
+    assert settings.stale_bars_max_calendar_days == 4
+
+
+def test_collector_settings_ntp_fallback_hosts_default() -> None:
+    from src.core.config import CollectorSettings
+
+    assert CollectorSettings().ntp_fallback_hosts == ("time.google.com", "time.cloudflare.com")

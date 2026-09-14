@@ -24,3 +24,11 @@ def _pin_tmp_root() -> None:
 @pytest.fixture(scope="session")
 def tmp_path_factory_root() -> Path:
     return PROJECT_TMP
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_managed_logging():
+    yield
+    from src.core.observability import shutdown_logging
+
+    shutdown_logging()

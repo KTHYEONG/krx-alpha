@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
+import os
+import pathlib
 from dataclasses import dataclass
 from typing import Any
 
 import requests
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_attempt
 
 from src.core.errors import KrxAlphaError
+from src.marketdata.krx_bars import retry_wait_seconds
 
 TOSS_TOKEN_URL: str = "https://openapi.tossinvest.com/oauth2/token"  # noqa: S105 - public endpoint, not a secret
 TOSS_CALENDAR_URL: str = "https://openapi.tossinvest.com/api/v1/market-calendar/KR"
@@ -29,7 +33,7 @@ class TradingDay:
 
 @retry(
     stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=0.01, max=0.1),
+    wait=retry_wait_seconds,
     retry=retry_if_exception_type(requests.RequestException),
     reraise=True,
 )
@@ -91,3 +95,45 @@ def fetch_trading_day(ref_date: dt.date, *, app_key: str, app_secret: str, sessi
         previous_business_day=previous_business_day,
         next_business_day=next_business_day,
     )
+
+def save_trading_day_cache(path: pathlib.Path, day: TradingDay) -> None:
+    target = pathlib.Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "date": day.date.isoformat(),
+        "is_business_day": day.is_business_day,
+        "previous_business_day": day.previous_business_day.isoformat(),
+        "next_business_day": day.next_business_day.isoformat(),
+    }
+    tmp = target.parent / f".{target.name}.tmp"
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, target)
+
+
+def load_trading_day_cache(path: pathlib.Path) -> TradingDay | None:
+    try:
+        raw = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        return TradingDay(
+            date=dt.date.fromisoformat(str(raw["date"])),
+            is_business_day=bool(raw["is_business_day"]),
+            previous_business_day=dt.date.fromisoformat(str(raw["previous_business_day"])),
+            next_business_day=dt.date.fromisoformat(str(raw["next_business_day"])),
+        )
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def trading_day_from_cache(cached: TradingDay, today: dt.date) -> TradingDay | None:
+    if today == cached.date:
+        return cached
+    last_business = cached.date if cached.is_business_day else cached.previous_business_day
+    if today == cached.next_business_day:
+        return TradingDay(date=today, is_business_day=True, previous_business_day=last_business, next_business_day=today)
+    if cached.date < today < cached.next_business_day:
+        return TradingDay(
+            date=today,
+            is_business_day=False,
+            previous_business_day=last_business,
+            next_business_day=cached.next_business_day,
+        )
+    return None

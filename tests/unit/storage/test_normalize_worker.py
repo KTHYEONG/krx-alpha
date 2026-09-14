@@ -162,3 +162,26 @@ def test_run_isolated_normalize_executes_real_child_process(tmp_path) -> None:
     assert rows == 2
     assert pl.read_parquet(out)['raw'].to_list() == ['b', 'a']
 
+
+
+def test_normalize_worker_main_configures_logging_component(tmp_path, monkeypatch) -> None:
+    import json
+
+    import zstandard as zstd
+
+    import src.storage.normalize_worker as worker_mod
+    from src.core.config import CollectorSettings
+
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(worker_mod, "configure_logging", lambda component, *, log_dir=None: calls.append((component, log_dir)) or "r")
+    part = tmp_path / "l0" / "ls" / "H0STCNT0" / "dt=2026-09-01"
+    part.mkdir(parents=True)
+    rec = {"raw": "a", "recv_mono_ns": 1, "recv_wall_ns": 2, "conn_id": "ls-1", "conn_seq": 1, "vendor": "ls", "tr_id": "H0STCNT0"}
+    (part / "09.jsonl.zst").write_bytes(zstd.ZstdCompressor(level=3).compress((json.dumps(rec) + "\n").encode("utf-8")))
+
+    monkeypatch.delenv("KRX_ALPHA_PERSISTENT_LOGS", raising=False)
+    assert worker_mod.main(["--part", str(part), "--out", str(tmp_path / "o1.parquet")]) == 0
+    monkeypatch.setenv("KRX_ALPHA_PERSISTENT_LOGS", "true")
+    assert worker_mod.main(["--part", str(part), "--out", str(tmp_path / "o2.parquet")]) == 0
+
+    assert calls == [("normalize-worker", None), ("normalize-worker", CollectorSettings().paths.logs_dir)]

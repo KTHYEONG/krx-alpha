@@ -88,3 +88,16 @@ def test_environment_access_confined_to_core_config() -> None:
 
     # Then: 자격증명/환경 접근은 단일 진입점만 갖는다
     assert offenders == []
+
+
+def test_normalize_worker_is_registered_and_env_access_goes_through_config() -> None:
+    import pathlib
+
+    from tests.architecture.layers import LAYER_RANK
+
+    assert LAYER_RANK["src/storage/normalize_worker.py"] == 3
+    assert LAYER_RANK["src/core/observability.py"] == 0
+    for module in ("src/storage/normalize_worker.py", "src/core/observability.py"):
+        text = pathlib.Path(module).read_text(encoding="utf-8")
+        assert "os.environ" not in text
+        assert "os.getenv" not in text

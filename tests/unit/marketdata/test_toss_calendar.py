@@ -182,3 +182,35 @@ def test_issue_access_token_raises_when_access_token_missing() -> None:
     assert "super-secret" not in str(excinfo.value)
 
 
+
+
+def test_trading_day_cache_roundtrip_and_unreadable_cache(tmp_path) -> None:
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import TradingDay, load_trading_day_cache, save_trading_day_cache
+
+    path = tmp_path / "data" / "calendar_cache.json"
+    day = TradingDay(date=dt.date(2026, 9, 11), is_business_day=True, previous_business_day=dt.date(2026, 9, 10), next_business_day=dt.date(2026, 9, 14))
+
+    assert load_trading_day_cache(path) is None
+    save_trading_day_cache(path, day)
+    assert load_trading_day_cache(path) == day
+    assert list(path.parent.glob("*.tmp")) == []
+    path.write_text("{not json", encoding="utf-8")
+    assert load_trading_day_cache(path) is None
+
+
+def test_trading_day_from_cache_derives_only_decidable_days() -> None:
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import TradingDay, trading_day_from_cache
+
+    friday = TradingDay(date=dt.date(2026, 9, 11), is_business_day=True, previous_business_day=dt.date(2026, 9, 10), next_business_day=dt.date(2026, 9, 15))
+    holiday = TradingDay(date=dt.date(2026, 9, 14), is_business_day=False, previous_business_day=dt.date(2026, 9, 11), next_business_day=dt.date(2026, 9, 15))
+
+    assert trading_day_from_cache(friday, dt.date(2026, 9, 11)) == friday
+    assert trading_day_from_cache(friday, dt.date(2026, 9, 15)) == TradingDay(date=dt.date(2026, 9, 15), is_business_day=True, previous_business_day=dt.date(2026, 9, 11), next_business_day=dt.date(2026, 9, 15))
+    assert trading_day_from_cache(holiday, dt.date(2026, 9, 15)).previous_business_day == dt.date(2026, 9, 11)
+    assert trading_day_from_cache(friday, dt.date(2026, 9, 14)) == TradingDay(date=dt.date(2026, 9, 14), is_business_day=False, previous_business_day=dt.date(2026, 9, 11), next_business_day=dt.date(2026, 9, 15))
+    assert trading_day_from_cache(friday, dt.date(2026, 9, 16)) is None
+    assert trading_day_from_cache(friday, dt.date(2026, 9, 10)) is None

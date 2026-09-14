@@ -375,3 +375,139 @@ def test_ls_adapter_assigns_unique_conn_id_per_connect() -> None:
     assert frame1.conn_id != frame2.conn_id
     assert frame1.conn_id.startswith('ls-')
     assert frame2.conn_id.startswith('ls-')
+
+
+def test_ls_adapter_connect_enables_ws_heartbeat() -> None:
+    import asyncio
+
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+
+    class _Resp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self):
+            return {"access_token": "TOK"}
+
+    class _WSCtx:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Http:
+        def __init__(self):
+            self.ws_kwargs = []
+
+        def post(self, url, **kw):
+            return _Resp()
+
+        def ws_connect(self, url, **kw):
+            self.ws_kwargs.append(kw)
+            return _WSCtx()
+
+    default_http, custom_http = _Http(), _Http()
+    asyncio.run(LsRealtimeAdapter(app_key="k", app_secret="s", http=default_http, market_of={}).connect())
+    asyncio.run(LsRealtimeAdapter(app_key="k", app_secret="s", http=custom_http, market_of={}, heartbeat_s=3.0).connect())
+
+    assert default_http.ws_kwargs == [{"heartbeat": 10.0}]
+    assert custom_http.ws_kwargs == [{"heartbeat": 3.0}]
+
+
+def test_ls_adapter_connect_maps_vendor_failures_to_vendor_disconnected() -> None:
+    import asyncio
+
+    import aiohttp
+    import pytest
+
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import VendorDisconnected
+
+    class _Resp:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self):
+            if isinstance(self.payload, BaseException):
+                raise self.payload
+            return self.payload
+
+    class _Http:
+        def __init__(self, outcome):
+            self.outcome = outcome
+
+        def post(self, url, **kw):
+            if isinstance(self.outcome, aiohttp.ClientError):
+                raise self.outcome
+            return _Resp(self.outcome)
+
+        def ws_connect(self, url, **kw):
+            raise AssertionError("ws must not open when the token step failed")
+
+    cases = [
+        (aiohttp.ClientConnectionError("dns"), "connect_failed:ClientConnectionError"),
+        (ValueError("Expecting value"), "connect_failed:ValueError"),
+        ({"error": "invalid_client"}, "connect_failed:KeyError"),
+    ]
+    for outcome, expected in cases:
+        adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(outcome), market_of={})
+        with pytest.raises(VendorDisconnected, match=expected):
+            asyncio.run(adapter.connect())
+
+
+def test_ls_adapter_subscribe_raises_vendor_disconnected_on_ack_timeout() -> None:
+    import asyncio
+
+    import pytest
+
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import VendorDisconnected
+
+    class _WS:
+        async def send_str(self, s):
+            self.last = s
+
+        async def receive_str(self):
+            await asyncio.sleep(5)
+            return "{}"
+
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=object(), market_of={"005930": "KOSPI"}, ack_timeout_s=0.05)
+    adapter._ws = _WS()  # type: ignore[attr-defined]
+    adapter._token = "TOK"  # type: ignore[attr-defined]
+
+    with pytest.raises(VendorDisconnected, match="ack_timeout:005930:H0STCNT0"):
+        asyncio.run(adapter.subscribe([("005930", "H0STCNT0")]))
+
+
+def test_ls_adapter_subscribe_raises_vendor_disconnected_on_non_text_frame() -> None:
+    import asyncio
+
+    import pytest
+    from aiohttp import WSMessageTypeError
+
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import VendorDisconnected
+
+    class _WS:
+        async def send_str(self, s):
+            self.last = s
+
+        async def receive_str(self):
+            raise WSMessageTypeError("Received message 257:None is not WSMsgType.TEXT")
+
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=object(), market_of={"005930": "KOSPI"})
+    adapter._ws = _WS()  # type: ignore[attr-defined]
+    adapter._token = "TOK"  # type: ignore[attr-defined]
+
+    with pytest.raises(VendorDisconnected, match="subscribe_non_text"):
+        asyncio.run(adapter.subscribe([("005930", "H0STCNT0")]))

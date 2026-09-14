@@ -21,6 +21,10 @@ class SessionManifest:
     started_at_ns: int
     subscription_acks: list[dict[str, object]] = field(default_factory=list)
     gaps: list[dict[str, object]] = field(default_factory=list)
+    candidates_rev: int | None = None
+    degraded_reason: str | None = None
+    clock_status: str = "measured"
+    boots: list[dict[str, object]] = field(default_factory=list)
 
     def record_ack(self, *, vendor: str, tr_id: str, symbol: str, rt_cd: str, accepted: bool) -> None:
         self.subscription_acks.append({"vendor": vendor, "tr_id": tr_id, "symbol": symbol, "rt_cd": rt_cd, "accepted": accepted})
@@ -43,21 +47,30 @@ class SessionManifest:
             "started_at_ns": self.started_at_ns,
             "subscription_acks": self.subscription_acks,
             "gaps": self.gaps,
+            "candidates_rev": self.candidates_rev,
+            "degraded_reason": self.degraded_reason,
+            "clock_status": self.clock_status,
+            "boots": self.boots,
         }
         tmp = target.parent / f".{target.name}.{os.getpid()}.tmp"
         if str(target.parent) not in ("", "."):
             target.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, target)
-        logger.info("[DATA] stage=manifest_save path=%s status=OK", str(target))
+        logger.debug("[DATA] stage=manifest_save path=%s status=OK", str(target))
 
     @classmethod
     def load(cls, path: pathlib.Path) -> SessionManifest:
         raw = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        rev_raw = raw.get("candidates_rev")
         return cls(
             session_date=dt.date.fromisoformat(str(raw["session_date"])),
             clock_offset_ns=int(raw["clock_offset_ns"]),
             started_at_ns=int(raw["started_at_ns"]),
             subscription_acks=list(raw.get("subscription_acks", [])),
             gaps=list(raw.get("gaps", [])),
+            candidates_rev=int(rev_raw) if rev_raw is not None else None,
+            degraded_reason=raw.get("degraded_reason"),
+            clock_status=str(raw.get("clock_status", "measured")),
+            boots=list(raw.get("boots", [])),
         )

@@ -10,6 +10,7 @@ services:
       - TZ=Asia/Seoul
       - POLARS_MAX_THREADS=2
       - OMP_NUM_THREADS=2
+      - KRX_ALPHA_PERSISTENT_LOGS=true
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

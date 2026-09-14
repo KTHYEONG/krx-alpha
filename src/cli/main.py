@@ -7,6 +7,9 @@ import logging
 import sys
 from collections.abc import Sequence
 
+from src.core.config import CollectorSettings, ObservabilitySettings
+from src.core.observability import configure_logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,7 +38,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI 실행 진입점."""
     parser = build_parser()
     args = parser.parse_args(argv)
-    logging.basicConfig(level=getattr(logging, str(args.log_level).upper(), logging.INFO))
+    configure_logging(
+        f"cli-{args.command}",
+        log_dir=CollectorSettings().paths.logs_dir if ObservabilitySettings().persistent_logs else None,
+        level=str(args.log_level).upper(),
+    )
     handler = getattr(args, "handler", None)
     if handler is None:
         parser.error(f"no handler bound for command: {args.command}")

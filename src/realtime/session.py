@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import os
 import pathlib
 import time
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 from src.core.calendar import SessionSchedule, SessionState, calc_sleep_seconds, get_target_state
-from src.realtime.clock import measure_ntp_offset_ns
+from src.realtime.clock import ClockUnsyncedError, measure_ntp_offset_ns
 from src.universe.ipc import read_candidates
 from src.storage.journal import L0JournalWriter
 from src.realtime.manifest import SessionManifest
@@ -34,6 +35,8 @@ class SessionConfig:
     vendor: str
     archive_root: pathlib.Path | None = None
     schedule: SessionSchedule = field(default_factory=SessionSchedule)
+    degraded_reason: str | None = None
+    ntp_fallback_hosts: tuple[str, ...] = ()
 
 
 @dataclass
@@ -92,10 +95,42 @@ class CollectorSession:
 
 
 def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, now_ns: int | None = None) -> CollectorSession:
-    offset_ns = measure_ntp_offset_ns(cfg.ntp_host, client=ntp_client)
+    offset_ns: int | None = None
+    for host in (cfg.ntp_host, *cfg.ntp_fallback_hosts):
+        try:
+            offset_ns = measure_ntp_offset_ns(host, client=ntp_client)
+            break
+        except ClockUnsyncedError:
+            logger.warning("[DATA] stage=ntp_probe status=FAIL host=%s", host)
+    clock_status = "measured" if offset_ns is not None else "unmeasured"
+    if offset_ns is None:
+        logger.critical(
+            "[DATA] stage=bootstrap status=DEGRADED reason=ntp_unmeasured hosts=%d",
+            1 + len(cfg.ntp_fallback_hosts),
+        )
     started = now_ns if now_ns is not None else time.time_ns()
-    manifest = SessionManifest(session_date=cfg.session_date, clock_offset_ns=offset_ns, started_at_ns=started)
-    manifest.assert_clock_within(max_offset_ns=cfg.max_clock_offset_ns)
+    manifest: SessionManifest | None = None
+    if cfg.manifest_path.exists():
+        try:
+            loaded = SessionManifest.load(cfg.manifest_path)
+        except (ValueError, KeyError, TypeError, OSError):
+            corrupt = cfg.manifest_path.with_name(cfg.manifest_path.name + ".corrupt")
+            os.replace(cfg.manifest_path, corrupt)
+            logger.warning(
+                "[DATA] stage=manifest_load status=CORRUPT action=fresh path=%s", str(cfg.manifest_path)
+            )
+            loaded = None
+        if loaded is not None and loaded.session_date == cfg.session_date:
+            manifest = loaded
+            manifest.clock_offset_ns = offset_ns or 0
+            manifest.clock_status = clock_status
+    if manifest is None:
+        manifest = SessionManifest(
+            session_date=cfg.session_date,
+            clock_offset_ns=offset_ns or 0,
+            started_at_ns=started,
+            clock_status=clock_status,
+        )
     stored = read_candidates(cfg.candidates_path)
     rows: list[dict[str, Any]] = cast(list[dict[str, Any]], stored["candidates"]) if stored is not None else []
     desired = {str(row["symbol"]): tuple(cfg.desired_streams) for row in rows}
@@ -107,11 +142,23 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
     session = CollectorSession(
         manifest=manifest, registry=registry, journals=journals, manifest_path=cfg.manifest_path, schedule=cfg.schedule
     )
+    if stored is not None and "rev" in stored:
+        manifest.candidates_rev = int(cast(Any, stored["rev"]))
+    manifest.degraded_reason = cfg.degraded_reason
+    manifest.boots.append(
+        {
+            "started_at_ns": started,
+            "clock_offset_ns": manifest.clock_offset_ns,
+            "clock_status": clock_status,
+        }
+    )
+    if clock_status == "measured":
+        manifest.assert_clock_within(max_offset_ns=cfg.max_clock_offset_ns)
     session.persist()
     logger.info(
         "[DATA] stage=bootstrap pairs=%d offset_ns=%d state=%s status=OK",
         len(session.replay_pairs()),
-        offset_ns,
+        manifest.clock_offset_ns,
         session.current_state(),
     )
     return session

@@ -40,6 +40,11 @@ class ProcessSupervisor:
         self._breaker = breaker
         self._popen = popen
         self._proc: Any = None
+        self._last_exit_code: int | None = None
+
+    @property
+    def last_exit_code(self) -> int | None:
+        return self._last_exit_code
 
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -48,6 +53,8 @@ class ProcessSupervisor:
         if self._proc is not None and self._proc.poll() is None:
             return "running"
         was_started_before = self._proc is not None
+        if was_started_before:
+            self._last_exit_code = self._proc.poll()
         if was_started_before and self._breaker is not None and not self._breaker.allow_restart():
             return "circuit_open"
         if was_started_before and self._breaker is not None:
