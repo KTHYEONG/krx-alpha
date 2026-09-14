@@ -35,6 +35,7 @@ Ultra-fast automated git execution protocol. Enforces atomic commits, bisect-saf
    - **Subject**: `<type>: <Korean summary <= 50 chars>` (Imperative, clear target)
    - **Body**: `- **Why:** <Specific business/technical reason ending with ~함.>`
    - **Prohibited Tautologies**: Avoid generic tautologies like "정합성을 확보함", "구조를 반영함", "회귀 방지 범위를 확보함". State **what problem was solved** or **what business requirement was met** (e.g., "동시호가 체결가 괴리율 완화 및 슬리피지 과소평가 보정을 위함.").
+   - **Prohibited AI Attribution (Zero Co-Author / Metadata)**: NEVER add `Co-Authored-By:`, `Co-authored-by:`, AI model/assistant names (e.g., Claude, GPT, Gemini), session links (`*-Session:`, URLs), or any automated co-author/attribution trailers. Keep commits strictly clean with only the subject and the rationale body.
 
 ## Output
 
