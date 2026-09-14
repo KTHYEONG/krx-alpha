@@ -90,13 +90,14 @@ def test_run_eod_maintenance_forwards_quarantine_root(tmp_path, monkeypatch) -> 
 
     import src.orchestration.eod as eod_mod
     from src.orchestration.eod import run_eod_maintenance
+    from src.storage.normalize_worker import run_isolated_normalize
 
     seen: dict[str, object] = {}
 
-    def _fake_prune(root, archive_root=None, *, retain_days=3, reference_date=None, quarantine_root=None):
+    def _fake_prune(root, archive_root=None, *, retain_days=3, reference_date=None, quarantine_root=None, normalizer=None):
         seen.update({
             'root': root, 'archive_root': archive_root, 'retain_days': retain_days,
-            'reference_date': reference_date, 'quarantine_root': quarantine_root,
+            'reference_date': reference_date, 'quarantine_root': quarantine_root, 'normalizer': normalizer,
         })
         return 7
 
@@ -109,12 +110,15 @@ def test_run_eod_maintenance_forwards_quarantine_root(tmp_path, monkeypatch) -> 
         today=dt.date(2026, 9, 30),
         archive_root=pathlib.Path(tmp_path) / 'l1',
         quarantine_root=pathlib.Path(tmp_path) / 'quarantine',
+        work_root=pathlib.Path(tmp_path) / 'work',
     )
 
-    # Then: 격리 경로가 보존 계층까지 전달된다
+    # Then: 격리 경로 + 자식 프로세스 정규화기가 보존 계층까지 전달된다
     assert deleted == 7
     assert seen['quarantine_root'] == pathlib.Path(tmp_path) / 'quarantine'
     assert seen['reference_date'] == dt.date(2026, 9, 30)
+    assert seen['normalizer'].func is run_isolated_normalize
+    assert seen['normalizer'].keywords == {'work_root': pathlib.Path(tmp_path) / 'work'}
 
 
 def test_run_eod_offload_uses_rclone_archiver_by_default(tmp_path, caplog, monkeypatch) -> None:
@@ -215,3 +219,37 @@ def test_check_session_reconciliation_true_when_manifest_present(tmp_path) -> No
     ok = check_session_reconciliation(bars_store=store, manifest_path=manifest_path, date=dt.date(2026, 9, 10))
 
     assert ok is True
+
+def test_run_eod_maintenance_retains_partition_when_isolated_worker_is_killed(tmp_path, monkeypatch, caplog) -> None:
+    # Given: 자식 정규화 프로세스가 cgroup OOM 으로 SIGKILL 되는 상황
+    import datetime as dt
+    import logging
+    import subprocess
+
+    from src.orchestration.eod import run_eod_maintenance
+
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True)
+    (part / '09.jsonl.zst').write_bytes(b'raw')
+    calls = []
+
+    def _killed(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, -9, stdout='', stderr=None)
+
+    monkeypatch.setattr(subprocess, 'run', _killed)
+
+    # When
+    with caplog.at_level(logging.CRITICAL):
+        deleted = run_eod_maintenance(
+            tmp_path / 'l0', retain_days=3, today=dt.date(2026, 9, 30),
+            archive_root=tmp_path / 'l1', quarantine_root=tmp_path / 'quarantine', work_root=tmp_path / 'work',
+        )
+
+    # Then: 부모는 살아서 기록하고 원본을 격리하지 않는다
+    assert deleted == 0
+    assert len(calls) == 1
+    assert (part / '09.jsonl.zst').read_bytes() == b'raw'
+    assert (tmp_path / 'quarantine').exists() is False
+    assert 'reason=worker_crash' in caplog.text
+

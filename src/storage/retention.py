@@ -9,18 +9,36 @@ import os
 import pathlib
 import re
 import shutil
+import tempfile
+from collections.abc import Callable, Iterator
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import polars as pl
+import pyarrow.parquet as pq
 import zstandard as zstd
 
 from src.core.errors import KrxAlphaError
-from src.storage.quality import QuoteQualitySummary, TickQualitySummary, decode_and_flag_quotes, decode_and_flag_ticks
+from src.storage.quality import (
+    QuoteQualitySummary,
+    TickQualitySummary,
+    decode_and_flag_quotes,
+    decode_tick_raw_fields,
+    sum_quote_summaries,
+    summarize_tick_fields_bucketed,
+)
 
 logger = logging.getLogger(__name__)
 
 _KST = ZoneInfo("Asia/Seoul")
 _DT_RE = re.compile(r"dt=(\d{4})-(\d{2})-(\d{2})")
+
+_L0_SCHEMA: dict[str, pl.DataType] = {'raw': pl.String, 'recv_mono_ns': pl.Int64, 'recv_wall_ns': pl.Int64, 'conn_id': pl.String, 'conn_seq': pl.Int64, 'vendor': pl.String, 'tr_id': pl.String}  # type: ignore[dict-item]
+_BATCH_BYTES: int = 32 * 2**20
+_GATHER_ROWS: int = 20_000
+_TICK_BUCKETS: int = 16
+_RAW_HASH_SEEDS: tuple[int, int] = (0x9E3779B1, 0x85EBCA77)
+_WORK_DIR_PREFIX: str = 'krx-l1-normalize-'
 
 
 class StorageExhaustedError(KrxAlphaError):
@@ -31,51 +49,200 @@ class L1NormalizationError(KrxAlphaError):
     """L1 정규화 실패 fail-closed 신호."""
 
 
+class L1WorkerCrashError(KrxAlphaError):
+    """정규화 워커 프로세스 비정상 종료(OOM SIGKILL 등) 신호 — 데이터 결함 아님, 격리 금지."""
+
+
 def check_disk_watermark(path: pathlib.Path, *, min_free_gb: float = 3.0) -> bool:
     usage = shutil.disk_usage(path)
     return usage.free >= min_free_gb * (1024**3)
 
 
-def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path) -> int:
+def _iter_line_batches(path: pathlib.Path, batch_bytes: int) -> Iterator[bytes]:
+    dctx = zstd.ZstdDecompressor()
+    carry = b""
+    with open(path, "rb") as fh, dctx.stream_reader(fh, read_across_frames=True) as reader:
+        while True:
+            buf = reader.read(batch_bytes)
+            if not buf:
+                break
+            buf = carry + buf
+            # 고정 크기 배치는 반드시 개행에서만 절단해야 JSON 행이 깨지지 않는다
+            cut = buf.rfind(b"\n")
+            if cut < 0:
+                carry = buf
+                continue
+            yield buf[: cut + 1]
+            carry = buf[cut + 1 :]
+    # json.dumps는 원시 개행을 배출하지 않으므로 EOF 잔여물은 온전한 한 행이다
+    if carry.strip():
+        yield carry
+
+
+def _dedup_sort_order(keys: pl.DataFrame) -> tuple[np.ndarray, int, np.ndarray, np.ndarray]:
+    conn = keys["conn_id"].rank("dense").to_numpy().astype(np.int64)
+    seq = keys["conn_seq"].to_numpy()
+    wall = keys["recv_wall_ns"].to_numpy()
+    h1 = keys["h1"].to_numpy()
+    h2 = keys["h2"].to_numpy()
+    # polars 다중키 group_by/unique는 키 대비 +280MB를 쓰므로 키 배열만으로 정렬한다
+    perm = np.lexsort((h2, h1, seq, conn))
+    c = conn[perm]
+    s = seq[perm]
+    a = h1[perm]
+    b = h2[perm]
+    new_key = np.empty(seq.size, dtype=bool)
+    new_key[0] = True
+    new_key[1:] = (c[1:] != c[:-1]) | (s[1:] != s[:-1])
+    new_raw = new_key.copy()
+    new_raw[1:] |= (a[1:] != a[:-1]) | (b[1:] != b[:-1])
+    key_starts = np.flatnonzero(new_key)
+    conflict = int((np.add.reduceat(new_raw.astype(np.int64), key_starts) > 1).sum())
+    # 같은 신원의 첫 행이 L0 읽기 순서상 최소 인덱스이므로 keep-first가 보존된다
+    keep = np.minimum.reduceat(perm, key_starts)
+    kept_for = keep[np.cumsum(new_key) - 1]
+    mask = perm != kept_for
+    dropped = perm[mask]
+    kept = kept_for[mask]
+    order = keep[np.lexsort((keep, wall[keep]))]
+    return (order.astype(np.int64), conflict, dropped.astype(np.int64), kept.astype(np.int64))
+
+
+class _SpillReader:
+    def __init__(self, paths: list[pathlib.Path], starts: list[int]) -> None:
+        self._paths = list(paths)
+        self._starts = np.asarray(list(starts), dtype=np.int64)
+        self._cache: tuple[int, pl.DataFrame] | None = None
+
+    def take(self, ids: np.ndarray) -> pl.DataFrame:
+        ids64 = np.asarray(ids, dtype=np.int64)
+        file_of = np.searchsorted(self._starts, ids64, side="right") - 1
+        parts: list[pl.DataFrame] = []
+        positions: list[np.ndarray] = []
+        for fi in np.unique(file_of):
+            idx = int(fi)
+            mask = file_of == fi
+            # gather 청크 하나만 메모리에 두기 위해 최근 spill 파일 하나만 캐시한다
+            if self._cache is None or self._cache[0] != idx:
+                self._cache = (idx, pl.read_parquet(self._paths[idx]))
+            frame = self._cache[1]
+            parts.append(frame[(ids64[mask] - self._starts[idx]).tolist()])
+            positions.append(np.flatnonzero(mask))
+        result = pl.concat(parts)
+        taken: pl.DataFrame = result[np.argsort(np.concatenate(positions), kind="stable").tolist()].select(list(_L0_SCHEMA))
+        return taken
+
+
+def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path, *, work_root: pathlib.Path | None = None) -> int:
+    """Normalize one L0 day-partition into a deduplicated, sorted L1 parquet file.
+
+    Args:
+        part_dir: L0 partition directory holding hourly .jsonl.zst files.
+        out_path: Destination L1 parquet path (written atomically via .tmp).
+        work_root: Spill directory root; a fresh temp dir when None.
+
+    Returns:
+        Number of L1 rows written.
+
+    Raises:
+        L1NormalizationError: For every data or IO fault (fail-closed, no output).
+    """
     part = pathlib.Path(part_dir)
     zst_files = sorted(part.glob("*.jsonl.zst"))
     if not zst_files:
         raise L1NormalizationError(f"no .zst files in {part}")
+    if work_root is None:
+        work_dir = pathlib.Path(tempfile.mkdtemp(prefix=_WORK_DIR_PREFIX))
+    else:
+        # spill이 archive 트리에 섞이면 L1로 오업로드되므로 work 루트에 격리한다
+        work_dir = pathlib.Path(work_root) / f"{part.parent.parent.name}.{part.parent.name}.{part.name}"
+        # SIGKILL이 남긴 spill 잔재는 다음 시도 전에 쓸어낸다
+        shutil.rmtree(work_dir, ignore_errors=True)
+        work_dir.mkdir(parents=True)
+    spill_dir = work_dir / "in"
+    tick_dir = work_dir / "tick"
+    spill_dir.mkdir(parents=True, exist_ok=True)
+    tick_dir.mkdir(parents=True, exist_ok=True)
     out = pathlib.Path(out_path)
     tmp_path = out.parent / (out.name + ".tmp")
+    writer: pq.ParquetWriter | None = None
+    succeeded = False
     try:
-        dctx = zstd.ZstdDecompressor()
-        chunks: list[bytes] = []
+        spill_paths: list[pathlib.Path] = []
+        starts: list[int] = []
+        key_frames: list[pl.DataFrame] = []
+        raw_records = 0
+        # 패스 1: 압축 해제 배치 하나씩 spill하고 키 배열만 누적한다
         for zf in zst_files:
-            with open(zf, "rb") as fh, dctx.stream_reader(fh, read_across_frames=True) as reader:
-                chunks.append(reader.read())
-        df = pl.read_ndjson(io.BytesIO(b"".join(chunks)))
-        df = df.with_columns([
-            pl.col("recv_mono_ns").cast(pl.Int64),
-            pl.col("recv_wall_ns").cast(pl.Int64),
-            pl.col("conn_seq").cast(pl.Int64),
-            pl.col("raw").cast(pl.String),
-            pl.col("conn_id").cast(pl.String),
-            pl.col("vendor").cast(pl.String),
-            pl.col("tr_id").cast(pl.String),
-        ])
-        raw_records = df.height
-        conn_seq_conflict = (
-            df.group_by(["conn_id", "conn_seq"])
-            .agg(pl.col("raw").n_unique().alias("nuniq"))
-            .filter(pl.col("nuniq") > 1)
-            .height
+            for blob in _iter_line_batches(zf, _BATCH_BYTES):
+                df = pl.read_ndjson(io.BytesIO(blob), schema=_L0_SCHEMA)
+                if df.height == 0:
+                    continue
+                if any(df[col].null_count() > 0 for col in _L0_SCHEMA):
+                    raise L1NormalizationError(f"null field in {zf}")
+                spill = spill_dir / f"{len(spill_paths):06d}.parquet"
+                df.write_parquet(spill, compression="lz4")
+                starts.append(raw_records)
+                spill_paths.append(spill)
+                key_frames.append(
+                    df.select(
+                        "conn_id",
+                        "conn_seq",
+                        "recv_wall_ns",
+                        pl.col("raw").hash(_RAW_HASH_SEEDS[0]).alias("h1"),
+                        pl.col("raw").hash(_RAW_HASH_SEEDS[1]).alias("h2"),
+                    )
+                )
+                raw_records += df.height
+        if raw_records == 0:
+            raise L1NormalizationError(f"zero rows: {part}")
+        keys = pl.concat(key_frames, rechunk=True)
+        # 배치별 키 프레임과 연결본이 pass 2 내내 살아 있으면 호가 DQ 순간 피크와 겹쳐 cgroup 한도를 넘는다
+        del key_frames
+        order, conflict, dropped_idx, kept_idx = _dedup_sort_order(keys)
+        del keys
+        # 레거시 재접속 구간의 신원 붕괴는 조용히 버리면 안 되므로 fail-closed 한다
+        if conflict > 0:
+            raise L1NormalizationError(f"conn_seq collision in {part}: {conflict} groups")
+        # 해시는 후보 지명만 하고 실제 삭제는 원문 바이트 동등성으로 확정한다
+        reader = _SpillReader(spill_paths, starts)
+        for lo in range(0, dropped_idx.size, _GATHER_ROWS):
+            if not reader.take(dropped_idx[lo : lo + _GATHER_ROWS]).get_column("raw").equals(
+                reader.take(kept_idx[lo : lo + _GATHER_ROWS]).get_column("raw")
+            ):
+                raise L1NormalizationError(f"conn_seq collision in {part}: hash-equal payload mismatch")
+        # 패스 2: 정렬 순서대로 묶어 gather하고 row-group 단위로 쓴다
+        out.parent.mkdir(parents=True, exist_ok=True)
+        quote_parts: list[QuoteQualitySummary] = []
+        tick_rows = 0
+        for ci, lo in enumerate(range(0, order.size, _GATHER_ROWS)):
+            chunk = reader.take(order[lo : lo + _GATHER_ROWS])
+            qs = decode_and_flag_quotes(chunk)
+            if qs is not None:
+                quote_parts.append(qs)
+            fields = decode_tick_raw_fields(chunk)
+            if fields is not None:
+                tick_rows += fields.height
+                fields.write_parquet(tick_dir / f"{ci:06d}.parquet")
+            # polars 업그레이드와 무관하게 large_string 물리 타입을 고정한다
+            table = chunk.to_arrow(compat_level=pl.CompatLevel.oldest())
+            if writer is None:
+                writer = pq.ParquetWriter(tmp_path, table.schema, compression="zstd")
+            writer.write_table(table)
+        # raw_records>=1 and conflict==0 이므로 최소 한 청크는 써서 writer가 열려 있다
+        assert writer is not None
+        writer.close()
+        writer = None
+        # 버킷 요약 순간 피크와 겹치지 않도록 gather 캐시·마지막 청크를 먼저 놓는다
+        del reader, chunk, table, fields
+        tick_summary: TickQualitySummary | None = (
+            summarize_tick_fields_bucketed(pl.scan_parquet(tick_dir / "*.parquet"), rows=tick_rows, buckets=_TICK_BUCKETS)
+            if tick_rows > 0
+            else None
         )
-        if conn_seq_conflict > 0:
-            raise L1NormalizationError(f"conn_seq collision in {part}: {conn_seq_conflict} groups")
-        df = df.unique(subset=["conn_id", "conn_seq"], keep="first", maintain_order=True)
-        df = df.sort("recv_wall_ns")
-        if df.height == 0:
-            raise ValueError(f"zero rows after dedup: {part}")
-        l1_rows = df.height
-        dedup_dropped = raw_records - l1_rows
-        quality: TickQualitySummary | None = decode_and_flag_ticks(df)
-        if quality is not None:
+        quote_summary: QuoteQualitySummary | None = sum_quote_summaries(quote_parts) if quote_parts else None
+        if tick_summary is not None:
+            quality = tick_summary
             status = "WARN" if any((quality.decode_fail, quality.zero_volume, quality.price_band_violation, quality.cum_volume_regression, quality.schema_disagree, quality.tick_loss, quality.lost_volume)) else "OK"
             (logger.warning if status == "WARN" else logger.info)(
                 "[DATA] stage=quality tr_id=%s rows=%d decode_fail=%d zero_volume=%d price_band_violation=%d cum_volume_regression=%d schema_disagree=%d tick_loss=%d lost_volume=%d status=%s",
@@ -90,8 +257,8 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path) -> in
                 quality.lost_volume,
                 status,
             )
-        quote_quality: QuoteQualitySummary | None = decode_and_flag_quotes(df)
-        if quote_quality is not None:
+        if quote_summary is not None:
+            quote_quality = quote_summary
             quote_status = "WARN" if any((quote_quality.decode_fail, quote_quality.ladder_disorder, quote_quality.crossed_book, quote_quality.negative_remain, quote_quality.total_remain_short)) else "OK"
             (logger.warning if quote_status == "WARN" else logger.info)(
                 "[DATA] stage=quality tr_id=%s rows=%d decode_fail=%d ladder_disorder=%d crossed_book=%d negative_remain=%d total_remain_short=%d status=%s",
@@ -104,21 +271,25 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path) -> in
                 quote_quality.total_remain_short,
                 quote_status,
             )
-        out.parent.mkdir(parents=True, exist_ok=True)
-        df.write_parquet(tmp_path, compression="zstd")
         os.replace(tmp_path, out)
         logger.info(
             "[DATA] stage=normalize part=%s raw_records=%d l1_rows=%d dedup_dropped=%d conn_seq_conflict=%d status=OK",
             str(part),
             raw_records,
-            l1_rows,
-            dedup_dropped,
-            conn_seq_conflict,
+            int(order.size),
+            raw_records - int(order.size),
+            conflict,
         )
+        succeeded = True
+        return int(order.size)
     except (zstd.ZstdError, OSError, ValueError, pl.exceptions.ComputeError) as exc:
-        tmp_path.unlink(missing_ok=True)
         raise L1NormalizationError(f"normalize failed: {part} ({exc})") from exc
-    return int(df.height)
+    finally:
+        if writer is not None:
+            writer.close()
+        if not succeeded:
+            tmp_path.unlink(missing_ok=True)
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def prune_old_journals(
@@ -128,6 +299,7 @@ def prune_old_journals(
     retain_days: int = 3,
     reference_date: dt.date | None = None,
     quarantine_root: pathlib.Path | None = None,
+    normalizer: Callable[[pathlib.Path, pathlib.Path], int] | None = None,
 ) -> int:
     if archive_root is None:
         return 0
@@ -144,7 +316,12 @@ def prune_old_journals(
         stream = part.parent.name
         out_path = archive_base / vendor / stream / f"{part.name}.parquet"
         try:
-            rows = normalize_l0_partition(part, out_path)
+            normalize = normalizer if normalizer is not None else normalize_l0_partition
+            rows = normalize(part, out_path)
+        except L1WorkerCrashError as exc:
+            # OOM SIGKILL 같은 인프라는 데이터 결함이 아니므로 격리 없이 보존한다
+            logger.critical("[DATA] stage=prune status=FAIL reason=worker_crash part=%s error=%s", str(part), str(exc))
+            continue
         except L1NormalizationError as exc:
             logger.critical("[DATA] stage=prune status=FAIL reason=%s part=%s", str(exc), str(part))
             if quarantine_root is not None:
@@ -181,14 +358,14 @@ def prune_local_l1(
     cutoff = ref - dt.timedelta(days=retain_days)
     root = pathlib.Path(archive_root)
     purged = 0
-    for pq in sorted(root.rglob("*.parquet")):
-        m = _DT_RE.search(pq.name)
+    for pq_file in sorted(root.rglob("*.parquet")):
+        m = _DT_RE.search(pq_file.name)
         part_date = dt.date.fromisoformat(m.group(0)[3:]) if m else None
         if part_date is None or part_date >= cutoff:
             continue
-        rel = "l1/" + pq.relative_to(root).as_posix()
+        rel = "l1/" + pq_file.relative_to(root).as_posix()
         if rel not in confirmed_remote:
             continue
-        pq.unlink()
+        pq_file.unlink()
         purged += 1
     return purged

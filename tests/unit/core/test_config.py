@@ -179,3 +179,15 @@ def test_data_paths_expose_quarantine_root() -> None:
 
     # Then: 격리 경로도 단일 루트에서 파생된다
     assert settings.paths.quarantine_root == pathlib.Path('var/krx/quarantine')
+
+def test_data_paths_expose_work_root_outside_journal_and_archive_roots() -> None:
+    import pathlib
+
+    from src.core.config import CollectorSettings
+
+    settings = CollectorSettings(data_root=pathlib.Path('var/krx'))
+
+    assert settings.paths.work_root == pathlib.Path('var/krx/work')
+    assert not settings.paths.work_root.is_relative_to(settings.paths.archive_root)
+    assert not settings.paths.work_root.is_relative_to(settings.paths.journal_root)
+

@@ -692,3 +692,98 @@ def test_decode_and_flag_ticks_rejects_non_positive_chunk_rows() -> None:
     for chunk_rows in (0, -1):
         with pytest.raises(ValueError, match="chunk_rows"):
             decode_and_flag_ticks(frame, chunk_rows=chunk_rows)
+
+def test_decode_tick_raw_fields_returns_none_without_tick_rows() -> None:
+    import polars as pl
+
+    from src.storage.quality import decode_tick_raw_fields
+
+    # Given: 호가 행만 존재
+    df = pl.DataFrame({'raw': ['x'], 'tr_id': ['H0STASP0'], 'recv_wall_ns': [1]})
+
+    # When / Then
+    assert decode_tick_raw_fields(df) is None
+
+def test_decode_tick_raw_fields_rejects_non_positive_chunk_rows() -> None:
+    import json
+
+    import polars as pl
+    import pytest
+
+    from src.storage.quality import decode_tick_raw_fields
+
+    body = {
+        'shcode': '005930', 'price': '70000', 'cvolume': '10', 'volume': '100', 'change': '0',
+        'sign': '3', 'drate': '0.00', 'mdchecnt': '1', 'mschecnt': '1',
+    }
+    frame = pl.DataFrame({
+        'raw': [json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': body})],
+        'tr_id': ['H0STCNT0'], 'recv_wall_ns': [100],
+    })
+
+    for chunk_rows in (0, -1):
+        with pytest.raises(ValueError, match='chunk_rows'):
+            decode_tick_raw_fields(frame, chunk_rows=chunk_rows)
+
+def test_summarize_tick_fields_bucketed_equals_unbucketed_summary() -> None:
+    import json
+
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_ticks, decode_tick_raw_fields, summarize_tick_fields_bucketed
+
+    def tick(symbol, wall, volume, cvolume, mdchecnt, mschecnt):
+        body = {
+            'shcode': symbol, 'price': '70000', 'cvolume': str(cvolume), 'volume': str(volume),
+            'change': '0', 'sign': '3', 'drate': '0.00', 'mdchecnt': str(mdchecnt), 'mschecnt': str(mschecnt),
+        }
+        return {'raw': json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': symbol}, 'body': body}), 'tr_id': 'H0STCNT0', 'recv_wall_ns': wall}
+
+    # Given: 종목 3개 + 디코드 실패 1건, 종목별 누적상태가 청크/버킷 경계를 넘나듦
+    frame = pl.DataFrame([
+        tick('005930', 100, 500, 10, 100, 50),
+        tick('000660', 90, 1000, 20, 200, 40),
+        tick('005930', 200, 520, 10, 101, 50),
+        {'raw': 'not-json', 'tr_id': 'H0STCNT0', 'recv_wall_ns': 250},
+        tick('000660', 300, 900, 20, 201, 40),
+        tick('005930', 400, 540, 10, 103, 51),
+        tick('035720', 150, 300, 5, 10, 10),
+        tick('035720', 350, 290, 5, 11, 10),
+    ])
+    expected = decode_and_flag_ticks(frame)
+    fields = decode_tick_raw_fields(frame, chunk_rows=2)
+    assert expected is not None
+    assert fields is not None
+
+    # When / Then
+    for buckets in (1, 2, 3, 8):
+        assert summarize_tick_fields_bucketed(fields.lazy(), rows=fields.height, buckets=buckets) == expected
+    assert expected.rows == 8
+    assert expected.decode_fail == 1
+    assert expected.cum_volume_regression == 2
+    assert expected.tick_loss == 1
+    assert expected.lost_volume == 10
+
+def test_summarize_tick_fields_bucketed_rejects_non_positive_buckets() -> None:
+    import polars as pl
+    import pytest
+
+    from src.storage.quality import summarize_tick_fields_bucketed
+
+    fields = pl.LazyFrame({'shcode': ['005930'], 'recv_wall_ns': [1]})
+
+    for buckets in (0, -2):
+        with pytest.raises(ValueError, match='buckets'):
+            summarize_tick_fields_bucketed(fields, rows=1, buckets=buckets)
+
+def test_sum_quote_summaries_adds_all_fields_and_returns_none_when_empty() -> None:
+    from src.storage.quality import QuoteQualitySummary, sum_quote_summaries
+
+    a = QuoteQualitySummary(rows=2, decode_fail=1, ladder_disorder=0, crossed_book=1, negative_remain=0, total_remain_short=3)
+    b = QuoteQualitySummary(rows=5, decode_fail=0, ladder_disorder=2, crossed_book=0, negative_remain=1, total_remain_short=4)
+
+    assert sum_quote_summaries([a, b]) == QuoteQualitySummary(
+        rows=7, decode_fail=1, ladder_disorder=2, crossed_book=1, negative_remain=1, total_remain_short=7
+    )
+    assert sum_quote_summaries([]) is None
+
