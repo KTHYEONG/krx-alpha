@@ -28,6 +28,7 @@
   "src/cli/collect_stream.py": {
     "deps": [
       "src/core/config.py",
+      "src/core/observability.py",
       "src/realtime/adapters/ls.py",
       "src/realtime/session.py",
       "src/realtime/streamer.py"
@@ -36,6 +37,10 @@
     "testing": "tests/unit/cli/test_collect_stream.py"
   },
   "src/cli/main.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/core/observability.py"
+    ],
     "layer": 7,
     "testing": "tests/unit/cli/test_main.py"
   },
@@ -78,6 +83,13 @@
       "tests/unit/core/test_calendar.py",
       "tests/unit/core/test_config.py"
     ]
+  },
+  "src/core/observability.py": {
+    "deps": [
+      "src/core/config.py"
+    ],
+    "layer": 0,
+    "testing": "tests/unit/core/test_observability.py"
   },
   "src/execution/contracts.py": {
     "deps": [
@@ -182,7 +194,8 @@
   },
   "src/marketdata/toss_calendar.py": {
     "deps": [
-      "src/core/errors.py"
+      "src/core/errors.py",
+      "src/marketdata/krx_bars.py"
     ],
     "layer": 1,
     "testing": "tests/unit/marketdata/test_toss_calendar.py"
@@ -192,6 +205,7 @@
       "src/core/calendar.py",
       "src/core/config.py",
       "src/core/errors.py",
+      "src/core/observability.py",
       "src/execution/contracts.py",
       "src/execution/kis_client.py",
       "src/marketdata/krx_bars.py",
@@ -261,8 +275,10 @@
   },
   "src/realtime/streamer.py": {
     "deps": [
+      "src/core/observability.py",
       "src/realtime/contracts.py",
-      "src/realtime/session.py"
+      "src/realtime/session.py",
+      "src/storage/journal.py"
     ],
     "layer": 4,
     "testing": "tests/unit/realtime/test_streamer.py"
@@ -283,8 +299,11 @@
   },
   "src/storage/normalize_worker.py": {
     "deps": [
+      "src/core/config.py",
+      "src/core/observability.py",
       "src/storage/retention.py"
     ],
+    "layer": 3,
     "testing": "tests/unit/storage/test_normalize_worker.py"
   },
   "src/storage/quality.py": {
