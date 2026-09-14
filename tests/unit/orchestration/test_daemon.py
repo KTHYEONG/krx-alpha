@@ -982,9 +982,762 @@ def test_run_collector_daemon_eod_logs_error_when_offload_raises_and_does_not_re
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo('Asia/Seoul'))
 
     # When
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.INFO):
         daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: eod_time)
 
-    # Then: 데몬은 생존하고 오류를 남기며 같은 날 재시도하지 않는다
-    assert counts == {'maintenance': 1, 'offload': 1, 'reconcile': 0}
+    # Then: 오프로드 실패와 무관하게 정합성 검사는 수행되고 같은 날 재시도하지 않는다
+    assert counts == {'maintenance': 1, 'offload': 1, 'reconcile': 1}
     assert 'stage=eod_maintenance error=rclone lsjson failed' in caplog.text
+    assert 'deleted_partitions=0 uploaded=0 purged=0 status=DEGRADED' in caplog.text
+
+def test_run_collector_daemon_configures_logging_with_persistent_dir_flag(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None: calls.append((component, log_dir)) or "daemon-77")
+    night = dt.datetime(2026, 9, 8, 20, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    monkeypatch.delenv("KRX_ALPHA_PERSISTENT_LOGS", raising=False)
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: night)
+    monkeypatch.setenv("KRX_ALPHA_PERSISTENT_LOGS", "true")
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: night)
+
+    assert calls == [("daemon", None), ("daemon", settings.paths.logs_dir)]
+    assert "stage=start status=ONLINE timezone=Asia/Seoul run_id=daemon-77" in caplog.text
+
+
+def test_run_collector_daemon_logs_state_changes_and_ten_minute_heartbeat_only(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None: "r")
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    kst = ZoneInfo("Asia/Seoul")
+    times = iter([
+        dt.datetime(2026, 9, 8, 20, 0, 0, tzinfo=kst),
+        dt.datetime(2026, 9, 8, 20, 0, 10, tzinfo=kst),
+        dt.datetime(2026, 9, 8, 20, 10, 30, tzinfo=kst),
+    ])
+
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=3, now_fn=lambda: next(times))
+
+    info = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO and r.name == daemon_mod.logger.name]
+    assert sum("stage=state_change" in m for m in info) == 1
+    assert sum("stage=heartbeat" in m for m in info) == 2
+    assert not any("sleeping" in m for m in info)
+    assert not any(" cycle=" in m and "stage=" not in m for m in info)
+
+
+def test_run_collector_daemon_logs_streamer_restart_and_circuit_transition_once(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    import src.orchestration.daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None: "r")
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: True)
+    results = iter(["started", "restarted", "circuit_open", "circuit_open"])
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = cmd
+            self.last_exit_code = -9
+
+        def ensure_running(self):
+            return next(results)
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+    active = dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(sleep_fn=lambda s: None, max_cycles=4, now_fn=lambda: active)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert warnings.count("[DAEMON] stage=streamer status=RESTARTED exit_code=-9 restarts=1") == 1
+    assert sum("reason=circuit_open" in m for m in criticals) == 1
+    assert any("stage=streamer status=STARTED" in r.getMessage() for r in caplog.records if r.levelno == logging.INFO)
+
+
+def test_run_collector_daemon_orchestration_exception_logs_traceback(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    import src.orchestration.daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None: "r")
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+
+    def _raise(**kw):
+        raise FileNotFoundError("data/universe/2026-09-08.parquet")
+
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", _raise)
+    active = dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    with caplog.at_level(logging.CRITICAL):
+        daemon_mod.run_collector_daemon(sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: active)
+
+    records = [r for r in caplog.records if "reason=orchestration_error" in r.getMessage()]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
+    assert records[0].exc_info[0] is FileNotFoundError
+
+
+def test_run_collector_daemon_eod_unexpected_error_logs_traceback(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None: "r")
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+
+    def _offload(*a, **kw):
+        raise RuntimeError("rclone lsjson failed")
+
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", _offload)
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    with caplog.at_level(logging.ERROR):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    records = [r for r in caplog.records if "stage=eod_maintenance error=" in r.getMessage()]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
+    assert records[0].exc_info[0] is RuntimeError
+
+
+def test_run_session_orchestration_blocks_stale_bars_when_calendar_unknown(tmp_path, monkeypatch, caplog) -> None:
+
+    import datetime as dt
+    import logging
+    import pathlib
+
+    import polars as pl
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+
+    def _store(last: dt.date) -> None:
+        pl.DataFrame({"date": [last], "symbol": ["000001"], "close": [1000.0], "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0]}).write_parquet(settings.paths.bars_store)
+
+    planned: list[dt.date] = []
+
+    def _plan(**kwargs):
+        planned.append(kwargs["decision_date"])
+        write_candidates(settings.paths.candidates, [{"symbol": "000001", "selection_reasons": ["limit_up"]}], rev=1)
+        return daemon.UniversePlanResult(decision_date=kwargs["decision_date"], selected=1, out_path=kwargs["out_path"], candidates_emitted=1)
+
+    monkeypatch.setattr(daemon, "plan_universe", _plan)
+
+    _store(dt.date(2026, 9, 3))
+    monkeypatch.setattr(daemon, "refresh_bars", lambda **kw: None)
+
+    with caplog.at_level(logging.CRITICAL):
+        ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 14), settings=settings, trading_day=None)
+
+    assert ready is False
+    assert planned == []
+    assert "reason=stale_bars_calendar_unknown decision_date=2026-09-03" in caplog.text
+
+
+def test_run_session_orchestration_allows_recent_bars_when_calendar_unknown(tmp_path, monkeypatch) -> None:
+
+    import datetime as dt
+    import pathlib
+
+    import polars as pl
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+
+    def _store(last: dt.date) -> None:
+        pl.DataFrame({"date": [last], "symbol": ["000001"], "close": [1000.0], "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0]}).write_parquet(settings.paths.bars_store)
+
+    planned: list[dt.date] = []
+
+    def _plan(**kwargs):
+        planned.append(kwargs["decision_date"])
+        write_candidates(settings.paths.candidates, [{"symbol": "000001", "selection_reasons": ["limit_up"]}], rev=1)
+        return daemon.UniversePlanResult(decision_date=kwargs["decision_date"], selected=1, out_path=kwargs["out_path"], candidates_emitted=1)
+
+    monkeypatch.setattr(daemon, "plan_universe", _plan)
+
+    _store(dt.date(2026, 9, 10))
+    monkeypatch.setattr(daemon, "refresh_bars", lambda **kw: None)
+
+    ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 14), settings=settings, trading_day=None)
+
+    assert ready is True
+    assert planned == [dt.date(2026, 9, 10)]
+
+
+def test_run_session_orchestration_uses_kis_fallback_on_incomplete_market(tmp_path, monkeypatch) -> None:
+
+    import datetime as dt
+    import pathlib
+
+    import polars as pl
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+
+    def _store(last: dt.date) -> None:
+        pl.DataFrame({"date": [last], "symbol": ["000001"], "close": [1000.0], "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0]}).write_parquet(settings.paths.bars_store)
+
+    planned: list[dt.date] = []
+
+    def _plan(**kwargs):
+        planned.append(kwargs["decision_date"])
+        write_candidates(settings.paths.candidates, [{"symbol": "000001", "selection_reasons": ["limit_up"]}], rev=1)
+        return daemon.UniversePlanResult(decision_date=kwargs["decision_date"], selected=1, out_path=kwargs["out_path"], candidates_emitted=1)
+
+    monkeypatch.setattr(daemon, "plan_universe", _plan)
+
+    from src.marketdata.krx_bars import IncompleteMarketError
+    from src.marketdata.toss_calendar import TradingDay
+
+    _store(dt.date(2026, 9, 10))
+
+    def _partial(**kw):
+        raise IncompleteMarketError("partial market data for 2026-09-11: empty KOSDAQ")
+
+    fallback_targets: list[dt.date] = []
+
+    def _fallback(**kw):
+        fallback_targets.append(kw["target_date"])
+        return daemon.BarsRefreshResult(trading_day=kw["target_date"], appended_rows=1, backfilled_days=0)
+
+    monkeypatch.setattr(daemon, "refresh_bars", _partial)
+    monkeypatch.setattr(daemon, "refresh_bars_via_kis_fallback", _fallback)
+    monkeypatch.setattr(daemon, "_build_kis_client", lambda paths: object())
+    trading_day = TradingDay(date=dt.date(2026, 9, 14), is_business_day=True, previous_business_day=dt.date(2026, 9, 11), next_business_day=dt.date(2026, 9, 15))
+
+    ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 14), settings=settings, trading_day=trading_day)
+
+    assert ready is True
+    assert fallback_targets == [dt.date(2026, 9, 11)]
+    assert planned == [dt.date(2026, 9, 11)]
+
+
+def test_run_session_orchestration_fails_closed_when_kis_fallback_rowcount_implausible(tmp_path, monkeypatch, caplog) -> None:
+
+    import datetime as dt
+    import logging
+    import pathlib
+
+    import polars as pl
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+
+    def _store(last: dt.date) -> None:
+        pl.DataFrame({"date": [last], "symbol": ["000001"], "close": [1000.0], "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0]}).write_parquet(settings.paths.bars_store)
+
+    planned: list[dt.date] = []
+
+    def _plan(**kwargs):
+        planned.append(kwargs["decision_date"])
+        write_candidates(settings.paths.candidates, [{"symbol": "000001", "selection_reasons": ["limit_up"]}], rev=1)
+        return daemon.UniversePlanResult(decision_date=kwargs["decision_date"], selected=1, out_path=kwargs["out_path"], candidates_emitted=1)
+
+    monkeypatch.setattr(daemon, "plan_universe", _plan)
+
+    from src.marketdata.krx_bars import ImplausibleRowCountError
+    from src.marketdata.toss_calendar import TradingDay
+
+    _store(dt.date(2026, 9, 10))
+
+    def _truncated(**kw):
+        raise ImplausibleRowCountError("implausible row count for [2026-09-11]: 10 < 2765 * 0.9")
+
+    monkeypatch.setattr(daemon, "refresh_bars", lambda **kw: None)
+    monkeypatch.setattr(daemon, "refresh_bars_via_kis_fallback", _truncated)
+    monkeypatch.setattr(daemon, "_build_kis_client", lambda paths: object())
+    trading_day = TradingDay(date=dt.date(2026, 9, 14), is_business_day=True, previous_business_day=dt.date(2026, 9, 11), next_business_day=dt.date(2026, 9, 15))
+
+    with caplog.at_level(logging.CRITICAL):
+        ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 14), settings=settings, trading_day=trading_day)
+
+    assert ready is False
+    assert planned == []
+    assert "stale_bars_fallback_failed" in caplog.text
+
+
+def test_degraded_candidates_rev_accepts_only_recent_readable_candidates(tmp_path) -> None:
+    import datetime as dt
+
+    from src.orchestration.daemon import _degraded_candidates_rev
+    from src.universe.ipc import write_candidates
+
+    today = dt.date(2026, 9, 14)
+    path = tmp_path / "candidates.json"
+    row = [{"symbol": "005930", "selection_reasons": ["limit_up"]}]
+
+    assert _degraded_candidates_rev(path, today, max_age_days=7) is None
+    path.write_text("{broken", encoding="utf-8")
+    assert _degraded_candidates_rev(path, today, max_age_days=7) is None
+    write_candidates(path, [], rev=20260911)
+    assert _degraded_candidates_rev(path, today, max_age_days=7) is None
+    write_candidates(path, row, rev=20260901)
+    assert _degraded_candidates_rev(path, today, max_age_days=7) is None
+    write_candidates(path, row, rev=20260915)
+    assert _degraded_candidates_rev(path, today, max_age_days=7) is None
+    write_candidates(path, row, rev=1)
+    assert _degraded_candidates_rev(path, today, max_age_days=7) is None
+    write_candidates(path, row, rev=20260907)
+    assert _degraded_candidates_rev(path, today, max_age_days=7) == 20260907
+
+
+def test_run_collector_daemon_retries_orchestration_after_backoff_same_day(tmp_path, monkeypatch, caplog) -> None:
+
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+    kst = ZoneInfo("Asia/Seoul")
+    constructed: list[list[str]] = []
+    stops: list[float] = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = cmd
+            self.last_exit_code = None
+            constructed.append(cmd)
+
+        def ensure_running(self):
+            return "started"
+
+        def stop(self, *, timeout_s=15.0):
+            stops.append(timeout_s)
+            return "graceful"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+    outcomes = iter([False, True])
+    attempts: list[dt.date] = []
+
+    def _orch(**kw):
+        attempts.append(kw["today"])
+        return next(outcomes)
+
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", _orch)
+    times = iter([dt.datetime(2026, 9, 14, 8, 25, tzinfo=kst), dt.datetime(2026, 9, 14, 8, 27, tzinfo=kst),
+                  dt.datetime(2026, 9, 14, 8, 31, tzinfo=kst), dt.datetime(2026, 9, 14, 8, 32, tzinfo=kst)])
+
+    with caplog.at_level(logging.CRITICAL):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=4, now_fn=lambda: next(times))
+
+    assert len(attempts) == 2
+    assert len(constructed) == 1
+    assert "--degraded-reason" not in constructed[0]
+    failures = [r.getMessage() for r in caplog.records if "reason=candidates_not_ready" in r.getMessage()]
+    assert len(failures) == 1
+    assert "attempt=1" in failures[0]
+
+
+def test_run_collector_daemon_starts_degraded_streamer_with_recent_candidates(tmp_path, monkeypatch, caplog) -> None:
+
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+    kst = ZoneInfo("Asia/Seoul")
+    constructed: list[list[str]] = []
+    stops: list[float] = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = cmd
+            self.last_exit_code = None
+            constructed.append(cmd)
+
+        def ensure_running(self):
+            return "started"
+
+        def stop(self, *, timeout_s=15.0):
+            stops.append(timeout_s)
+            return "graceful"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+
+    write_candidates(settings.paths.candidates, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: False)
+
+    with caplog.at_level(logging.CRITICAL):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: dt.datetime(2026, 9, 14, 8, 25, tzinfo=kst))
+
+    assert len(constructed) == 1
+    cmd = constructed[0]
+    assert cmd[cmd.index("--degraded-reason") + 1] == "orchestration_failed"
+    assert "[DAEMON] stage=streamer status=DEGRADED reason=orchestration_failed candidates_rev=20260911" in caplog.text
+
+
+def test_run_collector_daemon_skips_degraded_streamer_when_candidates_too_old(tmp_path, monkeypatch) -> None:
+
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+    kst = ZoneInfo("Asia/Seoul")
+    constructed: list[list[str]] = []
+    stops: list[float] = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = cmd
+            self.last_exit_code = None
+            constructed.append(cmd)
+
+        def ensure_running(self):
+            return "started"
+
+        def stop(self, *, timeout_s=15.0):
+            stops.append(timeout_s)
+            return "graceful"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+
+    write_candidates(settings.paths.candidates, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260901)
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: False)
+
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: dt.datetime(2026, 9, 14, 8, 25, tzinfo=kst))
+
+    assert constructed == []
+
+
+def test_run_collector_daemon_replaces_degraded_streamer_after_successful_retry(tmp_path, monkeypatch, caplog) -> None:
+
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+    kst = ZoneInfo("Asia/Seoul")
+    constructed: list[list[str]] = []
+    stops: list[float] = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = cmd
+            self.last_exit_code = None
+            constructed.append(cmd)
+
+        def ensure_running(self):
+            return "started"
+
+        def stop(self, *, timeout_s=15.0):
+            stops.append(timeout_s)
+            return "graceful"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+
+    write_candidates(settings.paths.candidates, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+    outcomes = iter([False, True])
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: next(outcomes))
+    times = iter([dt.datetime(2026, 9, 14, 8, 25, tzinfo=kst), dt.datetime(2026, 9, 14, 8, 31, tzinfo=kst)])
+
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: next(times))
+
+    assert len(constructed) == 2
+    assert "--degraded-reason" in constructed[0]
+    assert "--degraded-reason" not in constructed[1]
+    assert stops == [15.0]
+    assert "stage=streamer status=REPLACE_DEGRADED stop_result=graceful" in caplog.text
+
+
+def test_run_collector_daemon_uses_calendar_cache_when_toss_unavailable(tmp_path, monkeypatch) -> None:
+
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+    kst = ZoneInfo("Asia/Seoul")
+    constructed: list[list[str]] = []
+    stops: list[float] = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = cmd
+            self.last_exit_code = None
+            constructed.append(cmd)
+
+        def ensure_running(self):
+            return "started"
+
+        def stop(self, *, timeout_s=15.0):
+            stops.append(timeout_s)
+            return "graceful"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+
+    from src.marketdata.toss_calendar import TradingDay
+
+    friday = TradingDay(date=dt.date(2026, 9, 11), is_business_day=True, previous_business_day=dt.date(2026, 9, 10), next_business_day=dt.date(2026, 9, 14))
+    lookups = iter([friday, None])
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: next(lookups))
+    seen: list[object] = []
+
+    def _orch(**kw):
+        seen.append(kw["trading_day"])
+        return True
+
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", _orch)
+    times = iter([dt.datetime(2026, 9, 11, 8, 30, tzinfo=kst), dt.datetime(2026, 9, 14, 8, 30, tzinfo=kst)])
+
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: next(times))
+
+    assert settings.paths.calendar_cache.exists()
+    assert seen[0] is friday
+    assert seen[1] == TradingDay(date=dt.date(2026, 9, 14), is_business_day=True, previous_business_day=dt.date(2026, 9, 11), next_business_day=dt.date(2026, 9, 14))
+
+
+def test_run_collector_daemon_skips_day_when_calendar_cache_marks_holiday(tmp_path, monkeypatch) -> None:
+
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+    kst = ZoneInfo("Asia/Seoul")
+    constructed: list[list[str]] = []
+    stops: list[float] = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = cmd
+            self.last_exit_code = None
+            constructed.append(cmd)
+
+        def ensure_running(self):
+            return "started"
+
+        def stop(self, *, timeout_s=15.0):
+            stops.append(timeout_s)
+            return "graceful"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+
+    from src.marketdata.toss_calendar import TradingDay
+
+    friday = TradingDay(date=dt.date(2026, 9, 11), is_business_day=True, previous_business_day=dt.date(2026, 9, 10), next_business_day=dt.date(2026, 9, 15))
+    lookups = iter([friday, None])
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: next(lookups))
+    orchestrated: list[dt.date] = []
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: orchestrated.append(kw["today"]) or True)
+    sleeps: list[float] = []
+    times = iter([dt.datetime(2026, 9, 11, 8, 30, tzinfo=kst), dt.datetime(2026, 9, 14, 8, 30, tzinfo=kst)])
+
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=sleeps.append, max_cycles=2, now_fn=lambda: next(times))
+
+    assert orchestrated == [dt.date(2026, 9, 11)]
+    assert sleeps[-1] == 3600.0
+
+
+def test_run_collector_daemon_eod_reconciliation_failure_is_critical_and_degraded(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 1, "skipped": 0, "failed": 0, "purged": 0})
+
+    def _broken(**kw):
+        raise OSError("bars parquet unreadable")
+
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", _broken)
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    records = [r for r in caplog.records if "stage=eod_reconciliation status=FAIL" in r.getMessage()]
+    assert len(records) == 1
+    assert records[0].levelno == logging.CRITICAL
+    assert records[0].exc_info is not None
+    assert "deleted_partitions=0 uploaded=1 purged=0 status=DEGRADED" in caplog.text
+
+
+def test_run_collector_daemon_clears_supervisor_after_eod_so_next_day_never_restarts_stale_session(tmp_path, monkeypatch) -> None:
+    # Given: 전일 스트리머가 EOD 에서 정지된 뒤 다음 날 오케스트레이션이 실패
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    kst = ZoneInfo("Asia/Seoul")
+    ensured_dates: list[str] = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = cmd
+            self.last_exit_code = 0
+
+        def ensure_running(self):
+            ensured_dates.append(self.cmd[self.cmd.index("--session-date") + 1])
+            return "restarted"
+
+        def stop(self, *, timeout_s=15.0):
+            return "graceful"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+    outcomes = iter([True, False])
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: next(outcomes))
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
+    times = iter([
+        dt.datetime(2026, 9, 14, 9, 0, tzinfo=kst),
+        dt.datetime(2026, 9, 14, 15, 45, tzinfo=kst),
+        dt.datetime(2026, 9, 15, 9, 0, tzinfo=kst),
+    ])
+
+    # When
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=3, now_fn=lambda: next(times))
+
+    # Then: 다음 날에는 전일 session-date 스트리머를 재기동하지 않는다
+    assert ensured_dates == ["2026-09-14"]
+
+
+def test_run_collector_daemon_stops_stale_day_streamer_when_eod_was_missed(tmp_path, monkeypatch, caplog) -> None:
+    # Given: EOD 윈도우를 거치지 못한 채 날짜가 바뀐 경우 (데몬이 15:40-16:00 사이 중단 등)
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    kst = ZoneInfo("Asia/Seoul")
+    stops: list[str] = []
+    ensured_dates: list[str] = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = cmd
+            self.last_exit_code = None
+
+        def ensure_running(self):
+            ensured_dates.append(self.cmd[self.cmd.index("--session-date") + 1])
+            return "running"
+
+        def stop(self, *, timeout_s=15.0):
+            stops.append(self.cmd[self.cmd.index("--session-date") + 1])
+            return "graceful"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+    outcomes = iter([True, False])
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: next(outcomes))
+    times = iter([dt.datetime(2026, 9, 14, 9, 0, tzinfo=kst), dt.datetime(2026, 9, 15, 9, 0, tzinfo=kst)])
+
+    # When
+    with caplog.at_level(logging.WARNING):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: next(times))
+
+    # Then: 전일 스트리머를 정지하고 재기동하지 않는다
+    assert stops == ["2026-09-14"]
+    assert ensured_dates == ["2026-09-14"]
+    assert "stage=streamer status=STOP_STALE_DAY stop_result=graceful" in caplog.text

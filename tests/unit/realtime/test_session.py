@@ -307,3 +307,229 @@ def test_collector_session_record_frame_raises_storage_exhausted(tmp_path) -> No
         with pytest.raises(StorageExhaustedError, match='watermark'):
             session.record_frame(vendor='kis', stream='H0STCNT0', raw='dummy',
                                  recv_mono_ns=1, recv_wall_ns=1_735_954_200_000_000_000, conn_id='c', conn_seq=1)
+
+
+def test_bootstrap_session_records_candidates_rev_and_degraded_reason(tmp_path) -> None:
+    import datetime as dt
+    import json
+
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    class _Stat:
+        offset = 0.001
+
+    class _Client:
+        def request(self, host, version=3, timeout=5):
+            return _Stat()
+
+    cand = tmp_path / "candidates.json"
+    write_candidates(cand, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+    cfg = SessionConfig(
+        session_date=dt.date(2026, 9, 14), journal_root=tmp_path / "l0", manifest_path=tmp_path / "session.json",
+        candidates_path=cand, ntp_host="h", slot_budget=10, max_clock_offset_ns=2_000_000_000,
+        desired_streams=("H0STCNT0",), vendor="ls", degraded_reason="orchestration_failed",
+    )
+
+    session = bootstrap_session(cfg, ntp_client=_Client(), now_ns=1)
+
+    assert session.manifest.candidates_rev == 20260911
+    assert session.manifest.degraded_reason == "orchestration_failed"
+    saved = json.loads(cfg.manifest_path.read_text(encoding="utf-8"))
+    assert saved["candidates_rev"] == 20260911
+    assert saved["degraded_reason"] == "orchestration_failed"
+
+
+def test_bootstrap_session_merges_same_date_manifest_on_restart(tmp_path) -> None:
+
+    import datetime as dt
+    import json
+
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    class _FC:
+        def __init__(self, offset=0.001):
+            self.offset = offset
+
+        def request(self, host, version=3, timeout=5):
+            return type("S", (), {"offset": self.offset})()
+
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+
+    def cfg_for(day, **extra):
+        return SessionConfig(session_date=day, journal_root=tmp_path / "l0", manifest_path=tmp_path / "s.json",
+                             candidates_path=cp, ntp_host="primary", slot_budget=200, max_clock_offset_ns=2_000_000_000,
+                             desired_streams=("H0STCNT0",), vendor="ls", **extra)
+
+    first = bootstrap_session(cfg_for(dt.date(2026, 9, 14)), ntp_client=_FC(0.001), now_ns=111)
+    first.note_ack(vendor="ls", tr_id="H0STCNT0", symbol="005930", rt_cd="00000", accepted=True)
+    first.note_gap(symbol="005930", gap_start_ns=1, gap_end_ns=2, reason="disconnect")
+    first.persist()
+
+    second = bootstrap_session(cfg_for(dt.date(2026, 9, 14)), ntp_client=_FC(0.002), now_ns=222)
+
+    manifest = second.manifest
+    assert len(manifest.subscription_acks) == 1
+    assert len(manifest.gaps) == 1
+    assert manifest.started_at_ns == 111
+    assert manifest.clock_offset_ns == 2_000_000
+    assert [b["started_at_ns"] for b in manifest.boots] == [111, 222]
+    saved = json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))
+    assert len(saved["boots"]) == 2
+    assert len(saved["gaps"]) == 1
+
+
+def test_bootstrap_session_starts_fresh_for_other_date_manifest(tmp_path) -> None:
+
+    import datetime as dt
+
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    class _FC:
+        def __init__(self, offset=0.001):
+            self.offset = offset
+
+        def request(self, host, version=3, timeout=5):
+            return type("S", (), {"offset": self.offset})()
+
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+
+    def cfg_for(day, **extra):
+        return SessionConfig(session_date=day, journal_root=tmp_path / "l0", manifest_path=tmp_path / "s.json",
+                             candidates_path=cp, ntp_host="primary", slot_budget=200, max_clock_offset_ns=2_000_000_000,
+                             desired_streams=("H0STCNT0",), vendor="ls", **extra)
+
+    old = bootstrap_session(cfg_for(dt.date(2026, 9, 11)), ntp_client=_FC(), now_ns=1)
+    old.note_gap(symbol="005930", gap_start_ns=1, gap_end_ns=2, reason="disconnect")
+    old.persist()
+
+    fresh = bootstrap_session(cfg_for(dt.date(2026, 9, 14)), ntp_client=_FC(), now_ns=2)
+
+    assert fresh.manifest.session_date == dt.date(2026, 9, 14)
+    assert fresh.manifest.gaps == []
+    assert len(fresh.manifest.boots) == 1
+
+
+def test_bootstrap_session_quarantines_corrupt_manifest_and_starts_fresh(tmp_path, caplog) -> None:
+
+    import datetime as dt
+    import json
+    import logging
+
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    class _FC:
+        def __init__(self, offset=0.001):
+            self.offset = offset
+
+        def request(self, host, version=3, timeout=5):
+            return type("S", (), {"offset": self.offset})()
+
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+
+    def cfg_for(day, **extra):
+        return SessionConfig(session_date=day, journal_root=tmp_path / "l0", manifest_path=tmp_path / "s.json",
+                             candidates_path=cp, ntp_host="primary", slot_budget=200, max_clock_offset_ns=2_000_000_000,
+                             desired_streams=("H0STCNT0",), vendor="ls", **extra)
+
+    (tmp_path / "s.json").write_text("{half-written", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        session = bootstrap_session(cfg_for(dt.date(2026, 9, 14)), ntp_client=_FC(), now_ns=5)
+
+    assert (tmp_path / "s.json.corrupt").read_text(encoding="utf-8") == "{half-written"
+    assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["session_date"] == "2026-09-14"
+    assert len(session.manifest.boots) == 1
+    assert "stage=manifest_load status=CORRUPT" in caplog.text
+
+
+def test_bootstrap_session_falls_back_to_secondary_ntp_host(tmp_path, monkeypatch, caplog) -> None:
+
+    import datetime as dt
+    import logging
+
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    class _FC:
+        def __init__(self, offset=0.001):
+            self.offset = offset
+
+        def request(self, host, version=3, timeout=5):
+            return type("S", (), {"offset": self.offset})()
+
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+
+    def cfg_for(day, **extra):
+        return SessionConfig(session_date=day, journal_root=tmp_path / "l0", manifest_path=tmp_path / "s.json",
+                             candidates_path=cp, ntp_host="primary", slot_budget=200, max_clock_offset_ns=2_000_000_000,
+                             desired_streams=("H0STCNT0",), vendor="ls", **extra)
+
+    import src.realtime.session as session_mod
+    from src.realtime.clock import ClockUnsyncedError
+
+    probed: list[str] = []
+
+    def _measure(host, *, client=None):
+        probed.append(host)
+        if host == "primary":
+            raise ClockUnsyncedError("ntp unreachable: primary")
+        return 5
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", _measure)
+
+    with caplog.at_level(logging.WARNING):
+        session = bootstrap_session(cfg_for(dt.date(2026, 9, 14), ntp_fallback_hosts=("secondary", "tertiary")), now_ns=1)
+
+    assert probed == ["primary", "secondary"]
+    assert session.manifest.clock_offset_ns == 5
+    assert session.manifest.clock_status == "measured"
+    assert "stage=ntp_probe status=FAIL host=primary" in caplog.text
+
+
+def test_bootstrap_session_collects_with_unmeasured_clock_when_all_ntp_hosts_fail(tmp_path, monkeypatch, caplog) -> None:
+
+    import datetime as dt
+    import json
+    import logging
+
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    class _FC:
+        def __init__(self, offset=0.001):
+            self.offset = offset
+
+        def request(self, host, version=3, timeout=5):
+            return type("S", (), {"offset": self.offset})()
+
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+
+    def cfg_for(day, **extra):
+        return SessionConfig(session_date=day, journal_root=tmp_path / "l0", manifest_path=tmp_path / "s.json",
+                             candidates_path=cp, ntp_host="primary", slot_budget=200, max_clock_offset_ns=2_000_000_000,
+                             desired_streams=("H0STCNT0",), vendor="ls", **extra)
+
+    import src.realtime.session as session_mod
+    from src.realtime.clock import ClockUnsyncedError
+
+    def _dead(host, *, client=None):
+        raise ClockUnsyncedError(f"ntp unreachable: {host}")
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", _dead)
+
+    with caplog.at_level(logging.CRITICAL):
+        session = bootstrap_session(cfg_for(dt.date(2026, 9, 14), ntp_fallback_hosts=("secondary",)), now_ns=1)
+
+    assert session.manifest.clock_status == "unmeasured"
+    assert session.manifest.clock_offset_ns == 0
+    assert "stage=bootstrap status=DEGRADED reason=ntp_unmeasured hosts=2" in caplog.text
+    assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["clock_status"] == "unmeasured"

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import pathlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TypeVar
@@ -15,6 +17,8 @@ from src.core.calendar import SessionSchedule
 from src.core.errors import LiveNotArmedError, MissingCredentialsError, SlotBudgetExceededError
 
 SettingsT = TypeVar("SettingsT", bound=BaseSettings)
+
+RUN_ID_ENV: str = "KRX_ALPHA_RUN_ID"
 
 
 class ExecutionMode(StrEnum):
@@ -66,6 +70,14 @@ class DataPaths:
     def work_root(self) -> pathlib.Path:
         return self.root / "work"
 
+    @property
+    def logs_dir(self) -> pathlib.Path:
+        return self.root / "logs"
+
+    @property
+    def calendar_cache(self) -> pathlib.Path:
+        return self.root / "calendar_cache.json"
+
     def universe_out(self, day: dt.date) -> pathlib.Path:
         return self.universe_dir / f"{day.isoformat()}.parquet"
 
@@ -96,6 +108,7 @@ class CollectorSettings(BaseSettings):
 
     data_root: pathlib.Path = pathlib.Path("data")
     ntp_host: str = "kr.pool.ntp.org"
+    ntp_fallback_hosts: tuple[str, ...] = ("time.google.com", "time.cloudflare.com")
     max_clock_offset_ns: int = 2_000_000_000
     vendor: str = "ls"
     streams: tuple[str, ...] = ("H0STCNT0", "H0STASP0")
@@ -105,6 +118,9 @@ class CollectorSettings(BaseSettings):
     journal_retain_days: int = 3
     archive_retain_days: int = 30
     min_free_disk_gb: float = 3.0
+    orchestration_retry_s: float = 300.0
+    degraded_candidates_max_age_days: int = 7
+    stale_bars_max_calendar_days: int = 4
     schedule: SessionSchedule = SessionSchedule()
 
     @property
@@ -203,6 +219,33 @@ class ExecutionSettings(BaseSettings):
         if self.mode is ExecutionMode.LIVE and not self.live_armed:
             raise LiveNotArmedError("live mode requires KRX_ALPHA_EXEC_LIVE_ARMED=true")
         return self
+
+
+class ObservabilitySettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_", extra="ignore")
+
+    persistent_logs: bool = False
+    run_id: str = ""
+
+
+class AlertSettings(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore")
+
+    alert_gmail_user: str = ""
+    alert_gmail_app_password: str = ""
+    alert_gmail_to: str = ""
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.alert_gmail_user and self.alert_gmail_app_password and self.alert_gmail_to)
+
+
+def child_process_env(overrides: Mapping[str, str]) -> dict[str, str]:
+    return {**os.environ, **overrides}
+
+
+def export_run_id(run_id: str) -> None:
+    os.environ[RUN_ID_ENV] = run_id
 
 
 def load_credentials(model: type[SettingsT]) -> SettingsT:

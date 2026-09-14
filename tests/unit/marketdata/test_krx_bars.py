@@ -86,7 +86,7 @@ def test_latest_trading_day_walks_backward_on_krx_bars_error(monkeypatch) -> Non
     def _fake(date, *, auth_key, session=None):
         calls.append(date)
         if date != dt.date(2026, 9, 4):
-            raise bars_mod.KrxBarsError('non-trading')
+            raise bars_mod.KrxNoTradingDataError('non-trading')
         return pl.DataFrame({'date': [date], 'symbol': ['005930'], 'close': [1.0],
                              'volume': [1], 'trade_value_100m': [1.0], 'daily_change_pct': [0.1], 'market': ['KOSPI']})
 
@@ -96,7 +96,6 @@ def test_latest_trading_day_walks_backward_on_krx_bars_error(monkeypatch) -> Non
 
     assert day == dt.date(2026, 9, 4)
     assert calls == [dt.date(2026, 9, 7), dt.date(2026, 9, 6), dt.date(2026, 9, 5), dt.date(2026, 9, 4)]
-
 
 def test_latest_trading_day_never_fetches_ref_date_itself(monkeypatch) -> None:
     import datetime as dt
@@ -189,11 +188,11 @@ def test_backfill_bars_accumulates_until_window_days_reached(tmp_path, monkeypat
     import datetime as dt
     import polars as pl
     import src.marketdata.krx_bars as bars_mod
-    from src.marketdata.krx_bars import KrxBarsError, backfill_bars
+    from src.marketdata.krx_bars import KrxNoTradingDataError, backfill_bars
 
     def _fake_fetch(date, *, auth_key, session=None):
         if date.weekday() >= 5:
-            raise KrxBarsError('weekend')
+            raise KrxNoTradingDataError('weekend')
         return pl.DataFrame({'date': [date], 'symbol': ['005930'], 'close': [100.0],
                              'volume': [1], 'trade_value_100m': [1.0], 'daily_change_pct': [0.1]})
 
@@ -204,7 +203,6 @@ def test_backfill_bars_accumulates_until_window_days_reached(tmp_path, monkeypat
     assert result['trading_days'] == 5
     assert result['appended_rows'] == 5
     assert pl.read_parquet(tmp_path / 'bars.parquet').height == 5
-
 
 def test_backfill_bars_raises_when_calendar_cap_exhausted_before_window(tmp_path, monkeypatch) -> None:
     import datetime as dt
@@ -390,3 +388,136 @@ def test_append_daily_bars_accepts_rowcount_within_ratio(tmp_path) -> None:
     assert MIN_ROWCOUNT_RATIO == 0.90
     assert appended == 9
     assert pl.read_parquet(store).height == 19
+
+
+def test_fetch_daily_bars_raises_transport_error_on_request_exception() -> None:
+    import datetime as dt
+
+    import pytest
+    import requests
+
+    from src.marketdata.krx_bars import KrxBarsError, KrxTransportError, fetch_daily_bars
+
+    class _Session:
+        def post(self, url, **kw):
+            raise requests.ConnectionError("boom")
+
+    with pytest.raises(KrxTransportError, match="krx request failed") as excinfo:
+        fetch_daily_bars(dt.date(2026, 9, 11), auth_key="k", session=_Session())
+    assert isinstance(excinfo.value, KrxBarsError)
+
+
+def test_fetch_daily_bars_raises_no_trading_data_when_both_markets_empty() -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.marketdata.krx_bars import KrxNoTradingDataError, fetch_daily_bars
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"OutBlock_1": []}
+
+    class _Session:
+        def post(self, url, **kw):
+            return _Resp()
+
+    with pytest.raises(KrxNoTradingDataError, match="no trading data"):
+        fetch_daily_bars(dt.date(2026, 9, 12), auth_key="k", session=_Session())
+
+
+def test_latest_trading_day_propagates_transport_error_without_walking_back(monkeypatch) -> None:
+    import datetime as dt
+
+    import pytest
+
+    import src.marketdata.krx_bars as bars_mod
+    from src.marketdata.krx_bars import KrxTransportError, latest_trading_day
+
+    calls: list[dt.date] = []
+
+    def _fake(date, *, auth_key, session=None):
+        calls.append(date)
+        raise KrxTransportError(f"krx request failed for {date}: timeout")
+
+    monkeypatch.setattr(bars_mod, "fetch_daily_bars", _fake)
+
+    with pytest.raises(KrxTransportError):
+        latest_trading_day(dt.date(2026, 9, 14), auth_key="k")
+    assert calls == [dt.date(2026, 9, 13)]
+
+
+def test_backfill_bars_propagates_transport_error(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    import polars as pl
+    import pytest
+
+    import src.marketdata.krx_bars as bars_mod
+    from src.marketdata.krx_bars import KrxNoTradingDataError, KrxTransportError, backfill_bars
+
+    def _fake(date, *, auth_key, session=None):
+        if date == dt.date(2026, 9, 7):
+            return pl.DataFrame({"date": [date], "symbol": ["005930"], "close": [1.0], "volume": [1], "trade_value_100m": [1.0], "daily_change_pct": [0.1]})
+        if date.weekday() >= 5:
+            raise KrxNoTradingDataError("weekend")
+        raise KrxTransportError("krx request failed")
+
+    monkeypatch.setattr(bars_mod, "fetch_daily_bars", _fake)
+
+    with pytest.raises(KrxTransportError):
+        backfill_bars(tmp_path / "bars.parquet", auth_key="k", end_date=dt.date(2026, 9, 7), window_days=3)
+
+
+def test_partial_and_implausible_errors_are_krx_bars_errors() -> None:
+    from src.marketdata.krx_bars import (
+        ImplausibleRowCountError,
+        IncompleteMarketError,
+        KrxBarsError,
+        KrxNoTradingDataError,
+        KrxTransportError,
+    )
+
+    for cls in (IncompleteMarketError, ImplausibleRowCountError, KrxNoTradingDataError, KrxTransportError):
+        assert issubclass(cls, KrxBarsError)
+    assert not issubclass(IncompleteMarketError, KrxNoTradingDataError)
+    assert not issubclass(KrxTransportError, KrxNoTradingDataError)
+
+
+def test_retry_wait_seconds_grows_exponentially_and_caps(monkeypatch) -> None:
+    import types
+
+    import src.marketdata.krx_bars as bars_mod
+
+    monkeypatch.setattr(bars_mod, "RETRY_WAIT_BASE_S", 1.0)
+    waits = [bars_mod.retry_wait_seconds(types.SimpleNamespace(attempt_number=n)) for n in (1, 2, 3, 4)]
+
+    assert bars_mod.RETRY_WAIT_MAX_S == 4.0
+    assert waits == [1.0, 2.0, 4.0, 4.0]
+
+
+def test_post_krx_sleeps_between_attempts_using_retry_wait(monkeypatch) -> None:
+    import datetime as dt
+
+    import pytest
+    import requests
+
+    import src.marketdata.krx_bars as bars_mod
+
+    slept: list[float] = []
+    monkeypatch.setattr(bars_mod, "RETRY_WAIT_BASE_S", 0.5)
+    monkeypatch.setattr(bars_mod._post_krx.retry, "sleep", slept.append)
+    attempts = {"n": 0}
+
+    class _Session:
+        def post(self, url, **kw):
+            attempts["n"] += 1
+            raise requests.ConnectionError("down")
+
+    with pytest.raises(bars_mod.KrxTransportError):
+        bars_mod.fetch_daily_bars(dt.date(2026, 9, 11), auth_key="k", session=_Session())
+    assert attempts["n"] == 3
+    assert slept == [0.5, 1.0]

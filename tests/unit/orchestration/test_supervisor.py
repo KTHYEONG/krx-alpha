@@ -175,3 +175,22 @@ def test_process_supervisor_stop_returns_not_running_when_no_process() -> None:
     result = sup.stop()
 
     assert result == 'not_running'
+
+
+def test_process_supervisor_records_last_exit_code_on_restart() -> None:
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    class _Proc:
+        def __init__(self, code):
+            self.code = code
+
+        def poll(self):
+            return self.code
+
+    procs = iter([_Proc(-9), _Proc(None)])
+    sup = ProcessSupervisor(cmd=["x"], popen=lambda cmd: next(procs))
+
+    assert sup.ensure_running() == "started"
+    assert sup.last_exit_code is None
+    assert sup.ensure_running() == "restarted"
+    assert sup.last_exit_code == -9

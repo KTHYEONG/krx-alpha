@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Mapping
@@ -39,6 +40,8 @@ class LsRealtimeAdapter:
         capacity_pairs: int = 200,
         token_url: str = LS_TOKEN_URL,
         ws_url: str = LS_WS_URL,
+        heartbeat_s: float = 10.0,
+        ack_timeout_s: float = 10.0,
     ) -> None:
         self.name = "ls"
         self.capacity_pairs = capacity_pairs
@@ -49,6 +52,8 @@ class LsRealtimeAdapter:
         self._streams = streams
         self._token_url = token_url
         self._ws_url = ws_url
+        self._heartbeat_s = heartbeat_s
+        self._ack_timeout_s = ack_timeout_s
         self._ws: Any = None
         self._token: str | None = None
         self._seq = 0
@@ -56,18 +61,21 @@ class LsRealtimeAdapter:
         self._pending: list[L0Frame] = []  # subscribe 중 끼어든 데이터 프레임 (recv 가 먼저 소진)
 
     async def connect(self) -> None:
-        async with self._http.post(
-            self._token_url,
-            data={
-                "grant_type": "client_credentials",
-                "appkey": self._app_key,
-                "appsecretkey": self._app_secret,
-                "scope": "oob",
-            },
-        ) as resp:
-            data = await resp.json()
-        self._token = str(data["access_token"])
-        self._ws = await (self._http.ws_connect(self._ws_url)).__aenter__()
+        try:
+            async with self._http.post(
+                self._token_url,
+                data={
+                    "grant_type": "client_credentials",
+                    "appkey": self._app_key,
+                    "appsecretkey": self._app_secret,
+                    "scope": "oob",
+                },
+            ) as resp:
+                data = await resp.json()
+            self._token = str(data["access_token"])
+            self._ws = await (self._http.ws_connect(self._ws_url, heartbeat=self._heartbeat_s)).__aenter__()
+        except (TimeoutError, aiohttp.ClientError, ValueError, KeyError) as exc:
+            raise VendorDisconnected(f"connect_failed:{type(exc).__name__}") from exc
         self._seq = 0
         self._conn_id = f"{self.name}-{time.time_ns()}"
         self._pending = []
@@ -106,7 +114,12 @@ class LsRealtimeAdapter:
             # ACK 로 인식될 때까지 프레임을 분류하며 소비한다 (데이터 유실 방지).
             resp: dict[str, Any] | None = None
             while resp is None:
-                raw = await self._ws.receive_str()
+                try:
+                    raw = await asyncio.wait_for(self._ws.receive_str(), timeout=self._ack_timeout_s)
+                except TimeoutError as exc:
+                    raise VendorDisconnected(f"ack_timeout:{symbol}:{stream}") from exc
+                except TypeError as exc:
+                    raise VendorDisconnected("subscribe_non_text") from exc
                 o = json.loads(raw)
                 header = o.get("header", {})
                 if header.get("tr_cd") == "PINGPONG":

@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import polars as pl
 import requests
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_attempt
 
 from src.core.errors import KrxAlphaError
 from src.marketdata.schema import BAR_SCHEMA, REQUIRED_BAR_COLUMNS
@@ -23,12 +23,28 @@ class KrxBarsError(KrxAlphaError):
     """KRX 요청 실패/빈 응답(비영업일)/거래일 미발견 fail-closed 신호."""
 
 
-class IncompleteMarketError(KrxAlphaError):
+class KrxTransportError(KrxBarsError):
+    """KRX 전송 계층 실패 (재시도 대상, 휴장 아님)."""
+
+
+class KrxNoTradingDataError(KrxBarsError):
+    """양 시장 모두 빈 응답 (비거래일)."""
+
+
+class IncompleteMarketError(KrxBarsError):
     """KOSPI/KOSDAQ 중 일부 시장만 응답한 부분 수집 fail-closed 신호."""
 
 
-class ImplausibleRowCountError(KrxAlphaError):
+class ImplausibleRowCountError(KrxBarsError):
     """직전 거래일 대비 행수 급감(절단 응답) fail-closed 신호."""
+
+
+RETRY_WAIT_BASE_S: float = 1.0
+RETRY_WAIT_MAX_S: float = 4.0
+
+
+def retry_wait_seconds(retry_state: RetryCallState) -> float:
+    return float(min(RETRY_WAIT_BASE_S * 2 ** (retry_state.attempt_number - 1), RETRY_WAIT_MAX_S))
 
 
 MIN_ROWCOUNT_RATIO: float = 0.90
@@ -36,7 +52,7 @@ MIN_ROWCOUNT_RATIO: float = 0.90
 
 @retry(
     stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=0.01, max=0.1),
+    wait=retry_wait_seconds,
     retry=retry_if_exception_type(requests.RequestException),
     reraise=True,
 )
@@ -57,11 +73,11 @@ def fetch_daily_bars(date: dt.date, *, auth_key: str, session: Any | None = None
         kospi = _post_krx(sess, KOSPI_URL, auth_key, date)
         kosdaq = _post_krx(sess, KOSDAQ_URL, auth_key, date)
     except requests.RequestException as exc:
-        raise KrxBarsError(f"krx request failed for {date}: {exc}") from exc
+        raise KrxTransportError(f"krx request failed for {date}: {exc}") from exc
     kospi_rows = kospi.get("OutBlock_1", [])
     kosdaq_rows = kosdaq.get("OutBlock_1", [])
     if not kospi_rows and not kosdaq_rows:
-        raise KrxBarsError(f"no trading data for {date}")
+        raise KrxNoTradingDataError(f"no trading data for {date}")
     if not kospi_rows or not kosdaq_rows:
         empty = "KOSPI" if not kospi_rows else "KOSDAQ"
         raise IncompleteMarketError(f"partial market data for {date}: empty {empty}")
@@ -89,7 +105,7 @@ def latest_trading_day(
     for _ in range(max_lookback):
         try:
             bars = fetch_daily_bars(cursor, auth_key=auth_key, session=session)
-        except KrxBarsError:
+        except KrxNoTradingDataError:
             cursor -= dt.timedelta(days=1)
             continue
         return cursor, bars
@@ -151,7 +167,7 @@ def backfill_bars(
     while trading_days_found < window_days and scanned < calendar_cap:
         try:
             bars = fetch_daily_bars(cursor, auth_key=auth_key, session=session)
-        except KrxBarsError:
+        except KrxNoTradingDataError:
             cursor -= dt.timedelta(days=1)
             scanned += 1
             continue

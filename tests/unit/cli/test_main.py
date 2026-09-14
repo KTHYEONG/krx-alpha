@@ -83,3 +83,25 @@ def test_cli_main_registers_order_subcommand() -> None:
     assert (args.symbol, args.side, args.qty, args.type, args.price) == ("005930", "buy", 3, "limit", 10_000)
     assert callable(args.handler)
     assert (market.type, market.price) == ("market", None)
+
+
+def test_cli_main_configures_logging_per_subcommand(tmp_path, monkeypatch) -> None:
+    import json
+
+    import src.cli.main as main_mod
+
+    calls: list[dict[str, object]] = []
+
+    def fake_configure(component, *, log_dir=None, level="INFO"):
+        calls.append({"component": component, "log_dir": log_dir, "level": level})
+        return "r"
+
+    monkeypatch.setattr(main_mod, "configure_logging", fake_configure)
+    monkeypatch.delenv("KRX_ALPHA_PERSISTENT_LOGS", raising=False)
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"session_date": "2026-09-14", "clock_offset_ns": 0, "started_at_ns": 0, "subscription_acks": [], "gaps": []}), encoding="utf-8")
+
+    code = main_mod.main(["--log-level", "DEBUG", "collect-status", "--manifest-path", str(manifest)])
+
+    assert code == 0
+    assert calls == [{"component": "cli-collect-status", "log_dir": None, "level": "DEBUG"}]

@@ -73,3 +73,46 @@ def test_manifest_save_is_atomic_no_partial_target(tmp_path, monkeypatch):
     assert seen["src_is_tmp"] is True
     assert seen["target_exists_before_replace"] is False
     assert target.exists()
+
+
+def test_manifest_roundtrip_preserves_degraded_metadata_and_loads_legacy(tmp_path) -> None:
+    import datetime as dt
+    import json
+
+    from src.realtime.manifest import SessionManifest
+
+    path = tmp_path / "m.json"
+    SessionManifest(session_date=dt.date(2026, 9, 14), clock_offset_ns=1, started_at_ns=2, candidates_rev=20260911, degraded_reason="orchestration_failed").save(path)
+    loaded = SessionManifest.load(path)
+    assert loaded.candidates_rev == 20260911
+    assert loaded.degraded_reason == "orchestration_failed"
+
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps({"session_date": "2026-09-11", "clock_offset_ns": 0, "started_at_ns": 0, "subscription_acks": [], "gaps": []}), encoding="utf-8")
+    old = SessionManifest.load(legacy)
+    assert old.candidates_rev is None
+    assert old.degraded_reason is None
+
+
+def test_manifest_roundtrip_preserves_clock_status_and_boots(tmp_path, caplog) -> None:
+    import datetime as dt
+    import json
+    import logging
+
+    from src.realtime.manifest import SessionManifest
+
+    path = tmp_path / "m.json"
+    manifest = SessionManifest(session_date=dt.date(2026, 9, 14), clock_offset_ns=0, started_at_ns=1, clock_status="unmeasured",
+                               boots=[{"started_at_ns": 1, "clock_offset_ns": 0, "clock_status": "unmeasured"}])
+    with caplog.at_level(logging.INFO):
+        manifest.save(path)
+    loaded = SessionManifest.load(path)
+
+    assert loaded.clock_status == "unmeasured"
+    assert loaded.boots == [{"started_at_ns": 1, "clock_offset_ns": 0, "clock_status": "unmeasured"}]
+    assert "stage=manifest_save" not in caplog.text
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps({"session_date": "2026-09-11", "clock_offset_ns": 0, "started_at_ns": 0}), encoding="utf-8")
+    old = SessionManifest.load(legacy)
+    assert old.clock_status == "measured"
+    assert old.boots == []
