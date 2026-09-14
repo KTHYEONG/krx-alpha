@@ -1,6 +1,36 @@
 {
   "tasks": [
     {
+      "task_id": "ingest_resilience",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_ingest_resilience",
+      "domain": "realtime",
+      "title": "실시간 수집 복원력: watchdog·프로세스내 재접속·gap 교정·manifest 병합",
+      "why": "무응답 벤더에 무한 대기, 뒤집힌 gap 의미, 재기동 시 manifest 덮어쓰기, 예외 시 버퍼 미flush로 조용한 데이터 유실이 있었음",
+      "resolution": "세션 시간대별 무수신 watchdog과 지수 backoff 재접속을 추가하고 gap을 끊김~복구로 교정, manifest를 같은 날짜에 병합, NTP 폴백 도입",
+      "impact": "장중 조용한 유실이 로그로 드러나고, 프로세스 재기동에도 ACK/gap 이력이 보존되며 NTP 전부 불통에도 수집이 계속됨"
+    },
+    {
+      "task_id": "orchestration_fallback",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_orchestration_fallback",
+      "domain": "orchestration",
+      "title": "오케스트레이션 폴백: 당일 재시도·degraded 수집·KRX 오류 분류·캘린더 캐시",
+      "why": "오케스트레이션 1회 실패가 당일 전체 수집 중단으로 번지고, KRX 전송오류를 휴장으로 오인하며 Toss 장애 시 stale 검사가 꺼졌음",
+      "resolution": "실패 시 5분 간격 재시도와 전날 후보 degraded 수집을 추가하고, KRX 예외를 전송/휴장으로 분리하며 Toss 캘린더를 캐시함",
+      "impact": "당일 재시도·degraded 스트리밍으로 하루 손실을 방지하고, EOD 단계를 분리해 오프로드 실패가 정합성 검사를 막지 않게 됨"
+    },
+    {
+      "task_id": "observability_foundation",
+      "date": "2026-09-14",
+      "adr_id": "ADR_20260914_observability_foundation",
+      "domain": "orchestration",
+      "title": "관측성 기반: 통일 로깅·영구 이벤트 로그·CRITICAL 이메일 알림",
+      "why": "포맷 혼재·전량 휘발 로그·traceback 부재로 크래시 루프와 세션 누락을 사후에 진단할 수 없었음",
+      "resolution": "컴포넌트별 key=value 스트림 로그와 회전 JSONL 영구 로그를 도입하고, CRITICAL은 Gmail로 백그라운드 발송",
+      "impact": "재배포로 로그가 사라지지 않고, 광역 예외에 traceback이 남으며, heartbeat 스팸 없이 상태 변화만 기록됨"
+    },
+    {
       "task_id": "eod_bounded_normalize",
       "date": "2026-09-14",
       "adr_id": "ADR_20260914_eod_bounded_normalize",
