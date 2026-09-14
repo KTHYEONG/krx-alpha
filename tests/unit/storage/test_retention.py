@@ -548,7 +548,6 @@ def test_normalize_l0_partition_uses_chunked_tick_quality_without_output_change(
     import polars as pl
     import zstandard as zstd
     import src.storage.retention as retention_mod
-    from src.storage.quality import decode_and_flag_ticks as real_decode
 
     part = tmp_path / "l0" / "kis" / "H0STCNT0" / "dt=2026-09-01"
     part.mkdir(parents=True)
@@ -568,19 +567,372 @@ def test_normalize_l0_partition_uses_chunked_tick_quality_without_output_change(
     (part / "09.jsonl.zst").write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
     out = tmp_path / "l1" / "kis" / "H0STCNT0" / "dt=2026-09-01.parquet"
     calls = []
+    real_decode = retention_mod.decode_tick_raw_fields
 
     def observed(frame):
         calls.append(frame.height)
         return real_decode(frame)
 
-    monkeypatch.setattr(retention_mod, "decode_and_flag_ticks", observed)
+    monkeypatch.setattr(retention_mod, "decode_tick_raw_fields", observed)
+    monkeypatch.setattr(retention_mod, "_GATHER_ROWS", 2)
 
     row_count = retention_mod.normalize_l0_partition(part, out)
 
     persisted = pl.read_parquet(out)
-    assert calls == [3]
+    assert calls == [2, 1]
     assert row_count == 3
     assert persisted["recv_wall_ns"].to_list() == [100, 200, 300]
     expected_raw_by_wall = {row["recv_wall_ns"]: row["raw"] for row in records}
     assert persisted["raw"].to_list() == [expected_raw_by_wall[100], expected_raw_by_wall[200], expected_raw_by_wall[300]]
     assert not (out.parent / (out.name + ".tmp")).exists()
+
+
+def test_normalize_l0_partition_bounded_matches_reference_semantics_across_batches(tmp_path, monkeypatch, caplog) -> None:
+    # Given: 시간 파일 2개 + 극소 배치/청크로 spill 다중 파일과 gather 청크 경계를 강제
+    import json
+    import logging
+
+    import polars as pl
+    import zstandard as zstd
+
+    import src.storage.retention as retention_mod
+
+    monkeypatch.setattr(retention_mod, '_BATCH_BYTES', 64)
+    monkeypatch.setattr(retention_mod, '_GATHER_ROWS', 2)
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True)
+
+    def rec(raw, wall, seq):
+        return {'raw': raw, 'recv_mono_ns': wall + 1, 'recv_wall_ns': wall, 'conn_id': 'ls-1', 'conn_seq': seq, 'vendor': 'ls', 'tr_id': 'H0STCNT0'}
+
+    file09 = [rec('r-seq1', 300, 1), rec('r-seq2', 100, 2), rec('r-seq1', 300, 1)]
+    file10 = [rec('r-seq3', 100, 3), rec('r-seq4', 50, 4)]
+    for name, recs in (('09.jsonl.zst', file09), ('10.jsonl.zst', file10)):
+        payload = ('\n'.join(json.dumps(r) for r in recs) + '\n').encode('utf-8')
+        (part / name).write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    out = tmp_path / 'l1' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    # When
+    with caplog.at_level(logging.INFO):
+        rows = retention_mod.normalize_l0_partition(part, out, work_root=tmp_path / 'work')
+
+    # Then: 첫 행 보존 dedup, recv_wall_ns 오름차순, 동률은 L0 읽기 순서(seq2 가 seq3 보다 먼저)
+    frame = pl.read_parquet(out)
+    assert rows == 4
+    assert frame['raw'].to_list() == ['r-seq4', 'r-seq2', 'r-seq3', 'r-seq1']
+    assert dict(frame.schema) == {
+        'raw': pl.String, 'recv_mono_ns': pl.Int64, 'recv_wall_ns': pl.Int64, 'conn_id': pl.String,
+        'conn_seq': pl.Int64, 'vendor': pl.String, 'tr_id': pl.String,
+    }
+    assert 'raw_records=5' in caplog.text
+    assert 'l1_rows=4' in caplog.text
+    assert 'dedup_dropped=1' in caplog.text
+    assert 'conn_seq_conflict=0' in caplog.text
+    assert not (out.parent / (out.name + '.tmp')).exists()
+
+def test_normalize_l0_partition_raises_on_null_required_field(tmp_path) -> None:
+    # Given: conn_seq 키가 누락된 레코드 (명시 스키마에서는 null 로 조용히 읽힘)
+    import json
+
+    import pytest
+    import zstandard as zstd
+
+    from src.storage.retention import L1NormalizationError, normalize_l0_partition
+
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True)
+    rec = {'raw': 'a', 'recv_mono_ns': 1, 'recv_wall_ns': 2, 'conn_id': 'ls-1', 'vendor': 'ls', 'tr_id': 'H0STCNT0'}
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress((json.dumps(rec) + '\n').encode('utf-8')))
+    out = tmp_path / 'l1' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    # When / Then: dedup/정렬 키가 null 이면 fail-closed
+    with pytest.raises(L1NormalizationError, match='null'):
+        normalize_l0_partition(part, out, work_root=tmp_path / 'work')
+    assert out.exists() is False
+    assert not (out.parent / (out.name + '.tmp')).exists()
+
+def test_normalize_l0_partition_raises_when_hash_equal_duplicate_payload_differs(tmp_path, monkeypatch) -> None:
+    # Given: 해시 충돌을 시뮬레이션하도록 _dedup_sort_order 가 서로 다른 raw 를 중복으로 지명
+    import json
+
+    import numpy as np
+    import pytest
+    import zstandard as zstd
+
+    import src.storage.retention as retention_mod
+    from src.storage.retention import L1NormalizationError
+
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True)
+    recs = [
+        {'raw': '{"v":1}', 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'ls-1', 'conn_seq': 1, 'vendor': 'ls', 'tr_id': 'H0STCNT0'},
+        {'raw': '{"v":2}', 'recv_mono_ns': 2, 'recv_wall_ns': 200, 'conn_id': 'ls-1', 'conn_seq': 1, 'vendor': 'ls', 'tr_id': 'H0STCNT0'},
+    ]
+    payload = ('\n'.join(json.dumps(r) for r in recs) + '\n').encode('utf-8')
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    out = tmp_path / 'l1' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    def _forged(keys):
+        return np.array([0], dtype=np.int64), 0, np.array([1], dtype=np.int64), np.array([0], dtype=np.int64)
+
+    monkeypatch.setattr(retention_mod, '_dedup_sort_order', _forged)
+
+    # When / Then: 해시만 믿고 다른 raw 를 버리지 않는다
+    with pytest.raises(L1NormalizationError, match='conn_seq'):
+        retention_mod.normalize_l0_partition(part, out, work_root=tmp_path / 'work')
+    assert out.exists() is False
+
+def test_normalize_l0_partition_removes_work_dir_and_tmp_on_failure(tmp_path) -> None:
+    # Given: conn_seq 충돌 파티션 + 명시 work_root
+    import json
+
+    import pytest
+    import zstandard as zstd
+
+    from src.storage.retention import L1NormalizationError, normalize_l0_partition
+
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True)
+    recs = [
+        {'raw': '{"v":1}', 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'ls', 'conn_seq': 1, 'vendor': 'ls', 'tr_id': 'H0STCNT0'},
+        {'raw': '{"v":2}', 'recv_mono_ns': 2, 'recv_wall_ns': 200, 'conn_id': 'ls', 'conn_seq': 1, 'vendor': 'ls', 'tr_id': 'H0STCNT0'},
+    ]
+    payload = ('\n'.join(json.dumps(r) for r in recs) + '\n').encode('utf-8')
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    out = tmp_path / 'l1' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+    work_root = tmp_path / 'work'
+
+    # When
+    with pytest.raises(L1NormalizationError, match='conn_seq'):
+        normalize_l0_partition(part, out, work_root=work_root)
+
+    # Then: spill 작업 디렉터리와 tmp 산출물이 남지 않는다
+    assert not (work_root / 'ls.H0STCNT0.dt=2026-09-01').exists()
+    assert out.exists() is False
+    assert not (out.parent / (out.name + '.tmp')).exists()
+
+def test_normalize_l0_partition_sweeps_stale_work_dir_and_keeps_spill_outside_archive(tmp_path) -> None:
+    # Given: 이전 SIGKILL 시도가 남긴 stale spill 파일
+    import json
+
+    import polars as pl
+    import zstandard as zstd
+
+    from src.storage.retention import normalize_l0_partition
+
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True)
+    recs = [
+        {'raw': 'a', 'recv_mono_ns': 1, 'recv_wall_ns': 20, 'conn_id': 'ls-1', 'conn_seq': 1, 'vendor': 'ls', 'tr_id': 'H0STCNT0'},
+        {'raw': 'b', 'recv_mono_ns': 2, 'recv_wall_ns': 10, 'conn_id': 'ls-1', 'conn_seq': 2, 'vendor': 'ls', 'tr_id': 'H0STCNT0'},
+    ]
+    payload = ('\n'.join(json.dumps(r) for r in recs) + '\n').encode('utf-8')
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    work_root = tmp_path / 'work'
+    stale = work_root / 'ls.H0STCNT0.dt=2026-09-01'
+    (stale / 'in').mkdir(parents=True)
+    (stale / 'in' / '000000.parquet').write_bytes(b'stale')
+    out = tmp_path / 'l1' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    # When
+    rows = normalize_l0_partition(part, out, work_root=work_root)
+
+    # Then: stale 무시 + 작업 디렉터리 정리 + archive 트리에는 최종 L1 만 존재
+    assert rows == 2
+    assert pl.read_parquet(out)['raw'].to_list() == ['b', 'a']
+    assert not stale.exists()
+    archived = sorted(p.relative_to(tmp_path / 'l1').as_posix() for p in (tmp_path / 'l1').rglob('*.parquet'))
+    assert archived == ['ls/H0STCNT0/dt=2026-09-01.parquet']
+
+def test_normalize_l0_partition_default_work_dir_is_temporary_and_removed(tmp_path, monkeypatch) -> None:
+    # Given: work_root 미지정 + mkdtemp 를 관측 가능한 경로로 치환
+    import json
+
+    import zstandard as zstd
+
+    import src.storage.retention as retention_mod
+
+    created = tmp_path / 'sys-tmp'
+    prefixes = []
+
+    def _mkdtemp(prefix):
+        prefixes.append(prefix)
+        created.mkdir()
+        return str(created)
+
+    monkeypatch.setattr(retention_mod.tempfile, 'mkdtemp', _mkdtemp)
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True)
+    rec = {'raw': 'a', 'recv_mono_ns': 1, 'recv_wall_ns': 2, 'conn_id': 'ls-1', 'conn_seq': 1, 'vendor': 'ls', 'tr_id': 'H0STCNT0'}
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress((json.dumps(rec) + '\n').encode('utf-8')))
+    out = tmp_path / 'l1' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    # When
+    rows = retention_mod.normalize_l0_partition(part, out)
+
+    # Then
+    assert rows == 1
+    assert prefixes == ['krx-l1-normalize-']
+    assert created.exists() is False
+
+def test_iter_line_batches_splits_only_at_newline_and_yields_trailing_line(tmp_path) -> None:
+    # Given: 다중 zstd 프레임 + 마지막 줄 개행 없음
+    import zstandard as zstd
+
+    from src.storage.retention import _iter_line_batches
+
+    lines = [b'{"a":"' + b'x' * n + b'"}' for n in (3, 40, 7)]
+    payload = b'\n'.join(lines)
+    path = tmp_path / '09.jsonl.zst'
+    cctx = zstd.ZstdCompressor(level=3)
+    path.write_bytes(cctx.compress(payload[:20]) + cctx.compress(payload[20:]))
+
+    # When
+    batches = list(_iter_line_batches(path, 8))
+
+    # Then: 줄 경계에서만 분할되고 원문이 보존된다
+    assert b''.join(batches) == payload
+    assert all(batch.endswith(b'\n') for batch in batches[:-1])
+    assert batches[-1] == lines[-1]
+
+def test_dedup_sort_order_keeps_first_occurrence_and_breaks_wall_ties_by_read_order() -> None:
+    # Given: (b,1) 동일 해시 중복 1건 + recv_wall_ns 동률(행 1, 3)
+    import polars as pl
+
+    from src.storage.retention import _dedup_sort_order
+
+    keys = pl.DataFrame({
+        'conn_id': ['b', 'a', 'b', 'a'],
+        'conn_seq': [1, 1, 1, 2],
+        'recv_wall_ns': [5, 3, 5, 3],
+        'h1': pl.Series([7, 8, 7, 9], dtype=pl.UInt64),
+        'h2': pl.Series([70, 80, 70, 90], dtype=pl.UInt64),
+    })
+
+    # When
+    order, conflict, dropped, kept = _dedup_sort_order(keys)
+
+    # Then
+    assert order.tolist() == [1, 3, 0]
+    assert conflict == 0
+    assert dropped.tolist() == [2]
+    assert kept.tolist() == [0]
+
+def test_dedup_sort_order_counts_groups_with_distinct_payload_hashes() -> None:
+    # Given: (a,1) 그룹이 h2 만 다른 두 행
+    import polars as pl
+
+    from src.storage.retention import _dedup_sort_order
+
+    keys = pl.DataFrame({
+        'conn_id': ['a', 'a', 'a', 'c'],
+        'conn_seq': [1, 1, 2, 2],
+        'recv_wall_ns': [1, 2, 3, 4],
+        'h1': pl.Series([5, 5, 6, 6], dtype=pl.UInt64),
+        'h2': pl.Series([1, 2, 3, 3], dtype=pl.UInt64),
+    })
+
+    # When
+    order, conflict, dropped, kept = _dedup_sort_order(keys)
+
+    # Then
+    assert conflict == 1
+    assert order.tolist() == [0, 2, 3]
+
+def test_prune_old_journals_retains_partition_without_quarantine_on_worker_crash(tmp_path, caplog) -> None:
+    # Given: OOM 등 인프라 원인으로 워커가 죽는 정규화기
+    import datetime as dt
+    import logging
+
+    from src.storage.retention import L1WorkerCrashError, prune_old_journals
+
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True)
+    (part / '09.jsonl.zst').write_bytes(b'kept')
+    quarantine = tmp_path / 'quarantine'
+
+    def _crash(part_dir, out_path):
+        raise L1WorkerCrashError('normalize worker crashed: returncode=-9')
+
+    # When
+    with caplog.at_level(logging.CRITICAL):
+        deleted = prune_old_journals(
+            tmp_path / 'l0', archive_root=tmp_path / 'l1', retain_days=3,
+            reference_date=dt.date(2026, 9, 30), quarantine_root=quarantine, normalizer=_crash,
+        )
+
+    # Then: 데이터 결함이 아니므로 격리하지 않고 원위치 보존
+    assert deleted == 0
+    assert (part / '09.jsonl.zst').read_bytes() == b'kept'
+    assert quarantine.exists() is False
+    assert 'reason=worker_crash' in caplog.text
+
+def test_prune_old_journals_uses_injected_normalizer(tmp_path) -> None:
+    # Given: 산출물을 직접 쓰는 주입 정규화기
+    import datetime as dt
+
+    from src.storage.retention import prune_old_journals
+
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True)
+    (part / '09.jsonl.zst').write_bytes(b'x')
+    seen = []
+
+    def _normalizer(part_dir, out_path):
+        seen.append((part_dir, out_path))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(b'parquet')
+        return 3
+
+    # When
+    deleted = prune_old_journals(
+        tmp_path / 'l0', archive_root=tmp_path / 'l1', retain_days=3,
+        reference_date=dt.date(2026, 9, 30), normalizer=_normalizer,
+    )
+
+    # Then
+    assert deleted == 1
+    assert seen == [(part, tmp_path / 'l1' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01.parquet')]
+    assert part.exists() is False
+
+def test_normalize_l0_partition_closes_writer_and_removes_tmp_when_failing_after_writer_open(tmp_path, monkeypatch) -> None:
+    # Given: 첫 gather 청크를 쓴 뒤(= writer 열림) 두 번째 청크 DQ 에서 ValueError
+    import json
+
+    import pytest
+    import zstandard as zstd
+
+    import src.storage.retention as retention_mod
+    from src.storage.retention import L1NormalizationError
+
+    monkeypatch.setattr(retention_mod, '_GATHER_ROWS', 1)
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True)
+    recs = [
+        {'raw': 'a', 'recv_mono_ns': 1, 'recv_wall_ns': 10, 'conn_id': 'ls-1', 'conn_seq': 1, 'vendor': 'ls', 'tr_id': 'H0STCNT0'},
+        {'raw': 'b', 'recv_mono_ns': 2, 'recv_wall_ns': 20, 'conn_id': 'ls-1', 'conn_seq': 2, 'vendor': 'ls', 'tr_id': 'H0STCNT0'},
+    ]
+    payload = ('\n'.join(json.dumps(r) for r in recs) + '\n').encode('utf-8')
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    out = tmp_path / 'l1' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+    work_root = tmp_path / 'work'
+    calls = []
+    real_quotes = retention_mod.decode_and_flag_quotes
+
+    def _fail_on_second_chunk(chunk):
+        calls.append(chunk.height)
+        if len(calls) == 2:
+            raise ValueError('injected failure after writer open')
+        return real_quotes(chunk)
+
+    monkeypatch.setattr(retention_mod, 'decode_and_flag_quotes', _fail_on_second_chunk)
+
+    # When
+    with pytest.raises(L1NormalizationError, match='normalize failed'):
+        retention_mod.normalize_l0_partition(part, out, work_root=work_root)
+
+    # Then: 열린 writer 정리 + tmp/작업 디렉터리 제거 + 산출물 없음
+    assert calls == [1, 1]
+    assert out.exists() is False
+    assert not (out.parent / (out.name + '.tmp')).exists()
+    assert not (work_root / 'ls.H0STCNT0.dt=2026-09-01').exists()

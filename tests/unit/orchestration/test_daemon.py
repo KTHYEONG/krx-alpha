@@ -670,8 +670,8 @@ def test_run_collector_daemon_eod_passes_quarantine_root(tmp_path, monkeypatch) 
 
     seen: dict[str, object] = {}
 
-    def _fake_maintenance(journal_root, *, retain_days=3, today=None, archive_root=None, quarantine_root=None):
-        seen.update({'quarantine_root': quarantine_root, 'archive_root': archive_root})
+    def _fake_maintenance(journal_root, *, retain_days=3, today=None, archive_root=None, quarantine_root=None, work_root=None):
+        seen.update({'quarantine_root': quarantine_root, 'archive_root': archive_root, 'work_root': work_root})
         return 0
 
     monkeypatch.setattr(daemon_mod, 'run_eod_maintenance', _fake_maintenance)
@@ -684,9 +684,10 @@ def test_run_collector_daemon_eod_passes_quarantine_root(tmp_path, monkeypatch) 
     # When
     run_collector_daemon(settings=settings, sleep_fn=mock_sleep, max_cycles=1, now_fn=lambda: eod_time)
 
-    # Then: 설정에서 파생된 격리 경로가 EOD 유지보수로 전달된다
+    # Then: 설정에서 파생된 격리/작업 경로가 EOD 유지보수로 전달된다
     assert seen['quarantine_root'] == settings.paths.quarantine_root
     assert seen['archive_root'] == settings.paths.archive_root
+    assert seen['work_root'] == settings.paths.work_root
 
 
 def test_build_kis_client_wires_shared_token_cache_path(tmp_path, monkeypatch) -> None:
@@ -839,3 +840,151 @@ def test_run_collector_daemon_eod_logs_session_data_gap(tmp_path, monkeypatch, c
         daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
 
     assert "session_data_gap" in caplog.text
+
+def test_run_collector_daemon_eod_attempts_maintenance_once_per_date(tmp_path, monkeypatch) -> None:
+    # Given: 같은 날 EOD 윈도우에서 3사이클 반복
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / 'data')
+    counts = {'maintenance': 0, 'offload': 0, 'reconcile': 0}
+
+    def _maintenance(*a, **kw):
+        counts['maintenance'] += 1
+        return 0
+
+    def _offload(*a, **kw):
+        counts['offload'] += 1
+        return {'uploaded': 0, 'skipped': 0, 'failed': 0, 'purged': 0}
+
+    def _reconcile(**kw):
+        counts['reconcile'] += 1
+        return True
+
+    monkeypatch.setattr(daemon_mod, 'run_eod_maintenance', _maintenance)
+    monkeypatch.setattr(daemon_mod, 'run_eod_offload', _offload)
+    monkeypatch.setattr(daemon_mod, 'check_session_reconciliation', _reconcile)
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+
+    # When
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=3, now_fn=lambda: eod_time)
+
+    # Then: 거래일당 1회만 시도
+    assert counts == {'maintenance': 1, 'offload': 1, 'reconcile': 1}
+
+def test_run_collector_daemon_eod_attempts_again_on_next_date(tmp_path, monkeypatch) -> None:
+    # Given: 이틀 연속 EOD 사이클
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / 'data')
+    days = []
+
+    def _maintenance(*a, **kw):
+        days.append(kw['today'])
+        return 0
+
+    monkeypatch.setattr(daemon_mod, 'run_eod_maintenance', _maintenance)
+    monkeypatch.setattr(daemon_mod, 'run_eod_offload', lambda *a, **kw: {'uploaded': 0, 'skipped': 0, 'failed': 0, 'purged': 0})
+    monkeypatch.setattr(daemon_mod, 'check_session_reconciliation', lambda **kw: True)
+    kst = ZoneInfo('Asia/Seoul')
+    times = iter([
+        dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=kst),
+        dt.datetime(2026, 9, 14, 15, 46, 0, tzinfo=kst),
+        dt.datetime(2026, 9, 15, 15, 45, 0, tzinfo=kst),
+    ])
+
+    # When
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=3, now_fn=lambda: next(times))
+
+    # Then
+    assert days == [dt.date(2026, 9, 14), dt.date(2026, 9, 15)]
+
+def test_run_collector_daemon_eod_runs_offload_and_reconciliation_when_maintenance_fails(tmp_path, monkeypatch, caplog) -> None:
+    # Given: 정규화 유지보수가 워커 크래시로 실패
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+    from src.storage.retention import L1WorkerCrashError
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / 'data')
+    counts = {'offload': 0, 'reconcile': 0}
+
+    def _maintenance(*a, **kw):
+        raise L1WorkerCrashError('normalize worker crashed: returncode=-9')
+
+    def _offload(*a, **kw):
+        counts['offload'] += 1
+        return {'uploaded': 2, 'skipped': 0, 'failed': 0, 'purged': 1}
+
+    def _reconcile(**kw):
+        counts['reconcile'] += 1
+        return True
+
+    monkeypatch.setattr(daemon_mod, 'run_eod_maintenance', _maintenance)
+    monkeypatch.setattr(daemon_mod, 'run_eod_offload', _offload)
+    monkeypatch.setattr(daemon_mod, 'check_session_reconciliation', _reconcile)
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+
+    # When
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    # Then: 오프로드/정합성 검사는 계속되고 요약은 DEGRADED
+    assert counts == {'offload': 1, 'reconcile': 1}
+    assert 'stage=eod_maintenance status=FAIL reason=maintenance_error' in caplog.text
+    assert 'deleted_partitions=0 uploaded=2 purged=1 status=DEGRADED' in caplog.text
+
+def test_run_collector_daemon_eod_logs_error_when_offload_raises_and_does_not_retry_same_date(tmp_path, monkeypatch, caplog) -> None:
+    # Given: 오프로드 단계에서 예기치 못한 예외
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / 'data')
+    counts = {'maintenance': 0, 'offload': 0, 'reconcile': 0}
+
+    def _maintenance(*a, **kw):
+        counts['maintenance'] += 1
+        return 0
+
+    def _offload(*a, **kw):
+        counts['offload'] += 1
+        raise RuntimeError('rclone lsjson failed')
+
+    def _reconcile(**kw):
+        counts['reconcile'] += 1
+        return True
+
+    monkeypatch.setattr(daemon_mod, 'run_eod_maintenance', _maintenance)
+    monkeypatch.setattr(daemon_mod, 'run_eod_offload', _offload)
+    monkeypatch.setattr(daemon_mod, 'check_session_reconciliation', _reconcile)
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+
+    # When
+    with caplog.at_level(logging.ERROR):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: eod_time)
+
+    # Then: 데몬은 생존하고 오류를 남기며 같은 날 재시도하지 않는다
+    assert counts == {'maintenance': 1, 'offload': 1, 'reconcile': 0}
+    assert 'stage=eod_maintenance error=rclone lsjson failed' in caplog.text

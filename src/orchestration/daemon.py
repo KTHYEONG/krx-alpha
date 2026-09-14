@@ -22,7 +22,7 @@ from src.core.config import (
     TossCredentials,
     load_credentials,
 )
-from src.core.errors import MissingCredentialsError
+from src.core.errors import KrxAlphaError, MissingCredentialsError
 from src.execution.contracts import KisApiError
 from src.execution.kis_client import KisRestClient, RateLimiter
 from src.marketdata.krx_bars import KrxBarsError
@@ -148,6 +148,7 @@ def run_collector_daemon(
     clock = now_fn if now_fn is not None else (lambda: dt.datetime.now(_KST))
     orchestrated_for: dt.date | None = None
     holiday_for: dt.date | None = None
+    eod_attempted_for: dt.date | None = None
     supervisor: ProcessSupervisor | None = None
 
     while True:
@@ -214,34 +215,45 @@ def run_collector_daemon(
                 stop_result = supervisor.stop(timeout_s=15.0)
                 logger.info("[DAEMON] stage=streamer_stop result=%s", stop_result)
             # 15:40 EOD 유지보수 (정규화 및 오래된 저널 prune + L1 오프로드)
-            try:
-                ref_day = now.astimezone(_KST).date()
-                deleted = run_eod_maintenance(
-                    paths.journal_root,
-                    retain_days=cfg.journal_retain_days,
-                    today=ref_day,
-                    archive_root=paths.archive_root,
-                    quarantine_root=paths.quarantine_root,
-                )
-                offload = run_eod_offload(
-                    paths.archive_root, retain_days=cfg.archive_retain_days, reference_date=ref_day
-                )
-                reconciled = check_session_reconciliation(
-                    bars_store=paths.bars_store, manifest_path=paths.manifest_path(ref_day), date=ref_day
-                )
-                if not reconciled:
-                    logger.critical(
-                        "[DAEMON] stage=eod_maintenance status=FAIL reason=session_data_gap date=%s",
-                        ref_day.isoformat(),
+            # 같은 거래일에 60초마다 재실행하지 않도록 날짜당 1회만 시도한다
+            ref_day = now.astimezone(_KST).date()
+            if eod_attempted_for != ref_day:
+                eod_attempted_for = ref_day
+                deleted = 0
+                maintenance_ok = True
+                try:
+                    deleted = run_eod_maintenance(
+                        paths.journal_root,
+                        retain_days=cfg.journal_retain_days,
+                        today=ref_day,
+                        archive_root=paths.archive_root,
+                        quarantine_root=paths.quarantine_root,
+                        work_root=paths.work_root,
                     )
-                logger.info(
-                    "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=OK",
-                    deleted,
-                    offload["uploaded"],
-                    offload["purged"],
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.error("[DAEMON] stage=eod_maintenance error=%s", str(e))
+                except (KrxAlphaError, OSError) as e:
+                    maintenance_ok = False
+                    logger.critical("[DAEMON] stage=eod_maintenance status=FAIL reason=maintenance_error error=%s", str(e))
+                try:
+                    offload = run_eod_offload(
+                        paths.archive_root, retain_days=cfg.archive_retain_days, reference_date=ref_day
+                    )
+                    reconciled = check_session_reconciliation(
+                        bars_store=paths.bars_store, manifest_path=paths.manifest_path(ref_day), date=ref_day
+                    )
+                    if not reconciled:
+                        logger.critical(
+                            "[DAEMON] stage=eod_maintenance status=FAIL reason=session_data_gap date=%s",
+                            ref_day.isoformat(),
+                        )
+                    logger.info(
+                        "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=%s",
+                        deleted,
+                        offload["uploaded"],
+                        offload["purged"],
+                        "OK" if maintenance_ok else "DEGRADED",
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.error("[DAEMON] stage=eod_maintenance error=%s", str(e))
             sleep_sec = 60.0
         else:  # NIGHT_SLEEP
             sleep_sec = min(calc_sleep_seconds(now, sched.streamer_start), 1800.0)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import polars as pl
@@ -17,6 +18,7 @@ _SCHEMA_DISAGREE_TOLERANCE: float = 0.01
 _QUOTE_LEVELS: int = 10
 _QUOTE_CHUNK_ROWS: int = 20_000
 _TICK_CHUNK_ROWS: int = 20_000
+_BUCKET_HASH_SEED: int = 0x9E3779B1
 _AUCTION_WINDOWS: tuple[tuple[int, int], ...] = ((83000, 90000), (152000, 153000))
 _QUOTE_BODY_FIELDS: tuple[str, ...] = (
     "shcode",
@@ -205,15 +207,99 @@ def _summarize_tick_fields(raw_fields: pl.DataFrame, *, rows: int) -> TickQualit
     )
 
 
-def decode_and_flag_ticks(df: pl.DataFrame, *, chunk_rows: int = _TICK_CHUNK_ROWS) -> TickQualitySummary | None:
+def decode_tick_raw_fields(df: pl.DataFrame, *, chunk_rows: int = _TICK_CHUNK_ROWS) -> pl.DataFrame | None:
+    """Decode H0STCNT0 tick bodies into a field frame, one bounded chunk at a time.
+
+    Args:
+        df: L1 rows containing raw/tr_id/recv_wall_ns columns.
+        chunk_rows: Maximum rows per decode chunk; must be positive.
+
+    Returns:
+        Concatenated tick field frame, or None when no tick rows exist.
+
+    Raises:
+        ValueError: If chunk_rows is not positive.
+
+    Note:
+        Callers needing a one-shot in-memory summary instead of the raw
+        fields should use decode_and_flag_ticks.
+    """
     ticks = df.filter(pl.col("tr_id") == _TICK_STREAM)
     if ticks.height == 0:
         return None
     if chunk_rows <= 0:
         raise ValueError(f"chunk_rows must be > 0, got {chunk_rows}")
-    parts: list[pl.DataFrame] = [_decode_tick_chunk(ticks.slice(offset, chunk_rows)) for offset in range(0, ticks.height, chunk_rows)]
-    raw_fields = pl.concat(parts)
-    return _summarize_tick_fields(raw_fields, rows=ticks.height)
+    # 청크 단위 디코딩으로 피크 메모리를 chunk_rows 행으로 묶는다
+    return pl.concat([_decode_tick_chunk(ticks.slice(offset, chunk_rows)) for offset in range(0, ticks.height, chunk_rows)])
+
+
+def decode_and_flag_ticks(df: pl.DataFrame, *, chunk_rows: int = _TICK_CHUNK_ROWS) -> TickQualitySummary | None:
+    fields = decode_tick_raw_fields(df, chunk_rows=chunk_rows)
+    if fields is None:
+        return None
+    return _summarize_tick_fields(fields, rows=fields.height)
+
+
+def summarize_tick_fields_bucketed(fields: pl.LazyFrame, *, rows: int, buckets: int) -> TickQualitySummary:
+    """Summarize spill-backed tick fields in shcode hash buckets with bounded memory.
+
+    Args:
+        fields: Lazy tick field frame (e.g. scan of per-chunk spill parquet).
+        rows: Total tick row count reported on the summary.
+        buckets: Number of hash buckets; must be positive.
+
+    Returns:
+        TickQualitySummary whose counters equal the unbucketed computation.
+
+    Raises:
+        ValueError: If buckets is not positive.
+    """
+    if buckets <= 0:
+        raise ValueError(f"buckets must be > 0, got {buckets}")
+    # 같은 shcode는 항상 같은 버킷에 모이므로 종목별 누적 상태가 경계를 넘지 않는다
+    decode_fail = 0
+    zero_volume = 0
+    price_band_violation = 0
+    cum_volume_regression = 0
+    schema_disagree = 0
+    tick_loss = 0
+    lost_volume = 0
+    for b in range(buckets):
+        frame = fields.filter((pl.col("shcode").hash(_BUCKET_HASH_SEED) % buckets) == b).collect()
+        if frame.height == 0:
+            continue
+        s = _summarize_tick_fields(frame, rows=frame.height)
+        decode_fail += s.decode_fail
+        zero_volume += s.zero_volume
+        price_band_violation += s.price_band_violation
+        cum_volume_regression += s.cum_volume_regression
+        schema_disagree += s.schema_disagree
+        tick_loss += s.tick_loss
+        lost_volume += s.lost_volume
+    return TickQualitySummary(
+        rows=rows,
+        decode_fail=decode_fail,
+        zero_volume=zero_volume,
+        price_band_violation=price_band_violation,
+        cum_volume_regression=cum_volume_regression,
+        schema_disagree=schema_disagree,
+        tick_loss=tick_loss,
+        lost_volume=lost_volume,
+    )
+
+
+def sum_quote_summaries(summaries: Sequence[QuoteQualitySummary]) -> QuoteQualitySummary | None:
+    items = list(summaries)
+    if not items:
+        return None
+    return QuoteQualitySummary(
+        rows=sum(s.rows for s in items),
+        decode_fail=sum(s.decode_fail for s in items),
+        ladder_disorder=sum(s.ladder_disorder for s in items),
+        crossed_book=sum(s.crossed_book for s in items),
+        negative_remain=sum(s.negative_remain for s in items),
+        total_remain_short=sum(s.total_remain_short for s in items),
+    )
 
 
 def _flag_quote_invariants(frame: pl.DataFrame) -> pl.DataFrame:

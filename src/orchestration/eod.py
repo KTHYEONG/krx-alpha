@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import logging
 import pathlib
 from typing import Any
 
 import polars as pl
 
+from src.storage.normalize_worker import run_isolated_normalize
 from src.storage.remote import RcloneArchiver
 from src.storage.retention import prune_local_l1, prune_old_journals
 
@@ -22,8 +24,17 @@ def run_eod_maintenance(
     today: dt.date | None = None,
     archive_root: pathlib.Path | None = None,
     quarantine_root: pathlib.Path | None = None,
+    work_root: pathlib.Path | None = None,
 ) -> int:
-    return prune_old_journals(journal_root, retain_days=retain_days, reference_date=today, archive_root=archive_root, quarantine_root=quarantine_root)
+    return prune_old_journals(
+        journal_root,
+        retain_days=retain_days,
+        reference_date=today,
+        archive_root=archive_root,
+        quarantine_root=quarantine_root,
+        # 데몬 OOM crash loop를 막기 위해 정규화는 자식 프로세스로 격리한다
+        normalizer=functools.partial(run_isolated_normalize, work_root=work_root),
+    )
 
 
 def run_eod_offload(
