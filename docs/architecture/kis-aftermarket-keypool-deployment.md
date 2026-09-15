@@ -39,6 +39,9 @@ Shared KIS data-key env and VPS activation runbook.
   repository secret `KIS_DATA_ENV_CONTENT` (multiline content). If that secret is
   empty, deployment reuses the already-provisioned VPS fragment; it fails closed
   when the VPS fragment is also missing.
+- This is a VPS-specific fragment: set `KIS_DATA_SLOTS=1,2,3,4,5` and
+  `KIS_HOST_DATA_SLOTS=1,2,3,4` explicitly. Do not copy the local host-only
+  `KIS_HOST_DATA_SLOTS` assignment.
 
 ## 4. Compose wiring (KRX)
 
