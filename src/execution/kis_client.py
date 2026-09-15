@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
+import hashlib
 import json
 import logging
 import os
 import pathlib
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from decimal import Decimal
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -66,6 +70,39 @@ _KST: dt.tzinfo = ZoneInfo("Asia/Seoul")
 def _to_int(raw: Any) -> int:
     text = str(raw or "0")
     return int(Decimal(text))
+
+
+def kis_app_key_fingerprint(app_key: str) -> str:
+    """앱키 지문 (토큰 캐시 파일명·WS lease와 공유하는 규칙)."""
+    return hashlib.sha256(app_key.encode("utf-8")).hexdigest()[:12]
+
+
+def kis_token_cache_path(cache_dir: pathlib.Path, app_key: str) -> pathlib.Path:
+    """앱키별 canonical 토큰 캐시 경로 (token_<sha256(app_key)[:12]>.json)."""
+    return pathlib.Path(cache_dir) / f"token_{kis_app_key_fingerprint(app_key)}.json"
+
+
+_TOKEN_KEY_LOCKS: dict[str, threading.Lock] = {}
+_TOKEN_KEY_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for_token_cache(path: pathlib.Path) -> threading.Lock:
+    with _TOKEN_KEY_LOCKS_GUARD:
+        return _TOKEN_KEY_LOCKS.setdefault(str(path), threading.Lock())
+
+
+@contextmanager
+def _token_file_lock(path: pathlib.Path) -> Iterator[None]:
+    """프로세스 간 토큰 발급을 직렬화하는 advisory lock."""
+    lock_path = pathlib.Path(f"{path}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a+b")  # noqa: SIM115 - lock handle은 context 수명 동안 유지
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 class RateLimiter:
@@ -145,6 +182,7 @@ class KisRestClient:
         now: Callable[[], dt.datetime],
         timeout_s: float,
         base_url: str = KIS_LIVE_BASE_URL,
+        allow_token_issue: bool = True,
     ) -> None:
         self._creds = creds
         self._session = session
@@ -153,8 +191,35 @@ class KisRestClient:
         self._now = now
         self._timeout_s = timeout_s
         self._base_url = base_url
+        self._allow_token_issue = allow_token_issue
         self._token: str | None = None
         self._token_expires_at: dt.datetime | None = None
+
+    def _read_valid_token(self, now: dt.datetime) -> tuple[str, dt.datetime] | None:
+        """유효한 캐시 토큰을 반환하고 무효·만료 임박분은 None으로 fail-closed 처리한다."""
+        try:
+            cached = json.loads(self._token_cache_path.read_text(encoding="utf-8"))
+            expires_at = dt.datetime.fromisoformat(
+                str(cached.get("expired_at") or cached.get("expires_at"))
+            )
+            if cached.get("app_key") != self._creds.kis_app_key:
+                return None
+            token = cached.get("access_token")
+            if not isinstance(token, str) or not token:
+                return None
+            if expires_at - now <= _TOKEN_REFRESH_MARGIN:
+                return None
+            return (token, expires_at)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+
+    def _cached_issue_day(self) -> dt.date | None:
+        """캐시에 기록된 발급일(KST)을 반환한다 (legacy 캐시는 None)."""
+        try:
+            cached = json.loads(self._token_cache_path.read_text(encoding="utf-8"))
+            return dt.datetime.fromisoformat(str(cached.get("issued_at", ""))).date()
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
 
     def access_token(self, *, force: bool = False) -> str:
         """캐시 토큰을 반환하고 만료 임박 시에만 재발급한다."""
@@ -167,15 +232,26 @@ class KisRestClient:
         ):
             return self._token
         if not force:
-            try:
-                cached = json.loads(self._token_cache_path.read_text(encoding="utf-8"))
-                expires_at = dt.datetime.fromisoformat(str(cached["expires_at"]))
-                if expires_at - now > _TOKEN_REFRESH_MARGIN:
-                    self._token = str(cached["access_token"])
-                    self._token_expires_at = expires_at
-                    return self._token
-            except (OSError, ValueError, KeyError):
-                pass
+            hit = self._read_valid_token(now)
+            if hit is not None:
+                self._token, self._token_expires_at = hit
+                return self._token
+        if not self._allow_token_issue:
+            raise KisApiError("TOKEN_CACHE", "token cache missing/expired and issuance disabled")
+        return self._issue_token(now, reuse_valid=not force)
+
+    def _issue_token(self, now: dt.datetime, *, reuse_valid: bool) -> str:
+        """per-key lock으로 캐시를 재검사한 뒤 atomic 0600 write로 발급한다 (당일 재발급은 force도 거부)."""
+        with _token_file_lock(self._token_cache_path), _lock_for_token_cache(self._token_cache_path):
+            cached = self._read_valid_token(now) if reuse_valid else None
+            if cached is not None:
+                self._token, self._token_expires_at = cached
+                return self._token
+            if self._cached_issue_day() == now.astimezone(_KST).date():
+                raise KisApiError("TOKEN_DAILY_LIMIT", "token already issued today (KST)")
+            return self._issue_token_unlocked(now)
+
+    def _issue_token_unlocked(self, now: dt.datetime) -> str:
         self._limiter.acquire()
         resp = self._session.post(
             self._base_url + _PATH_TOKEN,
@@ -194,7 +270,14 @@ class KisRestClient:
         ).replace(tzinfo=_KST)
         self._token = str(body["access_token"])
         self._token_expires_at = expires_at
-        payload = json.dumps({"access_token": self._token, "expires_at": expires_at.isoformat()})
+        payload = json.dumps(
+            {
+                "access_token": self._token,
+                "expired_at": expires_at.isoformat(),
+                "app_key": self._creds.kis_app_key,
+                "issued_at": now.isoformat(),
+            }
+        )
         self._token_cache_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self._token_cache_path.parent / (self._token_cache_path.name + ".tmp")
         fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

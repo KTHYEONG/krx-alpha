@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from src.core.calendar import SessionSchedule, SessionState, calc_sleep_seconds, get_target_state
 from src.realtime.clock import ClockUnsyncedError, measure_ntp_offset_ns
 from src.realtime.contracts import MarketSession, MarketVenue
+from src.realtime.kis_sharding import AftermarketShard
 from src.universe.ipc import read_candidates
 from src.storage.journal import L0JournalWriter
 from src.realtime.manifest import SessionManifest
@@ -47,6 +48,7 @@ class SessionConfig:
     degraded_reason: str | None = None
     ntp_fallback_hosts: tuple[str, ...] = ()
     route: StreamRoute | None = None
+    shard: AftermarketShard | None = None
 
 
 @dataclass
@@ -166,7 +168,15 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
         )
     stored = read_candidates(cfg.candidates_path)
     rows: list[dict[str, Any]] = cast(list[dict[str, Any]], stored["candidates"]) if stored is not None else []
-    desired = {str(row["symbol"]): tuple(cfg.desired_streams) for row in rows}
+    if cfg.shard is not None:
+        manifest.planned_pairs = [
+            {"symbol": symbol, "tr_id": stream} for symbol in cfg.shard.symbols for stream in cfg.shard.streams
+        ]
+        manifest.shard_index = cfg.shard.shard_index
+        manifest.credential_key_id = cfg.shard.credential_key_id
+        desired = {str(symbol): tuple(cfg.shard.streams) for symbol in cfg.shard.symbols}
+    else:
+        desired = {str(row["symbol"]): tuple(cfg.desired_streams) for row in rows}
     registry = SubscriptionRegistry(slot_budget=cfg.slot_budget)
     diff: SubscriptionDiff = registry.plan(desired)
     registry.apply(diff)

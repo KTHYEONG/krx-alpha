@@ -547,3 +547,36 @@ def test_session_rejects_frame_for_other_route(monkeypatch, tmp_path):
     session = bootstrap_session(cfg, now_ns=1)
     with pytest.raises(KeyError):
         session.record_frame(vendor='kis', venue=MarketVenue.KRX, session=MarketSession.KRX_AFTER, stream='H0NXCNT0', raw='x', exchange_event_time='160000', recv_mono_ns=1, recv_wall_ns=1, conn_id='c', conn_seq=1)
+
+
+def test_bootstrap_session_records_shard_planned_pairs(tmp_path):
+    import datetime as dt
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+    from src.realtime.session import SessionConfig, StreamRoute, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    class _FakeClient:
+        def request(self, host, version=3, timeout=5):
+            class _Stat:
+                offset = 0.0
+
+            return _Stat()
+
+    cand_path = tmp_path / "candidates.json"
+    write_candidates(cand_path, [{"symbol": "005930", "selection_reasons": ["limit_up"]}, {"symbol": "000660", "selection_reasons": ["surge10"]}], rev=1)
+    shard = AftermarketShard(MarketVenue.NXT, 0, ("005930",), ("H0NXCNT0", "H0NXASP0"), "1", "id1")
+    cfg = SessionConfig(
+        session_date=dt.date(2026, 9, 8), journal_root=tmp_path / "l0",
+        manifest_path=tmp_path / "session.json", candidates_path=cand_path,
+        ntp_host="pool.ntp.org", slot_budget=2, max_clock_offset_ns=2_000_000_000,
+        desired_streams=("H0NXCNT0", "H0NXASP0"), vendor="kis",
+        route=StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER), shard=shard,
+    )
+    session = bootstrap_session(cfg, ntp_client=_FakeClient(), now_ns=1)
+    assert session.manifest.planned_pairs == [
+        {"symbol": "005930", "tr_id": "H0NXCNT0"}, {"symbol": "005930", "tr_id": "H0NXASP0"},
+    ]
+    assert session.manifest.shard_index == 0
+    assert session.manifest.credential_key_id == "id1"
+    assert sorted(session.replay_pairs()) == [("005930", "H0NXASP0"), ("005930", "H0NXCNT0")]

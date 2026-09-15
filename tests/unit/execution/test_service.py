@@ -5,6 +5,7 @@ def test_build_order_manager_paper_self_checks_account_and_uses_virtual_cash(tmp
 
     from src.core.config import ExecutionMode, ExecutionSettings
     from src.execution.contracts import OrderIntent, OrderStatus, OrderType, Side
+    from src.execution.kis_client import kis_token_cache_path
     from src.execution.service import build_order_manager
     from tests.unit.execution.fakes import (
         T0, FakeSession, FixedClock, asking_body, balance_body, make_creds, price_body, write_token_cache,
@@ -12,8 +13,9 @@ def test_build_order_manager_paper_self_checks_account_and_uses_virtual_cash(tmp
 
     monkeypatch.delenv("KRX_ALPHA_EXEC_MODE", raising=False)
     monkeypatch.delenv("KRX_ALPHA_EXEC_LIVE_ARMED", raising=False)
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(tmp_path / "kis-tokens"))
     settings = ExecutionSettings(commission_bps=1.5, data_root=tmp_path)
-    write_token_cache(settings.paths.kis_token_cache)
+    write_token_cache(kis_token_cache_path(tmp_path / "kis-tokens", "app-key"))
     session = FakeSession([balance_body([]), price_body(), asking_body(asks=[(10_010, 5)], bids=[(10_000, 5)])])
 
     # When
@@ -48,12 +50,14 @@ def test_build_order_manager_live_seeds_positions_and_fails_closed_on_account_er
 
     from src.core.config import ExecutionMode, ExecutionSettings
     from src.execution.contracts import AccountCheckError
+    from src.execution.kis_client import kis_token_cache_path
     from src.execution.service import build_order_manager
     from tests.unit.execution.fakes import T0, FakeResponse, FakeSession, FixedClock, balance_body, make_creds, write_token_cache
 
     monkeypatch.delenv("KRX_ALPHA_EXEC_MODE", raising=False)
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(tmp_path / "kis-tokens"))
     settings = ExecutionSettings(commission_bps=1.5, data_root=tmp_path, mode=ExecutionMode.LIVE, live_armed=True)
-    write_token_cache(settings.paths.kis_token_cache)
+    write_token_cache(kis_token_cache_path(tmp_path / "kis-tokens", "app-key"))
     session = FakeSession([balance_body([{"pdno": "005930", "hldg_qty": "3", "pchs_amt": "750000"}])])
 
     # When

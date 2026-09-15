@@ -13,6 +13,7 @@ from src.realtime.contracts import (
     VendorAuthRejected,
     VendorDisconnected,
 )
+from src.realtime.kis_lease import KisWebSocketLease
 from src.realtime.session import StreamRoute
 
 KIS_WS_URL = "ws://ops.koreainvestment.com:21000"
@@ -39,6 +40,7 @@ class KisRealtimeAdapter:
         route: StreamRoute,
         allowed_streams: tuple[str, str],
         capacity_pairs: int,
+        lease: KisWebSocketLease | None = None,
     ) -> None:
         expected = _expected_streams(route)
         if tuple(allowed_streams) != expected:
@@ -51,6 +53,7 @@ class KisRealtimeAdapter:
         self._http = http
         self._route = route
         self._allowed = tuple(allowed_streams)
+        self._lease = lease
         self._ws: Any = None
         self._approval_key: str | None = None
         self._seq = 0
@@ -58,6 +61,8 @@ class KisRealtimeAdapter:
         self._pending: list[L0Frame] = []
 
     async def connect(self) -> None:  # pragma: no cover - live KIS approval/WebSocket boundary (G0-gated, needs production credentials)
+        if self._lease is not None:
+            await self._lease.acquire()
         async with self._http.post(
             KIS_APPROVAL_URL,
             json={"grant_type": "client_credentials", "appkey": self._app_key, "secretkey": self._app_secret},
@@ -83,7 +88,10 @@ class KisRealtimeAdapter:
             if stream not in self._allowed:
                 raise VendorDisconnected(f"route_mismatch:{stream}")
             await self._ws.send_str(
-                json.dumps({"header": {"approval_key": self._approval_key, "tr_type": "1"}, "body": {"tr_id": stream, "tr_key": symbol}})
+                json.dumps({
+                    "header": {"approval_key": self._approval_key, "custtype": "P", "tr_type": "1", "content-type": "utf-8"},
+                    "body": {"input": {"tr_id": stream, "tr_key": symbol}},
+                })
             )
             raw = await self._ws.receive_str()
             ack = self._parse_ack(raw, symbol, stream)
@@ -160,3 +168,5 @@ class KisRealtimeAdapter:
     async def aclose(self) -> None:  # pragma: no cover - live WebSocket close path
         if self._ws is not None:
             await self._ws.close()
+        if self._lease is not None:
+            await self._lease.release()

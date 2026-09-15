@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import polars as pl
 
+from src.realtime.kis_sharding import AftermarketShard
 from src.realtime.manifest import SessionManifest
 from src.storage.normalize_worker import run_isolated_normalize
 from src.storage.remote import GDriveArchiver, RcloneArchiver, RemoteArchiveError, SyncStats
@@ -131,24 +132,72 @@ def _aftermarket_streams_ok(loaded: SessionManifest) -> bool:
     return bool(required) and required.issubset(accepted)
 
 
-def aftermarket_eod_ready(*, manifests: list[pathlib.Path], date: dt.date, now: dt.datetime) -> bool:
+def _expected_aftermarket_shards_ready(
+    loaded: dict[tuple[str, int], SessionManifest],
+    *,
+    date: dt.date,
+    expected_shards: tuple[AftermarketShard, ...],
+) -> bool:
+    """모든 expected shard의 날짜·route·key_id·planned pairs·accepted ACK를 검증한다."""
+    for shard in expected_shards:
+        manifest = loaded.get((shard.venue.value, shard.shard_index))
+        if manifest is None:
+            return False
+        expected_session = "nxt_after" if shard.venue.value == "nxt" else "krx_after"
+        if manifest.venue != shard.venue.value or manifest.session != expected_session:
+            return False
+        if manifest.session_date != date:
+            return False
+        if manifest.credential_key_id != shard.credential_key_id:
+            return False
+        want = sorted(f"{symbol}:{stream}" for symbol in shard.symbols for stream in shard.streams)
+        got = sorted(f"{pair.get('symbol')}:{pair.get('tr_id')}" for pair in manifest.planned_pairs)
+        if got != want:
+            return False
+        if manifest.writer_closed_at_ns is None:
+            return False
+        accepted = {
+            (str(ack.get("symbol")), str(ack.get("tr_id")))
+            for ack in manifest.subscription_acks
+            if ack.get("accepted") is True
+        }
+        if any((symbol, stream) not in accepted for symbol in shard.symbols for stream in shard.streams):
+            return False
+    return True
+
+
+def aftermarket_eod_ready(
+    *,
+    manifests: list[pathlib.Path],
+    date: dt.date,
+    now: dt.datetime,
+    expected_shards: tuple[AftermarketShard, ...] | None = None,
+) -> bool:
     if now.astimezone(_KST).time() < dt.time(20, 0): return False  # noqa: E701 - 20:00 전 EOD 차단
     if not manifests: return False  # noqa: E701 - 대상 manifest 없이 성공 표기 금지
     closed: list[bool] = []
     routes: set[tuple[str, str]] = set()
+    loaded: dict[tuple[str, int], SessionManifest] = {}
     for path in manifests:
         try:
-            loaded = SessionManifest.load(pathlib.Path(path))
+            manifest = SessionManifest.load(pathlib.Path(path))
         except (ValueError, KeyError, TypeError, OSError) as exc:
             logger.critical("[DAEMON] stage=eod_readiness status=FAIL manifest=%s error=%s", str(path), str(exc))
             closed.append(False)
             continue
-        routes.add((str(loaded.venue), str(loaded.session)))
+        routes.add((str(manifest.venue), str(manifest.session)))
+        loaded[(str(manifest.venue), manifest.shard_index if manifest.shard_index is not None else -1)] = manifest
         closed.append(
-            loaded.session_date == date
-            and loaded.writer_closed_at_ns is not None
-            and loaded.expected_close_ns > 0
-            and _aftermarket_streams_ok(loaded)
+            manifest.session_date == date
+            and manifest.writer_closed_at_ns is not None
+            and manifest.expected_close_ns > 0
+            and _aftermarket_streams_ok(manifest)
+        )
+    if expected_shards:
+        return (
+            _expected_aftermarket_shards_ready(loaded, date=date, expected_shards=expected_shards)
+            and len(closed) == len(expected_shards)
+            and all(closed)
         )
     required_routes = {("krx", "krx_after"), ("nxt", "nxt_after")}
     return len(closed) == 2 and all(closed) and routes == required_routes

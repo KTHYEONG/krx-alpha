@@ -8,11 +8,11 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from src.core.config import ExecutionMode, ExecutionSettings, KisCredentials
+from src.core.config import ExecutionMode, ExecutionSettings, KisCredentials, KisTokenSettings
 from src.execution.contracts import AccountCheckError, KisApiError, OrderGateway
 from src.execution.gateways import LiveGateway, PaperGateway
 from src.execution.journal import OrderJournal
-from src.execution.kis_client import KisRestClient, RateLimiter
+from src.execution.kis_client import KisRestClient, RateLimiter, kis_token_cache_path
 from src.execution.ledger import CostModel, Ledger, Position
 from src.execution.oms import OrderManager
 from src.execution.risk import RiskLimits
@@ -33,13 +33,15 @@ def build_order_manager(
     paths = settings.paths
     journal = OrderJournal(root=paths.order_journal_dir, mode=settings.mode, now=now)
     limiter = RateLimiter(settings.rest_rate_per_s, clock=clock, sleep=sleep)
+    token_settings = KisTokenSettings()
     client = KisRestClient(
         creds=creds,
         session=session,
-        token_cache_path=paths.kis_token_cache,
+        token_cache_path=kis_token_cache_path(token_settings.token_cache_dir, creds.kis_app_key),
         limiter=limiter,
         now=now,
         timeout_s=settings.request_timeout_s,
+        allow_token_issue=token_settings.allow_issue,
     )
     try:
         holdings = client.get_holdings()

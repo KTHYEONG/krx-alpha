@@ -87,7 +87,8 @@ def token_response(expired: str = "2026-09-12 09:00:00", *, token: str = "tok-1"
 
 def write_token_cache(path: pathlib.Path, *, token: str = "tok-1", expires_at: dt.datetime = _CACHE_EXPIRY) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"access_token": token, "expires_at": expires_at.isoformat()}), encoding="utf-8")
+    issued_at = expires_at - dt.timedelta(days=1)
+    path.write_text(json.dumps({"access_token": token, "expired_at": expires_at.isoformat(), "app_key": "app-key", "issued_at": issued_at.isoformat()}), encoding="utf-8")
 
 
 def price_body(
