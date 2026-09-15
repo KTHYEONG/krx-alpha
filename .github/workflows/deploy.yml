@@ -110,6 +110,12 @@ jobs:
               rm -f "\$tmp_file"
               exit 1
             fi
+            if ! grep -Fxq 'KIS_DATA_SLOTS=1,2,3,4,5' "\$tmp_file" ||
+              ! grep -Fxq 'KIS_HOST_DATA_SLOTS=1,2,3,4' "\$tmp_file"; then
+              echo "Shared KIS data env must set DATA_SLOTS=1,2,3,4,5 and HOST_DATA_SLOTS=1,2,3,4" >&2
+              rm -f "\$tmp_file"
+              exit 1
+            fi
             for required_key in \
               KIS_DATA_SLOTS KIS_HOST_DATA_SLOTS \
               KIS_DATA_1_APP_KEY KIS_DATA_1_APP_SECRET KIS_DATA_1_HTS_ID \
