@@ -84,6 +84,10 @@ class DataPaths:
     def manifest_path(self, day: dt.date) -> pathlib.Path:
         return self.manifest_dir / f"{day.isoformat()}.json"
 
+    def aftermarket_manifest_path(self, day: dt.date, venue: object) -> pathlib.Path:
+        venue_s = str(getattr(venue, "value", venue))
+        return self.manifest_dir / "aftermarket" / f"{day.isoformat()}.{venue_s}.json"
+
     @property
     def execution_dir(self) -> pathlib.Path:
         return self.root / "execution"
@@ -143,6 +147,23 @@ class CollectorSettings(BaseSettings):
                 f"universe_slot_budget {self.universe_slot_budget} exceeds "
                 f"subscription_symbol_budget {self.subscription_symbol_budget}"
             )
+        return self
+
+
+class AftermarketSettings(BaseSettings):
+    """애프터마켓 수집 설정 (env_prefix='KRX_ALPHA_AFTERMARKET_')."""
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_AFTERMARKET_", extra="ignore")
+
+    enabled: bool = False
+    pair_capacity_per_connection: int | None = None
+    krx_streams: tuple[str, str] = ("H0STCNT0", "H0STASP0")
+    nxt_streams: tuple[str, str] = ("H0NXCNT0", "H0NXASP0")
+
+    @model_validator(mode="after")
+    def check_verified_capacity_when_enabled(self) -> AftermarketSettings:
+        if self.enabled and (self.pair_capacity_per_connection is None or self.pair_capacity_per_connection <= 0):
+            raise ValueError("pair_capacity_per_connection must be a positive verified value when enabled")
         return self
 
 

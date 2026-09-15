@@ -533,3 +533,17 @@ def test_bootstrap_session_collects_with_unmeasured_clock_when_all_ntp_hosts_fai
     assert session.manifest.clock_offset_ns == 0
     assert "stage=bootstrap status=DEGRADED reason=ntp_unmeasured hosts=2" in caplog.text
     assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["clock_status"] == "unmeasured"
+
+
+def test_session_rejects_frame_for_other_route(monkeypatch, tmp_path):
+    import datetime as dt
+    import pytest
+    import src.realtime.session as session_module
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import SessionConfig, StreamRoute, bootstrap_session
+    monkeypatch.setattr(session_module, 'measure_ntp_offset_ns', lambda *args, **kwargs: 0)
+    (tmp_path / 'candidates.json').write_text('{"candidates":[{"symbol":"005930"}]}')
+    cfg = SessionConfig(session_date=dt.date(2026, 9, 15), journal_root=tmp_path/'l0', manifest_path=tmp_path/'m.json', candidates_path=tmp_path/'candidates.json', ntp_host='x', slot_budget=2, max_clock_offset_ns=2, desired_streams=('H0NXCNT0',), vendor='kis', route=StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER))
+    session = bootstrap_session(cfg, now_ns=1)
+    with pytest.raises(KeyError):
+        session.record_frame(vendor='kis', venue=MarketVenue.KRX, session=MarketSession.KRX_AFTER, stream='H0NXCNT0', raw='x', exchange_event_time='160000', recv_mono_ns=1, recv_wall_ns=1, conn_id='c', conn_seq=1)

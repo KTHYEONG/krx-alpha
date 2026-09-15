@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol
 
 from src.core.errors import KrxAlphaError, SlotBudgetExceededError
 
 __all__ = [
     "L0Frame",
+    "MarketSession",
+    "MarketVenue",
     "SubscriptionPlanner",
     "VendorAck",
     "VendorAdapter",
@@ -16,6 +19,18 @@ __all__ = [
     "VendorCapacity",
     "VendorDisconnected",
 ]
+
+
+class MarketVenue(StrEnum):
+    KRX = "krx"
+    NXT = "nxt"
+    UNKNOWN = "unknown"
+
+
+class MarketSession(StrEnum):
+    REGULAR = "regular"
+    KRX_AFTER = "krx_after"
+    NXT_AFTER = "nxt_after"
 
 
 @dataclass(frozen=True)
@@ -28,6 +43,9 @@ class L0Frame:
     recv_wall_ns: int
     conn_seq: int
     conn_id: str
+    venue: MarketVenue = MarketVenue.UNKNOWN
+    session: MarketSession = MarketSession.REGULAR
+    exchange_event_time: str = ""
 
 
 @dataclass(frozen=True)

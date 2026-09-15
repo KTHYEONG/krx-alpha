@@ -275,3 +275,13 @@ def test_collector_settings_ntp_fallback_hosts_default() -> None:
     from src.core.config import CollectorSettings
 
     assert CollectorSettings().ntp_fallback_hosts == ("time.google.com", "time.cloudflare.com")
+
+
+def test_aftermarket_settings_require_verified_capacity_when_enabled(monkeypatch):
+    import pytest
+    from pydantic import ValidationError
+    from src.core.config import AftermarketSettings
+    monkeypatch.delenv('KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION', raising=False)
+    assert AftermarketSettings().enabled is False
+    with pytest.raises(ValidationError):
+        AftermarketSettings(enabled=True)

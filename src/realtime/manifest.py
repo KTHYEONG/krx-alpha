@@ -25,6 +25,10 @@ class SessionManifest:
     degraded_reason: str | None = None
     clock_status: str = "measured"
     boots: list[dict[str, object]] = field(default_factory=list)
+    venue: str = "krx"
+    session: str = "regular"
+    expected_close_ns: int = 0
+    writer_closed_at_ns: int | None = None
 
     def record_ack(self, *, vendor: str, tr_id: str, symbol: str, rt_cd: str, accepted: bool) -> None:
         self.subscription_acks.append({"vendor": vendor, "tr_id": tr_id, "symbol": symbol, "rt_cd": rt_cd, "accepted": accepted})
@@ -51,6 +55,10 @@ class SessionManifest:
             "degraded_reason": self.degraded_reason,
             "clock_status": self.clock_status,
             "boots": self.boots,
+            "venue": self.venue,
+            "session": self.session,
+            "expected_close_ns": self.expected_close_ns,
+            "writer_closed_at_ns": self.writer_closed_at_ns,
         }
         tmp = target.parent / f".{target.name}.{os.getpid()}.tmp"
         if str(target.parent) not in ("", "."):
@@ -73,4 +81,8 @@ class SessionManifest:
             degraded_reason=raw.get("degraded_reason"),
             clock_status=str(raw.get("clock_status", "measured")),
             boots=list(raw.get("boots", [])),
+            venue=str(raw.get("venue", "krx")),
+            session=str(raw.get("session", "regular")),
+            expected_close_ns=int(raw.get("expected_close_ns", 0)),
+            writer_closed_at_ns=int(raw["writer_closed_at_ns"]) if raw.get("writer_closed_at_ns") is not None else None,
         )

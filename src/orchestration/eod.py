@@ -124,6 +124,36 @@ def classify_remote_failure(message: str) -> str:
     return "remote_error"
 
 
+def _aftermarket_streams_ok(loaded: SessionManifest) -> bool:
+    venue = str(loaded.venue)
+    required = {"H0STCNT0", "H0STASP0"} if venue == "krx" else {"H0NXCNT0", "H0NXASP0"} if venue == "nxt" else set()
+    accepted = {str(a.get("tr_id")) for a in loaded.subscription_acks if a.get("accepted") is True}
+    return bool(required) and required.issubset(accepted)
+
+
+def aftermarket_eod_ready(*, manifests: list[pathlib.Path], date: dt.date, now: dt.datetime) -> bool:
+    if now.astimezone(_KST).time() < dt.time(20, 0): return False  # noqa: E701 - 20:00 전 EOD 차단
+    if not manifests: return False  # noqa: E701 - 대상 manifest 없이 성공 표기 금지
+    closed: list[bool] = []
+    routes: set[tuple[str, str]] = set()
+    for path in manifests:
+        try:
+            loaded = SessionManifest.load(pathlib.Path(path))
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            logger.critical("[DAEMON] stage=eod_readiness status=FAIL manifest=%s error=%s", str(path), str(exc))
+            closed.append(False)
+            continue
+        routes.add((str(loaded.venue), str(loaded.session)))
+        closed.append(
+            loaded.session_date == date
+            and loaded.writer_closed_at_ns is not None
+            and loaded.expected_close_ns > 0
+            and _aftermarket_streams_ok(loaded)
+        )
+    required_routes = {("krx", "krx_after"), ("nxt", "nxt_after")}
+    return len(closed) == 2 and all(closed) and routes == required_routes
+
+
 def check_backup_freshness(
     *, manifest_dir: pathlib.Path, today: dt.date, archiver: Any = None
 ) -> list[str]:
@@ -131,13 +161,16 @@ def check_backup_freshness(
     if arc is None:
         return []
     local: list[str] = []
-    for p in pathlib.Path(manifest_dir).glob("*.json"):
+    base = pathlib.Path(manifest_dir)
+    for p in sorted(base.rglob("*.json")):
+        rel = p.relative_to(base).as_posix()
+        stem_date = p.name.split(".")[0]
         try:
-            d = dt.date.fromisoformat(p.stem)
+            d = dt.date.fromisoformat(stem_date)
         except ValueError:
             continue
         if d < today:
-            local.append(p.name)
+            local.append(rel)
     remote = {p.removeprefix("manifests/") for p in arc.remote_files("manifests/")}
     return sorted(n for n in local if n not in remote)
 

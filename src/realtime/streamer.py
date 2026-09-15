@@ -14,7 +14,14 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from src.core.observability import EVENT
-from src.realtime.contracts import L0Frame, VendorAck, VendorAdapter, VendorAuthRejected, VendorDisconnected
+from src.realtime.contracts import (
+    L0Frame,
+    MarketVenue,
+    VendorAck,
+    VendorAdapter,
+    VendorAuthRejected,
+    VendorDisconnected,
+)
 from src.realtime.session import CollectorSession
 from src.storage.journal import JournalWriteError
 
@@ -36,6 +43,21 @@ def regular_session_silence_limit_s(now: dt.datetime, *, limit_s: float = SILENC
     return None
 
 
+_NXT_AFTER_OPEN = dt.time(15, 40)
+_KRX_AFTER_OPEN = dt.time(16, 0)
+_AFTER_CLOSE = dt.time(20, 0)
+
+
+def aftermarket_silence_limit_s(
+    now: dt.datetime, *, route: Any, limit_s: float = SILENCE_LIMIT_S
+) -> float | None:
+    venue = route.venue if hasattr(route, "venue") else route
+    open_t = _NXT_AFTER_OPEN if MarketVenue(venue) == MarketVenue.NXT else _KRX_AFTER_OPEN
+    if open_t <= now.astimezone(_KST).time() < _AFTER_CLOSE:
+        return limit_s
+    return None
+
+
 class FrameSink(Protocol):
     def record(self, frame: L0Frame) -> None: ...
     def note_ack(self, vendor: str, ack: VendorAck) -> None: ...
@@ -53,8 +75,11 @@ class SessionFrameSink:
     def record(self, frame: L0Frame) -> None:
         self.session.record_frame(
             vendor=frame.vendor,
+            venue=frame.venue,
+            session=frame.session,
             stream=frame.stream,
             raw=frame.raw,
+            exchange_event_time=frame.exchange_event_time,
             recv_mono_ns=frame.recv_mono_ns,
             recv_wall_ns=frame.recv_wall_ns,
             conn_id=frame.conn_id,

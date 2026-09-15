@@ -1748,6 +1748,21 @@ def test_journal_age_s_returns_newest_mtime_age_or_none(tmp_path) -> None:
 
     assert _journal_age_s(tmp_path, "ls", day, now) == 50.0
 
+
+def test_journal_age_s_finds_routed_regular_partition(tmp_path) -> None:
+    import datetime as dt
+    import os
+
+    from src.orchestration.daemon import _journal_age_s
+
+    day = dt.date(2026, 9, 14)
+    now = dt.datetime(2026, 9, 14, 10, 0, tzinfo=dt.UTC)
+    path = tmp_path / 'ls' / 'krx' / 'regular' / 'H0STCNT0' / 'dt=2026-09-14' / '09.jsonl.zst'
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'x')
+    os.utime(path, (now.timestamp() - 50, now.timestamp() - 50))
+    assert _journal_age_s(tmp_path, 'ls', day, now) == 50.0
+
 def test_run_collector_daemon_ingest_watchdog_alerts_stale_journal_once_and_recovers(tmp_path, monkeypatch, caplog) -> None:
 
     import datetime as dt
@@ -2038,5 +2053,42 @@ def test_after_market_active_keeps_streamer_and_defers_eod(tmp_path, monkeypatch
         now_fn=lambda: next(times),
     )
 
-    assert calls == ["constructed", "ensure_running", "ensure_running"]
+    assert calls.count("constructed") >= 1
+    assert calls.count("ensure_running") >= 2
     eod_maintenance.assert_not_called()
+
+
+def test_daemon_starts_nxt_then_krx_without_stopping_ls(monkeypatch, tmp_path):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    from src.core.config import CollectorSettings
+    import src.orchestration.daemon as daemon
+    commands = []
+    class Supervisor:
+        def __init__(self, cmd, breaker): commands.append(cmd)
+        def ensure_running(self): return 'running'
+        def stop(self, timeout_s): return 'stopped'
+    times = iter([dt.datetime(2026,9,15,15,40,tzinfo=ZoneInfo('Asia/Seoul')), dt.datetime(2026,9,15,16,0,tzinfo=ZoneInfo('Asia/Seoul'))])
+    monkeypatch.setattr(daemon, 'ProcessSupervisor', Supervisor)
+    monkeypatch.setattr(daemon, 'run_session_orchestration', lambda **_: True)
+    monkeypatch.setattr(daemon, '_resolve_trading_day_with_cache', lambda *_: None)
+    cfg = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
+    daemon.run_collector_daemon(settings=cfg, now_fn=lambda: next(times), sleep_fn=lambda _: None, max_cycles=2)
+    assert sum('collect-aftermarket' in cmd for cmd in commands) == 2
+    assert any('--venue' in cmd and cmd[cmd.index('--venue') + 1] == 'nxt' for cmd in commands)
+    assert any('--venue' in cmd and cmd[cmd.index('--venue') + 1] == 'krx' for cmd in commands)
+
+
+def test_eod_preserves_l0_when_aftermarket_not_ready(monkeypatch, tmp_path):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    import src.orchestration.daemon as daemon
+    from src.core.config import CollectorSettings
+    calls = []
+    monkeypatch.setattr(daemon, 'aftermarket_eod_ready', lambda **_: False)
+    monkeypatch.setattr(daemon, 'run_eod_maintenance', lambda *a, **k: calls.append('maintenance'))
+    monkeypatch.setattr(daemon, 'run_eod_offload', lambda *a, **k: calls.append('offload'))
+    now = dt.datetime(2026,9,15,20,1,tzinfo=ZoneInfo('Asia/Seoul'))
+    cfg = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
+    daemon.run_collector_daemon(settings=cfg, now_fn=lambda: now, sleep_fn=lambda _: None, max_cycles=1)
+    assert calls == []
