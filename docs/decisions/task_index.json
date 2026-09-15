@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_KIS_AFTERMARKET_CONNECTION_SHARDING_TOKEN_LIFECYCLE",
+      "date": "2026-09-15",
+      "adr_id": "ADR_20260915_KIS_AFTERMARKET_CONNECTION_SHARDING_TOKEN_LIFECYCLE",
+      "domain": "data",
+      "title": "KIS 애프터마켓 연결 샤딩 및 토큰 수명",
+      "why": "KIS WebSocket 구독 한도와 승인키 경합으로 전체 애프터마켓 수집에 연결 샤딩과 키 분리가 필요하다.",
+      "resolution": "비거래 데이터 키별 4샤드 계획, 프로세스간 WS lease, 일일 REST 토큰 canonical cache, shard EOD 검증과 read-only compose mount를 적용했다.",
+      "impact": "전체 수집은 역할 승인된 데이터 키 4개가 필요하며 Drive/EOD는 모든 shard와 pair ACK가 검증될 때만 진행된다."
+    },
+    {
       "task_id": "extended_market_data_collection",
       "date": "2026-09-15",
       "adr_id": "ADR_20260915_extended_market_data_collection",

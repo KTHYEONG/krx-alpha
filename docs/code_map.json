@@ -16,9 +16,13 @@
       "src/core/observability.py",
       "src/realtime/adapters/kis.py",
       "src/realtime/contracts.py",
+      "src/realtime/kis_lease.py",
+      "src/realtime/kis_sharding.py",
       "src/realtime/session.py",
-      "src/realtime/streamer.py"
+      "src/realtime/streamer.py",
+      "src/universe/ipc.py"
     ],
+    "layer": 7,
     "testing": "tests/unit/cli/test_collect_aftermarket.py"
   },
   "src/cli/collect_init.py": {
@@ -94,7 +98,8 @@
     "testing": [
       "tests/unit/cli/test_collect_aftermarket.py",
       "tests/unit/core/test_calendar.py",
-      "tests/unit/core/test_config.py"
+      "tests/unit/core/test_config.py",
+      "tests/unit/realtime/test_kis_sharding.py"
     ]
   },
   "src/core/observability.py": {
@@ -227,6 +232,7 @@
       "src/orchestration/eod.py",
       "src/orchestration/supervisor.py",
       "src/realtime/contracts.py",
+      "src/realtime/kis_sharding.py",
       "src/storage/remote.py",
       "src/universe/ipc.py",
       "src/universe/service.py"
@@ -236,6 +242,7 @@
   },
   "src/orchestration/eod.py": {
     "deps": [
+      "src/realtime/kis_sharding.py",
       "src/realtime/manifest.py",
       "src/storage/normalize_worker.py",
       "src/storage/remote.py",
@@ -251,8 +258,10 @@
   "src/realtime/adapters/kis.py": {
     "deps": [
       "src/realtime/contracts.py",
+      "src/realtime/kis_lease.py",
       "src/realtime/session.py"
     ],
+    "layer": 4,
     "testing": "tests/unit/realtime/test_adapters_kis.py"
   },
   "src/realtime/adapters/ls.py": {
@@ -276,6 +285,22 @@
     "layer": 1,
     "testing": "tests/unit/realtime/test_contracts.py"
   },
+  "src/realtime/kis_lease.py": {
+    "deps": [
+      "src/realtime/contracts.py"
+    ],
+    "layer": 1,
+    "testing": "tests/unit/realtime/test_adapters_kis.py"
+  },
+  "src/realtime/kis_sharding.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/core/errors.py",
+      "src/realtime/contracts.py"
+    ],
+    "layer": 1,
+    "testing": "tests/unit/realtime/test_kis_sharding.py"
+  },
   "src/realtime/manifest.py": {
     "deps": [
       "src/realtime/clock.py"
@@ -288,6 +313,7 @@
       "src/core/calendar.py",
       "src/realtime/clock.py",
       "src/realtime/contracts.py",
+      "src/realtime/kis_sharding.py",
       "src/realtime/manifest.py",
       "src/realtime/subscription.py",
       "src/storage/journal.py",
