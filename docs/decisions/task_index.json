@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "extended_market_data_collection",
+      "date": "2026-09-15",
+      "adr_id": "ADR_20260915_extended_market_data_collection",
+      "domain": "data",
+      "title": "애프터마켓 P0 수명주기 및 백업 안전성",
+      "why": "정규장 중심 수집은 애프터마켓 연구 데이터와 검증형 백업 삭제 게이트가 부족했음.",
+      "resolution": "옵트인 애프터마켓 상태 전환과 manifest 포함 원격 크기 검증, 검증 후 L0 정리 순서를 구현하고 NXT 실시간 확장은 라이브 인증 게이트로 분리함.",
+      "impact": "기본 정규장 동작은 유지하면서 애프터마켓 파일럿과 무결성 검증 백업을 안전하게 준비할 수 있음."
+    },
+    {
       "task_id": "alert_format_readability",
       "date": "2026-09-15",
       "adr_id": "ADR_20260915_alert_format_readability",
