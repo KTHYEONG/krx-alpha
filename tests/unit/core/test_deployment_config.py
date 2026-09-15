@@ -28,6 +28,7 @@ def test_deploy_workflow_provisions_shared_env_and_wires_kca() -> None:
     assert 'KIS_SHARED_TOKEN_CACHE_DIR' in workflow
     assert 'kca-kis-token-warmup.service.d' in workflow
     assert 'non-data or account field' in workflow
+    assert 'HOST_DATA_SLOTS=1,2,3,4' in workflow
     assert r'\$1 !~ /^KIS_' in workflow
     assert 'systemctl --user daemon-reload' in workflow
     assert 'kca-kis-token-warmup.timer' in workflow
