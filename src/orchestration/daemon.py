@@ -6,6 +6,7 @@ import datetime as dt
 import logging
 import pathlib
 import sys
+from dataclasses import replace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -233,7 +234,7 @@ def run_collector_daemon(
 
     sleeper = sleep_fn if sleep_fn is not None else time.sleep
     cfg = settings if settings is not None else CollectorSettings()
-    sched = cfg.schedule
+    sched = replace(cfg.schedule, after_market_enabled=cfg.after_market_enabled)
     paths = cfg.paths
     cycle = 0
 
@@ -259,7 +260,7 @@ def run_collector_daemon(
     while True:
         cycle += 1
         now = clock()
-        state = get_target_state(now, schedule=sched)
+        state = get_target_state(now, sched)
         logger.debug("[DAEMON] cycle=%d now=%s state=%s", cycle, now.strftime("%Y-%m-%d %H:%M:%S"), state)
         if state != prev_state:
             logger.info(
@@ -281,9 +282,9 @@ def run_collector_daemon(
             sleep_sec = 3600.0  # 주말엔 1시간씩 대기
         elif state == SessionState.PRE_MARKET_SLEEP:
             sleep_sec = min(calc_sleep_seconds(now, sched.streamer_start), 300.0)
-        elif state in (SessionState.STREAMER_ACTIVE, SessionState.FULL_ACTIVE):
+        elif state in (SessionState.STREAMER_ACTIVE, SessionState.FULL_ACTIVE, SessionState.AFTER_MARKET_ACTIVE):
             today = now.date()
-            if today != orchestration_day:
+            if state is not SessionState.AFTER_MARKET_ACTIVE and today != orchestration_day:
                 # EOD를 거치지 못한 전일 스트리머가 남아 있으면 전일 session-date로 재기동되므로 먼저 정리한다
                 if supervisor is not None:
                     stale_stop = supervisor.stop(timeout_s=15.0)
@@ -297,7 +298,8 @@ def run_collector_daemon(
                 last_ingest_check = None
                 ingest_stale = False
             if (
-                orchestrated_for != today
+                state is not SessionState.AFTER_MARKET_ACTIVE
+                and orchestrated_for != today
                 and holiday_for != today
                 and (next_orchestration_at is None or now >= next_orchestration_at)
             ):
@@ -424,15 +426,19 @@ def run_collector_daemon(
                         archive_root=paths.archive_root,
                         quarantine_root=paths.quarantine_root,
                         work_root=paths.work_root,
+                        verified_remote_l1=None,
                     )
                 except (KrxAlphaError, OSError) as e:
                     maintenance_ok = False
                     logger.critical("[DAEMON] stage=eod_maintenance status=FAIL reason=maintenance_error error=%s", str(e))
-                offload = {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
+                offload: Any = {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
                 offload_ok = True
                 try:
                     offload = run_eod_offload(
-                        paths.archive_root, retain_days=cfg.archive_retain_days, reference_date=ref_day
+                        paths.archive_root,
+                        paths.manifest_dir,
+                        retain_days=cfg.archive_retain_days,
+                        reference_date=ref_day,
                     )
                 except RemoteArchiveError as e:
                     offload_ok = False
@@ -446,6 +452,22 @@ def run_collector_daemon(
                 except Exception as e:  # noqa: BLE001
                     offload_ok = False
                     logger.error("[DAEMON] stage=eod_maintenance error=%s", str(e), exc_info=True)
+                if offload_ok:
+                    try:
+                        verified = offload.verified_remote_l1 if hasattr(offload, "verified_remote_l1") else frozenset()
+                        post_deleted = run_eod_maintenance(
+                            paths.journal_root,
+                            retain_days=cfg.journal_retain_days,
+                            today=ref_day,
+                            archive_root=paths.archive_root,
+                            quarantine_root=paths.quarantine_root,
+                            work_root=paths.work_root,
+                            verified_remote_l1=verified,
+                        )
+                        deleted = int(deleted) + int(post_deleted)
+                    except (KrxAlphaError, OSError) as e:
+                        maintenance_ok = False
+                        logger.critical("[DAEMON] stage=eod_maintenance status=FAIL reason=maintenance_error error=%s", str(e))
                 reconcile_ok = True
                 reconciled = False
                 try:
@@ -488,11 +510,13 @@ def run_collector_daemon(
                         str(e),
                     )
                 eod_status = "OK" if (maintenance_ok and offload_ok and reconcile_ok and backup_ok) else "DEGRADED"
+                uploaded = offload.l1.uploaded if hasattr(offload, "l1") else offload["uploaded"]
+                purged = offload.purged if hasattr(offload, "purged") else offload["purged"]
                 logger.info(
                     "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=%s",
                     deleted,
-                    offload["uploaded"],
-                    offload["purged"],
+                    uploaded,
+                    purged,
                     eod_status,
                     extra=EVENT,
                 )
@@ -501,8 +525,8 @@ def run_collector_daemon(
                         f"run_id={run_id}",
                         f"status={eod_status}",
                         f"deleted_partitions={deleted}",
-                        f"uploaded={offload['uploaded']}",
-                        f"purged={offload['purged']}",
+                        f"uploaded={uploaded}",
+                        f"purged={purged}",
                         f"reconciled={reconciled}",
                         f"backup_missing={len(backup_missing)}",
                         f"streamer_restarts={streamer_restarts}",

@@ -146,16 +146,25 @@ def test_sync_l1_tree_uploads_new_skips_existing(tmp_path) -> None:
     (root / "dt=2026-09-02.parquet").write_bytes(b"b" * 60)
 
     calls: list[list[str]] = []
+    remote_state = {"l1/kis/H0STCNT0/dt=2026-09-01.parquet": 50}
 
     def _runner(args, **kwargs):
         calls.append(args)
         if "--recursive" in args:
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps([{"Path": "l1/kis/H0STCNT0/dt=2026-09-01.parquet", "IsDir": False, "Size": 50}]),
+                stdout=json.dumps(
+                    [{"Path": p, "IsDir": False, "Size": s} for p, s in sorted(remote_state.items())]
+                ),
                 stderr="",
             )
         if args[1] == "copyto":
+            from pathlib import Path as _P
+
+            dest = args[3]
+            prefix = "quant-lake/live/krx-alpha/data/"
+            repo_path = dest.split(prefix, 1)[1] if prefix in dest else _P(args[2]).name
+            remote_state[repo_path] = _P(args[2]).stat().st_size
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return SimpleNamespace(
             returncode=0,
@@ -167,7 +176,9 @@ def test_sync_l1_tree_uploads_new_skips_existing(tmp_path) -> None:
 
     stats = arc.sync_l1_tree(tmp_path / "l1")
 
-    assert stats == {"uploaded": 1, "skipped": 1, "failed": 0}
+    assert stats.uploaded == 1
+    assert stats.skipped_verified == 1
+    assert stats.failed_verification == 0
 
 
 def test_sync_l1_tree_counts_failed_upload(tmp_path) -> None:
@@ -189,7 +200,9 @@ def test_sync_l1_tree_counts_failed_upload(tmp_path) -> None:
 
     stats = arc.sync_l1_tree(tmp_path / "l1")
 
-    assert stats == {"uploaded": 0, "skipped": 0, "failed": 1}
+    assert stats.uploaded == 0
+    assert stats.skipped_verified == 0
+    assert stats.failed_verification == 1
 
 
 def test_remote_files_raises_on_invalid_json() -> None:
@@ -229,7 +242,9 @@ def test_sync_l1_tree_counts_size_mismatch(tmp_path) -> None:
 
     stats = arc.sync_l1_tree(tmp_path / "l1")
 
-    assert stats == {"uploaded": 0, "skipped": 0, "failed": 1}
+    assert stats.uploaded == 0
+    assert stats.skipped_verified == 0
+    assert stats.failed_verification == 1
 
 
 def test_try_from_env_returns_none_without_rclone_binary(monkeypatch) -> None:
@@ -253,3 +268,198 @@ def test_try_from_env_builds_archiver_when_binary_present(monkeypatch) -> None:
     assert arc._remote_name == "gdrive"
     assert arc._remote_path == "quant-lake/live/krx-alpha/data"
 
+
+def _write_l1(root, data: bytes):
+    from pathlib import Path
+
+    root = Path(root)
+    target = root / "kis" / "H0STCNT0" / "dt=2026-09-01.parquet"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    return target
+
+
+def _relative(local):
+    from pathlib import Path
+
+    # Mirror GDriveArchiver.repo_path_for relative to the sync root used in
+    # contract skeletons (tmp_path itself): l1/<path-below-kis>.
+    parts = Path(local).parts
+    if "l1" in parts:
+        idx = len(parts) - 1 - list(reversed(parts)).index("l1")
+        rel = Path(*parts[idx + 1 :]).as_posix()
+        return f"l1/{rel}"
+    if "kis" in parts:
+        idx = list(parts).index("kis")
+        rel = Path(*parts[idx:]).as_posix()
+        return f"l1/{rel}"
+    return Path(local).name
+
+
+def _write_manifests(root, names):
+    from pathlib import Path
+
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (root / name).write_text("{}", encoding="utf-8")
+
+
+class _FakeRcloneState:
+    def __init__(self):
+        from types import SimpleNamespace
+
+        import json
+
+        self.remote_sizes: dict[str, int] = {}
+        self.upload_order: list[str] = []
+        self.config = SimpleNamespace(
+            remote_name="gdrive",
+            remote_path="quant-lake/live/krx-alpha/data",
+            runner=self._runner,
+        )
+        self._json = json
+
+    def _runner(self, args, **kwargs):
+        from types import SimpleNamespace
+
+        # lsjson recursive listing: return current remote_sizes plus
+        # non-file entries exercising the IsDir/prefix guards.
+        if "lsjson" in args and "--recursive" in args:
+            entries = [
+                {"Path": path, "Size": size, "IsDir": False}
+                for path, size in sorted(self.remote_sizes.items())
+            ]
+            entries.append({"Path": "l1", "IsDir": True})
+            entries.append({"Path": "other/foreign.parquet", "Size": 9, "IsDir": False})
+            return SimpleNamespace(returncode=0, stdout=self._json.dumps(entries), stderr="")
+        # lsjson single object probe.
+        if "lsjson" in args:
+            dest = args[2] if len(args) > 2 else ""
+            # dest is like gdrive:path/<repo_path>; match by suffix.
+            matched = [(p, s) for p, s in self.remote_sizes.items() if dest.endswith(p)]
+            if not matched:
+                return SimpleNamespace(returncode=1, stdout="", stderr="not found")
+            path, size = matched[0]
+            return SimpleNamespace(
+                returncode=0, stdout=self._json.dumps([{"Path": path, "Size": size, "IsDir": False}]), stderr=""
+            )
+        # copyto upload: record basename order, mirror local size.
+        if "copyto" in args:
+            src = args[2]
+            dest = args[3] if len(args) > 3 else ""
+            from pathlib import Path as _P
+
+            # Derive repo-relative path by suffix matching local layout.
+            local = _P(src)
+            data = local.read_bytes()
+            # Find repo path: search by filename under known roots is ambiguous,
+            # so resolve via remote dest suffix after base prefix.
+            prefix = "quant-lake/live/krx-alpha/data/"
+            repo_path = dest.split(prefix, 1)[1] if prefix in dest else local.name
+            self.remote_sizes[repo_path] = len(data)
+            if repo_path.startswith("manifests/") or repo_path.startswith("manifest/"):
+                self.upload_order.append(repo_path.split("/", 1)[1])
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="unsupported")
+
+
+import pytest
+
+
+@pytest.fixture
+def fake_rclone():
+    return _FakeRcloneState()
+
+
+def test_sync_l1_tree_skips_only_size_verified_object(tmp_path, fake_rclone):
+    from src.storage.remote import GDriveArchiver
+
+    local = _write_l1(tmp_path, b'1234')
+    fake_rclone.remote_sizes = {_relative(local): 4}
+    stats = GDriveArchiver(fake_rclone.config).sync_l1_tree(tmp_path)
+    assert stats.skipped_verified == 1
+    assert stats.uploaded == 0
+
+
+def test_sync_l1_tree_reuploads_size_mismatch_and_verifies(tmp_path, fake_rclone):
+    from src.storage.remote import GDriveArchiver
+
+    local = _write_l1(tmp_path, b'1234')
+    fake_rclone.remote_sizes = {_relative(local): 3}
+    stats = GDriveArchiver(fake_rclone.config).sync_l1_tree(tmp_path)
+    assert stats.uploaded == 1
+    assert stats.failed_verification == 0
+
+
+def test_sync_manifest_tree_uploads_sorted_json_and_verifies_size(tmp_path, fake_rclone):
+    from src.storage.remote import GDriveArchiver
+
+    _write_manifests(tmp_path, ['b.json', 'a.json'])
+    stats = GDriveArchiver(fake_rclone.config).sync_manifest_tree(tmp_path)
+    assert stats.uploaded == 2
+    assert stats.failed_verification == 0
+    assert fake_rclone.upload_order == ['a.json', 'b.json']
+
+
+
+def test_remote_file_sizes_raises_on_unparseable_size():
+    import json
+    from types import SimpleNamespace
+
+    import pytest
+
+    from src.storage.remote import GDriveArchiver, RemoteArchiveError
+
+    for bad_size in (None, 'not-an-int', -1):
+        def _runner(args, _bad_size=bad_size, **kwargs):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{'Path': 'l1/kis/bad.parquet', 'IsDir': False, 'Size': _bad_size}]),
+                stderr='',
+            )
+
+        archiver = GDriveArchiver(remote_name='gdrive', remote_path='quant-lake/live/krx-alpha/data', runner=_runner)
+        with pytest.raises(RemoteArchiveError, match='invalid size'):
+            archiver.remote_file_sizes('l1/')
+
+
+def test_sync_manifest_tree_skips_size_verified_object(tmp_path, fake_rclone):
+    from src.storage.remote import GDriveArchiver
+
+    _write_manifests(tmp_path, ['a.json'])
+    fake_rclone.remote_sizes = {'manifests/a.json': 2}
+    stats = GDriveArchiver(fake_rclone.config).sync_manifest_tree(tmp_path)
+
+    assert stats.uploaded == 0
+    assert stats.skipped_verified == 1
+    assert stats.failed_verification == 0
+    assert fake_rclone.upload_order == []
+
+
+def test_sync_manifest_tree_raises_on_unverified_upload(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    import pytest
+
+    from src.storage.remote import GDriveArchiver, RemoteArchiveError
+
+    manifest = tmp_path / 'a.json'
+    manifest.write_text('{}', encoding='utf-8')
+
+    for mode, message in (('copy_failure', 'upload failed'), ('stale_size', 'verify failed')):
+        def _runner(args, _mode=mode, **kwargs):
+            if 'copyto' in args:
+                if _mode == 'copy_failure':
+                    return SimpleNamespace(returncode=1, stdout='', stderr='network down')
+                return SimpleNamespace(returncode=0, stdout='', stderr='')
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{'Path': 'manifests/a.json', 'IsDir': False, 'Size': 1}]),
+                stderr='',
+            )
+
+        archiver = GDriveArchiver(remote_name='gdrive', remote_path='quant-lake/live/krx-alpha/data', runner=_runner)
+        with pytest.raises(RemoteArchiveError, match=message):
+            archiver.sync_manifest_tree(tmp_path)

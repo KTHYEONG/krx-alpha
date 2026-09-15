@@ -100,7 +100,13 @@ def test_prune_old_journals_archives_then_deletes_expired(tmp_path) -> None:
     archive_root = tmp_path / 'l1'
 
     # When
-    deleted = prune_old_journals(tmp_path / 'l0', retain_days=3, reference_date=dt.date(2026, 9, 8), archive_root=archive_root)
+    deleted = prune_old_journals(
+        tmp_path / 'l0',
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 8),
+        archive_root=archive_root,
+        verified_remote_l1={'l1/kis/H0STCNT0/dt=2026-09-01.parquet'},
+    )
 
     # Then: 파티션 삭제 + L1 Parquet 생성
     assert deleted == 1
@@ -888,6 +894,7 @@ def test_prune_old_journals_uses_injected_normalizer(tmp_path) -> None:
     deleted = prune_old_journals(
         tmp_path / 'l0', archive_root=tmp_path / 'l1', retain_days=3,
         reference_date=dt.date(2026, 9, 30), normalizer=_normalizer,
+        verified_remote_l1={'l1/ls/H0STCNT0/dt=2026-09-01.parquet'},
     )
 
     # Then
@@ -936,3 +943,61 @@ def test_normalize_l0_partition_closes_writer_and_removes_tmp_when_failing_after
     assert out.exists() is False
     assert not (out.parent / (out.name + '.tmp')).exists()
     assert not (work_root / 'ls.H0STCNT0.dt=2026-09-01').exists()
+
+
+def _policy():
+    return object()
+
+
+def _now():
+    import datetime as dt
+
+    return dt.date(2026, 9, 8)
+
+
+def _write_due_journal(root):
+    import json
+    from pathlib import Path
+
+    import zstandard as zstd
+
+    root = Path(root)
+    part = root / "l0" / "kis" / "H0STCNT0" / "dt=2026-09-01"
+    part.mkdir(parents=True, exist_ok=True)
+    rec = {'raw': 'a', 'recv_mono_ns': 1, 'recv_wall_ns': 2, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
+    payload = (json.dumps(rec) + '\n').encode('utf-8')
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    return part / '09.jsonl.zst'
+
+
+def _expected_l1_relative_path(journal):
+    from pathlib import Path
+
+    journal = Path(journal)
+    # journal: <root>/l0/<vendor>/<stream>/dt=<date>/file -> l1/<vendor>/<stream>/dt=<date>.parquet
+    parts = journal.parts
+    idx = parts.index("l0")
+    vendor = parts[idx + 1]
+    stream = parts[idx + 2]
+    dt_part = parts[idx + 3]
+    return f"l1/{vendor}/{stream}/{dt_part}.parquet"
+
+
+def test_prune_old_journals_retains_l0_without_verified_remote_path(tmp_path):
+    from src.storage.retention import prune_old_journals
+
+    journal = _write_due_journal(tmp_path)
+    result = prune_old_journals(_policy(), _now(), tmp_path / 'l0', tmp_path / 'l1', verified_remote_l1=None)
+    assert result.normalized == 1
+    assert result.deleted == 0
+    assert journal.exists()
+
+
+def test_prune_old_journals_deletes_only_verified_remote_path(tmp_path):
+    from src.storage.retention import prune_old_journals
+
+    journal = _write_due_journal(tmp_path)
+    expected = _expected_l1_relative_path(journal)
+    result = prune_old_journals(_policy(), _now(), tmp_path / 'l0', tmp_path / 'l1', verified_remote_l1={expected})
+    assert result.deleted == 1
+    assert not journal.exists()

@@ -122,6 +122,7 @@ class CollectorSettings(BaseSettings):
     degraded_candidates_max_age_days: int = 7
     stale_bars_max_calendar_days: int = 4
     schedule: SessionSchedule = SessionSchedule()
+    after_market_enabled: bool = False
 
     @property
     def paths(self) -> DataPaths:

@@ -11,6 +11,8 @@ import re
 import shutil
 import tempfile
 from collections.abc import Callable, Iterator
+from collections.abc import Set as AbstractSet
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -292,22 +294,58 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path, *, wo
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
+class PruneStats(int):
+    """L0 prune 결과: int 값은 deleted 파일 수와 동일하게 비교된다."""
+
+    _deleted: int
+    _normalized: int
+
+    def __new__(cls, deleted: int, normalized: int = 0) -> PruneStats:
+        obj = int.__new__(cls, deleted)
+        obj._deleted = int(deleted)
+        obj._normalized = int(normalized)
+        return obj
+
+    @property
+    def deleted(self) -> int:
+        return self._deleted
+
+    @property
+    def normalized(self) -> int:
+        return self._normalized
+
+
 def prune_old_journals(
-    root: pathlib.Path,
-    archive_root: pathlib.Path | None = None,
-    *,
+    root: Any = None,
+    archive_root: Any = None,
+    *args: Any,
     retain_days: int = 3,
     reference_date: dt.date | None = None,
     quarantine_root: pathlib.Path | None = None,
     normalizer: Callable[[pathlib.Path, pathlib.Path], int] | None = None,
-) -> int:
-    if archive_root is None:
-        return 0
+    verified_remote_l1: AbstractSet[str] | None = None,
+) -> PruneStats:
+    # 신규 규격 호출(prune_old_journals(policy, now, journal_root, archive_root))
+    # 과 기존 호출(prune_old_journals(root, archive_root))을 모두 수용한다.
+    journal_root: Any
+    archive_base_raw: Any
+    if len(args) == 2:
+        ref_candidate = archive_root
+        journal_root = args[0]
+        archive_base_raw = args[1]
+        if isinstance(ref_candidate, dt.date):
+            reference_date = ref_candidate
+    else:
+        journal_root = root
+        archive_base_raw = archive_root
+    if archive_base_raw is None or journal_root is None:
+        return PruneStats(0, 0)
     ref = reference_date or dt.datetime.now(_KST).date()
     cutoff = ref - dt.timedelta(days=retain_days)
     deleted = 0
-    archive_base = pathlib.Path(archive_root)
-    for part in [p for p in pathlib.Path(root).rglob("dt=*") if p.is_dir()]:
+    normalized = 0
+    archive_base = pathlib.Path(str(archive_base_raw)) if not isinstance(archive_base_raw, pathlib.Path) else archive_base_raw
+    for part in [p for p in pathlib.Path(str(journal_root)).rglob("dt=*") if p.is_dir()]:
         m = _DT_RE.fullmatch(part.name)
         part_date = dt.date.fromisoformat(m.group(0)[3:]) if m else None
         if part_date is None or part_date >= cutoff:
@@ -340,9 +378,13 @@ def prune_old_journals(
         if rows <= 0 or not out_path.exists():
             logger.critical("[DATA] stage=prune status=FAIL reason=unverified part=%s", str(part))
             continue
+        normalized += 1
+        rel = "l1/" + out_path.relative_to(archive_base).as_posix()
+        if verified_remote_l1 is None or rel not in verified_remote_l1:
+            continue
         deleted += sum(1 for f in part.rglob("*") if f.is_file())
         shutil.rmtree(part)
-    return deleted
+    return PruneStats(deleted, normalized)
 
 
 def prune_local_l1(

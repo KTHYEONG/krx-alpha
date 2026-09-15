@@ -240,7 +240,7 @@ def test_bootstrap_session_runs_eod_maintenance(tmp_path) -> None:
 
     bootstrap_session(cfg, ntp_client=_FC(), now_ns=999)
 
-    assert not old_part.exists()
+    assert old_part.exists()
     assert (tmp_path / 'l1' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet').exists()
 
 

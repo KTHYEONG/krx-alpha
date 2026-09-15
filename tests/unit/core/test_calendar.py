@@ -71,3 +71,42 @@ def test_calc_sleep_seconds_same_day_and_next_day() -> None:
     # When / Then: 같은 날 남은 초, 지난 경우 익일로 롤오버
     assert calc_sleep_seconds(dt.datetime(2026, 9, 10, 8, 0, 0, tzinfo=kst), dt.time(8, 20, 0)) == 1200.0
     assert calc_sleep_seconds(dt.datetime(2026, 9, 10, 16, 0, 0, tzinfo=kst), dt.time(8, 20, 0)) == 58800.0
+
+
+def _kst(t: str):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    kst = ZoneInfo("Asia/Seoul")
+    hh, mm, ss = (int(x) for x in t.split(":"))
+    return dt.datetime(2026, 9, 10, hh, mm, ss, tzinfo=kst)
+
+
+def test_after_market_disabled_preserves_regular_eod_boundaries():
+    from src.core.calendar import SessionSchedule, SessionState, get_target_state
+
+    schedule = SessionSchedule(after_market_enabled=False)
+    assert get_target_state(_kst('15:39:59'), schedule) is SessionState.FULL_ACTIVE
+    assert get_target_state(_kst('15:40:00'), schedule) is SessionState.POST_MARKET_EOD
+    assert get_target_state(_kst('16:00:00'), schedule) is SessionState.NIGHT_IDLE
+
+
+def test_after_market_enabled_uses_1540_2000_2030_boundaries():
+    from src.core.calendar import SessionSchedule, SessionState, get_target_state
+
+    schedule = SessionSchedule(after_market_enabled=True)
+    assert get_target_state(_kst('15:40:00'), schedule) is SessionState.AFTER_MARKET_ACTIVE
+    assert get_target_state(_kst('19:59:59'), schedule) is SessionState.AFTER_MARKET_ACTIVE
+    assert get_target_state(_kst('20:00:00'), schedule) is SessionState.POST_MARKET_EOD
+    assert get_target_state(_kst('20:30:00'), schedule) is SessionState.NIGHT_IDLE
+
+
+def test_after_market_schedule_rejects_non_monotonic_boundaries():
+    from datetime import time
+
+    import pytest
+
+    from src.core.calendar import SessionSchedule
+
+    with pytest.raises(ValueError, match="monotonic"):  # noqa: PT011 - skeleton requires ValueError
+        SessionSchedule(after_market_close=time(15, 30))
