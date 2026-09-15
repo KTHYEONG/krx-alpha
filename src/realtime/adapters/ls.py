@@ -10,7 +10,7 @@ from typing import Any
 
 import aiohttp
 
-from src.realtime.contracts import L0Frame, VendorAck, VendorDisconnected
+from src.realtime.contracts import L0Frame, VendorAck, VendorAuthRejected, VendorDisconnected
 
 LS_TOKEN_URL = "https://openapi.ls-sec.co.kr:8080/oauth2/token"  # noqa: S105 - public endpoint, not a secret
 LS_WS_URL = "wss://openapi.ls-sec.co.kr:9443/websocket"
@@ -72,6 +72,11 @@ class LsRealtimeAdapter:
                 },
             ) as resp:
                 data = await resp.json()
+                status = getattr(resp, 'status', None)
+                if isinstance(data, dict) and 'access_token' not in data:
+                    code = str(data.get('error_code', ''))
+                    if status in (401, 403) or code:
+                        raise VendorAuthRejected(f'auth_rejected:{status}:{code}')
             self._token = str(data["access_token"])
             self._ws = await (self._http.ws_connect(self._ws_url, heartbeat=self._heartbeat_s)).__aenter__()
         except (TimeoutError, aiohttp.ClientError, ValueError, KeyError) as exc:

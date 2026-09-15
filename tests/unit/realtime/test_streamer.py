@@ -756,3 +756,193 @@ def test_streamer_pump_logs_critical_when_final_flush_fails(caplog) -> None:
 
     assert "[DATA] stage=stream_flush status=FAIL error=disk full" in caplog.text
     assert adapter.closed is True
+
+
+def test_streamer_escalates_auth_rejection_once_and_caps_backoff_at_auth_limit(caplog) -> None:
+    import asyncio
+    import logging
+
+    from src.realtime.contracts import VendorAuthRejected
+    from src.realtime.streamer import AUTH_BACKOFF_MAX_S, RealtimeStreamer
+
+    class _Adapter:
+        name = "ls"
+        capacity_pairs = 200
+
+        async def connect(self):
+            raise VendorAuthRejected("auth_rejected:403:IGW00103")
+
+        async def subscribe(self, pairs):
+            return []
+
+        async def recv(self):
+            raise AssertionError("unreachable")
+
+        async def aclose(self):
+            return None
+
+    class _Sink:
+        def __init__(self):
+            self.gaps = []
+
+        def record(self, f):
+            return None
+
+        def note_ack(self, v, a):
+            return None
+
+        def note_gap(self, symbol, start, end, reason):
+            self.gaps.append((symbol, start, end, reason))
+
+        def flush(self):
+            return 0
+
+    clock = {"ns": 0}
+    slept: list[float] = []
+
+    async def _sleep(s):
+        slept.append(s)
+        clock["ns"] += int(s * 1e9)
+
+    sink = _Sink()
+    streamer = RealtimeStreamer(adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0")],
+                                backoff_max_s=60.0, rng=lambda: 1.0, wall_ns=lambda: clock["ns"])
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(streamer.run_forever(asyncio.Event(), max_cycles=4, backoff_s=100.0, sleep=_sleep))
+
+    criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert AUTH_BACKOFF_MAX_S == 300.0
+    assert slept == [100.0, 200.0, 300.0]
+    assert len(criticals) == 1
+    assert criticals[0].startswith("[DATA] stage=stream_outage status=CRITICAL reason=auth_rejected detail=auth_rejected:403:IGW00103")
+    assert sink.gaps == [("005930", 0, 600_000_000_000, "auth_rejected")]
+    assert "stage=stream_outage status=UNRESOLVED reason=auth_rejected outage_s=600" in caplog.text
+
+def test_streamer_escalates_regular_session_outage_after_threshold_and_logs_recovery(caplog) -> None:
+    import asyncio
+    import logging
+
+    from src.realtime.contracts import L0Frame, VendorDisconnected
+    from src.realtime.streamer import OUTAGE_CRITICAL_S, RealtimeStreamer
+
+    stop = asyncio.Event()
+    clock = {"ns": 0}
+
+    class _Adapter:
+        name = "ls"
+        capacity_pairs = 200
+
+        def __init__(self):
+            self.cycle = 0
+
+        async def connect(self):
+            self.cycle += 1
+
+        async def subscribe(self, pairs):
+            return []
+
+        async def recv(self):
+            if self.cycle < 5:
+                raise VendorDisconnected("closed")
+            stop.set()
+            return L0Frame("ls", "H0STCNT0", "005930", "x", 1, 470_000_000_000, 1, "ls-5")
+
+        async def aclose(self):
+            return None
+
+    class _Sink:
+        def __init__(self):
+            self.gaps = []
+
+        def record(self, f):
+            return None
+
+        def note_ack(self, v, a):
+            return None
+
+        def note_gap(self, symbol, start, end, reason):
+            self.gaps.append((symbol, start, end, reason))
+
+        def flush(self):
+            return 0
+
+    async def _sleep(s):
+        clock["ns"] += int(s * 1e9)
+
+    sink = _Sink()
+    streamer = RealtimeStreamer(adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0")],
+                                silence_limit=lambda: 30.0, backoff_max_s=120.0, rng=lambda: 1.0, wall_ns=lambda: clock["ns"])
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(streamer.run_forever(stop, backoff_s=100.0, sleep=_sleep))
+
+    criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert OUTAGE_CRITICAL_S == 300.0
+    assert len(criticals) == 1
+    assert criticals[0].startswith("[DATA] stage=stream_outage status=CRITICAL reason=disconnect detail=closed outage_s=340")
+    assert sink.gaps == [("005930", 0, 470_000_000_000, "disconnect")]
+    assert "stage=stream_outage status=RECOVERED reason=disconnect outage_s=470" in caplog.text
+
+def test_streamer_does_not_escalate_transient_outage_outside_regular_session(caplog) -> None:
+    import asyncio
+    import logging
+
+    from src.realtime.contracts import L0Frame, VendorDisconnected
+    from src.realtime.streamer import RealtimeStreamer
+
+    stop = asyncio.Event()
+    clock = {"ns": 0}
+
+    class _Adapter:
+        name = "ls"
+        capacity_pairs = 200
+
+        def __init__(self):
+            self.cycle = 0
+
+        async def connect(self):
+            self.cycle += 1
+
+        async def subscribe(self, pairs):
+            return []
+
+        async def recv(self):
+            if self.cycle < 5:
+                raise VendorDisconnected("closed")
+            stop.set()
+            return L0Frame("ls", "H0STCNT0", "005930", "x", 1, 470_000_000_000, 1, "ls-5")
+
+        async def aclose(self):
+            return None
+
+    class _Sink:
+        def __init__(self):
+            self.gaps = []
+
+        def record(self, f):
+            return None
+
+        def note_ack(self, v, a):
+            return None
+
+        def note_gap(self, symbol, start, end, reason):
+            self.gaps.append((symbol, start, end, reason))
+
+        def flush(self):
+            return 0
+
+    async def _sleep(s):
+        clock["ns"] += int(s * 1e9)
+
+    sink = _Sink()
+    streamer = RealtimeStreamer(adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0")],
+                                silence_limit=lambda: None, backoff_max_s=120.0, rng=lambda: 1.0, wall_ns=lambda: clock["ns"])
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(streamer.run_forever(stop, backoff_s=100.0, sleep=_sleep))
+
+    assert [r for r in caplog.records if r.levelno == logging.CRITICAL] == []
+    assert "stage=stream_outage" not in caplog.text
+    assert sink.gaps == [("005930", 0, 470_000_000_000, "disconnect")]
+

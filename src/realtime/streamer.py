@@ -14,13 +14,15 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from src.core.observability import EVENT
-from src.realtime.contracts import L0Frame, VendorAck, VendorAdapter, VendorDisconnected
+from src.realtime.contracts import L0Frame, VendorAck, VendorAdapter, VendorAuthRejected, VendorDisconnected
 from src.realtime.session import CollectorSession
 from src.storage.journal import JournalWriteError
 
 logger = logging.getLogger(__name__)
 
 SILENCE_LIMIT_S: float = 30.0
+OUTAGE_CRITICAL_S: float = 300.0
+AUTH_BACKOFF_MAX_S: float = 300.0
 _REGULAR_OPEN = dt.time(9, 0)
 _REGULAR_CLOSE = dt.time(15, 30)
 _KST = ZoneInfo("Asia/Seoul")
@@ -105,10 +107,11 @@ class RealtimeStreamer:
         self._monotonic = monotonic
         self._outage: tuple[int, str] | None = None
         self._failures: int = 0
+        self._outage_alerted: bool = False
         self._last_pump_frames: int = 0
         self._last_disconnect_detail: str | None = None
 
-    def _close_outage(self, end_ns: int) -> None:
+    def _close_outage(self, end_ns: int, *, recovered: bool) -> None:
         if self._outage is None:
             return
         start_ns, reason = self._outage
@@ -121,6 +124,14 @@ class RealtimeStreamer:
             (end_ns - start_ns) // 1_000_000,
             len(symbols),
         )
+        if self._outage_alerted:
+            logger.warning(
+                "[DATA] stage=stream_outage status=%s reason=%s outage_s=%d",
+                "RECOVERED" if recovered else "UNRESOLVED",
+                reason,
+                (end_ns - start_ns) // 1_000_000_000,
+            )
+            self._outage_alerted = False
         self._outage = None
 
     async def pump(self, stop: asyncio.Event) -> str:
@@ -162,13 +173,16 @@ class RealtimeStreamer:
                 if recv_task in done:
                     frame = recv_task.result()
                     if frames == 0:
-                        self._close_outage(frame.recv_wall_ns)
+                        self._close_outage(frame.recv_wall_ns, recovered=True)
                     self._sink.record(frame)
                     frames += 1
                     if frames % self._flush_every == 0 or self._monotonic() - last_flush >= self._flush_interval_s:
                         self._sink.flush()
                         last_flush = self._monotonic()
             return "stopped"
+        except VendorAuthRejected as exc:
+            self._last_disconnect_detail = str(exc)
+            return "auth_rejected"
         except VendorDisconnected as exc:
             self._last_disconnect_detail = str(exc)
             return "disconnect"
@@ -199,7 +213,8 @@ class RealtimeStreamer:
             self._failures += 1
             if self._outage is None:
                 self._outage = (self._wall_ns(), reason)
-            delay = min(self._backoff_max_s, backoff_s * 2 ** (self._failures - 1)) * (0.5 + self._rng() / 2)
+            cap = AUTH_BACKOFF_MAX_S if reason == "auth_rejected" else self._backoff_max_s
+            delay = min(cap, backoff_s * 2 ** (self._failures - 1)) * (0.5 + self._rng() / 2)
             logger.warning(
                 "[DATA] stage=stream_disconnect reason=%s frames=%d consecutive_failures=%d backoff_s=%.2f",
                 reason,
@@ -207,7 +222,19 @@ class RealtimeStreamer:
                 self._failures,
                 delay,
             )
+            if not self._outage_alerted:
+                outage_s = (self._wall_ns() - self._outage[0]) / 1e9
+                regular = self._silence_limit is not None and self._silence_limit() is not None
+                if reason == "auth_rejected" or (regular and outage_s >= OUTAGE_CRITICAL_S):
+                    logger.critical(
+                        "[DATA] stage=stream_outage status=CRITICAL reason=%s detail=%s outage_s=%d consecutive_failures=%d",
+                        reason,
+                        self._last_disconnect_detail,
+                        int(outage_s),
+                        self._failures,
+                    )
+                    self._outage_alerted = True
             if (max_cycles is not None and cycle >= max_cycles) or stop.is_set():
                 break
             await (sleep or asyncio.sleep)(delay)
-        self._close_outage(self._wall_ns())
+        self._close_outage(self._wall_ns(), recovered=False)
