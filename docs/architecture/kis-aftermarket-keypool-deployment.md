@@ -35,6 +35,10 @@ Shared KIS data-key env and VPS activation runbook.
   unrelated credentials.
 - Failure mode guard: copying a trade key (`KIS_TRADE_*`) or primary key (`KIS_APP_*`)
   into the fragment is rejected during fingerprint validation.
+- The GitHub deploy workflow accepts the same allow-listed fragment through the
+  repository secret `KIS_DATA_ENV_CONTENT` (multiline content). If that secret is
+  empty, deployment reuses the already-provisioned VPS fragment; it fails closed
+  when the VPS fragment is also missing.
 
 ## 4. Compose wiring (KRX)
 
