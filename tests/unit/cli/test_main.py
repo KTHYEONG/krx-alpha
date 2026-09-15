@@ -105,3 +105,10 @@ def test_cli_main_configures_logging_per_subcommand(tmp_path, monkeypatch) -> No
 
     assert code == 0
     assert calls == [{"component": "cli-collect-status", "log_dir": None, "level": "DEBUG"}]
+
+
+def test_main_registers_collect_aftermarket_command():
+    from src.cli.main import build_parser
+    parser = build_parser()
+    action = next(a for a in parser._actions if a.dest == 'command')
+    assert 'collect-aftermarket' in action.choices

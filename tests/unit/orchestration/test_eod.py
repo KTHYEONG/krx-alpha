@@ -559,3 +559,59 @@ def test_eod_offload_verification_failure_retains_l0(tmp_path, failing_archiver)
     with pytest.raises(RemoteArchiveError):
         _run_normalize_offload_prune(tmp_path, failing_archiver)
     assert journal.exists()
+
+
+def test_aftermarket_eod_ready_requires_both_closed_manifests(tmp_path):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    from src.orchestration.eod import aftermarket_eod_ready
+    from src.realtime.manifest import SessionManifest
+    paths = []
+    for venue, session, closed in [('nxt','nxt_after', 1), ('krx','krx_after', None)]:
+        path = tmp_path / f'{venue}.json'
+        manifest = SessionManifest(session_date=dt.date(2026,9,15), clock_offset_ns=0, started_at_ns=1, venue=venue, session=session, expected_close_ns=1, writer_closed_at_ns=closed)
+        manifest.save(path); paths.append(path)  # noqa: E702 - verbatim contract skeleton
+    now = dt.datetime(2026,9,15,20,1,tzinfo=ZoneInfo('Asia/Seoul'))
+    assert aftermarket_eod_ready(manifests=paths, date=dt.date(2026,9,15), now=now) is False
+
+
+def test_aftermarket_eod_ready_rejects_empty_accepted_streams(tmp_path):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.orchestration.eod import aftermarket_eod_ready
+    from src.realtime.manifest import SessionManifest
+
+    paths = []
+    for venue, session in [('nxt', 'nxt_after'), ('krx', 'krx_after')]:
+        path = tmp_path / f'{venue}.json'
+        SessionManifest(session_date=dt.date(2026, 9, 15), clock_offset_ns=0, started_at_ns=1, venue=venue, session=session, expected_close_ns=1, writer_closed_at_ns=2).save(path)
+        paths.append(path)
+    assert aftermarket_eod_ready(manifests=paths, date=dt.date(2026, 9, 15), now=dt.datetime(2026, 9, 15, 20, 1, tzinfo=ZoneInfo('Asia/Seoul'))) is False
+
+
+def test_aftermarket_eod_ready_rejects_unreadable_manifest(tmp_path, caplog):
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from src.orchestration.eod import aftermarket_eod_ready
+
+    bad = tmp_path / 'bad.json'
+    bad.write_text('{')
+    with caplog.at_level(logging.CRITICAL):
+        ready = aftermarket_eod_ready(manifests=[bad], date=dt.date(2026, 9, 15), now=dt.datetime(2026, 9, 15, 20, 1, tzinfo=ZoneInfo('Asia/Seoul')))
+    assert ready is False
+    assert 'eod_readiness' in caplog.text
+
+
+def test_backup_freshness_recognizes_nested_aftermarket_manifests(tmp_path):
+    import datetime as dt
+    from src.orchestration.eod import check_backup_freshness
+    class Archive:
+        def remote_files(self, prefix): return {'manifests/2026-09-14.json'}
+    (tmp_path/'aftermarket').mkdir()
+    (tmp_path/'2026-09-14.json').write_text('{}')
+    (tmp_path/'aftermarket'/'2026-09-14.nxt.json').write_text('{}')
+    missing = check_backup_freshness(manifest_dir=tmp_path, today=dt.date(2026,9,15), archiver=Archive())
+    assert missing == ['aftermarket/2026-09-14.nxt.json']

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import zstandard as zstd
 
 from src.core.errors import KrxAlphaError
+from src.realtime.contracts import MarketSession, MarketVenue
 
 logger = logging.getLogger(__name__)
 
@@ -25,18 +26,47 @@ class JournalWriteError(KrxAlphaError):
 class L0JournalWriter:
     """수집 원문을 파티션 파일에 append 하는 writer."""
 
-    def __init__(self, root: pathlib.Path, vendor: str, stream: str, *, compress_level: int = 3) -> None:
+    def __init__(
+        self,
+        root: pathlib.Path,
+        vendor: str,
+        venue: MarketVenue | str = MarketVenue.KRX,
+        session: MarketSession | str = MarketSession.REGULAR,
+        stream: str = "",
+        *,
+        compress_level: int = 3,
+    ) -> None:
         self._root = pathlib.Path(root)
         self._vendor = vendor
+        self._venue = MarketVenue(venue)
+        self._session = MarketSession(session)
         self._stream = stream
         self._compress_level = compress_level
         self._buffer: list[dict[str, Any]] = []
 
     def partition_path(self, recv_wall_ns: int) -> pathlib.Path:
         ts = dt.datetime.fromtimestamp(recv_wall_ns / 1_000_000_000, tz=_KST)
-        return self._root / self._vendor / self._stream / f"dt={ts.date().isoformat()}" / f"{ts.hour:02d}.jsonl.zst"
+        return (
+            self._root
+            / self._vendor
+            / self._venue.value
+            / self._session.value
+            / self._stream
+            / f"dt={ts.date().isoformat()}"
+            / f"{ts.hour:02d}.jsonl.zst"
+        )
 
-    def append(self, *, raw: str, recv_mono_ns: int, recv_wall_ns: int, conn_id: str, conn_seq: int) -> None:
+    def append(
+        self,
+        *,
+        raw: str,
+        recv_mono_ns: int,
+        recv_wall_ns: int,
+        conn_id: str,
+        conn_seq: int,
+        exchange_event_time: str = "",
+        symbol: str = "",
+    ) -> None:
         self._buffer.append({
             "raw": raw,
             "recv_mono_ns": recv_mono_ns,
@@ -45,6 +75,11 @@ class L0JournalWriter:
             "conn_seq": conn_seq,
             "vendor": self._vendor,
             "tr_id": self._stream,
+            "venue": self._venue.value,
+            "session": self._session.value,
+            "stream": self._stream,
+            "symbol": symbol,
+            "exchange_event_time": exchange_event_time,
         })
 
     def flush(self) -> int:

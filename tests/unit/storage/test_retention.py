@@ -50,7 +50,27 @@ def test_normalize_l0_partition_writes_dedup_sorted_parquet(tmp_path) -> None:
     df = pl.read_parquet(out_path)
     assert df.height == 2
     assert df['recv_wall_ns'].to_list() == [90, 100]
-    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id'}
+    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id', 'venue', 'session', 'stream', 'symbol', 'exchange_event_time'}
+    assert set(df['venue']) == {'krx'}
+    assert set(df['session']) == {'regular'}
+
+
+def test_normalize_l0_partition_preserves_aftermarket_route_metadata(tmp_path) -> None:
+    import json
+    import polars as pl
+    import zstandard as zstd
+
+    from src.storage.retention import normalize_l0_partition
+
+    part = tmp_path / 'l0' / 'kis' / 'nxt' / 'nxt_after' / 'H0NXCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True)
+    rec = {'raw': '005930^154001', 'recv_mono_ns': 1, 'recv_wall_ns': 2, 'conn_id': 'c', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0NXCNT0', 'venue': 'nxt', 'session': 'nxt_after', 'stream': 'H0NXCNT0', 'symbol': '005930', 'exchange_event_time': '154001'}
+    (part / '15.jsonl.zst').write_bytes(zstd.ZstdCompressor().compress((json.dumps(rec) + '\n').encode()))
+    out = tmp_path / 'l1' / 'kis' / 'nxt' / 'nxt_after' / 'H0NXCNT0' / 'dt=2026-09-01.parquet'
+
+    assert normalize_l0_partition(part, out) == 1
+    row = pl.read_parquet(out).row(0, named=True)
+    assert (row['venue'], row['session'], row['symbol'], row['exchange_event_time']) == ('nxt', 'nxt_after', '005930', '154001')
 
 
 def test_normalize_l0_partition_raises_on_empty_partition(tmp_path) -> None:
@@ -313,7 +333,7 @@ def test_normalize_l0_partition_logs_tick_quality_summary(tmp_path, caplog) -> N
     # Then: 정상 처리 + 기존 컬럼 스키마 불변 + [DATA] quality 요약 로그
     assert rows == 1
     df = pl.read_parquet(out_path)
-    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id'}
+    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id', 'venue', 'session', 'stream', 'symbol', 'exchange_event_time'}
     assert 'stage=quality' in caplog.text
     assert 'decode_fail=0' in caplog.text
     assert 'status=OK' in caplog.text
@@ -356,7 +376,7 @@ def test_normalize_l0_partition_logs_quote_quality_summary(tmp_path, caplog) -> 
     # Then: 정상 처리 + 기존 컬럼 스키마 불변 + 호가 전용 [DATA] quality 요약 로그
     assert rows == 1
     df = pl.read_parquet(out_path)
-    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id'}
+    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id', 'venue', 'session', 'stream', 'symbol', 'exchange_event_time'}
     assert 'stage=quality' in caplog.text
     assert 'tr_id=H0STASP0' in caplog.text
     assert 'ladder_disorder=0' in caplog.text
@@ -628,7 +648,8 @@ def test_normalize_l0_partition_bounded_matches_reference_semantics_across_batch
     assert frame['raw'].to_list() == ['r-seq4', 'r-seq2', 'r-seq3', 'r-seq1']
     assert dict(frame.schema) == {
         'raw': pl.String, 'recv_mono_ns': pl.Int64, 'recv_wall_ns': pl.Int64, 'conn_id': pl.String,
-        'conn_seq': pl.Int64, 'vendor': pl.String, 'tr_id': pl.String,
+        'conn_seq': pl.Int64, 'vendor': pl.String, 'tr_id': pl.String, 'venue': pl.String,
+        'session': pl.String, 'stream': pl.String, 'symbol': pl.String, 'exchange_event_time': pl.String,
     }
     assert 'raw_records=5' in caplog.text
     assert 'l1_rows=4' in caplog.text
@@ -1001,3 +1022,14 @@ def test_prune_old_journals_deletes_only_verified_remote_path(tmp_path):
     result = prune_old_journals(_policy(), _now(), tmp_path / 'l0', tmp_path / 'l1', verified_remote_l1={expected})
     assert result.deleted == 1
     assert not journal.exists()
+
+
+def test_prune_keeps_unverified_aftermarket_l0(tmp_path):
+    import datetime as dt
+    from src.storage.retention import prune_old_journals
+    part = tmp_path/'l0'/'kis'/'nxt'/'nxt_after'/'H0NXCNT0'/'dt=2026-09-10'
+    part.mkdir(parents=True)
+    (part/'15.jsonl.zst').write_bytes(b'not-deleted')
+    deleted = prune_old_journals(tmp_path/'l0', retain_days=3, reference_date=dt.date(2026,9,15), archive_root=tmp_path/'l1', verified_remote_l1=frozenset())
+    assert deleted == 0
+    assert (part/'15.jsonl.zst').exists()

@@ -10,9 +10,11 @@ import pathlib
 import time
 from dataclasses import dataclass, field
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 from src.core.calendar import SessionSchedule, SessionState, calc_sleep_seconds, get_target_state
 from src.realtime.clock import ClockUnsyncedError, measure_ntp_offset_ns
+from src.realtime.contracts import MarketSession, MarketVenue
 from src.universe.ipc import read_candidates
 from src.storage.journal import L0JournalWriter
 from src.realtime.manifest import SessionManifest
@@ -20,6 +22,13 @@ from src.storage.retention import check_disk_watermark, StorageExhaustedError, p
 from src.realtime.subscription import SubscriptionDiff, SubscriptionRegistry
 
 logger = logging.getLogger(__name__)
+_KST = ZoneInfo("Asia/Seoul")
+
+
+@dataclass(frozen=True)
+class StreamRoute:
+    venue: MarketVenue
+    session: MarketSession
 
 
 @dataclass(frozen=True)
@@ -37,15 +46,17 @@ class SessionConfig:
     schedule: SessionSchedule = field(default_factory=SessionSchedule)
     degraded_reason: str | None = None
     ntp_fallback_hosts: tuple[str, ...] = ()
+    route: StreamRoute | None = None
 
 
 @dataclass
 class CollectorSession:
     manifest: SessionManifest
     registry: SubscriptionRegistry
-    journals: dict[tuple[str, str], L0JournalWriter]
+    journals: dict[tuple[str, ...], L0JournalWriter]
     manifest_path: pathlib.Path
     schedule: SessionSchedule = field(default_factory=SessionSchedule)
+    route: StreamRoute | None = None
 
     def current_state(self, now_dt: dt.datetime | None = None) -> SessionState:
         current = now_dt or dt.datetime.now(dt.UTC)
@@ -65,9 +76,20 @@ class CollectorSession:
         recv_wall_ns: int,
         conn_id: str,
         conn_seq: int,
+        venue: MarketVenue | str | None = None,
+        session: MarketSession | str | None = None,
+        symbol: str = "",
+        exchange_event_time: str = "",
     ) -> None:
         if not check_disk_watermark(self.manifest_path.parent, min_free_gb=3.0): raise StorageExhaustedError('free disk below watermark')  # noqa: E701
-        key = (vendor, stream)
+        route = getattr(self, "route", None)
+        # 라우팅 세션은 (venue, session, stream) 파티션 키로 검증한다.
+        # 경로 불일치 프레임은 저널 미스 KeyError 로 쓰기 전에 거부된다 (모호한 파티션 기록 방지).
+        key: tuple[str, ...] = (
+            (str(MarketVenue(venue).value), str(MarketSession(session).value), stream)
+            if route is not None and venue is not None and session is not None
+            else (vendor, stream)
+        )
         if key not in self.journals:
             raise KeyError(f"{vendor}/{stream}")
         self.journals[key].append(
@@ -76,6 +98,8 @@ class CollectorSession:
             recv_wall_ns=recv_wall_ns,
             conn_id=conn_id,
             conn_seq=conn_seq,
+            exchange_event_time=exchange_event_time,
+            symbol=symbol,
         )
 
     def flush_journals(self) -> int:
@@ -125,11 +149,20 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
             manifest.clock_offset_ns = offset_ns or 0
             manifest.clock_status = clock_status
     if manifest is None:
+        venue = cfg.route.venue.value if cfg.route is not None else MarketVenue.KRX.value
+        market_session = cfg.route.session.value if cfg.route is not None else MarketSession.REGULAR.value
+        expected_close_ns = 0
+        if cfg.route is not None:
+            close_at = dt.datetime.combine(cfg.session_date, dt.time(20, 0), tzinfo=_KST)
+            expected_close_ns = int(close_at.timestamp() * 1_000_000_000)
         manifest = SessionManifest(
             session_date=cfg.session_date,
             clock_offset_ns=offset_ns or 0,
             started_at_ns=started,
             clock_status=clock_status,
+            venue=venue,
+            session=market_session,
+            expected_close_ns=expected_close_ns,
         )
     stored = read_candidates(cfg.candidates_path)
     rows: list[dict[str, Any]] = cast(list[dict[str, Any]], stored["candidates"]) if stored is not None else []
@@ -137,10 +170,23 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
     registry = SubscriptionRegistry(slot_budget=cfg.slot_budget)
     diff: SubscriptionDiff = registry.plan(desired)
     registry.apply(diff)
-    journals = {(cfg.vendor, stream): L0JournalWriter(root=cfg.journal_root, vendor=cfg.vendor, stream=stream) for stream in cfg.desired_streams}
+    if cfg.route is not None:
+        journals: dict[tuple[str, ...], L0JournalWriter] = {
+            (cfg.route.venue.value, cfg.route.session.value, stream): L0JournalWriter(
+                root=cfg.journal_root,
+                vendor=cfg.vendor,
+                venue=cfg.route.venue,
+                session=cfg.route.session,
+                stream=stream,
+            )
+            for stream in cfg.desired_streams
+        }
+    else:
+        journals = {(cfg.vendor, stream): L0JournalWriter(root=cfg.journal_root, vendor=cfg.vendor, stream=stream) for stream in cfg.desired_streams}
     prune_old_journals(cfg.journal_root, retain_days=3, reference_date=cfg.session_date, archive_root=cfg.archive_root)
     session = CollectorSession(
-        manifest=manifest, registry=registry, journals=journals, manifest_path=cfg.manifest_path, schedule=cfg.schedule
+        manifest=manifest, registry=registry, journals=journals, manifest_path=cfg.manifest_path, schedule=cfg.schedule,
+        route=cfg.route,
     )
     if stored is not None and "rev" in stored:
         manifest.candidates_rev = int(cast(Any, stored["rev"]))

@@ -946,3 +946,17 @@ def test_streamer_does_not_escalate_transient_outage_outside_regular_session(cap
     assert "stage=stream_outage" not in caplog.text
     assert sink.gaps == [("005930", 0, 470_000_000_000, "disconnect")]
 
+
+
+def test_aftermarket_silence_limit_honors_distinct_starts():
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import StreamRoute
+    from src.realtime.streamer import aftermarket_silence_limit_s
+    kst = ZoneInfo('Asia/Seoul')
+    nxt = StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER)
+    krx = StreamRoute(MarketVenue.KRX, MarketSession.KRX_AFTER)
+    now = dt.datetime(2026, 9, 15, 15, 45, tzinfo=kst)
+    assert aftermarket_silence_limit_s(now, route=nxt) == 30.0
+    assert aftermarket_silence_limit_s(now, route=krx) is None

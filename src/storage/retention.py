@@ -35,7 +35,15 @@ logger = logging.getLogger(__name__)
 _KST = ZoneInfo("Asia/Seoul")
 _DT_RE = re.compile(r"dt=(\d{4})-(\d{2})-(\d{2})")
 
-_L0_SCHEMA: dict[str, pl.DataType] = {'raw': pl.String, 'recv_mono_ns': pl.Int64, 'recv_wall_ns': pl.Int64, 'conn_id': pl.String, 'conn_seq': pl.Int64, 'vendor': pl.String, 'tr_id': pl.String}  # type: ignore[dict-item]
+_L0_SCHEMA: dict[str, Any] = {
+    "raw": pl.String, "recv_mono_ns": pl.Int64, "recv_wall_ns": pl.Int64,
+    "conn_id": pl.String, "conn_seq": pl.Int64, "vendor": pl.String,
+    "tr_id": pl.String, "venue": pl.String, "session": pl.String,
+    "stream": pl.String, "symbol": pl.String, "exchange_event_time": pl.String,
+}
+_L0_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "raw", "recv_mono_ns", "recv_wall_ns", "conn_id", "conn_seq", "vendor", "tr_id",
+)
 _BATCH_BYTES: int = 32 * 2**20
 _GATHER_ROWS: int = 20_000
 _TICK_BUCKETS: int = 16
@@ -150,6 +158,11 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path, *, wo
         L1NormalizationError: For every data or IO fault (fail-closed, no output).
     """
     part = pathlib.Path(part_dir)
+    stream_name = part.parent.name
+    session_name = part.parent.parent.name
+    is_routed_partition = session_name in {"regular", "krx_after", "nxt_after"}
+    legacy_venue = "krx" if not is_routed_partition else part.parent.parent.parent.name
+    legacy_session = "regular" if not is_routed_partition else session_name
     zst_files = sorted(part.glob("*.jsonl.zst"))
     if not zst_files:
         raise L1NormalizationError(f"no .zst files in {part}")
@@ -180,8 +193,15 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path, *, wo
                 df = pl.read_ndjson(io.BytesIO(blob), schema=_L0_SCHEMA)
                 if df.height == 0:
                     continue
-                if any(df[col].null_count() > 0 for col in _L0_SCHEMA):
+                if any(df[col].null_count() > 0 for col in _L0_REQUIRED_COLUMNS):
                     raise L1NormalizationError(f"null field in {zf}")
+                df = df.with_columns(
+                    pl.col("venue").fill_null(legacy_venue),
+                    pl.col("session").fill_null(legacy_session),
+                    pl.col("stream").fill_null(pl.col("tr_id")).fill_null(stream_name),
+                    pl.col("symbol").fill_null(""),
+                    pl.col("exchange_event_time").fill_null(""),
+                ).select(list(_L0_SCHEMA))
                 spill = spill_dir / f"{len(spill_paths):06d}.parquet"
                 df.write_parquet(spill, compression="lz4")
                 starts.append(raw_records)
@@ -350,9 +370,8 @@ def prune_old_journals(
         part_date = dt.date.fromisoformat(m.group(0)[3:]) if m else None
         if part_date is None or part_date >= cutoff:
             continue
-        vendor = part.parent.parent.name
-        stream = part.parent.name
-        out_path = archive_base / vendor / stream / f"{part.name}.parquet"
+        rel_parent = part.relative_to(pathlib.Path(str(journal_root))).parent
+        out_path = archive_base / rel_parent / f"{part.name}.parquet"
         try:
             normalize = normalizer if normalizer is not None else normalize_l0_partition
             rows = normalize(part, out_path)
@@ -363,7 +382,8 @@ def prune_old_journals(
         except L1NormalizationError as exc:
             logger.critical("[DATA] stage=prune status=FAIL reason=%s part=%s", str(exc), str(part))
             if quarantine_root is not None:
-                dest = pathlib.Path(quarantine_root) / vendor / stream / part.name
+                rel_part = part.relative_to(pathlib.Path(str(journal_root)))
+                dest = pathlib.Path(quarantine_root) / rel_part
                 if dest.exists():
                     logger.critical(
                         "[DATA] stage=quarantine part=%s status=FAIL reason=quarantine_exists", str(part)

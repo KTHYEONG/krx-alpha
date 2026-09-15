@@ -92,3 +92,17 @@ def test_journal_write_failure_raises_journal_write_error(tmp_path, monkeypatch)
 
     with pytest.raises(JournalWriteError, match="space"):
         writer.flush()
+
+
+def test_journal_partitions_aftermarket_route_and_metadata(tmp_path):
+    import json
+    import zstandard as zstd
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.storage.journal import L0JournalWriter
+    writer = L0JournalWriter(tmp_path, 'kis', MarketVenue.NXT, MarketSession.NXT_AFTER, 'H0NXCNT0')
+    writer.append(raw='005930^154001', exchange_event_time='154001', recv_mono_ns=1, recv_wall_ns=1757922001000000000, conn_id='c1', conn_seq=1)
+    assert writer.flush() == 1
+    path = next(tmp_path.rglob('*.jsonl.zst'))
+    payload = zstd.ZstdDecompressor().decompress(path.read_bytes()).decode()
+    row = json.loads(payload)
+    assert ('/nxt/nxt_after/H0NXCNT0/' in path.as_posix(), row['venue'], row['session'], row['exchange_event_time']) == (True, 'nxt', 'nxt_after', '154001')
