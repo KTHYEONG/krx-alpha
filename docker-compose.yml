@@ -14,7 +14,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - ./rclone.conf:/root/.config/rclone/rclone.conf:ro
+      - ${HOME}/.config/rclone:/root/.config/rclone:ro
     # 장중 수집(daemon ~95MB) + EOD 정규화 자식(cgroup 실측 ≤500MB) 동시 상주 여유, swap 스래싱 방지
     mem_limit: 1g
     memswap_limit: 1g
