@@ -9,17 +9,20 @@ import logging
 import pathlib
 import signal
 import time
-from typing import Any
+from typing import Any, cast
 
 import aiohttp
 
-from src.core.config import AftermarketSettings, CollectorSettings, KisCredentials, load_credentials
-from src.core.errors import SlotBudgetExceededError
+from src.core.config import AftermarketSettings, CollectorSettings, DataPaths
+from src.core.errors import MissingCredentialsError, SlotBudgetExceededError
 from src.core.observability import EVENT
 from src.realtime.adapters.kis import KisRealtimeAdapter
 from src.realtime.contracts import MarketSession, MarketVenue
+from src.realtime.kis_lease import KisWebSocketLease
+from src.realtime.kis_sharding import AftermarketShard, load_kis_data_credentials
 from src.realtime.session import SessionConfig, StreamRoute, bootstrap_session
 from src.realtime.streamer import RealtimeStreamer, SessionFrameSink, aftermarket_silence_limit_s
+from src.universe.ipc import read_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,10 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--manifest-path", required=True)
     parser.add_argument("--candidates-path", required=True)
     parser.add_argument("--venue", required=True, choices=["krx", "nxt"])
+    parser.add_argument("--shard-index", type=int, required=True)
+    parser.add_argument("--credential-slot", required=True)
+    parser.add_argument("--credential-key-id", required=True)
+    parser.add_argument("--symbols", required=True)
     parser.add_argument("--ntp-host", default="kr.pool.ntp.org")
     parser.add_argument("--max-clock-offset-ns", type=int, default=2_000_000_000)
     parser.add_argument("--max-cycles", type=int, default=None)
@@ -49,22 +56,36 @@ async def _run_stream(args: argparse.Namespace) -> int:
     after = AftermarketSettings(enabled=settings.after_market_enabled)
     route = _route_for_venue(str(args.venue))
     streams: tuple[str, str] = after.nxt_streams if route.venue == MarketVenue.NXT else after.krx_streams
-    creds = load_credentials(KisCredentials)
-    app_key = getattr(creds, "kis_app_key", "k")
-    app_secret = getattr(creds, "kis_app_secret", "s")
+    credentials = load_kis_data_credentials()
+    slot = str(args.credential_slot)
+    key_id = str(args.credential_key_id)
+    cred = next((c for c in credentials if c.slot == slot), None)
+    if cred is None or cred.key_id != key_id:
+        raise MissingCredentialsError(f"credential fingerprint mismatch for slot {slot}")
+    symbols = tuple(part for part in str(args.symbols).split(",") if part)
+    stored = read_candidates(pathlib.Path(str(args.candidates_path)))
+    rows: list[dict[str, Any]] = cast("list[dict[str, Any]]", stored.get("candidates")) if stored is not None else []
+    universe = {str(row["symbol"]) for row in rows}
+    expected_symbols = tuple(str(row["symbol"]) for row in rows if str(row["symbol"]) in set(symbols))
+    if not set(symbols) <= universe:
+        raise MissingCredentialsError(f"shard symbols not subset of candidates for slot {slot}")
+    if len(set(symbols)) != len(symbols) or symbols != expected_symbols:
+        raise MissingCredentialsError(f"shard symbols do not exactly match candidate order for slot {slot}")
+    shard = AftermarketShard(route.venue, int(args.shard_index), symbols, streams, cred.slot, cred.key_id)
     cfg = SessionConfig(
         session_date=dt.date.fromisoformat(str(args.session_date)),
         journal_root=pathlib.Path(str(args.journal_root)),
         manifest_path=pathlib.Path(str(args.manifest_path)),
         candidates_path=pathlib.Path(str(args.candidates_path)),
         ntp_host=str(args.ntp_host),
-        slot_budget=settings.subscription_pair_budget,
+        slot_budget=len(symbols) * len(streams),
         max_clock_offset_ns=int(args.max_clock_offset_ns),
         desired_streams=tuple(streams),
         vendor="kis",
         degraded_reason=getattr(args, "degraded_reason", None),
         ntp_fallback_hosts=settings.ntp_fallback_hosts,
         route=route,
+        shard=shard,
     )
     session = bootstrap_session(cfg)
     pairs = session.replay_pairs()
@@ -77,13 +98,18 @@ async def _run_stream(args: argparse.Namespace) -> int:
     loop.add_signal_handler(signal.SIGTERM, stop.set)
     http = aiohttp.ClientSession()
     try:
+        lease = KisWebSocketLease(
+            root=DataPaths(pathlib.Path(str(args.journal_root)).parent).kis_ws_lease_dir,
+            credential_key_id=cred.key_id,
+        )
         adapter = KisRealtimeAdapter(
-            app_key=app_key,
-            app_secret=app_secret,
+            app_key=cred.app_key,
+            app_secret=cred.app_secret,
             http=http,
             route=route,
             allowed_streams=streams,
             capacity_pairs=capacity,
+            lease=lease,
         )
         streamer = RealtimeStreamer(
             adapter=adapter,

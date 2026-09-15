@@ -29,6 +29,9 @@ class SessionManifest:
     session: str = "regular"
     expected_close_ns: int = 0
     writer_closed_at_ns: int | None = None
+    planned_pairs: list[dict[str, str]] = field(default_factory=list)
+    shard_index: int | None = None
+    credential_key_id: str | None = None
 
     def record_ack(self, *, vendor: str, tr_id: str, symbol: str, rt_cd: str, accepted: bool) -> None:
         self.subscription_acks.append({"vendor": vendor, "tr_id": tr_id, "symbol": symbol, "rt_cd": rt_cd, "accepted": accepted})
@@ -59,6 +62,9 @@ class SessionManifest:
             "session": self.session,
             "expected_close_ns": self.expected_close_ns,
             "writer_closed_at_ns": self.writer_closed_at_ns,
+            "planned_pairs": self.planned_pairs,
+            "shard_index": self.shard_index,
+            "credential_key_id": self.credential_key_id,
         }
         tmp = target.parent / f".{target.name}.{os.getpid()}.tmp"
         if str(target.parent) not in ("", "."):
@@ -85,4 +91,7 @@ class SessionManifest:
             session=str(raw.get("session", "regular")),
             expected_close_ns=int(raw.get("expected_close_ns", 0)),
             writer_closed_at_ns=int(raw["writer_closed_at_ns"]) if raw.get("writer_closed_at_ns") is not None else None,
+            planned_pairs=[dict(pair) for pair in raw.get("planned_pairs", [])],
+            shard_index=int(raw["shard_index"]) if raw.get("shard_index") is not None else None,
+            credential_key_id=str(raw["credential_key_id"]) if raw.get("credential_key_id") is not None else None,
         )

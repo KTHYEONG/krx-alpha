@@ -58,7 +58,8 @@ def test_access_token_is_cached_and_reissued_only_when_near_expiry(tmp_path) -> 
 
     # Then: 캐시 파일 형식 + 소유자 전용 권한
     assert json.loads(cache.read_text(encoding="utf-8")) == {
-        "access_token": "tok-1", "expires_at": "2026-09-12T09:00:00+09:00",
+        "access_token": "tok-1", "expired_at": "2026-09-12T09:00:00+09:00",
+        "app_key": "app-key", "issued_at": "2026-09-11T09:00:00+09:00",
     }
     assert stat.S_IMODE(cache.stat().st_mode) == 0o600
 
@@ -86,6 +87,21 @@ def test_access_token_is_cached_and_reissued_only_when_near_expiry(tmp_path) -> 
     with pytest.raises(KisApiError) as excinfo:
         failing.access_token()
     assert excinfo.value.msg_cd == "EGW00133"
+
+
+def test_access_token_rechecks_cache_after_cross_process_lock(monkeypatch, tmp_path) -> None:
+    import datetime as dt
+
+    from src.execution.kis_client import KisRestClient, RateLimiter
+    from tests.unit.execution.fakes import FixedClock, make_creds
+
+    client = KisRestClient(
+        creds=make_creds(), session=object(), token_cache_path=tmp_path / "token.json",
+        limiter=RateLimiter(1000.0, sleep=lambda _: None), now=lambda: FixedClock(dt.datetime(2026, 9, 15, 9, tzinfo=dt.UTC))(), timeout_s=1.0,
+    )
+    results = iter([None, ("cached-after-lock", dt.datetime(2026, 9, 16, 9, tzinfo=dt.UTC))])
+    monkeypatch.setattr(client, "_read_valid_token", lambda _now: next(results))
+    assert client.access_token() == "cached-after-lock"
 
 def test_get_quote_parses_price_and_ten_level_book(tmp_path) -> None:
     # Given: 실측 응답 형태(삼성전자 2026-09-11 종가 기준)
@@ -129,7 +145,9 @@ def test_reads_refresh_token_once_retry_rate_limit_and_raise_on_error(tmp_path) 
     book = asking_body(asks=[(10_010, 5)], bids=[(10_000, 5)])
 
     # When / Then: 만료 → 재발급 → 재요청
-    client, session, _ = make_client(tmp_path / "a", [expired, token_response(token="tok-2"), price_body(), book])
+    client, session, clock = make_client(tmp_path / "a", [expired, token_response(token="tok-2"), price_body(), book])
+    assert client.access_token() == "tok-1"
+    clock.advance(15 * 3_600)
     assert client.get_quote("005930").last == 10_000
     assert session.calls[1]["url"].endswith("/oauth2/tokenP")
     assert session.calls[2]["headers"]["authorization"] == "Bearer tok-2"
@@ -315,7 +333,9 @@ def test_post_order_retries_only_when_definitely_not_sent(tmp_path) -> None:
 
     # When / Then: 만료 토큰은 1회 재발급 후 재전송 (취소는 정정취소 경로)
     expired = FakeResponse({"rt_cd": "1", "msg_cd": "EGW00123", "msg1": "expired"}, status=500)
-    client, session, _ = make_client(tmp_path / "c", [expired, token_response(token="tok-2"), accepted_body()])
+    client, session, clock = make_client(tmp_path / "c", [expired, token_response(token="tok-2"), accepted_body()])
+    assert client.access_token() == "tok-1"
+    clock.advance(15 * 3_600)
     assert client.post_order(TR_CANCEL, {}).kind is OutcomeKind.ACCEPTED
     assert session.calls[0]["url"].endswith("/uapi/domestic-stock/v1/trading/order-rvsecncl")
     assert session.calls[2]["headers"]["authorization"] == "Bearer tok-2"
@@ -438,3 +458,57 @@ def test_get_daily_bar_keeps_zero_volume_when_price_valid(tmp_path) -> None:
     assert row is not None
     assert row["stck_clpr"] == "11700"
     assert row["acml_vol"] == "0"
+
+
+def test_kis_rest_client_readonly_cache_and_same_day_guard(tmp_path) -> None:
+    import datetime as dt
+    import pytest
+    from zoneinfo import ZoneInfo
+    from src.core.config import KisCredentials
+    from src.execution.contracts import KisApiError
+    from src.execution.kis_client import KisRestClient, RateLimiter
+    class Session:
+        def post(self, *args, **kwargs): raise AssertionError('must not issue token')
+    client=KisRestClient(creds=KisCredentials(kis_app_key='key',kis_app_secret='secret',kis_account_no='12345678',kis_account_product_code='01'),session=Session(),token_cache_path=tmp_path/'missing.json',limiter=RateLimiter(1.0,sleep=lambda _:None),now=lambda:dt.datetime(2026,9,15,9,tzinfo=ZoneInfo('Asia/Seoul')),timeout_s=1.0,allow_token_issue=False)
+    with pytest.raises(KisApiError,match='TOKEN_CACHE'):
+        client.access_token()
+
+
+def test_kis_rest_client_rejects_invalid_cache_and_same_day_reissue_without_http(tmp_path) -> None:
+    import datetime as dt
+    import json
+
+    import pytest
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import KisCredentials
+    from src.execution.contracts import KisApiError
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    now = dt.datetime(2026, 9, 15, 9, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    def client_for(cache, **kwargs):
+        class Session:
+            def post(self, *args, **kwargs):
+                raise AssertionError("must not issue token")
+
+        return KisRestClient(
+            creds=KisCredentials(kis_app_key="key", kis_app_secret="secret", kis_account_no="12345678", kis_account_product_code="01"),
+            session=Session(), token_cache_path=cache, limiter=RateLimiter(1000.0, sleep=lambda _: None),
+            now=lambda: now, timeout_s=1.0, **kwargs,
+        )
+
+    wrong = tmp_path / "wrong.json"
+    wrong.write_text(json.dumps({"access_token": "tok", "expired_at": "2026-09-16T09:00:00+09:00", "app_key": "other", "issued_at": "2026-09-15T08:00:00+09:00"}), encoding="utf-8")
+    with pytest.raises(KisApiError, match="TOKEN_CACHE"):
+        client_for(wrong, allow_token_issue=False).access_token()
+
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"access_token": "", "expired_at": "2026-09-16T09:00:00+09:00", "app_key": "key", "issued_at": "2026-09-15T08:00:00+09:00"}), encoding="utf-8")
+    with pytest.raises(KisApiError, match="TOKEN_CACHE"):
+        client_for(empty, allow_token_issue=False).access_token()
+
+    issued_today = tmp_path / "today.json"
+    issued_today.write_text(json.dumps({"access_token": "old", "expired_at": "2026-09-15T08:00:00+09:00", "app_key": "key", "issued_at": "2026-09-15T07:00:00+09:00"}), encoding="utf-8")
+    with pytest.raises(KisApiError, match="TOKEN_DAILY_LIMIT"):
+        client_for(issued_today, allow_token_issue=True).access_token(force=True)

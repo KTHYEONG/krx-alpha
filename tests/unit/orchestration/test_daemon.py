@@ -690,6 +690,7 @@ def test_run_collector_daemon_eod_passes_quarantine_root(tmp_path, monkeypatch) 
 
 
 def test_build_kis_client_wires_shared_token_cache_path(tmp_path, monkeypatch) -> None:
+    import hashlib
     import pathlib
 
     from src.core.config import CollectorSettings, ExecutionSettings
@@ -700,6 +701,7 @@ def test_build_kis_client_wires_shared_token_cache_path(tmp_path, monkeypatch) -
     monkeypatch.setenv("KIS_APP_SECRET", "s")
     monkeypatch.setenv("KIS_ACCOUNT_NO", "12345678")
     monkeypatch.setenv("KIS_ACCOUNT_PRODUCT_CODE", "01")
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(tmp_path / "kis-tokens"))
     data_root = pathlib.Path(tmp_path) / "data"
     collector = CollectorSettings(data_root=data_root)
     execution = ExecutionSettings(data_root=data_root)
@@ -707,8 +709,11 @@ def test_build_kis_client_wires_shared_token_cache_path(tmp_path, monkeypatch) -
     client = daemon._build_kis_client(collector.paths)
 
     assert isinstance(client, KisRestClient)
-    assert client._token_cache_path == collector.paths.kis_token_cache
-    assert client._token_cache_path == execution.paths.kis_token_cache
+    expected = pathlib.Path(tmp_path) / "kis-tokens" / f"token_{hashlib.sha256(b'k').hexdigest()[:12]}.json"
+    assert client._token_cache_path == expected
+    assert client._allow_token_issue is True
+    assert expected.parent == pathlib.Path(tmp_path) / "kis-tokens"
+    assert execution.paths.root == collector.paths.root
 
 def test_run_session_orchestration_falls_back_to_kis_when_bars_stale(tmp_path, monkeypatch) -> None:
     # Given: store 최신일이 2026-09-09 인데 직전 영업일은 2026-09-11 (KRX 장애 상황)
@@ -2027,6 +2032,7 @@ def test_after_market_active_keeps_streamer_and_defers_eod(tmp_path, monkeypatch
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
     monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
     monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kwargs: True)
+    monkeypatch.setattr(daemon_mod, "plan_aftermarket_shards", lambda **kwargs: ())
     eod_maintenance = MagicMock(return_value=0)
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", eod_maintenance)
     calls: list[str] = []
@@ -2062,21 +2068,25 @@ def test_daemon_starts_nxt_then_krx_without_stopping_ls(monkeypatch, tmp_path):
     import datetime as dt
     from zoneinfo import ZoneInfo
     from src.core.config import CollectorSettings
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
     import src.orchestration.daemon as daemon
     commands = []
     class Supervisor:
         def __init__(self, cmd, breaker): commands.append(cmd)
         def ensure_running(self): return 'running'
         def stop(self, timeout_s): return 'stopped'
+    plan = tuple(AftermarketShard(venue, index, ('000001',), streams, str(index), f'id{index}') for venue, streams, index in ((MarketVenue.NXT,('H0NXCNT0','H0NXASP0'),0),(MarketVenue.NXT,('H0NXCNT0','H0NXASP0'),1),(MarketVenue.KRX,('H0STCNT0','H0STASP0'),2),(MarketVenue.KRX,('H0STCNT0','H0STASP0'),3)))
     times = iter([dt.datetime(2026,9,15,15,40,tzinfo=ZoneInfo('Asia/Seoul')), dt.datetime(2026,9,15,16,0,tzinfo=ZoneInfo('Asia/Seoul'))])
+    monkeypatch.setattr(daemon, 'plan_aftermarket_shards', lambda **_: plan)
     monkeypatch.setattr(daemon, 'ProcessSupervisor', Supervisor)
     monkeypatch.setattr(daemon, 'run_session_orchestration', lambda **_: True)
     monkeypatch.setattr(daemon, '_resolve_trading_day_with_cache', lambda *_: None)
     cfg = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
     daemon.run_collector_daemon(settings=cfg, now_fn=lambda: next(times), sleep_fn=lambda _: None, max_cycles=2)
-    assert sum('collect-aftermarket' in cmd for cmd in commands) == 2
-    assert any('--venue' in cmd and cmd[cmd.index('--venue') + 1] == 'nxt' for cmd in commands)
-    assert any('--venue' in cmd and cmd[cmd.index('--venue') + 1] == 'krx' for cmd in commands)
+    assert sum('collect-aftermarket' in cmd for cmd in commands) == 4
+    venues = [cmd[cmd.index('--venue') + 1] for cmd in commands]
+    assert venues == ['nxt', 'nxt', 'krx', 'krx']
 
 
 def test_eod_preserves_l0_when_aftermarket_not_ready(monkeypatch, tmp_path):
@@ -2092,3 +2102,26 @@ def test_eod_preserves_l0_when_aftermarket_not_ready(monkeypatch, tmp_path):
     cfg = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
     daemon.run_collector_daemon(settings=cfg, now_fn=lambda: now, sleep_fn=lambda _: None, max_cycles=1)
     assert calls == []
+
+
+def test_daemon_starts_four_sharded_aftermarket_commands(monkeypatch, tmp_path) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+    plan = tuple(AftermarketShard(venue, index, ('000001',), streams, str(index), f'id{index}') for venue, streams, index in ((MarketVenue.NXT,('H0NXCNT0','H0NXASP0'),0),(MarketVenue.NXT,('H0NXCNT0','H0NXASP0'),1),(MarketVenue.KRX,('H0STCNT0','H0STASP0'),2),(MarketVenue.KRX,('H0STCNT0','H0STASP0'),3)))
+    commands=[]
+    class Sup:
+        def __init__(self, *, cmd, breaker): commands.append(cmd)
+        def ensure_running(self): return 'running'
+        def stop(self, timeout_s): return 'stopped'
+    monkeypatch.setattr(daemon, 'plan_aftermarket_shards', lambda **_: plan)
+    monkeypatch.setattr(daemon, 'ProcessSupervisor', Sup)
+    monkeypatch.setattr(daemon, 'run_session_orchestration', lambda **_: True)
+    monkeypatch.setattr(daemon, '_resolve_trading_day_with_cache', lambda *_: None)
+    times=iter([dt.datetime(2026,9,15,15,40,tzinfo=ZoneInfo('Asia/Seoul')),dt.datetime(2026,9,15,16,0,tzinfo=ZoneInfo('Asia/Seoul'))])
+    daemon.run_collector_daemon(settings=CollectorSettings(data_root=tmp_path,after_market_enabled=True,universe_slot_budget=1,ls_capacity_pairs=2),now_fn=lambda:next(times),sleep_fn=lambda _:None,max_cycles=2)
+    assert len(commands) == 4
+    assert [x[x.index('--credential-slot')+1] for x in commands] == ['0','1','2','3']

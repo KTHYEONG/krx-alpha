@@ -7,7 +7,7 @@ import logging
 import pathlib
 import sys
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -15,10 +15,12 @@ import requests
 
 from src.core.calendar import SessionState, calc_sleep_seconds, get_target_state
 from src.core.config import (
+    AftermarketSettings,
     CollectorSettings,
     DataPaths,
     ExecutionSettings,
     KisCredentials,
+    KisTokenSettings,
     KrxCredentials,
     ObservabilitySettings,
     TossCredentials,
@@ -27,7 +29,7 @@ from src.core.config import (
 from src.core.errors import KrxAlphaError, MissingCredentialsError
 from src.core.observability import EVENT, configure_logging, send_digest
 from src.execution.contracts import KisApiError
-from src.execution.kis_client import KisRestClient, RateLimiter
+from src.execution.kis_client import KisRestClient, RateLimiter, kis_token_cache_path
 from src.marketdata.krx_bars import KrxBarsError
 from src.marketdata.service import BarsRefreshResult as BarsRefreshResult
 from src.marketdata.service import KisFallbackError as KisFallbackError
@@ -50,6 +52,7 @@ from src.orchestration.eod import (
 )
 from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker
 from src.realtime.contracts import MarketVenue
+from src.realtime.kis_sharding import AftermarketShard, load_kis_data_credentials, plan_aftermarket_shards
 from src.storage.remote import RemoteArchiveError
 from src.universe.ipc import CandidateFileError, read_candidates
 from src.universe.service import UniversePlanResult as UniversePlanResult
@@ -84,13 +87,15 @@ def _build_kis_client(paths: DataPaths) -> KisRestClient:
     """execution 모듈과 동일한 토큰 캐시를 공유하는 KIS 클라이언트를 생성한다."""
     creds = load_credentials(KisCredentials)
     execution = ExecutionSettings(data_root=paths.root)
+    token_settings = KisTokenSettings()
     return KisRestClient(
         creds=creds,
         session=requests,
-        token_cache_path=paths.kis_token_cache,
+        token_cache_path=kis_token_cache_path(token_settings.token_cache_dir, creds.kis_app_key),
         limiter=RateLimiter(execution.rest_rate_per_s),
         now=lambda: dt.datetime.now(_KST),
         timeout_s=execution.request_timeout_s,
+        allow_token_issue=token_settings.allow_issue,
     )
 
 
@@ -208,7 +213,7 @@ def _stream_cmd(today: dt.date, paths: DataPaths, *, degraded_reason: str | None
     return cmd
 
 
-def _aftermarket_stream_cmd(today: dt.date, paths: DataPaths, *, venue: MarketVenue) -> list[str]:
+def _aftermarket_stream_cmd(today: dt.date, paths: DataPaths, *, shard: AftermarketShard) -> list[str]:
     return [
         sys.executable,
         "-m",
@@ -219,11 +224,19 @@ def _aftermarket_stream_cmd(today: dt.date, paths: DataPaths, *, venue: MarketVe
         "--journal-root",
         str(paths.journal_root),
         "--manifest-path",
-        str(paths.aftermarket_manifest_path(today, venue)),
+        str(paths.aftermarket_manifest_path(today, shard.venue, shard.shard_index)),
         "--candidates-path",
         str(paths.candidates),
         "--venue",
-        venue.value,
+        shard.venue.value,
+        "--shard-index",
+        str(shard.shard_index),
+        "--credential-slot",
+        shard.credential_slot,
+        "--credential-key-id",
+        shard.credential_key_id,
+        "--symbols",
+        ",".join(shard.symbols),
     ]
 
 
@@ -278,6 +291,8 @@ def run_collector_daemon(
     last_ingest_check: dt.datetime | None = None
     ingest_stale = False
     aftermarket_supervisors: dict[str, ProcessSupervisor] = {}
+    aftermarket_plan: tuple[AftermarketShard, ...] = ()
+    aftermarket_plan_day: dt.date | None = None
 
     while True:
         cycle += 1
@@ -426,18 +441,36 @@ def run_collector_daemon(
                         )
                     ingest_stale = stale
                 if state == SessionState.AFTER_MARKET_ACTIVE and cfg.after_market_enabled:
+                    if aftermarket_plan_day != today:
+                        stored = read_candidates(paths.candidates)
+                        rows: list[dict[str, Any]] = (
+                            cast("list[dict[str, Any]]", stored.get("candidates"))
+                            if stored is not None
+                            else []
+                        )
+                        after = AftermarketSettings()
+                        aftermarket_plan = plan_aftermarket_shards(
+                            symbols=tuple(str(row["symbol"]) for row in rows),
+                            credentials=load_kis_data_credentials(),
+                            pair_capacity_per_connection=int(after.pair_capacity_per_connection or 0),
+                            krx_streams=after.krx_streams,
+                            nxt_streams=after.nxt_streams,
+                        )
+                        aftermarket_plan_day = today
                     kst_time = now.astimezone(_KST).time()
                     due: list[MarketVenue] = []
                     if kst_time >= dt.time(15, 40):
                         due.append(MarketVenue.NXT)
                     if kst_time >= dt.time(16, 0):
                         due.append(MarketVenue.KRX)
-                    for venue in due:
-                        if venue.value not in aftermarket_supervisors:
-                            aftermarket_supervisors[venue.value] = ProcessSupervisor(
-                                cmd=_aftermarket_stream_cmd(today, paths, venue=venue),
-                                breaker=RestartCircuitBreaker(),
-                            )
+                    for shard in aftermarket_plan:
+                        if shard.venue in due:
+                            supervisor_key = f"{shard.venue.value}:{shard.shard_index}"
+                            if supervisor_key not in aftermarket_supervisors:
+                                aftermarket_supervisors[supervisor_key] = ProcessSupervisor(
+                                    cmd=_aftermarket_stream_cmd(today, paths, shard=shard),
+                                    breaker=RestartCircuitBreaker(),
+                                )
                     for sup in aftermarket_supervisors.values():
                         sup.ensure_running()
                 sleep_sec = 10.0
@@ -455,8 +488,20 @@ def run_collector_daemon(
                 eod_attempted_for = ref_day
                 for sup in aftermarket_supervisors.values(): sup.stop(timeout_s=15.0)  # noqa: E701 - 20:00 KIS 수집기 종료
                 aftermarket_supervisors.clear()
-                aftermarket_manifests = [paths.aftermarket_manifest_path(ref_day, venue) for venue in (MarketVenue.NXT, MarketVenue.KRX)] if cfg.after_market_enabled else []
-                aftermarket_blocked = cfg.after_market_enabled and not aftermarket_eod_ready(manifests=aftermarket_manifests, date=ref_day, now=now)
+                aftermarket_manifests = (
+                    [
+                        paths.aftermarket_manifest_path(ref_day, shard.venue, shard.shard_index)
+                        for shard in aftermarket_plan
+                    ]
+                    if cfg.after_market_enabled
+                    else []
+                )
+                aftermarket_blocked = cfg.after_market_enabled and not aftermarket_eod_ready(
+                    manifests=aftermarket_manifests,
+                    date=ref_day,
+                    now=now,
+                    expected_shards=tuple(aftermarket_plan),
+                )
                 if aftermarket_blocked: logger.critical("[DAEMON] stage=eod_maintenance status=DEGRADED reason=aftermarket_not_ready date=%s", ref_day.isoformat())  # noqa: E701
                 if not aftermarket_blocked:
                     deleted = 0

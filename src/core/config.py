@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TypeVar
 
-from pydantic import ValidationError, model_validator
+from pydantic import AliasChoices, Field, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.core.calendar import SessionSchedule
@@ -71,6 +71,10 @@ class DataPaths:
         return self.root / "work"
 
     @property
+    def kis_ws_lease_dir(self) -> pathlib.Path:
+        return self.work_root / "kis_ws_leases"
+
+    @property
     def logs_dir(self) -> pathlib.Path:
         return self.root / "logs"
 
@@ -84,9 +88,9 @@ class DataPaths:
     def manifest_path(self, day: dt.date) -> pathlib.Path:
         return self.manifest_dir / f"{day.isoformat()}.json"
 
-    def aftermarket_manifest_path(self, day: dt.date, venue: object) -> pathlib.Path:
+    def aftermarket_manifest_path(self, day: dt.date, venue: object, shard_index: int) -> pathlib.Path:
         venue_s = str(getattr(venue, "value", venue))
-        return self.manifest_dir / "aftermarket" / f"{day.isoformat()}.{venue_s}.json"
+        return self.manifest_dir / "aftermarket" / f"{day.isoformat()}.{venue_s}.shard-{shard_index:02d}.json"
 
     @property
     def execution_dir(self) -> pathlib.Path:
@@ -213,6 +217,18 @@ class KisCredentials(BaseSettings):
     kis_account_product_code: str
 
 
+class KisTokenSettings(BaseSettings):
+    """KIS 토큰 캐시 설정 (env_prefix='KRX_ALPHA_KIS_TOKEN_')."""
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_KIS_TOKEN_", extra="ignore")
+
+    token_cache_dir: pathlib.Path = Field(
+        default=pathlib.Path("data/execution/kis_tokens"),
+        validation_alias=AliasChoices("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", "token_cache_dir"),
+    )
+    allow_issue: bool = True
+
+
 class ExecutionSettings(BaseSettings):
     """주문집행 설정 (env_prefix='KRX_ALPHA_EXEC_')."""
 
@@ -264,6 +280,11 @@ class AlertSettings(BaseSettings):
 
 def child_process_env(overrides: Mapping[str, str]) -> dict[str, str]:
     return {**os.environ, **overrides}
+
+
+def kis_data_env() -> dict[str, str]:
+    """KIS 데이터 키 풀 원천 env 매핑 (프로세스 환경, layering 단일 진입점)."""
+    return dict(os.environ)
 
 
 def export_run_id(run_id: str) -> None:

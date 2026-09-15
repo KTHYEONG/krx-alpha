@@ -90,3 +90,81 @@ def test_kis_adapter_rejects_non_integer_and_misaligned_envelopes():
         adapter._parse_envelope('0|H0NXCNT0|002|005930^154001^x')
     with pytest.raises(VendorDisconnected, match='malformed_rows'):
         adapter._parse_envelope('0|H0NXCNT0|001|005930')
+
+
+def test_kis_websocket_lease_exclusive_and_adapter_lifecycle(tmp_path) -> None:
+    import asyncio
+    import pytest
+    from src.realtime.contracts import VendorAuthRejected
+    from src.realtime.kis_lease import KisWebSocketLease
+    async def run() -> None:
+        one = KisWebSocketLease(root=tmp_path, credential_key_id='id')
+        two = KisWebSocketLease(root=tmp_path, credential_key_id='id')
+        await one.acquire()
+        with pytest.raises(VendorAuthRejected, match='key_lease_busy'):
+            await two.acquire()
+        await one.release()
+        await two.acquire()
+        await two.release()
+    asyncio.run(run())
+
+
+def test_kis_adapter_acquires_lease_before_approval_and_releases_on_close(tmp_path) -> None:
+    import asyncio
+    import pytest
+    from src.realtime.adapters.kis import KisRealtimeAdapter
+    from src.realtime.contracts import MarketSession, MarketVenue, VendorAuthRejected
+    from src.realtime.kis_lease import KisWebSocketLease
+    from src.realtime.session import StreamRoute
+
+    posted = []
+
+    class Response:
+        status = 200
+
+        async def json(self):
+            return {"approval_key": "approved"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    class Ws:
+        async def close(self):
+            return None
+
+    class Http:
+        def __init__(self):
+            self.ws = Ws()
+
+        def post(self, *args, **kwargs):
+            posted.append(kwargs)
+            return Response()
+
+        async def ws_connect(self, *args):
+            return self.ws
+
+        async def close(self):
+            return None
+
+    async def run() -> None:
+        route = StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER)
+        held = KisWebSocketLease(root=tmp_path, credential_key_id="busy")
+        await held.acquire()
+        blocked = KisRealtimeAdapter(app_key="k", app_secret="s", http=Http(), route=route, allowed_streams=("H0NXCNT0", "H0NXASP0"), capacity_pairs=4, lease=KisWebSocketLease(root=tmp_path, credential_key_id="busy"))
+        with pytest.raises(VendorAuthRejected, match="key_lease_busy"):
+            await blocked.connect()
+        assert posted == []
+        await held.release()
+        http = Http()
+        adapter = KisRealtimeAdapter(app_key="k", app_secret="s", http=http, route=route, allowed_streams=("H0NXCNT0", "H0NXASP0"), capacity_pairs=4, lease=KisWebSocketLease(root=tmp_path, credential_key_id="busy"))
+        await adapter.connect()
+        assert len(posted) == 1
+        await adapter.aclose()
+        follower = KisWebSocketLease(root=tmp_path, credential_key_id="busy")
+        await follower.acquire()
+        await follower.release()
+
+    asyncio.run(run())

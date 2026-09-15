@@ -615,3 +615,72 @@ def test_backup_freshness_recognizes_nested_aftermarket_manifests(tmp_path):
     (tmp_path/'aftermarket'/'2026-09-14.nxt.json').write_text('{}')
     missing = check_backup_freshness(manifest_dir=tmp_path, today=dt.date(2026,9,15), archiver=Archive())
     assert missing == ['aftermarket/2026-09-14.nxt.json']
+
+
+def test_aftermarket_eod_ready_requires_all_shards_and_pairs(tmp_path) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    from src.orchestration.eod import aftermarket_eod_ready
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+    expected=(AftermarketShard(MarketVenue.NXT,0,('005930',),('H0NXCNT0','H0NXASP0'),'1','id1'),)
+    assert aftermarket_eod_ready(manifests=[],date=dt.date(2026,9,15),now=dt.datetime(2026,9,15,20,1,tzinfo=ZoneInfo('Asia/Seoul')),expected_shards=expected) is False
+
+
+def test_aftermarket_eod_ready_verifies_expected_shards(tmp_path) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    from src.orchestration.eod import aftermarket_eod_ready
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+    from src.realtime.manifest import SessionManifest
+    day = dt.date(2026, 9, 15)
+    now = dt.datetime(2026, 9, 15, 20, 1, tzinfo=ZoneInfo("Asia/Seoul"))
+    expected = (AftermarketShard(MarketVenue.NXT, 0, ("005930",), ("H0NXCNT0", "H0NXASP0"), "1", "id1"),)
+    counter = 0
+
+    def write_manifest(shard, *, key_id=None, symbols=None, acked=True, closed=True, day_override=None):
+        nonlocal counter
+        manifest = SessionManifest(
+            session_date=day_override or day, clock_offset_ns=0, started_at_ns=1,
+            venue=shard.venue.value, session="nxt_after", expected_close_ns=1,
+            writer_closed_at_ns=2 if closed else None,
+            planned_pairs=[{"symbol": s, "tr_id": t} for s in (symbols if symbols is not None else shard.symbols) for t in shard.streams],
+            shard_index=shard.shard_index, credential_key_id=key_id or shard.credential_key_id,
+        )
+        for symbol in shard.symbols:
+            for stream in shard.streams:
+                manifest.record_ack(vendor="kis", tr_id=stream, symbol=symbol, rt_cd="0", accepted=acked)
+        counter += 1
+        path = tmp_path / f"{shard.venue.value}-{shard.shard_index}-{counter}.json"
+        manifest.save(path)
+        return path
+
+    good = write_manifest(expected[0])
+    assert aftermarket_eod_ready(manifests=[good], date=day, now=now, expected_shards=expected) is True
+    assert aftermarket_eod_ready(manifests=[write_manifest(expected[0], key_id="other")], date=day, now=now, expected_shards=expected) is False
+    assert aftermarket_eod_ready(manifests=[write_manifest(expected[0], day_override=dt.date(2026, 9, 14))], date=day, now=now, expected_shards=expected) is False
+    assert aftermarket_eod_ready(manifests=[write_manifest(expected[0], symbols=("000660",))], date=day, now=now, expected_shards=expected) is False
+    assert aftermarket_eod_ready(manifests=[write_manifest(expected[0], acked=False)], date=day, now=now, expected_shards=expected) is False
+    assert aftermarket_eod_ready(manifests=[write_manifest(expected[0], closed=False)], date=day, now=now, expected_shards=expected) is False
+    assert aftermarket_eod_ready(manifests=[], date=day, now=now, expected_shards=expected) is False
+    extra = AftermarketShard(MarketVenue.KRX, 0, ("005930",), ("H0STCNT0", "H0STASP0"), "2", "id2")
+    assert aftermarket_eod_ready(manifests=[good], date=day, now=now, expected_shards=(*expected, extra)) is False
+
+
+def test_aftermarket_eod_ready_rejects_wrong_aftermarket_session(tmp_path) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.orchestration.eod import aftermarket_eod_ready
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+    from src.realtime.manifest import SessionManifest
+
+    shard = AftermarketShard(MarketVenue.NXT, 0, ("005930",), ("H0NXCNT0", "H0NXASP0"), "1", "id1")
+    manifest = SessionManifest(session_date=dt.date(2026, 9, 15), clock_offset_ns=0, started_at_ns=1, venue="nxt", session="regular", expected_close_ns=1, writer_closed_at_ns=2, shard_index=0, credential_key_id="id1", planned_pairs=[{"symbol": "005930", "tr_id": stream} for stream in shard.streams])
+    for stream in shard.streams:
+        manifest.record_ack(vendor="kis", tr_id=stream, symbol="005930", rt_cd="0", accepted=True)
+    path = tmp_path / "wrong-session.json"
+    manifest.save(path)
+    assert aftermarket_eod_ready(manifests=[path], date=dt.date(2026, 9, 15), now=dt.datetime(2026, 9, 15, 20, 1, tzinfo=ZoneInfo("Asia/Seoul")), expected_shards=(shard,)) is False
