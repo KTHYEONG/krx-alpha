@@ -104,7 +104,7 @@ jobs:
             if ! awk -F= '
               /^[[:space:]]*($|#)/ { next }
               !/^[A-Za-z_][A-Za-z0-9_]*=/ { exit 1 }
-              $1 !~ /^KIS_(DATA_SLOTS|HOST_DATA_SLOTS|DATA_[1-5]_(APP_KEY|APP_SECRET|HTS_ID))$/ { exit 1 }
+              \$1 !~ /^KIS_(DATA_SLOTS|HOST_DATA_SLOTS|DATA_[1-5]_(APP_KEY|APP_SECRET|HTS_ID))$/ { exit 1 }
             ' "\$tmp_file"; then
               echo "Shared KIS data env contains a non-data or account field" >&2
               rm -f "\$tmp_file"
