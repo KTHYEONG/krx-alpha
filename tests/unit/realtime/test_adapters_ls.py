@@ -511,3 +511,81 @@ def test_ls_adapter_subscribe_raises_vendor_disconnected_on_non_text_frame() -> 
 
     with pytest.raises(VendorDisconnected, match="subscribe_non_text"):
         asyncio.run(adapter.subscribe([("005930", "H0STCNT0")]))
+
+
+def test_ls_adapter_connect_raises_auth_rejected_on_invalid_app_key() -> None:
+    import asyncio
+
+    import pytest
+
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import VendorAuthRejected, VendorDisconnected
+
+    class _Resp:
+        def __init__(self, status, payload):
+            self.status = status
+            self.payload = payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self):
+            return self.payload
+
+    class _Http:
+        def __init__(self, resp):
+            self.resp = resp
+
+        def post(self, url, **kw):
+            return self.resp
+
+        def ws_connect(self, url, **kw):
+            raise AssertionError("ws must not open after an auth rejection")
+
+    body = {"error_code": "IGW00103", "error_description": "유효하지 않은 AppKey입니다."}
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(_Resp(403, body)), market_of={})
+
+    with pytest.raises(VendorAuthRejected, match="auth_rejected:403:IGW00103") as excinfo:
+        asyncio.run(adapter.connect())
+    assert isinstance(excinfo.value, VendorDisconnected)
+
+def test_ls_adapter_connect_raises_auth_rejected_on_401_without_error_code() -> None:
+    import asyncio
+
+    import pytest
+
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import VendorAuthRejected
+
+    class _Resp:
+        def __init__(self, status, payload):
+            self.status = status
+            self.payload = payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self):
+            return self.payload
+
+    class _Http:
+        def __init__(self, resp):
+            self.resp = resp
+
+        def post(self, url, **kw):
+            return self.resp
+
+        def ws_connect(self, url, **kw):
+            raise AssertionError("ws must not open after an auth rejection")
+
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(_Resp(401, {"error": "unauthorized"})), market_of={})
+
+    with pytest.raises(VendorAuthRejected, match=r"auth_rejected:401:$"):
+        asyncio.run(adapter.connect())
+

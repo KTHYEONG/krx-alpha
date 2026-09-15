@@ -24,7 +24,7 @@ from src.core.config import (
     load_credentials,
 )
 from src.core.errors import KrxAlphaError, MissingCredentialsError
-from src.core.observability import EVENT, configure_logging
+from src.core.observability import EVENT, configure_logging, send_digest
 from src.execution.contracts import KisApiError
 from src.execution.kis_client import KisRestClient, RateLimiter
 from src.marketdata.krx_bars import KrxBarsError
@@ -39,8 +39,15 @@ from src.marketdata.toss_calendar import (
     save_trading_day_cache,
     trading_day_from_cache,
 )
-from src.orchestration.eod import check_session_reconciliation, run_eod_maintenance, run_eod_offload
+from src.orchestration.eod import (
+    check_backup_freshness,
+    check_session_reconciliation,
+    classify_remote_failure,
+    run_eod_maintenance,
+    run_eod_offload,
+)
 from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker
+from src.storage.remote import RemoteArchiveError
 from src.universe.ipc import CandidateFileError, read_candidates
 from src.universe.service import UniversePlanResult as UniversePlanResult
 from src.universe.service import plan_universe
@@ -48,6 +55,17 @@ from src.universe.service import plan_universe
 logger = logging.getLogger(__name__)
 _KST = ZoneInfo("Asia/Seoul")
 HEARTBEAT_SUMMARY_S: float = 600.0
+INGEST_STALE_S: float = 300.0
+INGEST_CHECK_S: float = 60.0
+INGEST_WATCH_START: dt.time = dt.time(9, 5)
+INGEST_WATCH_END: dt.time = dt.time(15, 25)
+
+
+def _journal_age_s(journal_root: pathlib.Path, vendor: str, day: dt.date, now: dt.datetime) -> float | None:
+    files = list(journal_root.glob(f"{vendor}/*/dt={day.isoformat()}/*.jsonl.zst"))
+    if not files:
+        return None
+    return now.timestamp() - max(f.stat().st_mtime for f in files)
 
 
 def resolve_trading_day(ref_date: dt.date) -> TradingDay | None:
@@ -235,6 +253,8 @@ def run_collector_daemon(
     next_orchestration_at: dt.datetime | None = None
     orchestration_attempts = 0
     degraded_active = False
+    last_ingest_check: dt.datetime | None = None
+    ingest_stale = False
 
     while True:
         cycle += 1
@@ -274,6 +294,8 @@ def run_collector_daemon(
                 next_orchestration_at = None
                 orchestration_attempts = 0
                 degraded_active = False
+                last_ingest_check = None
+                ingest_stale = False
             if (
                 orchestrated_for != today
                 and holiday_for != today
@@ -357,6 +379,28 @@ def run_collector_daemon(
                     elif result == "circuit_open" and last_supervisor_result != "circuit_open":
                         logger.critical("[DAEMON] stage=streamer status=FAIL reason=circuit_open")
                     last_supervisor_result = result
+                if (
+                    state == SessionState.FULL_ACTIVE
+                    and holiday_for != today
+                    and INGEST_WATCH_START <= now.astimezone(_KST).time() < INGEST_WATCH_END
+                    and (last_ingest_check is None or (now - last_ingest_check).total_seconds() >= INGEST_CHECK_S)
+                ):
+                    last_ingest_check = now
+                    age = _journal_age_s(paths.journal_root, cfg.vendor, today, now)
+                    stale = age is None or age > INGEST_STALE_S
+                    if stale and not ingest_stale:
+                        logger.critical(
+                            "[DAEMON] stage=ingest_watchdog status=STALE date=%s age_s=%s",
+                            today.isoformat(),
+                            "none" if age is None else str(int(age)),
+                        )
+                    elif not stale and ingest_stale and age is not None:
+                        logger.warning(
+                            "[DAEMON] stage=ingest_watchdog status=RECOVERED date=%s age_s=%d",
+                            today.isoformat(),
+                            int(age),
+                        )
+                    ingest_stale = stale
                 sleep_sec = 10.0
         elif state == SessionState.POST_MARKET_EOD:
             if supervisor is not None:
@@ -390,15 +434,31 @@ def run_collector_daemon(
                     offload = run_eod_offload(
                         paths.archive_root, retain_days=cfg.archive_retain_days, reference_date=ref_day
                     )
+                except RemoteArchiveError as e:
+                    offload_ok = False
+                    reason = classify_remote_failure(str(e))
+                    logger.critical(
+                        "[DAEMON] stage=eod_offload status=FAIL reason=%s hint=%s error=%s",
+                        reason,
+                        "rclone_config_reconnect_gdrive" if reason == "auth_expired" else "check_remote",
+                        str(e),
+                    )
                 except Exception as e:  # noqa: BLE001
                     offload_ok = False
                     logger.error("[DAEMON] stage=eod_maintenance error=%s", str(e), exc_info=True)
                 reconcile_ok = True
+                reconciled = False
                 try:
                     reconciled = check_session_reconciliation(
-                        bars_store=paths.bars_store, manifest_path=paths.manifest_path(ref_day), date=ref_day
+                        bars_store=paths.bars_store,
+                        manifest_path=paths.manifest_path(ref_day),
+                        date=ref_day,
+                        journal_root=paths.journal_root,
+                        streams=cfg.streams,
+                        vendor=cfg.vendor,
                     )
                     if not reconciled:
+                        reconcile_ok = False
                         logger.critical(
                             "[DAEMON] stage=eod_maintenance status=FAIL reason=session_data_gap date=%s",
                             ref_day.isoformat(),
@@ -409,14 +469,47 @@ def run_collector_daemon(
                     logger.critical(
                         "[DAEMON] stage=eod_reconciliation status=FAIL error=%s", str(e), exc_info=True
                     )
+                backup_missing: list[str] = []
+                backup_ok = True
+                try:
+                    backup_missing = check_backup_freshness(manifest_dir=paths.manifest_dir, today=ref_day)
+                    if backup_missing:
+                        backup_ok = False
+                        logger.critical(
+                            "[DAEMON] stage=backup_freshness status=STALE missing=%d oldest=%s",
+                            len(backup_missing),
+                            backup_missing[0],
+                        )
+                except RemoteArchiveError as e:
+                    backup_ok = False
+                    logger.critical(
+                        "[DAEMON] stage=backup_freshness status=FAIL reason=%s error=%s",
+                        classify_remote_failure(str(e)),
+                        str(e),
+                    )
+                eod_status = "OK" if (maintenance_ok and offload_ok and reconcile_ok and backup_ok) else "DEGRADED"
                 logger.info(
                     "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=%s",
                     deleted,
                     offload["uploaded"],
                     offload["purged"],
-                    "OK" if (maintenance_ok and offload_ok and reconcile_ok) else "DEGRADED",
+                    eod_status,
                     extra=EVENT,
                 )
+                digest_body = "\n".join(
+                    [
+                        f"run_id={run_id}",
+                        f"status={eod_status}",
+                        f"deleted_partitions={deleted}",
+                        f"uploaded={offload['uploaded']}",
+                        f"purged={offload['purged']}",
+                        f"reconciled={reconciled}",
+                        f"backup_missing={len(backup_missing)}",
+                        f"streamer_restarts={streamer_restarts}",
+                        f"orchestration_attempts={orchestration_attempts}",
+                    ]
+                )
+                send_digest(f"[krx-alpha] EOD {ref_day.isoformat()} {eod_status}", digest_body)
             sleep_sec = 60.0
         else:  # NIGHT_SLEEP
             sleep_sec = min(calc_sleep_seconds(now, sched.streamer_start), 1800.0)

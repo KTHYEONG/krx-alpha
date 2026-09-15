@@ -1,3 +1,6 @@
+import logging
+
+
 def test_run_session_orchestration_invokes_services_directly(tmp_path, monkeypatch) -> None:
     # Given: service 계층을 대체한 데몬 오케스트레이션
     import datetime as dt
@@ -158,7 +161,6 @@ def test_run_collector_daemon_streamer_active_skips_spawn_when_not_ready(tmp_pat
 
 def test_run_collector_daemon_streamer_active_logs_circuit_open(tmp_path, monkeypatch, caplog) -> None:
     import datetime as dt
-    import logging
     from unittest.mock import MagicMock
     from zoneinfo import ZoneInfo
     import src.orchestration.daemon as daemon_mod
@@ -403,7 +405,6 @@ def test_run_collector_daemon_main_invokes_runner(monkeypatch) -> None:
 def test_run_session_orchestration_blocks_stale_bars_against_calendar(tmp_path, monkeypatch, caplog) -> None:
     # Given: store 최신일이 2026-09-09 인데 직전 영업일은 2026-09-11
     import datetime as dt
-    import logging
     import pathlib
 
     import polars as pl
@@ -598,7 +599,6 @@ def test_run_collector_daemon_runs_orchestration_on_business_day(tmp_path, monke
 def test_resolve_trading_day_degrades_to_none_when_credentials_missing(monkeypatch, caplog) -> None:
     # Given: 토스 자격증명 env 부재
     import datetime as dt
-    import logging
 
     from src.orchestration import daemon
 
@@ -622,7 +622,6 @@ def test_resolve_trading_day_degrades_to_none_when_credentials_missing(monkeypat
 def test_resolve_trading_day_degrades_to_none_when_vendor_fails(monkeypatch, caplog) -> None:
     # Given: 자격증명은 있으나 벤더가 실패
     import datetime as dt
-    import logging
 
     import pytest
 
@@ -767,7 +766,6 @@ def test_run_session_orchestration_falls_back_to_kis_when_bars_stale(tmp_path, m
 def test_run_session_orchestration_blocks_stale_bars_when_kis_fallback_also_fails(tmp_path, monkeypatch, caplog) -> None:
     # Given: store 최신일이 2026-09-09 인데 직전 영업일은 2026-09-11, KIS 폴백도 실패
     import datetime as dt
-    import logging
     import pathlib
 
     import polars as pl
@@ -820,7 +818,6 @@ def test_run_session_orchestration_blocks_stale_bars_when_kis_fallback_also_fail
 
 def test_run_collector_daemon_eod_logs_session_data_gap(tmp_path, monkeypatch, caplog) -> None:
     import datetime as dt
-    import logging
     import pathlib
     from zoneinfo import ZoneInfo
 
@@ -913,7 +910,6 @@ def test_run_collector_daemon_eod_attempts_again_on_next_date(tmp_path, monkeypa
 def test_run_collector_daemon_eod_runs_offload_and_reconciliation_when_maintenance_fails(tmp_path, monkeypatch, caplog) -> None:
     # Given: 정규화 유지보수가 워커 크래시로 실패
     import datetime as dt
-    import logging
     import pathlib
     from zoneinfo import ZoneInfo
 
@@ -953,7 +949,6 @@ def test_run_collector_daemon_eod_runs_offload_and_reconciliation_when_maintenan
 def test_run_collector_daemon_eod_logs_error_when_offload_raises_and_does_not_retry_same_date(tmp_path, monkeypatch, caplog) -> None:
     # Given: 오프로드 단계에서 예기치 못한 예외
     import datetime as dt
-    import logging
     import pathlib
     from zoneinfo import ZoneInfo
 
@@ -992,7 +987,6 @@ def test_run_collector_daemon_eod_logs_error_when_offload_raises_and_does_not_re
 
 def test_run_collector_daemon_configures_logging_with_persistent_dir_flag(tmp_path, monkeypatch, caplog) -> None:
     import datetime as dt
-    import logging
     import pathlib
     from zoneinfo import ZoneInfo
 
@@ -1016,7 +1010,6 @@ def test_run_collector_daemon_configures_logging_with_persistent_dir_flag(tmp_pa
 
 def test_run_collector_daemon_logs_state_changes_and_ten_minute_heartbeat_only(tmp_path, monkeypatch, caplog) -> None:
     import datetime as dt
-    import logging
     import pathlib
     from zoneinfo import ZoneInfo
 
@@ -1044,7 +1037,6 @@ def test_run_collector_daemon_logs_state_changes_and_ten_minute_heartbeat_only(t
 
 def test_run_collector_daemon_logs_streamer_restart_and_circuit_transition_once(tmp_path, monkeypatch, caplog) -> None:
     import datetime as dt
-    import logging
     from zoneinfo import ZoneInfo
 
     import src.orchestration.daemon as daemon_mod
@@ -1078,7 +1070,6 @@ def test_run_collector_daemon_logs_streamer_restart_and_circuit_transition_once(
 
 def test_run_collector_daemon_orchestration_exception_logs_traceback(tmp_path, monkeypatch, caplog) -> None:
     import datetime as dt
-    import logging
     from zoneinfo import ZoneInfo
 
     import src.orchestration.daemon as daemon_mod
@@ -1104,7 +1095,6 @@ def test_run_collector_daemon_orchestration_exception_logs_traceback(tmp_path, m
 
 def test_run_collector_daemon_eod_unexpected_error_logs_traceback(tmp_path, monkeypatch, caplog) -> None:
     import datetime as dt
-    import logging
     import pathlib
     from zoneinfo import ZoneInfo
 
@@ -1134,7 +1124,6 @@ def test_run_collector_daemon_eod_unexpected_error_logs_traceback(tmp_path, monk
 def test_run_session_orchestration_blocks_stale_bars_when_calendar_unknown(tmp_path, monkeypatch, caplog) -> None:
 
     import datetime as dt
-    import logging
     import pathlib
 
     import polars as pl
@@ -1262,7 +1251,6 @@ def test_run_session_orchestration_uses_kis_fallback_on_incomplete_market(tmp_pa
 def test_run_session_orchestration_fails_closed_when_kis_fallback_rowcount_implausible(tmp_path, monkeypatch, caplog) -> None:
 
     import datetime as dt
-    import logging
     import pathlib
 
     import polars as pl
@@ -1336,7 +1324,6 @@ def test_degraded_candidates_rev_accepts_only_recent_readable_candidates(tmp_pat
 def test_run_collector_daemon_retries_orchestration_after_backoff_same_day(tmp_path, monkeypatch, caplog) -> None:
 
     import datetime as dt
-    import logging
     import pathlib
     from zoneinfo import ZoneInfo
 
@@ -1391,7 +1378,6 @@ def test_run_collector_daemon_retries_orchestration_after_backoff_same_day(tmp_p
 def test_run_collector_daemon_starts_degraded_streamer_with_recent_candidates(tmp_path, monkeypatch, caplog) -> None:
 
     import datetime as dt
-    import logging
     import pathlib
     from zoneinfo import ZoneInfo
 
@@ -1478,7 +1464,6 @@ def test_run_collector_daemon_skips_degraded_streamer_when_candidates_too_old(tm
 def test_run_collector_daemon_replaces_degraded_streamer_after_successful_retry(tmp_path, monkeypatch, caplog) -> None:
 
     import datetime as dt
-    import logging
     import pathlib
     from zoneinfo import ZoneInfo
 
@@ -1625,7 +1610,6 @@ def test_run_collector_daemon_skips_day_when_calendar_cache_marks_holiday(tmp_pa
 
 def test_run_collector_daemon_eod_reconciliation_failure_is_critical_and_degraded(tmp_path, monkeypatch, caplog) -> None:
     import datetime as dt
-    import logging
     import pathlib
     from zoneinfo import ZoneInfo
 
@@ -1701,7 +1685,6 @@ def test_run_collector_daemon_clears_supervisor_after_eod_so_next_day_never_rest
 def test_run_collector_daemon_stops_stale_day_streamer_when_eod_was_missed(tmp_path, monkeypatch, caplog) -> None:
     # Given: EOD 윈도우를 거치지 못한 채 날짜가 바뀐 경우 (데몬이 15:40-16:00 사이 중단 등)
     import datetime as dt
-    import logging
     import pathlib
     from zoneinfo import ZoneInfo
 
@@ -1741,3 +1724,277 @@ def test_run_collector_daemon_stops_stale_day_streamer_when_eod_was_missed(tmp_p
     assert stops == ["2026-09-14"]
     assert ensured_dates == ["2026-09-14"]
     assert "stage=streamer status=STOP_STALE_DAY stop_result=graceful" in caplog.text
+
+
+def test_journal_age_s_returns_newest_mtime_age_or_none(tmp_path) -> None:
+    import datetime as dt
+    import os
+
+    from src.orchestration.daemon import _journal_age_s
+
+    now = dt.datetime.fromtimestamp(1_000_250, tz=dt.UTC)
+    day = dt.date(2026, 9, 14)
+    assert _journal_age_s(tmp_path, "ls", day, now) is None
+
+    for stream, mtime in (("H0STCNT0", 1_000_100), ("H0STASP0", 1_000_200)):
+        part = tmp_path / "ls" / stream / "dt=2026-09-14"
+        part.mkdir(parents=True)
+        f = part / "10.jsonl.zst"
+        f.write_bytes(b"x")
+        os.utime(f, (mtime, mtime))
+    other_day = tmp_path / "ls" / "H0STCNT0" / "dt=2026-09-13"
+    other_day.mkdir(parents=True)
+    (other_day / "15.jsonl.zst").write_bytes(b"x")
+
+    assert _journal_age_s(tmp_path, "ls", day, now) == 50.0
+
+def test_run_collector_daemon_ingest_watchdog_alerts_stale_journal_once_and_recovers(tmp_path, monkeypatch, caplog) -> None:
+
+    import datetime as dt
+    import os
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    kst = ZoneInfo("Asia/Seoul")
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = cmd
+            self.last_exit_code = None
+
+        def ensure_running(self):
+            return "started"
+
+        def stop(self, *, timeout_s=15.0):
+            return "graceful"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: True)
+
+    times = [dt.datetime(2026, 9, 14, 10, m, tzinfo=kst) for m in (0, 1, 2, 3)]
+    calls = {"n": 0}
+
+    def _now():
+        t = times[calls["n"]]
+        calls["n"] += 1
+        if calls["n"] == 3:
+            part = settings.paths.journal_root / "ls" / "H0STCNT0" / "dt=2026-09-14"
+            part.mkdir(parents=True, exist_ok=True)
+            f = part / "10.jsonl.zst"
+            f.write_bytes(b"x")
+            os.utime(f, (t.timestamp() - 10, t.timestamp() - 10))
+        return t
+
+    with caplog.at_level(logging.WARNING):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=4, now_fn=_now)
+
+    stale = [r.getMessage() for r in caplog.records if "stage=ingest_watchdog status=STALE" in r.getMessage()]
+    recovered = [r for r in caplog.records if "stage=ingest_watchdog status=RECOVERED" in r.getMessage()]
+    assert stale == ["[DAEMON] stage=ingest_watchdog status=STALE date=2026-09-14 age_s=none"]
+    assert [r.levelno for r in caplog.records if "status=STALE" in r.getMessage()] == [logging.CRITICAL]
+    assert len(recovered) == 1
+    assert recovered[0].levelno == logging.WARNING
+
+def test_run_collector_daemon_ingest_watchdog_skips_open_and_close_auction_windows(tmp_path, monkeypatch, caplog) -> None:
+
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    kst = ZoneInfo("Asia/Seoul")
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = cmd
+            self.last_exit_code = None
+
+        def ensure_running(self):
+            return "started"
+
+        def stop(self, *, timeout_s=15.0):
+            return "graceful"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: True)
+
+    times = iter([dt.datetime(2026, 9, 14, 9, 0, tzinfo=kst), dt.datetime(2026, 9, 14, 9, 4, tzinfo=kst), dt.datetime(2026, 9, 14, 15, 26, tzinfo=kst)])
+
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=3, now_fn=lambda: next(times))
+
+    assert "stage=ingest_watchdog" not in caplog.text
+
+def test_run_collector_daemon_eod_offload_remote_auth_failure_is_critical(tmp_path, monkeypatch, caplog) -> None:
+
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+    from src.storage.remote import RemoteArchiveError
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    digests: list[tuple[str, str]] = []
+    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    def _offload(*a, **kw):
+        raise RemoteArchiveError("lsjson failed: l1/ couldn't fetch token: invalid_grant: maybe token expired?")
+
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", _offload)
+    monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
+
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert any(m.startswith("[DAEMON] stage=eod_offload status=FAIL reason=auth_expired hint=rclone_config_reconnect_gdrive") for m in criticals)
+    assert "deleted_partitions=0 uploaded=0 purged=0 status=DEGRADED" in caplog.text
+
+def test_run_collector_daemon_eod_backup_freshness_stale_is_critical(tmp_path, monkeypatch, caplog) -> None:
+
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    digests: list[tuple[str, str]] = []
+    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
+
+    def _freshness(**kw):
+        seen.update(kw)
+        return ["2026-09-11.json", "2026-09-12.json"]
+
+    monkeypatch.setattr(daemon_mod, "check_backup_freshness", _freshness)
+
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    assert seen == {"manifest_dir": settings.paths.manifest_dir, "today": dt.date(2026, 9, 14)}
+    assert "[DAEMON] stage=backup_freshness status=STALE missing=2 oldest=2026-09-11.json" in caplog.text
+    assert [r.levelno for r in caplog.records if "stage=backup_freshness" in r.getMessage()] == [logging.CRITICAL]
+    assert "status=DEGRADED" in caplog.text
+
+def test_run_collector_daemon_eod_backup_freshness_remote_failure_is_critical(tmp_path, monkeypatch, caplog) -> None:
+
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+    from src.storage.remote import RemoteArchiveError
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    digests: list[tuple[str, str]] = []
+    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
+
+    def _freshness(**kw):
+        raise RemoteArchiveError("lsjson failed: manifest/ dial tcp: i/o timeout")
+
+    monkeypatch.setattr(daemon_mod, "check_backup_freshness", _freshness)
+
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    assert "[DAEMON] stage=backup_freshness status=FAIL reason=remote_error" in caplog.text
+    assert "status=DEGRADED" in caplog.text
+
+def test_run_collector_daemon_eod_passes_substantive_reconciliation_inputs(tmp_path, monkeypatch) -> None:
+
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    digests: list[tuple[str, str]] = []
+    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
+    monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
+
+    def _reconcile(**kw):
+        seen.update(kw)
+        return True
+
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", _reconcile)
+
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    assert seen["journal_root"] == settings.paths.journal_root
+    assert seen["streams"] == settings.streams
+    assert seen["vendor"] == settings.vendor
+    assert seen["manifest_path"] == settings.paths.manifest_path(dt.date(2026, 9, 14))
+
+def test_run_collector_daemon_eod_sends_daily_digest_once_per_date(tmp_path, monkeypatch) -> None:
+
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    digests: list[tuple[str, str]] = []
+    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 2, "skipped": 0, "failed": 0, "purged": 1})
+    monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
+
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: eod_time)
+
+    assert len(digests) == 1
+    subject, body = digests[0]
+    assert subject == "[krx-alpha] EOD 2026-09-14 OK"
+    lines = body.splitlines()
+    assert "status=OK" in lines
+    assert "uploaded=2" in lines
+    assert "purged=1" in lines
+    assert "reconciled=True" in lines
+    assert "backup_missing=0" in lines
+

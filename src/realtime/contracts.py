@@ -12,6 +12,7 @@ __all__ = [
     "SubscriptionPlanner",
     "VendorAck",
     "VendorAdapter",
+    "VendorAuthRejected",
     "VendorCapacity",
     "VendorDisconnected",
 ]
@@ -45,6 +46,10 @@ class VendorCapacity:
 
 class VendorDisconnected(KrxAlphaError):  # noqa: N818 - contract-pinned signal name
     """WS 절단 신호."""
+
+
+class VendorAuthRejected(VendorDisconnected):  # noqa: N818
+    """벤더 인증 거부 신호 (키 폐기·만료, 자동 복구 불가)."""
 
 
 class VendorAdapter(Protocol):

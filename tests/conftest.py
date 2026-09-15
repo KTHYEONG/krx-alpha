@@ -27,6 +27,13 @@ def tmp_path_factory_root() -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_rclone_and_alert_env(monkeypatch) -> None:
+    monkeypatch.setattr("src.storage.remote.shutil.which", lambda name: None)
+    for var in ("ALERT_GMAIL_USER", "ALERT_GMAIL_APP_PASSWORD", "ALERT_GMAIL_TO"):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _shutdown_managed_logging():
     yield
     from src.core.observability import shutdown_logging

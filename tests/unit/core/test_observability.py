@@ -180,8 +180,7 @@ def test_configure_logging_sends_critical_email_via_background_queue(monkeypatch
 
     assert len(queue_handlers) == 1
     assert queue_handlers[0].level == logging.CRITICAL
-    assert len(sent) == 1
-    assert sent[0][0].startswith("[krx-alpha] CRITICAL daemon: [DAEMON] stage=streamer status=FAIL")
+    assert sent[0][0] == "[krx-alpha] 🚨 [시세수집] 소켓 단절 (서킷오픈)"
     assert "circuit_open" in sent[0][1]
     assert "stage=alert status=ENABLED" in stream.getvalue()
 
@@ -275,3 +274,158 @@ def test_gmail_sender_sends_via_smtp_ssl(monkeypatch) -> None:
     assert msg["From"] == "u@x"
     assert msg["To"] == "t@x"
     assert msg.get_content().strip() == "body-1"
+
+
+def test_send_digest_sends_via_sender_when_alerts_enabled(caplog) -> None:
+    import logging
+
+    from src.core.config import AlertSettings
+    from src.core.observability import send_digest
+
+    sent: list[tuple[str, str]] = []
+    settings = AlertSettings(alert_gmail_user="u@x", alert_gmail_app_password="pw", alert_gmail_to="t@x")
+
+    with caplog.at_level(logging.INFO):
+        ok = send_digest("[krx-alpha] EOD 2026-09-14 OK", "status=OK", settings=settings, sender=lambda s, b: sent.append((s, b)))
+
+    assert ok is True
+    assert sent == [("[krx-alpha] EOD 2026-09-14 OK", "status=OK")]
+    assert "stage=digest status=SENT" in caplog.text
+
+def test_send_digest_skips_when_alerts_disabled(caplog) -> None:
+    import logging
+
+    from src.core.config import AlertSettings
+    from src.core.observability import send_digest
+
+    def _never(subject, body):
+        raise AssertionError("must not send")
+
+    with caplog.at_level(logging.INFO):
+        ok = send_digest("s", "b", settings=AlertSettings(alert_gmail_user="", alert_gmail_app_password="", alert_gmail_to=""), sender=_never)
+
+    assert ok is False
+    assert "stage=digest status=DISABLED" in caplog.text
+
+def test_send_digest_logs_warning_and_returns_false_on_smtp_failure(caplog) -> None:
+    import logging
+    import smtplib
+
+    from src.core.config import AlertSettings
+    from src.core.observability import send_digest
+
+    def _broken(subject, body):
+        raise smtplib.SMTPServerDisconnected("closed")
+
+    settings = AlertSettings(alert_gmail_user="u@x", alert_gmail_app_password="pw", alert_gmail_to="t@x")
+    with caplog.at_level(logging.WARNING):
+        ok = send_digest("s", "b", settings=settings, sender=_broken)
+
+    assert ok is False
+    assert "stage=digest status=FAIL reason=SMTPServerDisconnected" in caplog.text
+
+
+def test_format_alert_subject_mappings() -> None:
+    from src.core.observability import format_alert_subject
+
+    # 1. stage & reason mapped
+    s1 = format_alert_subject("daemon", "[DAEMON] stage=backup_freshness status=FAIL reason=auth_expired", {"stage": "backup_freshness", "reason": "auth_expired"})
+    assert s1 == "[krx-alpha] 🚨 [백업점검] GDrive 인증 만료"
+
+    # 2. stage only
+    s2 = format_alert_subject("streamer", "[STREAM] stage=stream_flush status=TIMEOUT", {"stage": "stream_flush", "status": "TIMEOUT"})
+    assert s2 == "[krx-alpha] 🚨 [시세저장] TIMEOUT"
+
+    # 3. reason only
+    s3 = format_alert_subject("daemon", "reason=circuit_open", {"reason": "circuit_open"})
+    assert s3 == "[krx-alpha] 🚨 [daemon] 소켓 단절 (서킷오픈)"
+
+    # 4. fallback unmapped
+    s4 = format_alert_subject("daemon", "[DAEMON] unexpected crash at startup", {})
+    assert s4 == "[krx-alpha] 🚨 [daemon] unexpected crash at startup"
+
+
+def test_format_alert_text_and_html() -> None:
+    import logging
+
+    from src.core.observability import format_alert_html, format_alert_text
+
+    record = logging.LogRecord(
+        name="src.orchestration.daemon",
+        level=logging.CRITICAL,
+        pathname="daemon.py",
+        lineno=10,
+        msg="[DAEMON] stage=backup_freshness status=FAIL reason=auth_expired hint=rclone_config_reconnect_gdrive",
+        args=(),
+        exc_info=None,
+    )
+    fields = {
+        "stage": "backup_freshness",
+        "status": "FAIL",
+        "reason": "auth_expired",
+        "hint": "rclone_config_reconnect_gdrive",
+    }
+
+    text = format_alert_text(record, "daemon", "daemon-123", fields)
+    assert "🤖 [krx-alpha] CRITICAL 장애 알림" in text
+    assert "• 위치: daemon > 백업점검" in text
+    assert "• 원인: GDrive 인증 만료" in text
+    assert "rclone config reconnect gdrive:" in text
+    assert "stage: backup_freshness" in text
+
+    html = format_alert_html(record, "daemon", "daemon-123", fields)
+    assert "🚨 [krx-alpha] 장애 알림" in html
+    assert "GDrive 인증 만료" in html
+    assert "rclone config reconnect gdrive:" in html
+    assert "Run ID: daemon-123" in html
+
+
+def test_format_digest_html_renders_ok_and_degraded() -> None:
+    from src.core.observability import format_digest_html
+
+    ok_body = "status=OK\nuploaded=2\npurged=1\nreconciled=True\nbackup_missing=0"
+    html_ok = format_digest_html("[krx-alpha] EOD 2026-09-14 OK", ok_body)
+    assert "정상 완료되었습니다" in html_ok
+    assert "#16a34a" in html_ok
+
+    degraded_body = "status=DEGRADED\nuploaded=0\npurged=0\nreconciled=False\nbackup_missing=2"
+    html_degraded = format_digest_html("[krx-alpha] EOD 2026-09-14 DEGRADED", degraded_body)
+    assert "이상이 감지되었습니다" in html_degraded
+    assert "#dc2626" in html_degraded
+    assert "DEGRADED" in html_degraded
+
+
+def test_gmail_sender_sends_multipart_when_html_body_provided(monkeypatch) -> None:
+    import smtplib
+
+    from src.core.config import AlertSettings
+    from src.core.observability import gmail_sender
+
+    seen: dict[str, object] = {}
+
+    class FakeSmtp:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            pass
+
+        def __enter__(self) -> "FakeSmtp":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def login(self, user: str, password: str) -> None:
+            pass
+
+        def send_message(self, msg: object) -> None:
+            seen["msg"] = msg
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", FakeSmtp)
+    send = gmail_sender(AlertSettings(alert_gmail_user="u@x", alert_gmail_app_password="pw", alert_gmail_to="t@x"))
+    send("subj", "plain-body", html_body="<b>html-body</b>")
+
+    msg = seen["msg"]
+    assert msg.is_multipart() is True
+    assert msg.get_body(preferencelist=("plain",)).get_content().strip() == "plain-body"
+    assert "<b>html-body</b>" in msg.get_body(preferencelist=("html",)).get_content()
+
+
