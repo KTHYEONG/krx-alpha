@@ -9,6 +9,18 @@
     "layer": 7,
     "testing": "tests/unit/cli/test_bars_refresh.py"
   },
+  "src/cli/collect_aftermarket.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/core/errors.py",
+      "src/core/observability.py",
+      "src/realtime/adapters/kis.py",
+      "src/realtime/contracts.py",
+      "src/realtime/session.py",
+      "src/realtime/streamer.py"
+    ],
+    "testing": "tests/unit/cli/test_collect_aftermarket.py"
+  },
   "src/cli/collect_init.py": {
     "deps": [
       "src/core/config.py",
@@ -80,6 +92,7 @@
   "src/core/errors.py": {
     "layer": 0,
     "testing": [
+      "tests/unit/cli/test_collect_aftermarket.py",
       "tests/unit/core/test_calendar.py",
       "tests/unit/core/test_config.py"
     ]
@@ -213,6 +226,7 @@
       "src/marketdata/toss_calendar.py",
       "src/orchestration/eod.py",
       "src/orchestration/supervisor.py",
+      "src/realtime/contracts.py",
       "src/storage/remote.py",
       "src/universe/ipc.py",
       "src/universe/service.py"
@@ -233,6 +247,13 @@
   "src/orchestration/supervisor.py": {
     "layer": 5,
     "testing": "tests/unit/orchestration/test_supervisor.py"
+  },
+  "src/realtime/adapters/kis.py": {
+    "deps": [
+      "src/realtime/contracts.py",
+      "src/realtime/session.py"
+    ],
+    "testing": "tests/unit/realtime/test_adapters_kis.py"
   },
   "src/realtime/adapters/ls.py": {
     "deps": [
@@ -266,6 +287,7 @@
     "deps": [
       "src/core/calendar.py",
       "src/realtime/clock.py",
+      "src/realtime/contracts.py",
       "src/realtime/manifest.py",
       "src/realtime/subscription.py",
       "src/storage/journal.py",
@@ -294,7 +316,8 @@
   },
   "src/storage/journal.py": {
     "deps": [
-      "src/core/errors.py"
+      "src/core/errors.py",
+      "src/realtime/contracts.py"
     ],
     "layer": 2,
     "testing": "tests/unit/storage/test_journal.py"

@@ -5,10 +5,10 @@
       "date": "2026-09-15",
       "adr_id": "ADR_20260915_extended_market_data_collection",
       "domain": "data",
-      "title": "애프터마켓 P0 수명주기 및 백업 안전성",
-      "why": "정규장 중심 수집은 애프터마켓 연구 데이터와 검증형 백업 삭제 게이트가 부족했음.",
-      "resolution": "옵트인 애프터마켓 상태 전환과 manifest 포함 원격 크기 검증, 검증 후 L0 정리 순서를 구현하고 NXT 실시간 확장은 라이브 인증 게이트로 분리함.",
-      "impact": "기본 정규장 동작은 유지하면서 애프터마켓 파일럿과 무결성 검증 백업을 안전하게 준비할 수 있음."
+      "title": "애프터마켓 자동 수집 및 백업",
+      "why": "정규장 중심 수집만으로는 KRX·NXT 애프터 원천데이터와 검증형 Drive 백업을 자동화할 수 없음.",
+      "resolution": "KIS KRX/NXT 독립 스트림, venue/session L0·L1 파티션, 20시 writer 종료 게이트와 원격 크기 검증 후 L0 정리를 구현함.",
+      "impact": "기존 LS 정규장 기본 동작을 유지하면서 애프터마켓 수집·저장·Drive 백업을 옵트인으로 운영할 수 있음."
     },
     {
       "task_id": "alert_format_readability",
