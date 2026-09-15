@@ -14,9 +14,9 @@ def test_run_eod_maintenance_threads_archive_root(tmp_path) -> None:
     # When
     deleted = run_eod_maintenance(tmp_path / 'l0', retain_days=3, today=dt.date(2026, 9, 8), archive_root=archive_root)
 
-    # Then
-    assert deleted == 1
-    assert not part.exists()
+    # Then: 검증 게이트 없이 정규화만 수행하고 L0를 보존한다
+    assert deleted == 0
+    assert part.exists()
     assert (archive_root / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet').exists()
 
 
@@ -53,14 +53,24 @@ def test_run_eod_offload_syncs_and_prunes_with_injected_archiver(tmp_path) -> No
 
     class _Arc:
         def sync_l1_tree(self, archive_root):
-            return {'uploaded': 1, 'skipped': 0, 'failed': 0}
+            from src.storage.remote import SyncStats
+
+            return SyncStats(uploaded=1, skipped_verified=0, failed_verification=0)
+        def sync_manifest_tree(self, manifest_root):
+            from src.storage.remote import SyncStats
+
+            return SyncStats(uploaded=0, skipped_verified=0, failed_verification=0)
         def remote_files(self, prefix):
             return {'l1/kis/H0STCNT0/dt=2026-07-01.parquet'}
+        def remote_file_sizes(self, prefix):
+            if prefix == "l1/":
+                return {'l1/kis/H0STCNT0/dt=2026-07-01.parquet': 1}
+            return {}
 
     stats = run_eod_offload(tmp_path / 'l1', archiver=_Arc(), reference_date=dt.date(2026, 9, 8))
 
-    assert stats['uploaded'] == 1
-    assert stats['purged'] == 1
+    assert stats.l1.uploaded == 1
+    assert stats.purged == 1
     assert not old_pq.exists()
 
 
@@ -78,7 +88,9 @@ def test_run_eod_offload_returns_zeros_when_archiver_missing(tmp_path, caplog, m
     with caplog.at_level(logging.CRITICAL):
         stats = run_eod_offload(tmp_path / 'l1')
 
-    assert stats == {'uploaded': 0, 'skipped': 0, 'failed': 0, 'purged': 0}
+    assert stats.l1.uploaded == 0
+    assert stats.purged == 0
+    assert stats.l1.failed_verification == 0
     assert old_pq.exists()
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
 
@@ -94,10 +106,11 @@ def test_run_eod_maintenance_forwards_quarantine_root(tmp_path, monkeypatch) -> 
 
     seen: dict[str, object] = {}
 
-    def _fake_prune(root, archive_root=None, *, retain_days=3, reference_date=None, quarantine_root=None, normalizer=None):
+    def _fake_prune(root, archive_root=None, *, retain_days=3, reference_date=None, quarantine_root=None, normalizer=None, verified_remote_l1=None):
         seen.update({
             'root': root, 'archive_root': archive_root, 'retain_days': retain_days,
             'reference_date': reference_date, 'quarantine_root': quarantine_root, 'normalizer': normalizer,
+            'verified_remote_l1': verified_remote_l1,
         })
         return 7
 
@@ -138,7 +151,8 @@ def test_run_eod_offload_uses_rclone_archiver_by_default(tmp_path, caplog, monke
     with caplog.at_level(logging.CRITICAL):
         stats = run_eod_offload(tmp_path / "l1")
 
-    assert stats == {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
+    assert stats.l1.uploaded == 0
+    assert stats.purged == 0
     assert old_pq.exists()
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
 
@@ -457,12 +471,12 @@ def test_check_backup_freshness_lists_local_manifests_missing_remotely(tmp_path)
     class _Archiver:
         def remote_files(self, prefix):
             prefixes.append(prefix)
-            return {"manifest/2026-09-11.json", "l1/ls/H0STCNT0/dt=2026-09-11.parquet"}
+            return {"manifests/2026-09-11.json", "l1/ls/H0STCNT0/dt=2026-09-11.parquet"}
 
     missing = check_backup_freshness(manifest_dir=manifest_dir, today=dt.date(2026, 9, 15), archiver=_Archiver())
 
     assert missing == ["2026-09-14.json"]
-    assert prefixes == ["manifest/"]
+    assert prefixes == ["manifests/"]
 
 def test_check_backup_freshness_returns_empty_without_rclone(tmp_path, monkeypatch) -> None:
     import datetime as dt
@@ -476,3 +490,72 @@ def test_check_backup_freshness_returns_empty_without_rclone(tmp_path, monkeypat
 
     assert check_backup_freshness(manifest_dir=manifest_dir, today=dt.date(2026, 9, 15)) == []
 
+
+def _write_due_journal(root):
+    import json
+    from pathlib import Path
+
+    import zstandard as zstd
+
+    root = Path(root)
+    part = root / "l0" / "kis" / "H0STCNT0" / "dt=2026-09-01"
+    part.mkdir(parents=True, exist_ok=True)
+    rec = {'raw': 'a', 'recv_mono_ns': 1, 'recv_wall_ns': 2, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
+    payload = (json.dumps(rec) + '\n').encode('utf-8')
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    return part / '09.jsonl.zst'
+
+
+import pytest
+
+
+@pytest.fixture
+def failing_archiver():
+    from src.storage.remote import SyncStats
+
+    class _Failing:
+        def sync_l1_tree(self, local_root):
+            return SyncStats(uploaded=0, skipped_verified=0, failed_verification=1)
+
+        def sync_manifest_tree(self, manifest_root):
+            return SyncStats(uploaded=0, skipped_verified=0, failed_verification=1)
+
+        def remote_file_sizes(self, prefix):
+            return {}
+
+    return _Failing()
+
+
+def _run_normalize_offload_prune(root, archiver):
+    import datetime as dt
+    from pathlib import Path
+
+    from src.orchestration.eod import run_eod_maintenance, run_eod_offload
+
+    root = Path(root)
+    # Step 1: pre-offload normalization without deletion gate.
+    run_eod_maintenance(
+        root / "l0",
+        retain_days=3,
+        today=dt.date(2026, 9, 8),
+        archive_root=root / "l1",
+        verified_remote_l1=None,
+    )
+    # Step 2: offload with verification (raises on failure; prune never reached).
+    run_eod_offload(
+        archive_root=root / "l1",
+        manifest_root=root / "manifest",
+        remote=archiver,
+    )
+    # Step 3 (unreached on failure): post-offload prune would run here.
+
+
+def test_eod_offload_verification_failure_retains_l0(tmp_path, failing_archiver):
+    import pytest
+
+    from src.storage.remote import RemoteArchiveError
+
+    journal = _write_due_journal(tmp_path)
+    with pytest.raises(RemoteArchiveError):
+        _run_normalize_offload_prune(tmp_path, failing_archiver)
+    assert journal.exists()

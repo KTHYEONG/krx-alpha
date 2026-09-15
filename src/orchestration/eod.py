@@ -6,6 +6,8 @@ import datetime as dt
 import functools
 import logging
 import pathlib
+from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -13,7 +15,7 @@ import polars as pl
 
 from src.realtime.manifest import SessionManifest
 from src.storage.normalize_worker import run_isolated_normalize
-from src.storage.remote import RcloneArchiver
+from src.storage.remote import GDriveArchiver, RcloneArchiver, RemoteArchiveError, SyncStats
 from src.storage.retention import prune_local_l1, prune_old_journals
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,14 @@ _REGULAR_CLOSE = dt.time(15, 30)
 _KST = ZoneInfo("Asia/Seoul")
 
 
+@dataclass(frozen=True)
+class EodOffloadResult:
+    l1: SyncStats
+    manifests: SyncStats
+    verified_remote_l1: frozenset[str]
+    purged: int = 0
+
+
 def run_eod_maintenance(
     journal_root: pathlib.Path,
     *,
@@ -32,6 +42,7 @@ def run_eod_maintenance(
     archive_root: pathlib.Path | None = None,
     quarantine_root: pathlib.Path | None = None,
     work_root: pathlib.Path | None = None,
+    verified_remote_l1: AbstractSet[str] | None = None,
 ) -> int:
     return prune_old_journals(
         journal_root,
@@ -39,6 +50,7 @@ def run_eod_maintenance(
         reference_date=today,
         archive_root=archive_root,
         quarantine_root=quarantine_root,
+        verified_remote_l1=verified_remote_l1,
         # 데몬 OOM crash loop를 막기 위해 정규화는 자식 프로세스로 격리한다
         normalizer=functools.partial(run_isolated_normalize, work_root=work_root),
     )
@@ -46,21 +58,42 @@ def run_eod_maintenance(
 
 def run_eod_offload(
     archive_root: pathlib.Path,
+    manifest_root: pathlib.Path | None = None,
+    remote: Any | None = None,
     *,
     archiver: Any = None,
     reference_date: dt.date | None = None,
     retain_days: int = 30,
-) -> dict[str, int]:
-    arc = archiver if archiver is not None else RcloneArchiver.try_from_env()
+) -> EodOffloadResult:
+    arc = remote if remote is not None else archiver
+    if arc is None:
+        arc = GDriveArchiver.try_from_env()
     if arc is None:
         logger.critical("[DAEMON] stage=eod_offload status=FAIL reason=rclone_settings_missing")
-        return {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
-    stats = arc.sync_l1_tree(archive_root)
+        empty = SyncStats()
+        return EodOffloadResult(l1=empty, manifests=SyncStats(), verified_remote_l1=frozenset(), purged=0)
+    l1_stats = arc.sync_l1_tree(archive_root)
+    manifest_path = pathlib.Path(manifest_root) if manifest_root is not None else pathlib.Path(archive_root).parent / "manifest"
+    archiver = arc
+    manifests_stats = archiver.sync_manifest_tree(manifest_path)
+    if l1_stats.failed_verification > 0 or manifests_stats.failed_verification > 0:
+        raise RemoteArchiveError(
+            f"offload verification failed: l1={l1_stats.failed_verification} manifests={manifests_stats.failed_verification}"
+        )
+    sizes = arc.remote_file_sizes("l1/") if hasattr(arc, "remote_file_sizes") else {}
+    local_root = pathlib.Path(archive_root)
+    verified: set[str] = set()
+    for pq in sorted(local_root.rglob("*.parquet")):
+        rel = "l1/" + pq.relative_to(local_root).as_posix()
+        if sizes.get(rel) == pq.stat().st_size:
+            verified.add(rel)
     confirmed = arc.remote_files("l1/")
-    stats["purged"] = prune_local_l1(
+    purged = prune_local_l1(
         archive_root, retain_days=retain_days, reference_date=reference_date, confirmed_remote=confirmed
     )
-    return stats
+    return EodOffloadResult(
+        l1=l1_stats, manifests=manifests_stats, verified_remote_l1=frozenset(verified), purged=purged
+    )
 
 
 def _regular_session_gap_s(gaps: list[dict[str, object]], date: dt.date) -> float:
@@ -105,7 +138,7 @@ def check_backup_freshness(
             continue
         if d < today:
             local.append(p.name)
-    remote = {p.removeprefix("manifest/") for p in arc.remote_files("manifest/")}
+    remote = {p.removeprefix("manifests/") for p in arc.remote_files("manifests/")}
     return sorted(n for n in local if n not in remote)
 
 

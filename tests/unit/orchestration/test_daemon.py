@@ -669,7 +669,7 @@ def test_run_collector_daemon_eod_passes_quarantine_root(tmp_path, monkeypatch) 
 
     seen: dict[str, object] = {}
 
-    def _fake_maintenance(journal_root, *, retain_days=3, today=None, archive_root=None, quarantine_root=None, work_root=None):
+    def _fake_maintenance(journal_root, *, retain_days=3, today=None, archive_root=None, quarantine_root=None, work_root=None, verified_remote_l1=None):
         seen.update({'quarantine_root': quarantine_root, 'archive_root': archive_root, 'work_root': work_root})
         return 0
 
@@ -871,8 +871,8 @@ def test_run_collector_daemon_eod_attempts_maintenance_once_per_date(tmp_path, m
     # When
     daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=3, now_fn=lambda: eod_time)
 
-    # Then: 거래일당 1회만 시도
-    assert counts == {'maintenance': 1, 'offload': 1, 'reconcile': 1}
+    # Then: 거래일당 1회만 시도 (정규화 2회: offload 전 None + offload 후 verified)
+    assert counts == {'maintenance': 2, 'offload': 1, 'reconcile': 1}
 
 def test_run_collector_daemon_eod_attempts_again_on_next_date(tmp_path, monkeypatch) -> None:
     # Given: 이틀 연속 EOD 사이클
@@ -905,7 +905,7 @@ def test_run_collector_daemon_eod_attempts_again_on_next_date(tmp_path, monkeypa
     daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=3, now_fn=lambda: next(times))
 
     # Then
-    assert days == [dt.date(2026, 9, 14), dt.date(2026, 9, 15)]
+    assert days == [dt.date(2026, 9, 14), dt.date(2026, 9, 14), dt.date(2026, 9, 15), dt.date(2026, 9, 15)]
 
 def test_run_collector_daemon_eod_runs_offload_and_reconciliation_when_maintenance_fails(tmp_path, monkeypatch, caplog) -> None:
     # Given: 정규화 유지보수가 워커 크래시로 실패
@@ -1998,3 +1998,45 @@ def test_run_collector_daemon_eod_sends_daily_digest_once_per_date(tmp_path, mon
     assert "reconciled=True" in lines
     assert "backup_missing=0" in lines
 
+
+def test_after_market_active_keeps_streamer_and_defers_eod(tmp_path, monkeypatch):
+    import datetime as dt
+    import pathlib
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kwargs: True)
+    eod_maintenance = MagicMock(return_value=0)
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", eod_maintenance)
+    calls: list[str] = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            calls.append("constructed")
+
+        def ensure_running(self):
+            calls.append("ensure_running")
+            return "started"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+    kst = ZoneInfo("Asia/Seoul")
+    times = iter([
+        dt.datetime(2026, 9, 10, 9, 0, tzinfo=kst),
+        dt.datetime(2026, 9, 10, 18, 0, tzinfo=kst),
+    ])
+
+    daemon_mod.run_collector_daemon(
+        settings=settings,
+        sleep_fn=lambda _: None,
+        max_cycles=2,
+        now_fn=lambda: next(times),
+    )
+
+    assert calls == ["constructed", "ensure_running", "ensure_running"]
+    eod_maintenance.assert_not_called()
