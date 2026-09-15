@@ -4,8 +4,10 @@ services:
     container_name: krx-collector
     restart: unless-stopped
     stop_grace_period: 30s
+    # krx_collector_kis_data_env_file: project .env first, then required shared data-key env
     env_file:
       - .env
+      - ${KIS_DATA_ENV_FILE:?KIS_DATA_ENV_FILE is required}
     environment:
       - TZ=Asia/Seoul
       - POLARS_MAX_THREADS=2
