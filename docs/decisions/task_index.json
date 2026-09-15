@@ -1,6 +1,26 @@
 {
   "tasks": [
     {
+      "task_id": "alert_format_readability",
+      "date": "2026-09-15",
+      "adr_id": "ADR_20260915_alert_format_readability",
+      "domain": "observability",
+      "title": "장애 알림 이메일 가독성 및 봇 식별성 개선",
+      "why": "단일행 raw JSON 이메일과 단순 text 다이제스트가 모바일/다중 봇 환경에서 식별성과 가독성이 떨어졌음.",
+      "resolution": "봇 식별자([krx-alpha]) 및 30자 이내 장애 원인을 담은 제목과 핵심 3요소 중심의 초슬림 카드형 본문(HTML/Plain Multipart) 구조를 도입함.",
+      "impact": "모바일 알림창에서 즉시 봇과 원인을 식별하고 즉시 조치 명령어를 확인할 수 있어 장애 대응 속도가 향상됨."
+    },
+    {
+      "task_id": "silent_failure_alerting",
+      "date": "2026-09-15",
+      "adr_id": "ADR_20260915_silent_failure_alerting",
+      "domain": "orchestration",
+      "title": "조용한 장애 알림 강화",
+      "why": "인증만료·장기수집중단·백업실패가 CRITICAL/메일 없이 조용히 지나가 운영자가 사후에만 인지함",
+      "resolution": "LS 인증거부(VendorAuthRejected)와 인제스트 워치독, 백업 신선도 점검을 추가하고 EOD 일일 다이제스트 메일 발송을 배선",
+      "impact": "장중 인증/수집 단절과 백업 실패를 15분 내 이메일로 감지 가능, EOD 상태를 매일 요약 수신"
+    },
+    {
       "task_id": "ingest_resilience",
       "date": "2026-09-14",
       "adr_id": "ADR_20260914_ingest_resilience",
