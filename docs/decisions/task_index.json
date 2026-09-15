@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_KIS_AFTERMARKET_SHARED_KEYPOOL_DEPLOYMENT",
+      "date": "2026-09-15",
+      "adr_id": "ADR_20260915_KIS_AFTERMARKET_SHARED_KEYPOOL_DEPLOYMENT",
+      "domain": "data",
+      "title": "KIS 애프터마켓 공유 키풀 배포",
+      "why": "로컬 상위 .quant.env는 VPS 프로젝트에 자동 주입되지 않아 KCA warm-up과 KRX Compose의 키 풀을 단일 공유 fragment로 연결해야 한다.",
+      "resolution": "활성 슬롯 1~4와 예비 슬롯 5를 정의하고 KCA systemd EnvironmentFile 및 KRX Compose required env_file/read-only token cache 배포 runbook을 등록했다.",
+      "impact": "비밀값 중복 없이 두 프로젝트가 동일한 데이터 키 풀과 token cache를 사용하며 G0 전 애프터마켓 활성화는 차단된다."
+    },
+    {
       "task_id": "TASK_KIS_AFTERMARKET_CONNECTION_SHARDING_TOKEN_LIFECYCLE",
       "date": "2026-09-15",
       "adr_id": "ADR_20260915_KIS_AFTERMARKET_CONNECTION_SHARDING_TOKEN_LIFECYCLE",
