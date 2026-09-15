@@ -11,10 +11,13 @@ services:
       - POLARS_MAX_THREADS=2
       - OMP_NUM_THREADS=2
       - KRX_ALPHA_PERSISTENT_LOGS=true
+      - KRX_ALPHA_KIS_TOKEN_CACHE_DIR=/run/kis-token-cache
+      - KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE=false
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
       - ${HOME}/.config/rclone:/root/.config/rclone:ro
+      - ${KIS_SHARED_TOKEN_CACHE_DIR}:/run/kis-token-cache:ro
     # 장중 수집(daemon ~95MB) + EOD 정규화 자식(cgroup 실측 ≤500MB) 동시 상주 여유, swap 스래싱 방지
     mem_limit: 1g
     memswap_limit: 1g
