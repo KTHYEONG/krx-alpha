@@ -9,11 +9,18 @@ never writes or prints credential values.
 from __future__ import annotations
 
 import logging
+import re
 import shlex
 import subprocess
 from pathlib import Path
 
 from src.core.errors import KrxAlphaError
+
+# ~/.quant.env 는 소싱되는 bash 스크립트라 "KIS_APP_KEY=$KIS_TRADE_APP_KEY" 같은
+# 셸 변수 참조가 정상 문법이다(실측: 2026-09-16 프로덕션 장애 — 이 리터럴 텍스트를
+# 그대로 배포해 KisCredentials 가 빈 문자열로 주입됨). 값 전체가 단일 참조일 때만
+# 같은 파일 내 다른 할당을 조회해 해석한다.
+_VAR_REF_RE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +48,16 @@ chown ubuntu:ubuntu "$dest"
 
 
 def parse_workstation_assignments(source_path: Path, accepted_keys: frozenset[str]) -> dict[str, str]:
-    """Collect accepted workstation assignments with shell-syntax normalization."""
-    accepted: dict[str, str] = {}
+    """Collect accepted workstation assignments with shell-syntax normalization.
+
+    A value that is exactly a bare ``$VAR``/``${VAR}`` reference is resolved
+    against other assignments in the same file (mirroring bash ``source``
+    semantics); an unresolvable reference resolves to empty and is therefore
+    treated as absent, so callers fail closed on the true value being missing
+    rather than silently shipping the literal reference text.
+    """
+    raw: dict[str, str] = {}
+    accepted_seen: set[str] = set()
     for raw_line in Path(source_path).read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -53,15 +68,32 @@ def parse_workstation_assignments(source_path: Path, accepted_keys: frozenset[st
         if not sep:
             continue
         key = name.strip()
-        if key not in accepted_keys:
+        if not key:
             continue
-        if key in accepted:
-            raise KrxAlphaError(f"duplicate accepted data key: {key}")
         candidate = value.strip()
         if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in ("'", '"'):
             candidate = candidate[1:-1]
-        if candidate:
-            accepted[key] = candidate
+        if key in accepted_keys:
+            if key in accepted_seen:
+                raise KrxAlphaError(f"duplicate accepted data key: {key}")
+            accepted_seen.add(key)
+        raw[key] = candidate  # 비허용 키의 재할당은 정상 bash 문법이라 마지막 값이 우선한다
+
+    def _resolve(key: str, chain: frozenset[str]) -> str:
+        value = raw.get(key, "")
+        match = _VAR_REF_RE.match(value)
+        if not match:
+            return value
+        ref = match.group(1)
+        if ref in chain:
+            raise KrxAlphaError(f"circular variable reference resolving {key}")
+        return _resolve(ref, chain | {ref})
+
+    accepted: dict[str, str] = {}
+    for key in accepted_seen:
+        resolved = _resolve(key, frozenset({key}))
+        if resolved:
+            accepted[key] = resolved
     return accepted
 
 
