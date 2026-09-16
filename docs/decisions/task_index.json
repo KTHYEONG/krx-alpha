@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_UNIVERSE_SELECTION_FEEDBACK",
+      "date": "2026-09-16",
+      "adr_id": "ADR_20260916_UNIVERSE_SELECTION_FEEDBACK",
+      "domain": "data",
+      "title": "실시간 유니버스 세션 격리 및 애프터마켓 재선정",
+      "why": "T-1 정적 후보와 공용 candidates 경로가 실시간 신규 주도주 및 세션 무결성을 보장하지 못했다.",
+      "resolution": "KIS 거래대금·등락률 랭킹으로 15:31 애프터마켓 snapshot을 생성하고 날짜별 경로·엄격한 스키마 검증·결정적 40종목 할당을 적용했다.",
+      "impact": "애프터마켓은 최대 40종목을 최신 실적 기준으로 수집하며 정규장 스트리밍은 유지되고 오류 입력은 fail-closed 된다."
+    },
+    {
       "task_id": "vps_cicd_local_first_restructuring",
       "date": "2026-09-16",
       "adr_id": "ADR_20260916_vps_cicd_local_first_restructuring",
