@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "vps_kis_secret_provisioning",
+      "date": "2026-09-16",
+      "adr_id": "ADR_20260916_vps_kis_secret_provisioning",
+      "domain": "infra",
+      "title": "VPS KIS 자격증명 프로비저닝 이관",
+      "why": "GitHub Secret로 KIS 데이터키를 CI에 흘려보내던 방식이 자격증명 노출면을 넓혔음",
+      "resolution": "신뢰워크스테이션 CLI로 VPS 공유 파일을 1회 설치하고 CI는 존재/권한/키셋만 fail-closed 검증하도록 전환",
+      "impact": "deploy.yml에서 KIS_DATA_ENV_CONTENT/B64 완전 제거, validate_shared_keypool()이 KCA/Compose 배선 전에 게이트"
+    },
+    {
       "task_id": "TASK_KIS_AFTERMARKET_SHARED_KEYPOOL_DEPLOYMENT",
       "date": "2026-09-15",
       "adr_id": "ADR_20260915_KIS_AFTERMARKET_SHARED_KEYPOOL_DEPLOYMENT",
