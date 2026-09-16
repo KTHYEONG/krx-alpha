@@ -5,52 +5,49 @@ description: Independently audit contract compliance, typing, regressions, cover
 
 # Check Protocol
 
-Independent audit gate completing the main development loop (`probe` -> `spec` -> `implement` -> `check`). Performs code review, strict quality checks, and regression verification without mutating source code.
+Independent audit gate completing the development loop (`probe` -> `spec` -> `implement` -> `check`). Performs deterministic verification followed by rigorous semantic code review.
 
 ## Directives
 
 1. **Identify Modified Scope & Active Spec**:
    - Inspect modified files using `git status --short`.
-   - Identify active spec contract under `docs/specs/*_contract.json` if available.
+   - Identify active spec under `docs/specs/*_spec.md` or `docs/specs/*_contract.json`.
 
 2. **Tier 1: Deterministic Audit Gate (Fast Script)**:
-   - Run Smart Selective Verification runner (auto-detects modified `.py` files; self-heals `docs/code_map.json`, then runs static checks, pinpoint tests, and a diff-scoped coverage gate):
+   - Run Smart Selective Verification runner:
      ```bash
-     uv run python tools/agent_skills/lean_check.py --spec docs/specs/<feature>_contract.json
+     uv run python tools/agent_skills/lean_check.py
      ```
-     (Omit `--spec` if auditing an un-specced patch or chore).
-   - This gate includes: Ruff, Mypy, impact-scoped pytest, and **diff coverage** — every line the diff *adds* to a touched `src/` file must execute during the test run (not a flat %, the exact new lines).
-   - **Immediate Stop on Tier 1 Failure**: If `lean_check.py` fails, immediately report `FAIL` with the root cause diagnostics without proceeding to Tier 2.
+     (Pass `--spec docs/specs/<feature>_spec.md` if not auto-detected).
+   - This gate deterministically verifies: Ruff linting, Mypy types, impact-scoped tests, and **100% diff coverage** on newly-added lines.
+   - **Immediate Stop on Tier 1 Failure**: If `lean_check.py` fails, immediately report `FAIL` with root-cause diagnostics without proceeding to Tier 2.
 
-3. **Tier 2: Semantic Defect Scan (Targeted Code Review)**:
-   - Correctness over speed here: Tier 1 already caught the mechanical failures, so spend the reasoning budget Tier 2 needs to actually catch what a script can't. Scan the modified changes (`git diff`) for:
-     1) **Test Realism & Exception Specificity**: Ensure tests are non-vacuous (no trivial `assert True`, mocks do not mask core logic, and `pytest.raises` specifies `match=` or precise exception types).
-     2) **Contract & Invariant Integrity**: Verify core business invariants, division by zero / None handling, and boundary edge cases specified in `requirements`. Verify each entry in `design_rationale.failure_modes` has a corresponding guard in the diff.
-     3) **No Dead Defensive Code (Defensive Sprawl Audit)**: Flag unrequested `try-except Exception` catches, silent `except: return None`, or speculative null checks that hide bugs or skirt coverage.
-     4) **Performance Budget Honored**: Confirm actual use of `dtype_precision`/`storage_format`/`chunking_strategy`, and flag any `timeout`, `max_iterations`/`n_epochs` cap, sample-size reduction, or shortened date-range introduced without technical justification (`.agents/rules/performance.md` §0).
-     5) **Domain Principle Compliance**: Cross-check against `.agents/rules/quant.md`, `.agents/rules/performance.md`, and `.agents/rules/code-style.md`.
-     6) **Production Wire-up & No Ghost Paths**: Verify new logic is actually invoked in the production pipeline/entry-point and no unhandled branches or orphaned dead code remain.
+3. **Tier 2: Semantic Defect Scan (Universal Code Review)**:
+   Tier 1 proves mechanical compliance (lines were executed). Tier 2 proves **semantic truth**. Review the `git diff` against 3 universal engineering lenses without anchoring to a single domain:
+   1) **Test Efficacy & Vacuity**: Verify tests are not vacuous. Assertions must validate concrete return values and state transformations, not merely assert trivial truths (`assert True`) or mask real logic with over-mocking.
+   2) **Contract & State Integrity**: Verify pre/post conditions and domain invariants hold. Ensure edge conditions, boundary values, error branches, and resource lifecycles are properly handled rather than silently ignored.
+   3) **Clean Wiring & Anti-Sprawl**: Ensure new logic is actively wired into its production entry-point (no dead/ghost paths), and confirm that no speculative defensive try-except blocks were added solely to skirt coverage.
 
-4. **Strict Audit Gate & Surgical Remediation Authority (Zero Human-Pingpong)**:
-   - **Full Surgical Remediation Authority**:
-     - The high-reasoning auditor (`check`) has full authority to perform pinpoint surgical patches when the diagnosis is 100% deterministic:
-       1) **Contract/Fixture Contradictions**: When the spec contract requirement contradicts its own test fixture (e.g. denominator counting, conflicting assertion constants, missing sentinel import handling), the auditor directly amends `contract.json` and the corresponding test fixture.
-       2) **Production Contortion Cleanup**: When the implementer introduced artificial hacks (e.g. `globals()[...]`, dead comments to appease matchers), the auditor cleanly reverts the hack and redirects the test mock/fixture appropriately.
-       3) **Mechanical Wiring/Lint Defects**: Fix simple imports, wiring anchors, or missing scenarios directly.
-     - Immediately re-run `lean_check.py` to confirm the fix is green and sound.
-     - When verified, emit ✅ **PASS** with a 1-line resolution summary. Do NOT bounce back to user or call subagents.
-   - **Escalation Boundary (When to FAIL)**:
-     - Stop immediately and output `FAIL` ONLY when:
-       1) Fundamental business hypothesis invalidation or mathematical instability under real market data (`/probe`).
-       2) Deep architectural conflicts requiring trade-off decisions beyond the original spec scope (`/spec`).
-       3) Destructive actions or unresolvable financial correctness ambiguity affecting production money.
+4. **Surgical Remediation Authority (Zero Ping-Pong)**:
+   - The auditor (`check`) has full authority to perform pinpoint surgical patches when the diagnosis is deterministic:
+     1) Fix minor typing/import inconsistencies or formatting in target files.
+     2) Strengthen loose test assertions or fix contradictory test fixtures directly.
+     3) Clean up artificial test contortions or dead code.
+   - Immediately re-run `lean_check.py` to confirm the patch is green.
+   - Output final verdict with concise audit evidence.
 
 ## Output
 
-Do NOT add any intro, preamble, sub-bullet checks, breakdown items, or conversational commentary.
+Avoid conversational fluff. Present concise, verifiable audit evidence:
 
-- **PASS** (Strict 1-Line ONLY):
-  ✅ PASS: <Audit Target> [Optional: (Resolved: <1-line surgical fix summary>)]
+### 🛡️ [CHECK] <Audit Target>
 
-- **FAIL** (Compact 1-2 Lines format):
-  ❌ FAIL: <Audit Target> | Root: <Cause> | Impact: <Scope> | Fix: <Action> → `/implement`, `/spec`, or `/probe`
+- **Tier 1 (Mechanical Gate)**: ✅ PASS (Lint, Type, Tests, Diff-Coverage)
+- **Tier 2 (Semantic Audit)**:
+  - 🧪 **Test Efficacy**: <1 line: Evidence that tests genuinely validate state/behavior rather than just executing lines>
+  - 🧩 **Contract & State**: <1 line: Verification of pre/post conditions, invariants, and boundary safety>
+  - 🔌 **Wiring & Cleanliness**: <1 line: Confirmation of active entry-point hookup and absence of dead defensive code>
+- **Verdict**: ✅ PASS [Optional: (Surgical Fix: <1-line summary of patch applied>)]
+
+*(On Failure)*:
+❌ FAIL: <Audit Target> | Root: <Cause> | Impact: <Scope> | Fix: <Action> → `/implement`, `/spec`, or `/probe`
