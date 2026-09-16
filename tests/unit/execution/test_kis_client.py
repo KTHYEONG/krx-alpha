@@ -512,3 +512,28 @@ def test_kis_rest_client_rejects_invalid_cache_and_same_day_reissue_without_http
     issued_today.write_text(json.dumps({"access_token": "old", "expired_at": "2026-09-15T08:00:00+09:00", "app_key": "key", "issued_at": "2026-09-15T07:00:00+09:00"}), encoding="utf-8")
     with pytest.raises(KisApiError, match="TOKEN_DAILY_LIMIT"):
         client_for(issued_today, allow_token_issue=True).access_token(force=True)
+
+
+def test_kis_rankings_use_correct_trs_and_reject_schema(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import FakeResponse, make_client
+
+    amount = FakeResponse({'rt_cd': '0', 'msg_cd': '0', 'msg1': 'ok', 'output': [{'stck_shrn_iscd': '005930', 'prdy_ctrt': '1.25', 'acml_tr_pbmn': '123456789'}]})
+    fluctuation = FakeResponse({'rt_cd': '0', 'msg_cd': '0', 'msg1': 'ok', 'output': [{'stck_shrn_iscd': '000660', 'prdy_ctrt': '29.90', 'acml_tr_pbmn': '987654321'}]})
+    client, session, _ = make_client(tmp_path, [amount, fluctuation])
+
+    assert client.get_trade_amount_ranking()[0].symbol == '005930'
+    assert client.get_fluctuation_ranking()[0].change_pct == pytest.approx(29.90)
+    assert [call['headers']['tr_id'] for call in session.calls] == ['FHPST01720000', 'FHPST01700000']
+    assert session.calls[0]['url'].endswith('/uapi/domestic-stock/v1/ranking/trade-amount')
+    assert session.calls[0]['params']['FID_INPUT_CNT_1'] == '100'
+    assert session.calls[1]['url'].endswith('/uapi/domestic-stock/v1/ranking/fluctuation')
+    assert session.calls[1]['params']['FID_INPUT_CNT_1'] == '200'
+
+    bad = FakeResponse({'rt_cd': '0', 'msg_cd': '0', 'msg1': 'ok', 'output': [{'stck_shrn_iscd': 'BAD', 'prdy_ctrt': '1', 'acml_tr_pbmn': '1'}]})
+    client, _, _ = make_client(tmp_path / 'bad', [bad])
+    with pytest.raises(KisApiError) as excinfo:
+        client.get_trade_amount_ranking()
+    assert excinfo.value.msg_cd == 'SCHEMA'

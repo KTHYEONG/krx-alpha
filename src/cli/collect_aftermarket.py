@@ -9,7 +9,7 @@ import logging
 import pathlib
 import signal
 import time
-from typing import Any, cast
+from typing import Any
 
 import aiohttp
 
@@ -22,7 +22,7 @@ from src.realtime.kis_lease import KisWebSocketLease
 from src.realtime.kis_sharding import AftermarketShard, load_kis_data_credentials
 from src.realtime.session import SessionConfig, StreamRoute, bootstrap_session
 from src.realtime.streamer import RealtimeStreamer, SessionFrameSink, aftermarket_silence_limit_s
-from src.universe.ipc import read_candidates
+from src.universe.ipc import read_candidate_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +63,8 @@ async def _run_stream(args: argparse.Namespace) -> int:
     if cred is None or cred.key_id != key_id:
         raise MissingCredentialsError(f"credential fingerprint mismatch for slot {slot}")
     symbols = tuple(part for part in str(args.symbols).split(",") if part)
-    stored = read_candidates(pathlib.Path(str(args.candidates_path)))
-    rows: list[dict[str, Any]] = cast("list[dict[str, Any]]", stored.get("candidates")) if stored is not None else []
+    snapshot = read_candidate_snapshot(pathlib.Path(str(args.candidates_path)), expected_session_date=dt.date.fromisoformat(str(args.session_date)), expected_session="aftermarket", max_candidates=after.max_symbols)
+    rows: list[dict[str, Any]] = list(snapshot.candidates)
     universe = {str(row["symbol"]) for row in rows}
     expected_symbols = tuple(str(row["symbol"]) for row in rows if str(row["symbol"]) in set(symbols))
     if not set(symbols) <= universe:

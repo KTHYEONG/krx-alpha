@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -46,6 +47,8 @@ TR_ORDERABLE: str = "TTTC8408R"
 TR_PRICE: str = "FHKST01010100"
 TR_ASKING: str = "FHKST01010200"
 TR_DAILY_CHART: str = "FHKST03010100"
+TR_TRADE_AMOUNT: str = "FHPST01720000"
+TR_FLUCTUATION: str = "FHPST01700000"
 
 ORD_DVSN: dict[OrderType, str] = {OrderType.LIMIT: "00", OrderType.MARKET: "01"}
 
@@ -58,6 +61,8 @@ _PATH_BALANCE = "/uapi/domestic-stock/v1/trading/inquire-balance"
 _PATH_ORDERABLE = "/uapi/domestic-stock/v1/trading/inquire-psbl-order"
 _PATH_DAILY = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
 _PATH_TOKEN = "/oauth2/tokenP"  # noqa: S105 - public endpoint, not a secret
+_PATH_TRADE_AMOUNT = "/uapi/domestic-stock/v1/ranking/trade-amount"
+_PATH_FLUCTUATION = "/uapi/domestic-stock/v1/ranking/fluctuation"
 
 _RATE_LIMIT_CODES: frozenset[str] = frozenset({"EGW00201"})
 _EXPIRED_TOKEN_CODES: frozenset[str] = frozenset({"EGW00121", "EGW00123"})
@@ -65,6 +70,37 @@ _MAX_SAFE_RETRIES = 2
 _MAX_PAGES = 100
 _TOKEN_REFRESH_MARGIN: dt.timedelta = dt.timedelta(minutes=10)
 _KST: dt.tzinfo = ZoneInfo("Asia/Seoul")
+
+
+@dataclass(frozen=True)
+class KisRankingRow:
+    """KIS 랭킹 행 (거래대금·등락률 공용)."""
+
+    symbol: str
+    rank: int
+    change_pct: float
+    trade_value_krw: int
+
+
+def _parse_ranking_rows(rows: list[dict[str, Any]]) -> tuple[KisRankingRow, ...]:
+    try:
+        parsed: list[KisRankingRow] = []
+        seen: set[str] = set()
+        ok = bool(rows)
+        for index, row in enumerate(rows, start=1):
+            symbol = str(row.get("stck_shrn_iscd", ""))
+            change = Decimal(str(row.get("prdy_ctrt", "")))
+            trade_value = int(Decimal(str(row.get("acml_tr_pbmn", ""))))
+            if not (symbol.isdigit() and len(symbol) == 6) or not change.is_finite() or trade_value < 0 or symbol in seen:
+                ok = False
+                break
+            seen.add(symbol)
+            parsed.append(KisRankingRow(symbol=symbol, rank=index, change_pct=float(change), trade_value_krw=trade_value))
+        if not ok:
+            raise ValueError("invalid ranking schema")
+        return tuple(parsed)
+    except (ValueError, KeyError, TypeError, AttributeError, ArithmeticError) as exc:
+        raise KisApiError("SCHEMA", "invalid ranking schema") from exc
 
 
 def _to_int(raw: Any) -> int:
@@ -535,3 +571,15 @@ class KisRestClient:
                 code=msg_cd,
                 message=message,
             )
+
+    def get_trade_amount_ranking(self) -> tuple[KisRankingRow, ...]:
+        """거래대금 랭킹(TR FHPST01720000)을 조회한다."""
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20172", "FID_INPUT_ISCD": "0000", "FID_INPUT_CNT_1": "100"}
+        body, _ = self._get(_PATH_TRADE_AMOUNT, TR_TRADE_AMOUNT, params)
+        return _parse_ranking_rows(list(body.get("output") or []))
+
+    def get_fluctuation_ranking(self) -> tuple[KisRankingRow, ...]:
+        """등락률 랭킹(TR FHPST01700000)을 조회한다."""
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20170", "FID_INPUT_ISCD": "0000", "FID_RANK_SORT_CLS_CODE": "0", "FID_INPUT_CNT_1": "200", "FID_RSFL_RATE1": "0", "FID_RSFL_RATE2": "30"}
+        body, _ = self._get(_PATH_FLUCTUATION, TR_FLUCTUATION, params)
+        return _parse_ranking_rows(list(body.get("output") or []))

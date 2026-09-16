@@ -91,3 +91,52 @@ def test_emit_candidates_maps_selection_rows_and_writes_atomically(tmp_path):
     assert got["rev"] == 20260908
     assert got["candidates"][0]["symbol"] == "005930"
     assert got["candidates"][0]["selection_reasons"] == ["limit_up", "surge10"]
+
+
+def test_candidate_snapshot_roundtrip_rejects_wrong_session_and_noncontiguous_rank(tmp_path) -> None:
+    import datetime as dt
+    import json
+    from zoneinfo import ZoneInfo
+
+    import pytest
+
+    from src.universe.ipc import CandidateFileError, CandidateSnapshot, read_candidate_snapshot, write_candidate_snapshot
+
+    generated = dt.datetime(2026, 9, 16, 15, 31, tzinfo=ZoneInfo('Asia/Seoul'))
+    path = tmp_path / 'aftermarket.json'
+    snapshot = CandidateSnapshot(
+        schema_version=1, rev=20260916, session_date=generated.date(), session='aftermarket',
+        generated_at=generated, source_asof=generated, effective_from=generated, policy_version='aftermarket_v1',
+        capacity=40, eligible_count=1, selected_count=1,
+        candidates=({'symbol': '005930', 'rank': 1, 'source_ranks': {'trade_amount': 1}, 'metrics': {'trade_value_krw': 1, 'change_pct': 1.0}, 'selection_reasons': ['trade_amount']},),
+    )
+    write_candidate_snapshot(path, snapshot)
+
+    assert read_candidate_snapshot(path, expected_session_date=generated.date(), expected_session='aftermarket', max_candidates=40) == snapshot
+    with pytest.raises(CandidateFileError):
+        read_candidate_snapshot(path, expected_session_date=generated.date(), expected_session='regular', max_candidates=40)
+    payload = json.loads(path.read_text(encoding='utf-8'))
+    payload['candidates'][0]['rank'] = 2
+    path.write_text(json.dumps(payload), encoding='utf-8')
+    with pytest.raises(CandidateFileError):
+        read_candidate_snapshot(path, expected_session_date=generated.date(), expected_session='aftermarket', max_candidates=40)
+
+
+def test_candidate_snapshot_rejects_naive_timestamp(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.universe.ipc import CandidateFileError, CandidateSnapshot, read_candidate_snapshot, write_candidate_snapshot
+
+    stamp = dt.datetime(2026, 9, 16, 15, 31)
+    path = tmp_path / "aftermarket.json"
+    write_candidate_snapshot(path, CandidateSnapshot(
+        schema_version=1, rev=20260916, session_date=stamp.date(), session="aftermarket",
+        generated_at=stamp, source_asof=stamp, effective_from=stamp, policy_version="aftermarket_v1",
+        capacity=1, eligible_count=1, selected_count=1,
+        candidates=({"symbol": "005930", "rank": 1},),
+    ))
+
+    with pytest.raises(CandidateFileError):
+        read_candidate_snapshot(path, expected_session_date=stamp.date(), expected_session="aftermarket", max_candidates=40)
