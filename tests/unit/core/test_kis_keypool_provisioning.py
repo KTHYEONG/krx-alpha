@@ -163,3 +163,56 @@ def test_parse_workstation_assignments_normalizes_and_rejects_duplicates(tmp_pat
 
     with pytest.raises(KrxAlphaError, match="ALPHA"):
         parse_workstation_assignments(duplicate, accepted)
+
+
+def test_parse_workstation_assignments_resolves_shell_variable_reference(tmp_path) -> None:
+    """실측 회귀: KIS_APP_KEY=$KIS_TRADE_APP_KEY 리터럴 텍스트가 그대로 배포돼
+    KisCredentials 가 빈 문자열로 주입된 2026-09-16 프로덕션 장애 재발 방지."""
+    from src.core.kis_keypool_provisioning import parse_workstation_assignments
+
+    accepted = frozenset({"KIS_APP_KEY", "KIS_ACCOUNT_NO"})
+    source = tmp_path / ".quant.env"
+    source.write_text(
+        "\n".join(
+            [
+                "export KIS_TRADE_APP_KEY=trade-key-value",
+                "export KIS_APP_KEY=$KIS_TRADE_APP_KEY",
+                "export KIS_TRADE_ACCOUNT_NO=trade-account",
+                "export KIS_ACCOUNT_NO=${KIS_TRADE_ACCOUNT_NO}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    parsed = parse_workstation_assignments(source, accepted)
+
+    assert parsed == {"KIS_APP_KEY": "trade-key-value", "KIS_ACCOUNT_NO": "trade-account"}
+    assert "$" not in parsed["KIS_APP_KEY"]
+
+
+def test_parse_workstation_assignments_drops_unresolvable_reference_as_missing(tmp_path) -> None:
+    """참조 대상이 파일에 없으면 리터럴 텍스트를 흘리지 않고 빈 값(=미존재)으로 취급한다."""
+    from src.core.kis_keypool_provisioning import parse_workstation_assignments
+
+    accepted = frozenset({"KIS_APP_KEY"})
+    source = tmp_path / ".quant.env"
+    source.write_text("export KIS_APP_KEY=$UNDEFINED_ELSEWHERE\n", encoding="utf-8")
+
+    parsed = parse_workstation_assignments(source, accepted)
+
+    assert "KIS_APP_KEY" not in parsed
+
+
+def test_parse_workstation_assignments_rejects_circular_variable_reference(tmp_path) -> None:
+    import pytest
+
+    from src.core.errors import KrxAlphaError
+    from src.core.kis_keypool_provisioning import parse_workstation_assignments
+
+    accepted = frozenset({"ALPHA"})
+    source = tmp_path / ".quant.env"
+    source.write_text("export ALPHA=$BETA\nexport BETA=$ALPHA\n", encoding="utf-8")
+
+    with pytest.raises(KrxAlphaError, match="circular"):
+        parse_workstation_assignments(source, accepted)
