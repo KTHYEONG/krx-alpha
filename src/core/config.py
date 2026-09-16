@@ -85,6 +85,9 @@ class DataPaths:
     def universe_out(self, day: dt.date) -> pathlib.Path:
         return self.universe_dir / f"{day.isoformat()}.parquet"
 
+    def aftermarket_candidates(self, day: dt.date) -> pathlib.Path:
+        return self.universe_dir / "aftermarket" / f"{day.isoformat()}.json"
+
     def manifest_path(self, day: dt.date) -> pathlib.Path:
         return self.manifest_dir / f"{day.isoformat()}.json"
 
@@ -163,6 +166,8 @@ class AftermarketSettings(BaseSettings):
     pair_capacity_per_connection: int | None = None
     krx_streams: tuple[str, str] = ("H0STCNT0", "H0STASP0")
     nxt_streams: tuple[str, str] = ("H0NXCNT0", "H0NXASP0")
+    selection_time: dt.time = dt.time(15, 31)
+    max_symbols: int = Field(default=40, ge=1)
 
     @model_validator(mode="after")
     def check_verified_capacity_when_enabled(self) -> AftermarketSettings:

@@ -2083,6 +2083,11 @@ def test_daemon_starts_nxt_then_krx_without_stopping_ls(monkeypatch, tmp_path):
     monkeypatch.setattr(daemon, 'run_session_orchestration', lambda **_: True)
     monkeypatch.setattr(daemon, '_resolve_trading_day_with_cache', lambda *_: None)
     cfg = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
+    from src.universe.ipc import CandidateSnapshot as _CS, write_candidate_snapshot as _wcs
+    import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZI
+    _stamp = _dt.datetime(2026, 9, 15, 15, 31, tzinfo=_ZI('Asia/Seoul'))
+    _wcs(cfg.paths.aftermarket_candidates(_dt.date(2026, 9, 15)), _CS(schema_version=1, rev=20260915, session_date=_dt.date(2026, 9, 15), session='aftermarket', generated_at=_stamp, source_asof=_stamp, effective_from=_stamp, policy_version='aftermarket_v1', capacity=40, eligible_count=1, selected_count=1, candidates=({'symbol': '000001', 'rank': 1, 'source_ranks': {'trade_amount': 1}, 'metrics': {'trade_value_krw': 1, 'change_pct': 1.0}, 'selection_reasons': ['trade_amount']},)))
     daemon.run_collector_daemon(settings=cfg, now_fn=lambda: next(times), sleep_fn=lambda _: None, max_cycles=2)
     assert sum('collect-aftermarket' in cmd for cmd in commands) == 4
     venues = [cmd[cmd.index('--venue') + 1] for cmd in commands]
@@ -2122,6 +2127,103 @@ def test_daemon_starts_four_sharded_aftermarket_commands(monkeypatch, tmp_path) 
     monkeypatch.setattr(daemon, 'run_session_orchestration', lambda **_: True)
     monkeypatch.setattr(daemon, '_resolve_trading_day_with_cache', lambda *_: None)
     times=iter([dt.datetime(2026,9,15,15,40,tzinfo=ZoneInfo('Asia/Seoul')),dt.datetime(2026,9,15,16,0,tzinfo=ZoneInfo('Asia/Seoul'))])
-    daemon.run_collector_daemon(settings=CollectorSettings(data_root=tmp_path,after_market_enabled=True,universe_slot_budget=1,ls_capacity_pairs=2),now_fn=lambda:next(times),sleep_fn=lambda _:None,max_cycles=2)
+    _cfg2=CollectorSettings(data_root=tmp_path,after_market_enabled=True,universe_slot_budget=1,ls_capacity_pairs=2)
+    from src.universe.ipc import CandidateSnapshot as _CS2, write_candidate_snapshot as _wcs2
+    _stamp2=dt.datetime(2026,9,15,15,31,tzinfo=ZoneInfo('Asia/Seoul'))
+    _wcs2(_cfg2.paths.aftermarket_candidates(dt.date(2026,9,15)),_CS2(schema_version=1,rev=20260915,session_date=dt.date(2026,9,15),session='aftermarket',generated_at=_stamp2,source_asof=_stamp2,effective_from=_stamp2,policy_version='aftermarket_v1',capacity=40,eligible_count=1,selected_count=1,candidates=({'symbol':'000001','rank':1,'source_ranks':{'trade_amount':1},'metrics':{'trade_value_krw':1,'change_pct':1.0},'selection_reasons':['trade_amount']},)))
+    daemon.run_collector_daemon(settings=_cfg2,now_fn=lambda:next(times),sleep_fn=lambda _:None,max_cycles=2)
     assert len(commands) == 4
     assert [x[x.index('--credential-slot')+1] for x in commands] == ['0','1','2','3']
+
+
+def test_daemon_refreshes_isolated_aftermarket_snapshot_before_nxt_start(monkeypatch, tmp_path) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+    from src.universe.ipc import CandidateSnapshot, write_candidate_snapshot
+
+    kst = ZoneInfo('Asia/Seoul')
+    settings = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
+    calls: list[list[str]] = []
+    refreshed: list[dict[str, object]] = []
+
+    def refresh(**kwargs):
+        refreshed.append(kwargs)
+        stamp = kwargs['generated_at']
+        snapshot = CandidateSnapshot(
+            schema_version=1, rev=20260916, session_date=kwargs['session_date'], session='aftermarket',
+            generated_at=stamp, source_asof=stamp, effective_from=stamp, policy_version='aftermarket_v1',
+            capacity=40, eligible_count=1, selected_count=1,
+            candidates=({'symbol': '005930', 'rank': 1, 'source_ranks': {'trade_amount': 1}, 'metrics': {'trade_value_krw': 1, 'change_pct': 1.0}, 'selection_reasons': ['trade_amount']},),
+        )
+        write_candidate_snapshot(kwargs['out_path'], snapshot)
+        return snapshot
+
+    class Supervisor:
+        def __init__(self, *, cmd, breaker):
+            calls.append(cmd)
+        def ensure_running(self):
+            return 'running'
+        def stop(self, *, timeout_s=15.0):
+            return 'stopped'
+
+    plan = (AftermarketShard(MarketVenue.NXT, 0, ('005930',), ('H0NXCNT0', 'H0NXASP0'), '1', 'id1'),)
+    monkeypatch.setattr(daemon, 'refresh_aftermarket_candidates', refresh)
+    monkeypatch.setattr(daemon, '_build_kis_client', lambda _: object())
+    monkeypatch.setattr(daemon, 'plan_aftermarket_shards', lambda **_: plan)
+    monkeypatch.setattr(daemon, 'load_kis_data_credentials', lambda: ())
+    monkeypatch.setattr(daemon, 'run_session_orchestration', lambda **_: True)
+    monkeypatch.setattr(daemon, '_resolve_trading_day_with_cache', lambda *_: None)
+    monkeypatch.setattr(daemon, 'ProcessSupervisor', Supervisor)
+    times = iter([dt.datetime(2026, 9, 16, 15, 31, tzinfo=kst), dt.datetime(2026, 9, 16, 15, 40, tzinfo=kst)])
+
+    daemon.run_collector_daemon(settings=settings, now_fn=lambda: next(times), sleep_fn=MagicMock(), max_cycles=2)
+
+    assert len(refreshed) == 1
+    assert refreshed[0]['out_path'] == settings.paths.aftermarket_candidates(dt.date(2026, 9, 16))
+    aftermarket = [cmd for cmd in calls if 'collect-aftermarket' in cmd]
+    assert len(aftermarket) == 1
+    assert aftermarket[0][aftermarket[0].index('--candidates-path') + 1] == str(settings.paths.aftermarket_candidates(dt.date(2026, 9, 16)))
+
+
+def test_daemon_blocks_aftermarket_when_reselection_fails(monkeypatch, tmp_path, caplog) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.execution.contracts import KisApiError
+    from src.orchestration import daemon
+
+    settings = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
+    commands: list[list[str]] = []
+
+    class Supervisor:
+        def __init__(self, *, cmd, breaker):
+            commands.append(cmd)
+        def ensure_running(self):
+            return 'running'
+        def stop(self, *, timeout_s=15.0):
+            return 'stopped'
+
+    def fail(**kwargs):
+        raise KisApiError('SCHEMA', 'bad ranking')
+
+    monkeypatch.setattr(daemon, 'refresh_aftermarket_candidates', fail)
+    monkeypatch.setattr(daemon, '_build_kis_client', lambda _: object())
+    monkeypatch.setattr(daemon, 'run_session_orchestration', lambda **_: True)
+    monkeypatch.setattr(daemon, '_resolve_trading_day_with_cache', lambda *_: None)
+    monkeypatch.setattr(daemon, 'ProcessSupervisor', Supervisor)
+    kst = ZoneInfo('Asia/Seoul')
+    times = iter([dt.datetime(2026, 9, 16, 15, 31, tzinfo=kst), dt.datetime(2026, 9, 16, 15, 40, tzinfo=kst)])
+
+    daemon.run_collector_daemon(settings=settings, now_fn=lambda: next(times), sleep_fn=MagicMock(), max_cycles=2)
+
+    assert any('collect-stream' in cmd for cmd in commands)
+    assert not any('collect-aftermarket' in cmd for cmd in commands)
+    assert any('aftermarket' in record.getMessage().lower() for record in caplog.records)

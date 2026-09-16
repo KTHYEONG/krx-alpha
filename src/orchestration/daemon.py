@@ -7,7 +7,7 @@ import logging
 import pathlib
 import sys
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -54,7 +54,8 @@ from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreake
 from src.realtime.contracts import MarketVenue
 from src.realtime.kis_sharding import AftermarketShard, load_kis_data_credentials, plan_aftermarket_shards
 from src.storage.remote import RemoteArchiveError
-from src.universe.ipc import CandidateFileError, read_candidates
+from src.universe.aftermarket import AftermarketUniverseError, refresh_aftermarket_candidates
+from src.universe.ipc import CandidateFileError, read_candidate_snapshot, read_candidates
 from src.universe.service import UniversePlanResult as UniversePlanResult
 from src.universe.service import plan_universe
 
@@ -226,7 +227,7 @@ def _aftermarket_stream_cmd(today: dt.date, paths: DataPaths, *, shard: Aftermar
         "--manifest-path",
         str(paths.aftermarket_manifest_path(today, shard.venue, shard.shard_index)),
         "--candidates-path",
-        str(paths.candidates),
+        str(paths.aftermarket_candidates(today)),
         "--venue",
         shard.venue.value,
         "--shard-index",
@@ -293,6 +294,7 @@ def run_collector_daemon(
     aftermarket_supervisors: dict[str, ProcessSupervisor] = {}
     aftermarket_plan: tuple[AftermarketShard, ...] = ()
     aftermarket_plan_day: dt.date | None = None
+    aftermarket_refresh_day: dt.date | None = None
 
     while True:
         cycle += 1
@@ -440,22 +442,23 @@ def run_collector_daemon(
                             int(age),
                         )
                     ingest_stale = stale
+                if state == SessionState.FULL_ACTIVE and cfg.after_market_enabled:
+                    after_cfg = AftermarketSettings()
+                    if now.astimezone(_KST).time() >= after_cfg.selection_time and aftermarket_refresh_day != today:
+                        aftermarket_refresh_day = today
+                        try:
+                            refresh_aftermarket_candidates(session_date=today, generated_at=now, client=_build_kis_client(paths), out_path=paths.aftermarket_candidates(today), capacity=after_cfg.max_symbols)
+                        except (MissingCredentialsError, KisApiError, AftermarketUniverseError, CandidateFileError) as exc:
+                            logger.critical("[DAEMON] stage=aftermarket_reselection status=FAIL reason=%s", str(exc))
                 if state == SessionState.AFTER_MARKET_ACTIVE and cfg.after_market_enabled:
                     if aftermarket_plan_day != today:
-                        stored = read_candidates(paths.candidates)
-                        rows: list[dict[str, Any]] = (
-                            cast("list[dict[str, Any]]", stored.get("candidates"))
-                            if stored is not None
-                            else []
-                        )
-                        after = AftermarketSettings()
-                        aftermarket_plan = plan_aftermarket_shards(
-                            symbols=tuple(str(row["symbol"]) for row in rows),
-                            credentials=load_kis_data_credentials(),
-                            pair_capacity_per_connection=int(after.pair_capacity_per_connection or 0),
-                            krx_streams=after.krx_streams,
-                            nxt_streams=after.nxt_streams,
-                        )
+                        try:
+                            after = AftermarketSettings()
+                            snapshot = read_candidate_snapshot(paths.aftermarket_candidates(today), expected_session_date=today, expected_session="aftermarket", max_candidates=after.max_symbols)
+                            aftermarket_plan = plan_aftermarket_shards(symbols=tuple(str(row["symbol"]) for row in snapshot.candidates), credentials=load_kis_data_credentials(), pair_capacity_per_connection=int(after.pair_capacity_per_connection or 0), krx_streams=after.krx_streams, nxt_streams=after.nxt_streams)
+                        except (CandidateFileError, KrxAlphaError) as exc:
+                            logger.critical("[DAEMON] stage=aftermarket_plan status=FAIL reason=%s", str(exc))
+                            aftermarket_plan = ()
                         aftermarket_plan_day = today
                     kst_time = now.astimezone(_KST).time()
                     due: list[MarketVenue] = []
