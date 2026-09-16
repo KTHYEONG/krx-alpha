@@ -49,6 +49,9 @@ def main() -> None:
     for adr in relevant_adrs:
         print(f"• [{adr.get('adr_id')}] {adr.get('title')} ({adr.get('date')})")
         print(f"  - Resolution: {adr.get('resolution')}")
+        caveat_text = adr.get("caveat") or adr.get("trap")
+        if caveat_text:
+            print(f"  - Caveat/Assumption: {caveat_text}")
 
 
     # 2. Search code map entries from code_map.json
