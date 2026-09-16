@@ -72,10 +72,11 @@
   },
   "src/cli/provision_kis_keypool.py": {
     "deps": [
-      "src/core/kis_keypool_provisioning.py"
+      "src/core/kis_keypool_provisioning.py",
+      "src/core/runtime_env_provisioning.py"
     ],
     "layer": 7,
-    "testing": "tests/unit/core/test_kis_keypool_provisioning.py"
+    "testing": "tests/unit/cli/test_provision_kis_keypool.py"
   },
   "src/cli/universe_plan.py": {
     "deps": [
@@ -107,6 +108,7 @@
       "tests/unit/core/test_calendar.py",
       "tests/unit/core/test_config.py",
       "tests/unit/core/test_kis_keypool_provisioning.py",
+      "tests/unit/core/test_runtime_env_provisioning.py",
       "tests/unit/realtime/test_kis_sharding.py"
     ]
   },
@@ -123,6 +125,14 @@
     ],
     "layer": 0,
     "testing": "tests/unit/core/test_observability.py"
+  },
+  "src/core/runtime_env_provisioning.py": {
+    "deps": [
+      "src/core/errors.py",
+      "src/core/kis_keypool_provisioning.py"
+    ],
+    "layer": 0,
+    "testing": "tests/unit/core/test_runtime_env_provisioning.py"
   },
   "src/execution/contracts.py": {
     "deps": [

@@ -39,6 +39,31 @@ chown ubuntu:ubuntu "$dest"
 """
 
 
+def parse_workstation_assignments(source_path: Path, accepted_keys: frozenset[str]) -> dict[str, str]:
+    """Collect accepted workstation assignments with shell-syntax normalization."""
+    accepted: dict[str, str] = {}
+    for raw_line in Path(source_path).read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        name, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = name.strip()
+        if key not in accepted_keys:
+            continue
+        if key in accepted:
+            raise KrxAlphaError(f"duplicate accepted data key: {key}")
+        candidate = value.strip()
+        if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in ("'", '"'):
+            candidate = candidate[1:-1]
+        if candidate:
+            accepted[key] = candidate
+    return accepted
+
+
 def build_shared_fragment(source_path: Path) -> str:
     """Build the canonical 17-line shared fragment from a workstation source file.
 
@@ -48,22 +73,7 @@ def build_shared_fragment(source_path: Path) -> str:
     settings are ignored. Selectors copied from a local-host allocation are
     never honored; the canonical VPS selectors are always emitted.
     """
-    accepted: dict[str, str] = {}
-    for raw_line in Path(source_path).read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if line.startswith("export "):
-            line = line[len("export "):].strip()
-        name, sep, value = line.partition("=")
-        if not sep or name.strip() not in _ACCEPTED_KEY_SET:
-            continue
-        key = name.strip()
-        if key in accepted:
-            raise KrxAlphaError(f"duplicate accepted data key: {key}")
-        candidate = value.strip()
-        if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in ("'", '"'):
-            candidate = candidate[1:-1]
-        if candidate:
-            accepted[key] = candidate
+    accepted = parse_workstation_assignments(source_path, _ACCEPTED_KEY_SET)
     missing = [key for key in ACCEPTED_KEYS if key not in accepted]
     if missing:
         raise KrxAlphaError(f"missing required data keys: {', '.join(missing)}")
