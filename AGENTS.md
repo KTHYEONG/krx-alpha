@@ -12,7 +12,7 @@
 ## 3. Execution & Efficiency
 - **Token-Conscious Verification:** Use configured tools (`uv run`) to verify changes against existing harnesses. Avoid wasteful retry loops; isolate verbose logs in `scratch/` to prevent context bloat.
 - **Human-Centric Clarity:** Communicate in intuitive, plain language (Problem → Root Cause → Impact) rather than dense, robotic jargon dumps.
-- **Korean by Default:** Always converse, explain, and report in natural Korean (한국어) unless explicitly requested otherwise.
+- **Korean by Default:** Always converse, explain, and report in natural Korean (한국어) unless explicitly requested otherwise. Strictly prohibit the use of Chinese or Japanese.
 
 ## 4. Domain Rule Routing
 - **Financial & Quant Engineering:** [quant.md](file:///.agents/rules/quant.md)

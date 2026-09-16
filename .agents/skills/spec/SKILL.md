@@ -17,8 +17,9 @@ As the contract architect, your cognitive budget is 100% dedicated to:
 
 ## Directives
 
-1. **Prerequisite & Context Alignment**:
-   - Check if `scratch/probe_<feature>.json` exists. Carry over invariants, trade-offs, and failure modes directly.
+1. **Prerequisite & Context Alignment (Auto-Inference)**:
+   - When `/spec` is called without arguments, automatically infer the feature name, domain, and technical context directly from the preceding `/probe` step in the active session.
+   - Carry over the invariants, trade-offs, failure modes, and architectural decisions directly from conversation memory.
    - Inspect target files and immediate 1-depth callers to ensure exact imports and AST anchors. Do NOT scan unrelated repository paths.
 
 2. **Blueprint Structure (`docs/specs/<feature>_spec.md`)**:
@@ -67,31 +68,15 @@ As the contract architect, your cognitive budget is 100% dedicated to:
 
 ## Chat Output Format
 
-Keep chat response clear, intuitive for humans, and contract-focused. Avoid cryptic jargon dumps or robotic abbreviation walls.
-
----
+Keep chat output ultra-compact. Detailed recipes and test code already reside inside `_spec.md`. Output only the minimal hand-off card below:
 
 ### 📐 [SPEC] <기능명>
-> 📄 **청사진 문서**: [`docs/specs/<feature>_spec.md`](file:///docs/specs/<feature>_spec.md)  
-> 📊 **작업 규모**: <N>개 파일 · <N>개 변경점 · <N>개 배선 · <N>개 시나리오  
-> 🚦 **게이트 검증**: `lean_check --pre-impl` **PASS**
+> 📄 **청사진**: [`docs/specs/<feature>_spec.md`](file:///docs/specs/<feature>_spec.md)  
+> 🚦 **하네스 검증**: `lean_check --pre-impl` **PASS**
 
-#### 1. 한눈에 보는 변경 요약 (Summary Briefing)
-- 🔍 **해결할 문제**: <전문 용어 난사 대신, 기존에 어떤 결함/증상이 발생하고 있었는지 직관적 설명 1-2줄>
-- 🛠️ **해결 방식**: <어떤 구조적 개선이나 알고리즘 레시피로 해결하는지 1-2줄>
-- 🎯 **기대 효과 및 영향**: <사용자/시스템 입장에서 무엇이 정상화되는지 1-2줄>
-
-#### 2. 작업 범위 및 연계 조치 (Scope & Follow-ups)
-- 📦 **이번 작업에 포함 (In-Scope)**: <직접 해결 대상 및 함께 수정할 연관 변경점 일체>
-- 🛡️ **설계상 금지 (Guardrails)**: <나중에 할 일이 아니라, 의도적으로 배제한 안티패턴/원칙>
-- ⏭️ **후속 연계 과제 (Next Action)**: <독립적인 대형 작업 등으로 분리가 필요한 경우, 원클릭 실행 명령어 제시. 없을 시 "없음">
-
-#### 3. 구현 및 배선 대상 (Blueprint Matrix)
-| 파일 경로 | 구분 | 대상 심볼 / 앵커 |
-| :--- | :--- | :--- |
-| `[<target_file>](file:///<target_file>)` | Target | `<symbol_1>` (Step-by-step Recipe 제공) |
-| `[<caller_file>](file:///<caller_file>)` | Wiring | `<anchor_symbol>` (호출부 주입) |
-| `[<test_file>](file:///<test_file>)` | Tests | `<N>개 시나리오 테스트 스켈레톤` |
+- 🎯 **작업 요약**: <구현할 핵심 기능 1줄 요약>
+- 📦 **작업 규모**: <N>개 파일 수정 · <N>개 테스트 작성 완료
 
 ---
-👉 다음 단계: `/implement docs/specs/<feature>_spec.md`
+👉 **다음 단계 (OpenCode)**: 
+`/implement docs/specs/<feature>_spec.md`
