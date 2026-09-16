@@ -35,14 +35,30 @@ Shared KIS data-key env and VPS activation runbook.
   unrelated credentials.
 - Failure mode guard: copying a trade key (`KIS_TRADE_*`) or primary key (`KIS_APP_*`)
   into the fragment is rejected during fingerprint validation.
-- The GitHub deploy workflow accepts the same allow-listed fragment through the
-  repository secret `KIS_DATA_ENV_CONTENT` (multiline content). If that secret is
-  empty, deployment reuses the already-provisioned VPS fragment; it fails closed
-  when the VPS fragment is also missing.
-- The workflow writes the VPS-specific selectors itself:
-  `KIS_DATA_SLOTS=1,2,3,4,5` and `KIS_HOST_DATA_SLOTS=1,2,3,4`. The Secret
-  may omit both selectors; any copies in it are replaced, so a local host-only
+- Provision the fragment only from a trusted workstation with the audited CLI
+  (it never runs in GitHub Actions):
+
+  ```sh
+  uv run python -m src.cli.provision_kis_keypool --host or-vps
+  ```
+
+  The CLI reads the workstation source (`~/.quant.env` by default, override with
+  `--source`), builds the canonical 17-line fragment, and installs it at the
+  canonical path `/home/ubuntu/quant-secrets/kis-data.env` with mode `0600`
+  owner `ubuntu:ubuntu` over SSH. Preview without installing via `--dry-run`.
+- The CLI writes the VPS-specific selectors itself:
+  `KIS_DATA_SLOTS=1,2,3,4,5` and `KIS_HOST_DATA_SLOTS=1,2,3,4`. Any selector
+  copies in the workstation source are ignored, so a local host-only
   assignment cannot affect the VPS.
+- CI has a validation-only role: the deploy workflow runs the remote
+  `validate_shared_keypool()` check before KCA/Compose wiring and fails closed
+  unless the shared file exists with mode `0600` owner `ubuntu:ubuntu`,
+  contains only the 17 canonical keys, and holds nonempty values for all 15
+  data credentials. The validator prints only fixed status text and key names,
+  never credential values.
+- Rotation procedure: update the workstation source, then re-run the same CLI
+  command above. Verify with `--dry-run` first when only validation is wanted,
+  then deploy normally so CI validation confirms the rotated fragment.
 
 ## 4. Compose wiring (KRX)
 
