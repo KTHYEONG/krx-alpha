@@ -64,9 +64,6 @@ jobs:
           REMOTE_USER: ${{ secrets.USERNAME }}
           GHCR_USER: ${{ github.repository_owner }}
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
-          # Multiline, allow-listed data-key fragment.  The secret is optional
-          # only when the VPS fragment has already been provisioned.
-          KIS_DATA_ENV_CONTENT: ${{ secrets.KIS_DATA_ENV_CONTENT }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
@@ -74,7 +71,6 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keygen -l -f ~/.ssh/deploy_key
           SSH_OPTS="-i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20"
-          KIS_DATA_ENV_B64="$(printf '%s' "$KIS_DATA_ENV_CONTENT" | base64 | tr -d '\n')"
 
           # 원격 서버 디렉터리 준비
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/krx-alpha/data ~/krx-alpha/logs"
@@ -88,57 +84,65 @@ jobs:
           cd ~/krx-alpha
 
           DATA_ENV_FILE="\$HOME/quant-secrets/kis-data.env"
-          mkdir -p "\$(dirname "\$DATA_ENV_FILE")"
 
-          # Provision the shared data-key fragment once, or refresh it only when
-          # the explicitly supplied GitHub secret is present. Never derive it
-          # from a project .env and never copy trade credentials into it.
-          if [ -n '$KIS_DATA_ENV_B64' ]; then
-            tmp_file="\$(mktemp "\$DATA_ENV_FILE.XXXXXX")"
-            printf '%s' '$KIS_DATA_ENV_B64' | base64 --decode > "\$tmp_file"
-            sed -i 's/\r$//' "\$tmp_file"
-            canonical_file="\$(mktemp "\$DATA_ENV_FILE.XXXXXX")"
-            {
-              printf '%s\n' 'KIS_DATA_SLOTS=1,2,3,4,5'
-              printf '%s\n' 'KIS_HOST_DATA_SLOTS=1,2,3,4'
-              awk -F= '\$1 != "KIS_DATA_SLOTS" && \$1 != "KIS_HOST_DATA_SLOTS" { print }' "\$tmp_file"
-            } > "\$canonical_file"
-            mv -f "\$canonical_file" "\$tmp_file"
-            if grep -Eq '^(KIS_APP_|KIS_TRADE_)' "\$tmp_file"; then
-              echo "Shared KIS data env contains a primary/trade credential" >&2
-              rm -f "\$tmp_file"
-              exit 1
+          # CI never provisions credentials: the shared fragment is installed
+          # once from a trusted workstation at the canonical absolute path
+          # /home/ubuntu/quant-secrets/kis-data.env and only validated here.
+          # This validator fails closed and prints only fixed text and key
+          # names, never credential values.
+          validate_shared_keypool() {
+            file="\$1"
+            if [ ! -s "\$file" ]; then
+              echo "Missing shared KIS data env" >&2
+              echo "Hint: run uv run python -m src.cli.provision_kis_keypool --host or-vps from a trusted workstation" >&2
+              return 1
             fi
-            if ! awk -F= '
-              /^[[:space:]]*($|#)/ { next }
-              !/^[A-Za-z_][A-Za-z0-9_]*=/ { exit 1 }
-              \$1 !~ /^KIS_(DATA_SLOTS|HOST_DATA_SLOTS|DATA_[1-5]_(APP_KEY|APP_SECRET|HTS_ID))$/ { exit 1 }
-            ' "\$tmp_file"; then
-              echo "Shared KIS data env contains a non-data or account field" >&2
-              rm -f "\$tmp_file"
-              exit 1
+            mode="\$(stat -c %a "\$file")"
+            if [ "\$mode" != "600" ]; then
+              echo "Shared KIS data env has unexpected mode" >&2
+              return 1
+            fi
+            owner="\$(stat -c %U:%G "\$file")"
+            if [ "\$owner" != "ubuntu:ubuntu" ]; then
+              echo "Shared KIS data env has unexpected owner" >&2
+              return 1
+            fi
+            unexpected_key="\$(awk -F= '
+              /^[[:space:]]*(#|$)/ { next }
+              \$1 !~ /^KIS_(DATA_SLOTS|HOST_DATA_SLOTS|DATA_[1-5]_(APP_KEY|APP_SECRET|HTS_ID))$/ { print \$1; exit 1 }
+            ' "\$file")"
+            if [ -n "\$unexpected_key" ]; then
+              echo "Shared KIS data env contains an unexpected key: \$unexpected_key" >&2
+              return 1
+            fi
+            slots_value="\$(awk -F= '\$1 == "KIS_DATA_SLOTS" { print substr(\$0, index(\$0, "=") + 1); exit }' "\$file")"
+            expected_slots_line="KIS_DATA_SLOTS=1,2,3,4,5"
+            if [ "\$slots_value" != "\${expected_slots_line#*=}" ]; then
+              echo "Shared KIS data env has unexpected KIS_DATA_SLOTS assignment" >&2
+              return 1
+            fi
+            host_slots_value="\$(awk -F= '\$1 == "KIS_HOST_DATA_SLOTS" { print substr(\$0, index(\$0, "=") + 1); exit }' "\$file")"
+            expected_host_slots_line="KIS_HOST_DATA_SLOTS=1,2,3,4"
+            if [ "\$host_slots_value" != "\${expected_host_slots_line#*=}" ]; then
+              echo "Shared KIS data env has unexpected KIS_HOST_DATA_SLOTS assignment" >&2
+              return 1
             fi
             for required_key in \
-              KIS_DATA_SLOTS KIS_HOST_DATA_SLOTS \
               KIS_DATA_1_APP_KEY KIS_DATA_1_APP_SECRET KIS_DATA_1_HTS_ID \
               KIS_DATA_2_APP_KEY KIS_DATA_2_APP_SECRET KIS_DATA_2_HTS_ID \
               KIS_DATA_3_APP_KEY KIS_DATA_3_APP_SECRET KIS_DATA_3_HTS_ID \
               KIS_DATA_4_APP_KEY KIS_DATA_4_APP_SECRET KIS_DATA_4_HTS_ID \
               KIS_DATA_5_APP_KEY KIS_DATA_5_APP_SECRET KIS_DATA_5_HTS_ID; do
-              grep -Eq "^"\$required_key"=.+$" "\$tmp_file" || {
-                echo "Missing required shared KIS data key: "\$required_key >&2
-                rm -f "\$tmp_file"
-                exit 1
-              }
+              credential_value="\$(awk -F= -v key="\$required_key" '\$1 == key { print substr(\$0, index(\$0, "=") + 1); exit }' "\$file")"
+              if [ -z "\$credential_value" ]; then
+                echo "Missing required shared KIS data key: \$required_key" >&2
+                echo "Hint: run uv run python -m src.cli.provision_kis_keypool --host or-vps from a trusted workstation" >&2
+                return 1
+              fi
             done
-            chmod 600 "\$tmp_file"
-            mv -f "\$tmp_file" "\$DATA_ENV_FILE"
-          fi
-          if [ ! -s "\$DATA_ENV_FILE" ]; then
-            echo "Missing \$DATA_ENV_FILE; set the KIS_DATA_ENV_CONTENT repository secret or provision it manually" >&2
-            exit 1
-          fi
-          chmod 600 "\$DATA_ENV_FILE"
+            echo "Shared KIS data env validated: 17 keys"
+          }
+          validate_shared_keypool "\$DATA_ENV_FILE"
 
           # .env 파일이 없으면 템플릿 생성 안내 (기존 .env 보존)
           if [ ! -f .env ]; then
@@ -165,7 +169,6 @@ jobs:
           chmod 600 "\$DROPIN_DIR/10-kis-data-env.conf"
           systemctl --user daemon-reload
           systemctl --user enable --now kca-kis-token-warmup.timer
-          systemctl --user restart kca-kis-token-warmup.service
 
           # rclone config directory bootstrap (directory mount follows host re-authorization)
           mkdir -p ~/.config/rclone
