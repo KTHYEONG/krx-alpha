@@ -4,10 +4,9 @@ services:
     container_name: krx-collector
     restart: unless-stopped
     stop_grace_period: 30s
-    # krx_collector_kis_data_env_file: project .env first, then required shared data-key env
     env_file:
-      - .env
-      - ${KIS_DATA_ENV_FILE:?KIS_DATA_ENV_FILE is required}
+      - /home/ubuntu/quant-secrets/krx-alpha.env
+      - /home/ubuntu/quant-secrets/kis-data.env
     environment:
       - TZ=Asia/Seoul
       - POLARS_MAX_THREADS=2
@@ -18,12 +17,12 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - ${HOME}/.config/rclone:/root/.config/rclone:ro
-      - ${KIS_SHARED_TOKEN_CACHE_DIR}:/run/kis-token-cache:ro
+      - /home/ubuntu/.config/rclone:/root/.config/rclone:ro
+      - /home/ubuntu/.cache/kis:/run/kis-token-cache:ro
     # 장중 수집(daemon ~95MB) + EOD 정규화 자식(cgroup 실측 ≤500MB) 동시 상주 여유, swap 스래싱 방지
     mem_limit: 1g
     memswap_limit: 1g
-    command: ["uv", "run", "--no-dev", "python", "-m", "src.orchestration.daemon"]
+    command: ["/app/.venv/bin/python", "-m", "src.orchestration.daemon"]
     # 195GB 디스크 보호: 도커 컨테이너 로그 최대 30MB 캡
     logging:
       driver: json-file

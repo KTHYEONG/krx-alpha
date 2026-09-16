@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from src.core.kis_keypool_provisioning import build_shared_fragment, install_shared_fragment
+from src.core.runtime_env_provisioning import build_runtime_fragment, install_runtime_fragment
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +29,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     fragment = build_shared_fragment(args.source)
+    runtime_fragment = build_runtime_fragment(args.source)
     data_key_total = sum(
         1 for line in fragment.splitlines() if line.partition("=")[0] not in SELECTOR_KEYS
     )
+    runtime_key_total = len(runtime_fragment.splitlines())
     if not args.dry_run:
         install_shared_fragment(args.host, fragment)
+        install_runtime_fragment(args.host, runtime_fragment)
     logger.info("validated %d accepted data keys", data_key_total)
+    logger.info("validated %d runtime env keys", runtime_key_total)
     return 0
 
 

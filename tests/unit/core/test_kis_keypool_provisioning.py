@@ -94,11 +94,13 @@ def test_main_dry_run_validates_without_installing_or_logging_secret(monkeypatch
     source = tmp_path / ".quant.env"
     source.write_text("placeholder\n", encoding="utf-8")
     monkeypatch.setattr(cli, "build_shared_fragment", lambda path: "KIS_DATA_1_APP_SECRET=secret-value\n")
+    monkeypatch.setattr(cli, "build_runtime_fragment", lambda path: "KRX_OPENAPI_KEY=key\n")
 
     def fail_install(host: str, fragment: str) -> None:
         raise AssertionError("dry-run must not install")
 
     monkeypatch.setattr(cli, "install_shared_fragment", fail_install)
+    monkeypatch.setattr(cli, "install_runtime_fragment", fail_install)
 
     assert cli.main(["--source", str(source), "--dry-run"]) == 0
     assert "secret-value" not in caplog.text
@@ -110,6 +112,7 @@ def test_main_installs_when_not_dry_run(monkeypatch, caplog, tmp_path) -> None:
     source = tmp_path / ".quant.env"
     source.write_text("placeholder\n", encoding="utf-8")
     monkeypatch.setattr(cli, "build_shared_fragment", lambda path: "KIS_DATA_1_APP_SECRET=secret-value\n")
+    monkeypatch.setattr(cli, "build_runtime_fragment", lambda path: "KRX_OPENAPI_KEY=key\n")
 
     installed: list[tuple[str, str]] = []
 
@@ -117,8 +120,46 @@ def test_main_installs_when_not_dry_run(monkeypatch, caplog, tmp_path) -> None:
         installed.append((host, fragment))
 
     monkeypatch.setattr(cli, "install_shared_fragment", fake_install)
+    monkeypatch.setattr(cli, "install_runtime_fragment", lambda host, fragment: None)
 
     assert cli.main(["--source", str(source), "--host", "or-vps"]) == 0
 
     assert installed == [("or-vps", "KIS_DATA_1_APP_SECRET=secret-value\n")]
     assert "secret-value" not in caplog.text
+
+
+def test_parse_workstation_assignments_normalizes_and_rejects_duplicates(tmp_path) -> None:
+    import pytest
+
+    from src.core.errors import KrxAlphaError
+    from src.core.kis_keypool_provisioning import parse_workstation_assignments
+
+    accepted = frozenset({"ALPHA", "BETA", "GAMMA", "DELTA"})
+    source = tmp_path / ".quant.env"
+    source.write_text(
+        "\n".join(
+            [
+                "# comment",
+                "",
+                "no_assignment_line",
+                "export ALPHA=one",
+                '  BETA = "two"  ',
+                "GAMMA='three'",
+                "DELTA=",
+                "OUT_OF_SCOPE=first",
+                "OUT_OF_SCOPE=second",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    parsed = parse_workstation_assignments(source, accepted)
+
+    assert parsed == {"ALPHA": "one", "BETA": "two", "GAMMA": "three"}
+
+    duplicate = tmp_path / "dup.env"
+    duplicate.write_text("ALPHA=one\nexport ALPHA=two\n", encoding="utf-8")
+
+    with pytest.raises(KrxAlphaError, match="ALPHA"):
+        parse_workstation_assignments(duplicate, accepted)

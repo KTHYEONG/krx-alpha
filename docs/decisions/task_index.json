@@ -1,6 +1,16 @@
 {
   "tasks": [
     {
+      "task_id": "vps_cicd_local_first_restructuring",
+      "date": "2026-09-16",
+      "adr_id": "ADR_20260916_vps_cicd_local_first_restructuring",
+      "domain": "infrastructure",
+      "title": "VPS CI/CD 로컬 우선 구조 개편",
+      "why": "GHA x86 QEMU 에뮬레이션, pyproject uv 캐시가 이미지 레이어(968MB)로 누출, VPS 시크릿 미프로비저닝으로 배포가 fail-closed 정지",
+      "resolution": "public 저장소 무료 ARM64 러너로 전환, UV_CACHE_DIR/캐시마운트/.venv 직접실행으로 이미지 3.00GB->1.69GB, 로컬 SSOT에서 런타임 env 12키를 SSH stdin 원자 설치하는 CLI 확장",
+      "impact": "배포 이미지 43% 축소, 빌드 QEMU 제거, 시크릿/토큰 계약이 provision_kis_keypool CLI 단일 진입점으로 통합; ALERT_GMAIL_TO 로컬 추가와 provision CLI 1회 실행 선결 필요"
+    },
+    {
       "task_id": "vps_kis_secret_provisioning",
       "date": "2026-09-16",
       "adr_id": "ADR_20260916_vps_kis_secret_provisioning",

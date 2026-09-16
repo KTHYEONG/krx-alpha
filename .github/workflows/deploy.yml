@@ -9,16 +9,13 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -30,14 +27,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Oracle Ampere ARM64 + AMD64 멀티아키텍처 크로스 빌드
+      # Oracle Ampere ARM64 네이티브 단일 아키텍처 빌드
       - name: Build and Push to GHCR
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/arm64,linux/amd64
+          platforms: linux/arm64
           push: true
-          tags: ${{ env.IMAGE }}:latest
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -83,7 +82,8 @@ jobs:
           set -e
           cd ~/krx-alpha
 
-          DATA_ENV_FILE="\$HOME/quant-secrets/kis-data.env"
+          DATA_ENV_FILE="/home/ubuntu/quant-secrets/kis-data.env"
+          RUNTIME_ENV_FILE="/home/ubuntu/quant-secrets/krx-alpha.env"
 
           # CI never provisions credentials: the shared fragment is installed
           # once from a trusted workstation at the canonical absolute path
@@ -144,23 +144,51 @@ jobs:
           }
           validate_shared_keypool "\$DATA_ENV_FILE"
 
-          # .env 파일이 없으면 템플릿 생성 안내 (기존 .env 보존)
-          if [ ! -f .env ]; then
-            touch .env
-            echo "Created empty .env. Please configure API credentials if not already set."
-          fi
-
-          upsert_env() {
-            key="\$1"
-            value="\$2"
-            if grep -q "^\$key=" .env; then
-              sed -i "s#^\$key=.*#\$key=\$value#" .env
-            else
-              printf '%s=%s\n' "\$key" "\$value" >> .env
+          # CI never provisions credentials: the runtime fragment is installed
+          # once from a trusted workstation at the canonical absolute path
+          # /home/ubuntu/quant-secrets/krx-alpha.env and only validated here.
+          # This validator fails closed and prints only fixed text and key
+          # names, never credential values.
+          validate_runtime_env() {
+            file="\$1"
+            if [ ! -s "\$file" ]; then
+              echo "Missing runtime env" >&2
+              echo "Hint: run uv run python -m src.cli.provision_kis_keypool --host or-vps from a trusted workstation" >&2
+              return 1
             fi
+            mode="\$(stat -c %a "\$file")"
+            if [ "\$mode" != "600" ]; then
+              echo "Runtime env has unexpected mode" >&2
+              return 1
+            fi
+            owner="\$(stat -c %U:%G "\$file")"
+            if [ "\$owner" != "ubuntu:ubuntu" ]; then
+              echo "Runtime env has unexpected owner" >&2
+              return 1
+            fi
+            unexpected_key="\$(awk -F= '
+              /^[[:space:]]*(#|$)/ { next }
+              \$1 !~ /^(KRX_OPENAPI_KEY|TOSS_APP_KEY|TOSS_APP_SECRET|LS_APP_KEY|LS_APP_SECRET|KIS_APP_KEY|KIS_APP_SECRET|KIS_ACCOUNT_NO|KIS_ACCOUNT_PRODUCT_CODE|ALERT_GMAIL_USER|ALERT_GMAIL_APP_PASSWORD|ALERT_GMAIL_TO)$/ { print \$1; exit 1 }
+            ' "\$file")"
+            if [ -n "\$unexpected_key" ]; then
+              echo "Runtime env contains an unexpected key: \$unexpected_key" >&2
+              return 1
+            fi
+            for required_key in \
+              KRX_OPENAPI_KEY TOSS_APP_KEY TOSS_APP_SECRET \
+              LS_APP_KEY LS_APP_SECRET \
+              KIS_APP_KEY KIS_APP_SECRET KIS_ACCOUNT_NO KIS_ACCOUNT_PRODUCT_CODE \
+              ALERT_GMAIL_USER ALERT_GMAIL_APP_PASSWORD ALERT_GMAIL_TO; do
+              credential_value="\$(awk -F= -v key="\$required_key" '\$1 == key { print substr(\$0, index(\$0, "=") + 1); exit }' "\$file")"
+              if [ -z "\$credential_value" ]; then
+                echo "Missing required runtime env key: \$required_key" >&2
+                echo "Hint: run uv run python -m src.cli.provision_kis_keypool --host or-vps from a trusted workstation" >&2
+                return 1
+              fi
+            done
+            echo "Runtime env validated: 12 keys"
           }
-          upsert_env KIS_DATA_ENV_FILE "\$DATA_ENV_FILE"
-          upsert_env KIS_SHARED_TOKEN_CACHE_DIR "\$HOME/.cache/kis"
+          validate_runtime_env "\$RUNTIME_ENV_FILE"
 
           # KCA reads the same shared fragment through its user-systemd unit.
           DROPIN_DIR="\$HOME/.config/systemd/user/kca-kis-token-warmup.service.d"

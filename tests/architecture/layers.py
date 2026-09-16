@@ -9,4 +9,5 @@ LAYER_RANK['src/realtime/kis_lease.py'] = 1
 LAYER_RANK['src/storage/normalize_worker.py'] = 3
 LAYER_RANK['src/core/observability.py'] = 0
 LAYER_RANK['src/core/kis_keypool_provisioning.py'] = 0
+LAYER_RANK['src/core/runtime_env_provisioning.py'] = 0
 LAYER_RANK['src/cli/provision_kis_keypool.py'] = 7
