@@ -42,60 +42,31 @@ Focus on: *What is the fundamental causality behind this state? What competing a
      - `{ expected_data_scale, memory_target_mb, storage_format, dtype_precision, chunking_strategy }`
      - Do NOT introduce artificial truncation or shortened windows.
 
-5. **Probe Summary Persistence & Transition Gate to `/spec`**:
-   - Always persist probe conclusions to `scratch/probe_<topic>.json`:
-     ```json
-     {
-       "feature": "<feature_name>",
-       "domain": "<domain>",
-       "hypothesis": "<validated core hypothesis>",
-       "empirical_proof": {
-         "script": "scratch/probe_<topic>.py",
-         "summary": "<real measurement/benchmark result>"
-       },
-       "alternatives_considered": ["<alt 1>", "<alt 2>"],
-       "chosen_reason": "<why the selected architecture was chosen>",
-       "failure_modes": ["<failure mode 1>", "<failure mode 2>"],
-       "invariants": ["<fail-closed rule 1>", "<invariant rule 2>"],
-       "performance_budget": null
-     }
-     ```
-   - Once persisted, hand off directly to `/spec` which will consume `scratch/probe_<topic>.json` as input.
+5. **Seamless In-Session Transition to `/spec`**:
+   - `probe` and `spec` run in the same model and session. Do NOT serialize intermediate JSON files to disk.
+   - The diagnosis, invariants, and architectural decisions established here flow directly through the conversation context into `/spec`.
 
 ## Chat Output Format
 
 Keep chat response clear, intuitive for humans, and evidence-focused. Avoid cryptic jargon dumps or robotic abbreviation walls.
-Detailed logs, benchmark payloads, and raw traces MUST be dumped to `scratch/probe_<topic>.json` and referenced via link, not pasted into chat.
 
 **Output Directives:**
-- **Human-Readable Context First**: Always explain the core diagnosis, chosen direction, and user-facing impact in plain Korean before presenting tables.
-- **Terminal-Safe Tables**: Never put multiline descriptions or long code snippets inside Markdown tables. Keep columns short.
+- **Human-Friendly & Intuitive Context**: Explain the problem, root cause, and solution in clear, natural Korean. Use intuitive, plain analogies where helpful so the user immediately grasps the situation without needing to ask for easier clarification.
+- **Zero Typing Next Step**: Point directly to `/spec` without requiring the user to type `--feature` or other CLI arguments.
 - **Language Requirement**: All output rendered to the user MUST be written in Korean (한국어).
 
 ---
 
 ### 🔬 [PROBE] <기능/토픽 제목>
 
-#### 1. 한눈에 보는 진단 요약 (Triage Briefing)
-- 🔍 **근본 원인 (Root Cause)**: <표면적 에러가 아닌, 데이터/상태 전이 상의 근본 원인 1-2줄>
-- 🛠️ **채택된 접근법**: <경쟁 대안 중 왜 이 방식을 선택했는지 1-2줄>
-- 🎯 **영향 및 기대 효과**: <이 변경이 시스템과 사용자에게 주는 실질적 영향 1줄>
+#### 💡 한눈에 이해하는 문제와 해법
+- 🔍 **상황 및 배경**: <전문 용어 난사 대신, 직관적인 비유나 일상 언어로 어떤 결함/증상인지 1-2줄>
+- ⚙️ **근본 원인 (Root Cause)**: <데이터/상태 전이 상의 근본 원인 1-2줄>
+- 🛠️ **해결 방식**: <경쟁 대안 중 왜 이 방식을 채택했는지 1-2줄>
+- 🎯 **기대 효과**: <이 변경이 시스템과 사용자에게 주는 실질적 영향 1줄>
 
-#### 2. 실증 검증 매트릭스 (Empirical Matrix)
-> 📁 상세 로그/페이로드: [`scratch/probe_<topic>.json`](file:///scratch/probe_<topic>.json)
-
-| 검증 항목 / 대상 | 실증 측정치 / 근거 | 판정 (Verdict) |
-| :--- | :--- | :--- |
-| `<모듈 or 이슈>` | `<측정값, 실패 라인, exit code 등 컴팩트한 근거>` | `CONFIRMED / REJECTED / BUG` |
-
-#### 3. 핵심 불변식 (Invariants & Boundaries)
-- 🛡️ **<INV-NAME>**: <Fail-Closed 조건 또는 경계 규칙 1줄 요약>
-- 🧩 **<STATE-RULE>**: <상태 전이 또는 스키마 규약 1줄 요약>
-
-#### 4. 구현 시 주의점 및 위험 (Critical Traps)
-*필요한 경우에만 최대 2개 이하의 콜아웃 박스 사용. 중복 설명 금지.*
-> [!CRITICAL]
-> **<핵심 위험 제목>**: <구현 시 주의할 엣지 조건 또는 회귀 경고 1줄 요약>
+#### 🛡️ 주의할 점 및 경계 맥락 (Caveats)
+- ⚠️ <다음 작업자가 오해하거나 놓치기 쉬운 전제조건 또는 경계 규칙 1줄>
 
 ---
-👉 다음 단계: `/spec --feature <feature_name> --domain <domain>`
+👉 다음 단계: `/spec`
