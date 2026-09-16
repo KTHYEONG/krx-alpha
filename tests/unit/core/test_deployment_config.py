@@ -48,6 +48,17 @@ def test_dockerfile_keeps_uv_cache_out_of_image_and_runs_venv_python() -> None:
     assert '"uv", "run"' not in dockerfile
 
 
+def test_compose_enables_aftermarket_with_verified_kis_pair_capacity() -> None:
+    from pathlib import Path
+
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "KRX_ALPHA_AFTER_MARKET_ENABLED=true" in compose
+    # KIS 웹소켓 커넥션당 41스트림쌍 하드캡: docs/architecture/design-decisions.md,
+    # overview.md, tests/unit/realtime/test_kis_sharding.py 가 모두 이 값을 검증치로 쓴다.
+    assert "KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION=41" in compose
+
+
 def test_compose_uses_absolute_secret_paths_without_shell_interpolation() -> None:
     from pathlib import Path
 
