@@ -14,6 +14,9 @@ services:
       - KRX_ALPHA_PERSISTENT_LOGS=true
       - KRX_ALPHA_KIS_TOKEN_CACHE_DIR=/run/kis-token-cache
       - KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE=false
+      - KRX_ALPHA_AFTER_MARKET_ENABLED=true
+      # KIS 리테일 웹소켓 커넥션당 41스트림쌍 하드캡(docs/architecture/design-decisions.md 검증치)
+      - KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION=41
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
