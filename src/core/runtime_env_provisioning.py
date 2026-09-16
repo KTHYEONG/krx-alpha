@@ -9,6 +9,7 @@ never writes or prints credential values.
 from __future__ import annotations
 
 import logging
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,8 +81,11 @@ def build_runtime_fragment(source_path: Path) -> str:
 def install_runtime_fragment(host: str, fragment: str) -> None:
     """Install the runtime fragment on the VPS over SSH, sending it only via stdin."""
     logger.info("installing runtime env fragment on host: %s", host)
+    # ssh는 argv[2:]를 공백으로 이어붙여 원격 로그인 셸에 통째로 전달한다. shlex.quote로
+    # 단일 문자열 인자를 만들어 원격 셸이 정확히 "bash -c <SCRIPT>"로만 해석하게 한다
+    # (분리 인자로 넘기면 개행 포함 SCRIPT가 재분리되어 셸 환경변수가 유출됨, 실측 확인).
     subprocess.run(  # noqa: S603 - fixed argv without shell; credentials travel only via stdin
-        ["ssh", host, "bash", "-c", REMOTE_RUNTIME_INSTALL_SCRIPT],  # noqa: S607 - ssh resolved via PATH on trusted workstation
+        ["ssh", host, f"bash -c {shlex.quote(REMOTE_RUNTIME_INSTALL_SCRIPT)}"],  # noqa: S607
         input=fragment,
         text=True,
         check=True,

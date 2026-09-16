@@ -9,6 +9,7 @@ never writes or prints credential values.
 from __future__ import annotations
 
 import logging
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -85,8 +86,14 @@ def build_shared_fragment(source_path: Path) -> str:
 def install_shared_fragment(host: str, fragment: str) -> None:
     """Install the fragment on the VPS over SSH, sending it only via stdin."""
     logger.info("installing shared KIS data fragment on host: %s", host)
+    # ssh는 argv[2:]를 공백으로 이어붙여 원격 로그인 셸에 통째로 전달한다. 4개 별도
+    # 인자("bash","-c",SCRIPT)로 넘기면 개행 포함 SCRIPT가 재분리되어 -c는 첫 단어만
+    # 받고 나머지는 원격 로그인 셸에서 개별 실행돼(우연히 성공은 하지만) 인자 없는
+    # "bash -c set"이 끼어들어 셸 환경변수 전체가 표준출력에 유출된다(실측 확인).
+    # shlex.quote로 단일 문자열 인자를 만들면 원격 셸이 정확히 "bash -c <SCRIPT>"로만
+    # 해석한다.
     subprocess.run(  # noqa: S603 - fixed argv without shell; credentials travel only via stdin
-        ["ssh", host, "bash", "-c", REMOTE_INSTALL_SCRIPT],  # noqa: S607 - ssh resolved via PATH on trusted workstation
+        ["ssh", host, f"bash -c {shlex.quote(REMOTE_INSTALL_SCRIPT)}"],  # noqa: S607
         input=fragment,
         text=True,
         check=True,
