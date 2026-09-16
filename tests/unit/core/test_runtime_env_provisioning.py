@@ -172,14 +172,16 @@ def test_install_runtime_fragment_sends_values_only_on_ssh_stdin(monkeypatch) ->
     args, kwargs = calls[0]
     assert args[0] == "ssh"
     assert args[1] == "or-vps"
-    assert args[2] == "bash"
-    assert args[3] == "-c"
+    # 단일 문자열 인자: ssh가 argv[2:]를 공백으로 이어붙여 원격 셸에 전달하므로
+    # 여러 인자로 나누면 개행 포함 스크립트가 재분리되어 환경변수가 유출된다.
+    assert len(args) == 3
+    assert args[2].startswith("bash -c ")
     assert kwargs["input"] == fragment
     assert kwargs["check"] is True
     assert kwargs["text"] is True
     assert "shell" not in kwargs
     assert all("secret-value" not in part for part in args)
-    remote_script = args[4]
+    remote_script = args[2]
     assert provisioning.REMOTE_RUNTIME_ENV_PATH == "/home/ubuntu/quant-secrets/krx-alpha.env"
     assert provisioning.REMOTE_RUNTIME_ENV_PATH in remote_script
     assert "set -euo pipefail" in remote_script
