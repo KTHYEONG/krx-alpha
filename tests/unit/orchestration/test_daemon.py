@@ -2514,3 +2514,248 @@ def test_daemon_logs_snapshot_restart_and_circuit_open(tmp_path, monkeypatch, ca
         )
 
     assert 'stage=snapshots status=FAIL reason=circuit_open' in caplog.text
+
+def _clear_program_backfill_env(monkeypatch) -> None:
+    import os
+
+    for name in [n for n in os.environ if n.startswith("KRX_ALPHA_TOSS_PROGRAM_")]:
+        monkeypatch.delenv(name, raising=False)
+
+
+def _ready_orchestration_setup(tmp_path, monkeypatch, *, symbols=("005930", "000660")):
+    import datetime as dt
+    import pathlib
+
+    import polars as pl
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
+    monkeypatch.setenv("TOSS_APP_KEY", "tsck_test")
+    monkeypatch.setenv("TOSS_APP_SECRET", "tssk_test")
+    _clear_program_backfill_env(monkeypatch)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "date": [dt.date(2026, 9, 9)],
+        "symbol": ["000001"],
+        "close": [1000.0],
+        "volume": [1000],
+        "trade_value_100m": [100.0],
+        "daily_change_pct": [1.0],
+    }).write_parquet(settings.paths.bars_store)
+
+    def _fake_refresh(**kwargs):
+        return daemon.BarsRefreshResult(trading_day=dt.date(2026, 9, 9), appended_rows=0, backfilled_days=0)
+
+    def _fake_plan(**kwargs):
+        settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+        write_candidates(
+            settings.paths.candidates,
+            [{"symbol": symbol, "selection_reasons": ["limit_up"]} for symbol in symbols],
+            rev=1,
+        )
+        return daemon.UniversePlanResult(
+            decision_date=dt.date(2026, 9, 9), selected=len(symbols), out_path=kwargs["out_path"], candidates_emitted=len(symbols)
+        )
+
+    monkeypatch.setattr(daemon, "refresh_bars", _fake_refresh)
+    monkeypatch.setattr(daemon, "plan_universe", _fake_plan)
+    return settings
+
+
+def test_run_session_orchestration_triggers_auto_backfill_when_ready(tmp_path, monkeypatch) -> None:
+    # Given: 정상 bars/universe/candidates 준비 경로와 가짜 백필
+    import datetime as dt
+
+    from src.marketdata.service import ProgramTradesBackfillResult
+    from src.orchestration import daemon
+
+    settings = _ready_orchestration_setup(tmp_path, monkeypatch)
+    seen: dict[str, object] = {}
+
+    def _fake_backfill(**kwargs):
+        seen.update(kwargs)
+        return ProgramTradesBackfillResult(symbols_ok=2, symbols_failed=0, appended_rows=10)
+
+    monkeypatch.setattr(daemon, "backfill_universe_program_trades", _fake_backfill)
+
+    # When
+    ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 10), settings=settings)
+
+    # Then: 오늘 candidates 심볼 튜플과 reference_date=today로 호출되고 반환은 그대로 True
+    assert ready is True
+    assert seen["symbols"] == ("005930", "000660")
+    assert seen["reference_date"] == dt.date(2026, 9, 10)
+    assert seen["store_path"] == settings.paths.program_trades_store
+
+
+def test_run_session_orchestration_skips_auto_backfill_when_not_ready(tmp_path, monkeypatch) -> None:
+    # Given: plan_universe가 빈 candidates를 발행하는 준비 실패 경로
+    import datetime as dt
+    import pathlib
+
+    import polars as pl
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+
+    monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
+    monkeypatch.setenv("TOSS_APP_KEY", "tsck_test")
+    monkeypatch.setenv("TOSS_APP_SECRET", "tssk_test")
+    _clear_program_backfill_env(monkeypatch)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "date": [dt.date(2026, 9, 9)],
+        "symbol": ["000001"],
+        "close": [1000.0],
+        "volume": [1000],
+        "trade_value_100m": [100.0],
+        "daily_change_pct": [1.0],
+    }).write_parquet(settings.paths.bars_store)
+    monkeypatch.setattr(
+        daemon, "refresh_bars", lambda **kw: daemon.BarsRefreshResult(trading_day=dt.date(2026, 9, 9), appended_rows=0, backfilled_days=0)
+    )
+    monkeypatch.setattr(
+        daemon,
+        "plan_universe",
+        lambda **kw: daemon.UniversePlanResult(
+            decision_date=dt.date(2026, 9, 9), selected=0, out_path=kw["out_path"], candidates_emitted=0
+        ),
+    )
+
+    def _must_not_call(**kwargs):
+        raise AssertionError("backfill must not run when universe is not ready")
+
+    monkeypatch.setattr(daemon, "backfill_universe_program_trades", _must_not_call)
+
+    # When
+    ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 10), settings=settings)
+
+    # Then: 백필 미호출
+    assert ready is False
+
+
+def test_run_session_orchestration_isolates_missing_toss_credentials(tmp_path, monkeypatch, caplog) -> None:
+    # Given: TOSS 자격증명 미설정, 그 외 정상 경로
+    import datetime as dt
+    import logging
+
+    from src.orchestration import daemon
+
+    settings = _ready_orchestration_setup(tmp_path, monkeypatch)
+    monkeypatch.delenv("TOSS_APP_KEY", raising=False)
+    monkeypatch.delenv("TOSS_APP_SECRET", raising=False)
+
+    def _must_not_call(**kwargs):
+        raise AssertionError("backfill must not run without credentials")
+
+    monkeypatch.setattr(daemon, "backfill_universe_program_trades", _must_not_call)
+
+    # When
+    with caplog.at_level(logging.WARNING):
+        ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 10), settings=settings)
+
+    # Then: 스트리밍 준비에 영향 없이 True + WARNING 로그
+    assert ready is True
+    assert "program_trades_auto_backfill" in caplog.text
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_run_session_orchestration_isolates_program_trades_backfill_failure(tmp_path, monkeypatch, caplog) -> None:
+    # Given: 백필이 TossProgramTradesError를 던지는 경로
+    import datetime as dt
+    import logging
+
+    from src.marketdata.toss_program_trades import TossProgramTradesError
+    from src.orchestration import daemon
+
+    settings = _ready_orchestration_setup(tmp_path, monkeypatch)
+
+    def _fail_backfill(**kwargs):
+        raise TossProgramTradesError("store unreadable")
+
+    monkeypatch.setattr(daemon, "backfill_universe_program_trades", _fail_backfill)
+
+    # When
+    with caplog.at_level(logging.ERROR):
+        ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 10), settings=settings)
+
+    # Then: 예외 전파 없이 True + ERROR 로그
+    assert ready is True
+    assert "program_trades_auto_backfill" in caplog.text
+    assert any(r.levelno == logging.ERROR for r in caplog.records)
+
+
+def test_program_trades_auto_backfill_skips_when_disabled(tmp_path, monkeypatch) -> None:
+    # Given: 자동 백필 비활성화 설정
+    import datetime as dt
+    import pathlib
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+
+    monkeypatch.setenv("TOSS_APP_KEY", "tsck_test")
+    monkeypatch.setenv("TOSS_APP_SECRET", "tssk_test")
+    monkeypatch.setenv("KRX_ALPHA_TOSS_PROGRAM_AUTO_BACKFILL_ENABLED", "false")
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+
+    def _must_not_call(**kwargs):
+        raise AssertionError("backfill must not run when disabled")
+
+    monkeypatch.setattr(daemon, "backfill_universe_program_trades", _must_not_call)
+
+    # When / Then: 후보 파일 유무와 무관하게 조용히 반환
+    daemon._run_program_trades_auto_backfill(settings.paths, dt.date(2026, 9, 10))
+
+
+def test_program_trades_auto_backfill_skips_when_no_candidates(tmp_path, monkeypatch) -> None:
+    # Given: 자격증명은 있으나 후보 파일이 없는 경로
+    import datetime as dt
+    import pathlib
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+
+    monkeypatch.setenv("TOSS_APP_KEY", "tsck_test")
+    monkeypatch.setenv("TOSS_APP_SECRET", "tssk_test")
+    _clear_program_backfill_env(monkeypatch)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+
+    def _must_not_call(**kwargs):
+        raise AssertionError("backfill must not run without candidates")
+
+    monkeypatch.setattr(daemon, "backfill_universe_program_trades", _must_not_call)
+
+    # When / Then: 예외 없이 반환
+    daemon._run_program_trades_auto_backfill(settings.paths, dt.date(2026, 9, 10))
+
+
+def test_program_trades_auto_backfill_isolates_unexpected_failure(tmp_path, monkeypatch, caplog) -> None:
+    # Given: 손상된 후보 파일(읽기 시 예외 발생)
+    import datetime as dt
+    import logging
+    import pathlib
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+
+    monkeypatch.setenv("TOSS_APP_KEY", "tsck_test")
+    monkeypatch.setenv("TOSS_APP_SECRET", "tssk_test")
+    _clear_program_backfill_env(monkeypatch)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.candidates.write_text("{not-json", encoding="utf-8")
+
+    def _must_not_call(**kwargs):
+        raise AssertionError("backfill must not run on corrupt candidates")
+
+    monkeypatch.setattr(daemon, "backfill_universe_program_trades", _must_not_call)
+
+    # When / Then: 호출자에게 전파하지 않고 ERROR 로그만 남긴다
+    with caplog.at_level(logging.ERROR):
+        daemon._run_program_trades_auto_backfill(settings.paths, dt.date(2026, 9, 10))
+    assert "program_trades_auto_backfill" in caplog.text

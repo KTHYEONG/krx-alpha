@@ -7,7 +7,7 @@ import logging
 import pathlib
 import sys
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -25,6 +25,7 @@ from src.core.config import (
     ObservabilitySettings,
     SnapshotSettings,
     TossCredentials,
+    TossProgramTradesSettings,
     load_credentials,
 )
 from src.core.errors import KrxAlphaError, MissingCredentialsError
@@ -34,7 +35,7 @@ from src.execution.kis_client import KisRestClient, RateLimiter, kis_token_cache
 from src.marketdata.krx_bars import KrxBarsError
 from src.marketdata.service import BarsRefreshResult as BarsRefreshResult
 from src.marketdata.service import KisFallbackError as KisFallbackError
-from src.marketdata.service import refresh_bars, refresh_bars_via_kis_fallback
+from src.marketdata.service import backfill_universe_program_trades, refresh_bars, refresh_bars_via_kis_fallback
 from src.marketdata.toss_calendar import (
     TossCalendarError,
     TradingDay,
@@ -43,6 +44,7 @@ from src.marketdata.toss_calendar import (
     save_trading_day_cache,
     trading_day_from_cache,
 )
+from src.marketdata.toss_program_trades import TossProgramTradesError
 from src.orchestration.eod import (
     aftermarket_eod_ready,
     check_backup_freshness,
@@ -100,6 +102,44 @@ def _build_kis_client(paths: DataPaths) -> KisRestClient:
         timeout_s=execution.request_timeout_s,
         allow_token_issue=token_settings.allow_issue,
     )
+
+
+def _run_program_trades_auto_backfill(paths: DataPaths, today: dt.date) -> None:
+    """오늘 유니버스 중 프로그램매매 이력이 부족한 종목만 백필한다 (실패해도 스트리밍 준비를 막지 않는다)."""
+    try:
+        settings = TossProgramTradesSettings()
+        if not settings.auto_backfill_enabled:
+            return
+        try:
+            creds = load_credentials(TossCredentials)
+        except MissingCredentialsError as exc:
+            logger.warning("[DAEMON] stage=program_trades_auto_backfill status=SKIP reason=%s", str(exc))
+            return
+        data = read_candidates(paths.candidates)
+        rows = cast("list[dict[str, object]] | None", data.get("candidates") if data else None)
+        if not rows:
+            return
+        symbols = tuple(str(row["symbol"]) for row in rows)
+        result = backfill_universe_program_trades(
+            store_path=paths.program_trades_store,
+            symbols=symbols,
+            lookback_days=settings.auto_backfill_lookback_days,
+            reference_date=today,
+            app_key=creds.toss_app_key,
+            app_secret=creds.toss_app_secret,
+            rate_per_s=settings.rate_per_s,
+        )
+        if result.symbols_ok + result.symbols_failed > 0:
+            logger.info(
+                "[DAEMON] stage=program_trades_auto_backfill status=OK symbols_ok=%d symbols_failed=%d appended_rows=%d",
+                result.symbols_ok,
+                result.symbols_failed,
+                result.appended_rows,
+            )
+    except TossProgramTradesError as exc:
+        logger.error("[DAEMON] stage=program_trades_auto_backfill status=FAIL reason=%s", str(exc))
+    except Exception as exc:  # noqa: BLE001 - 자동 백필 실패가 스트리밍 준비를 막지 않도록 격리
+        logger.error("[DAEMON] stage=program_trades_auto_backfill status=FAIL reason=%s", str(exc))
 
 
 def run_session_orchestration(
@@ -168,6 +208,8 @@ def run_session_orchestration(
         snapshot_store=SnapshotStore(paths=paths, session_date=today),
     )
     ready = _candidates_ready(paths.candidates)
+    if ready:
+        _run_program_trades_auto_backfill(paths, today)
     logger.info(
         "[DAEMON] stage=orchestration status=OK decision_date=%s ready=%s",
         decision_date.isoformat(),
