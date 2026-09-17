@@ -158,19 +158,25 @@ custtype: P
 ## 5. Ranking & Screening TRs (순위 / 조건검색)
 
 ### 5.1 `FHPST01700000` — 등락률 순위 (Fluctuation Ranking)
+> [!IMPORTANT]
+> 실측 정정(2026-09-17): 이 TR은 14개 필드가 전부 필수다. 이전 문서는 6개만
+> 기재해 나머지 7개(`FID_PRC_CLS_CODE` 등)가 누락된 채 배포됐고 KIS가
+> `OPSQ2001 ERROR INPUT FIELD NOT FOUND`로 거부했다(라이브 호출로 검증).
 * **Path:** `GET /uapi/domestic-stock/v1/ranking/fluctuation`
-* **Params:** `FID_COND_MRKT_DIV_CODE` (`J`), `FID_COND_SCR_DIV_CODE` (`20170`), `FID_INPUT_ISCD` (`0000`), `FID_RANK_SORT_CLS_CODE` (`0`: 상승률순), `FID_INPUT_CNT_1` (`200`), `FID_RSFL_RATE1` (min%), `FID_RSFL_RATE2` (max%).
+* **Params:** `FID_COND_MRKT_DIV_CODE` (`J`), `FID_COND_SCR_DIV_CODE` (`20170`), `FID_INPUT_ISCD` (`0000`), `FID_RANK_SORT_CLS_CODE` (`0`: 상승률순), `FID_INPUT_CNT_1` (`200`), `FID_PRC_CLS_CODE` (`0`: 전체), `FID_INPUT_PRICE_1` (`""`), `FID_INPUT_PRICE_2` (`""`), `FID_VOL_CNT` (`""`), `FID_TRGT_CLS_CODE` (`0`), `FID_TRGT_EXLS_CLS_CODE` (`0`), `FID_DIV_CLS_CODE` (`0`), `FID_RSFL_RATE1` (min%), `FID_RSFL_RATE2` (max%).
 * **Output (`output`):** `stck_shrn_iscd`, `hts_kor_isnm`, `stck_prpr`, `prdy_ctrt`, `acml_vol`, `acml_tr_pbmn`.
 
-### 5.2 `FHPST01710000` — 거래량 순위 (Volume Ranking)
-* **Path:** `GET /uapi/domestic-stock/v1/ranking/volume`
-* **Params:** `FID_COND_MRKT_DIV_CODE` (`J`), `FID_COND_SCR_DIV_CODE` (`20171`), `FID_INPUT_ISCD` (`0000`), `FID_DIV_CLS_CODE` (`0`), `FID_BLNG_CLS_CODE` (`0`), `FID_TRGT_CLS_CODE` (`0000000000`), `FID_TRGT_EXLS_CLS_CODE` (`0000000000`), `FID_INPUT_PRICE_1` (`""`), `FID_INPUT_PRICE_2` (`""`), `FID_VOL_CNT` (`""`), `FID_INPUT_CNT_1` (`100`).
-* **Output (`output`):** `stck_shrn_iscd`, `hts_kor_isnm`, `stck_prpr`, `prdy_ctrt`, `acml_vol`, `vol_inrt` (거래량증가율).
-
-### 5.3 `FHPST01720000` — 거래대금 순위 (Trade Amount Ranking)
-* **Path:** `GET /uapi/domestic-stock/v1/ranking/trade-amount`
-* **Params:** `FID_COND_MRKT_DIV_CODE` (`J`), `FID_COND_SCR_DIV_CODE` (`20172`), `FID_INPUT_ISCD` (`0000`), `FID_INPUT_CNT_1` (`100`).
-* **Output (`output`):** `stck_shrn_iscd`, `hts_kor_isnm`, `stck_prpr`, `prdy_ctrt`, `acml_tr_pbmn` (누적거래대금).
+### 5.2 `FHPST01710000` — 거래량/거래대금 순위 (Volume/Trade-Amount Ranking, `FID_BLNG_CLS_CODE`로 정렬 기준 선택)
+> [!IMPORTANT]
+> 실측 정정(2026-09-17): 이 화면은 하나의 TR로 여러 정렬 기준을 제공하는 템플릿이다.
+> 이전 문서(구 5.3)가 "거래대금 순위"를 별도 TR `FHPST01720000`·경로
+> `/ranking/trade-amount`로 잘못 기재해 프로덕션에서 404(JSONDecodeError)가
+> 발생했다. `FHPST01720000`의 실제 정체는 "호가잔량 순위"이며 해당 경로는
+> KIS에 존재하지 않는다(공식 `koreainvestment/open-trading-api` 재확인, 라이브
+> 호출로 검증). 거래대금순위는 아래처럼 `FID_BLNG_CLS_CODE="3"`으로 조회한다.
+* **Path:** `GET /uapi/domestic-stock/v1/quotations/volume-rank`
+* **Params:** `FID_COND_MRKT_DIV_CODE` (`J`), `FID_COND_SCR_DIV_CODE` (`20171`), `FID_INPUT_ISCD` (`0000`), `FID_DIV_CLS_CODE` (`0`), `FID_BLNG_CLS_CODE` (`0`: 평균거래량, `3`: 거래금액순), `FID_TRGT_CLS_CODE` (`0000000000`), `FID_TRGT_EXLS_CLS_CODE` (`0000000000`), `FID_INPUT_PRICE_1` (`""`), `FID_INPUT_PRICE_2` (`""`), `FID_VOL_CNT` (`""`), `FID_INPUT_DATE_1` (`""`).
+* **Output (`output`):** `mksc_shrn_iscd` (종목코드 — 5.1의 `stck_shrn_iscd`와 필드명이 다름), `hts_kor_isnm`, `stck_prpr`, `prdy_ctrt`, `acml_vol`, `acml_tr_pbmn` (누적거래대금).
 
 ### 5.4 `FHKST01010600` — 시가총액 순위 (Market Cap Ranking)
 * **Path:** `GET /uapi/domestic-stock/v1/ranking/market-cap`

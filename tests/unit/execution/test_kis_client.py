@@ -520,16 +520,19 @@ def test_kis_rankings_use_correct_trs_and_reject_schema(tmp_path) -> None:
     from src.execution.contracts import KisApiError
     from tests.unit.execution.fakes import FakeResponse, make_client
 
-    amount = FakeResponse({'rt_cd': '0', 'msg_cd': '0', 'msg1': 'ok', 'output': [{'stck_shrn_iscd': '005930', 'prdy_ctrt': '1.25', 'acml_tr_pbmn': '123456789'}]})
+    # 거래대금순위 화면(FHPST01710000)의 종목코드 필드는 mksc_shrn_iscd 다(실측
+    # 확인: FHPST01720000/"/ranking/trade-amount"는 404를 반환하는 잘못된 TR이었음).
+    amount = FakeResponse({'rt_cd': '0', 'msg_cd': '0', 'msg1': 'ok', 'output': [{'mksc_shrn_iscd': '005930', 'prdy_ctrt': '1.25', 'acml_tr_pbmn': '123456789'}]})
     fluctuation = FakeResponse({'rt_cd': '0', 'msg_cd': '0', 'msg1': 'ok', 'output': [{'stck_shrn_iscd': '000660', 'prdy_ctrt': '29.90', 'acml_tr_pbmn': '987654321'}]})
     client, session, _ = make_client(tmp_path, [amount, fluctuation])
 
     assert client.get_trade_amount_ranking()[0].symbol == '005930'
     assert client.get_fluctuation_ranking()[0].change_pct == pytest.approx(29.90)
-    assert [call['headers']['tr_id'] for call in session.calls] == ['FHPST01720000', 'FHPST01700000']
-    assert session.calls[0]['url'].endswith('/uapi/domestic-stock/v1/ranking/trade-amount')
-    assert session.calls[0]['params']['FID_INPUT_CNT_1'] == '100'
+    assert [call['headers']['tr_id'] for call in session.calls] == ['FHPST01710000', 'FHPST01700000']
+    assert session.calls[0]['url'].endswith('/uapi/domestic-stock/v1/quotations/volume-rank')
+    assert session.calls[0]['params']['FID_BLNG_CLS_CODE'] == '3'
     assert session.calls[1]['url'].endswith('/uapi/domestic-stock/v1/ranking/fluctuation')
+    assert session.calls[1]['params']['FID_PRC_CLS_CODE'] == '0'
     assert session.calls[1]['params']['FID_INPUT_CNT_1'] == '200'
 
     bad = FakeResponse({'rt_cd': '0', 'msg_cd': '0', 'msg1': 'ok', 'output': [{'stck_shrn_iscd': 'BAD', 'prdy_ctrt': '1', 'acml_tr_pbmn': '1'}]})
