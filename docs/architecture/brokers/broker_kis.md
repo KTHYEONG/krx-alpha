@@ -164,7 +164,7 @@ custtype: P
 > `OPSQ2001 ERROR INPUT FIELD NOT FOUND`로 거부했다(라이브 호출로 검증).
 * **Path:** `GET /uapi/domestic-stock/v1/ranking/fluctuation`
 * **Params:** `FID_COND_MRKT_DIV_CODE` (`J`), `FID_COND_SCR_DIV_CODE` (`20170`), `FID_INPUT_ISCD` (`0000`), `FID_RANK_SORT_CLS_CODE` (`0`: 상승률순), `FID_INPUT_CNT_1` (`200`), `FID_PRC_CLS_CODE` (`0`: 전체), `FID_INPUT_PRICE_1` (`""`), `FID_INPUT_PRICE_2` (`""`), `FID_VOL_CNT` (`""`), `FID_TRGT_CLS_CODE` (`0`), `FID_TRGT_EXLS_CLS_CODE` (`0`), `FID_DIV_CLS_CODE` (`0`), `FID_RSFL_RATE1` (min%), `FID_RSFL_RATE2` (max%).
-* **Output (`output`):** `stck_shrn_iscd`, `hts_kor_isnm`, `stck_prpr`, `prdy_ctrt`, `acml_vol`, `acml_tr_pbmn`.
+* **Output (`output`):** `stck_shrn_iscd`, `hts_kor_isnm`, `stck_prpr`, `prdy_ctrt`, `acml_vol`. `acml_tr_pbmn`(누적거래대금)은 이 TR에 없다 — 이전 문서 기재가 오류였다(실측 확인). 클라이언트는 미제공을 0으로 취급한다(선정 순위는 랭크 위치로 결정되고 이 값은 메타데이터 표시용이라 영향 없음).
 
 ### 5.2 `FHPST01710000` — 거래량/거래대금 순위 (Volume/Trade-Amount Ranking, `FID_BLNG_CLS_CODE`로 정렬 기준 선택)
 > [!IMPORTANT]

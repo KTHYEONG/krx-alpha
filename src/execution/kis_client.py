@@ -94,7 +94,10 @@ def _parse_ranking_rows(rows: list[dict[str, Any]]) -> tuple[KisRankingRow, ...]
         for index, row in enumerate(rows, start=1):
             symbol = str(row.get("stck_shrn_iscd", ""))
             change = Decimal(str(row.get("prdy_ctrt", "")))
-            trade_value = int(Decimal(str(row.get("acml_tr_pbmn", ""))))
+            # 등락률 랭킹(FHPST01700000)은 acml_tr_pbmn 필드를 아예 반환하지 않는다
+            # (실측 확인) -- 선택 순위는 랭크 위치로만 결정되고 이 값은 메타데이터
+            # 표시용이라, 미제공을 0으로 취급해도 선정 로직에 영향이 없다.
+            trade_value = int(Decimal(str(row.get("acml_tr_pbmn") or "0")))
             if not (symbol.isdigit() and len(symbol) == 6) or not change.is_finite() or trade_value < 0 or symbol in seen:
                 ok = False
                 break

@@ -541,3 +541,19 @@ def test_kis_rankings_use_correct_trs_and_reject_schema(tmp_path) -> None:
     with pytest.raises(KisApiError) as excinfo:
         client.get_trade_amount_ranking()
     assert excinfo.value.msg_cd == 'SCHEMA'
+
+
+def test_fluctuation_ranking_defaults_missing_trade_value_to_zero(tmp_path) -> None:
+    """실측 회귀: 등락률 랭킹은 acml_tr_pbmn 을 반환하지 않는다. 선정 순위는 랭크
+    위치로 결정되고 이 값은 메타데이터라 0 기본값이 선정 로직에 영향을 주지 않는다."""
+    from tests.unit.execution.fakes import FakeResponse, make_client
+
+    no_trade_value = FakeResponse(
+        {'rt_cd': '0', 'msg_cd': '0', 'msg1': 'ok', 'output': [{'stck_shrn_iscd': '042040', 'prdy_ctrt': '10.83'}]}
+    )
+    client, _, _ = make_client(tmp_path, [no_trade_value])
+
+    row = client.get_fluctuation_ranking()[0]
+
+    assert row.symbol == '042040'
+    assert row.trade_value_krw == 0
