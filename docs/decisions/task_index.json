@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_PROGRAM_TRADES_AUTO_BACKFILL",
+      "date": "2026-09-17",
+      "adr_id": "ADR_20260917_PROGRAM_TRADES_AUTO_BACKFILL",
+      "domain": "marketdata",
+      "title": "신규 유니버스 종목 프로그램매매 자동 백필",
+      "why": "매일 새로 유니버스에 진입하는 종목은 프로그램매매 과거 이력이 전혀 없어 롤링 피처 계산 시 결측이 발생했다",
+      "resolution": "장전 오케스트레이션에서 오늘 선정 종목 중 저장 이력이 lookback 기준일에 못 미치는 종목만 골라 기존 backfill_program_trades를 재사용 호출하고, 실패는 스트리밍 준비를 막지 않도록 격리했다",
+      "impact": "하루 신규 3~20종목 기준 수 초~수십 초 내 완료되며 새 벤더 호출 코드 없이 기존 부품만 재조합했다",
+      "caveat": "커버리지 판정은 종목별 최소 저장 날짜만 확인하며, 부분 백필 실패 시 아무 것도 저장되지 않는 backfill_program_trades_history의 원자성에 의존한다"
+    },
+    {
       "task_id": "TASK_TOSS_PROGRAM_TRADES_AND_INDEX_MINUTE_BAR",
       "date": "2026-09-17",
       "adr_id": "ADR_20260917_TOSS_PROGRAM_TRADES_AND_INDEX_MINUTE_BAR",
