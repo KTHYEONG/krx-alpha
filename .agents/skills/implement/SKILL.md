@@ -10,10 +10,10 @@ Fast-execution protocol for mechanical code implementation based strictly on fro
 ## Execution Principles
 
 Operate as a deterministic translator turning the specification into code and passing tests:
-1. Implement clean production logic satisfying the spec's invariants and docstring.
+1. Implement clean production logic satisfying the spec's invariants and docstring across all targets.
 2. Implement targeted invariant guard tests satisfying the spec's Invariant Scenarios.
-3. Wire the caller at the specified anchor.
-4. Verify with `lean_check.py`.
+3. Wire the caller at the specified anchor point(s).
+4. Verify in one pass with `lean_check.py`.
 
 ## Directives
 
@@ -31,20 +31,25 @@ Operate as a deterministic translator turning the specification into code and pa
    - Use idiomatic Pythonic names reflecting the target and behavior: `def test_<target_function>_<invariant_behavior>():`.
    - If scenario traceability is desired, add it optionally to the first line of the test docstring, not the function identifier.
 
-4. **Direct Implementation Workflow (Invariant-Driven)**:
-   - **Small Scope (≤ 1 target file)**:
-     - **Phase 1 (Production Logic & Wiring)**: Implement clean logic and wire at `- Anchor: <anchor>`. Check with `uv run ruff check <target_file> <caller_file>`.
-     - **Phase 2 (Invariant Guard Tests)**: Implement guard tests in `<target_test_file>` verifying Invariant Scenarios. Run `uv run pytest <target_test_file> -q`.
-     - **Phase 3 (Verification & Pruning)**: Run `uv run python tools/agent_skills/lean_check.py --spec <spec_file>`.
-   - **Multi-Component Scope (> 1 target file)**:
-     - Execute sequentially per component unit across all $N$ targets (Unit Chaining):
-       - For each Unit $i \in \{1, \dots, N\}$:
-         1. Implement Unit $i$ target logic & wiring.
-         2. Write Unit $i$ invariant guard tests in `<test_file_i>`.
-         3. Confirm `uv run pytest <test_file_i> -q` passes before advancing to Unit $i+1$.
-       - After all units pass individual verification:
-         - Run `uv run python tools/agent_skills/lean_check.py --spec <spec_file>` once across the whole scope.
-     - Do NOT run redundant Red-check test runs (e.g. executing pytest before production logic is written) to conserve token and process overhead.
+4. **Streamlined Implementation Pipeline (One-Pass Gate)**:
+   - **Phase 1 (Production Logic & Tests)**:
+     - Implement clean production logic for all targets specified in the blueprint.
+     - Implement corresponding invariant guard tests in designated test files.
+     - Batch related target and test implementations without fracturing into unnecessary intermediate turns.
+     - Do NOT run redundant Red-check runs (executing pytest before code is written) or intermediate ad-hoc `ruff check` commands.
+   - **Phase 2 (Anchor Wiring)**:
+     - Wire invocations into caller files at designated `- Anchor: <anchor>` points once target symbols are in place.
+   - **Phase 3 (Single-Gate Verification)**:
+     - Run the unified verification gate once across the entire scope:
+       ```bash
+       uv run python tools/agent_skills/lean_check.py --spec <spec_file>
+       ```
+     - `lean_check.py` executes Ruff, Mypy, Pytest (xdist + diff-coverage), and scaffolding guards in parallel.
+   - **Phase 4 (Targeted Failure Isolation - Only on Failure)**:
+     - If `lean_check.py` reports failures, isolate and fix only the flagged points:
+       - Pytest failure: run only the failing test file (`uv run pytest <failed_test_file> -q --tb=short`) to debug and repair.
+       - Lint/Type failure: fix the exact line reported in the diagnostic.
+       - Re-run `lean_check.py` to confirm resolution.
 
 5. **Diff Coverage Resolution (Pruning Over Bloat)**:
    - If diff coverage reports untested lines:
@@ -53,11 +58,26 @@ Operate as a deterministic translator turning the specification into code and pa
 
 ## Output
 
-### 🔨 [IMPLEMENT] <Task Title>
+Keep chat output ultra-compact and token-efficient.
+**Strictly Prohibited**: Do NOT write lengthy implementation prose, detailed code changes, or verbose Problem / Root Cause / Impact explanations (the rationale is already documented in probe and spec). Only output the minimal summary card below:
 
-- **Status**: ✅ COMPLETE (or ❌ ESCALATED)
-- **Modified**: <Count> files
-- **Verification**:
-  - 🧪 Pytest: <Passed>/<Total> passed
-  - 🧹 Ruff / Mypy: <PASS/FAIL>
-  - 🛡️ Scaffolding & Diff Coverage: <PASS/FAIL>
+### 🔨 [IMPLEMENT] <Task Title>
+> 📄 **구현 스펙**: [`<spec_filename>.md`](file:///path/to/docs/specs/<spec_filename>.md)  
+> 🚦 **상태**: ✅ COMPLETE
+
+- 📦 **수정 파일**: <Count>개 ([`<file_1>`](file:///path/to/<file_1>), [`<file_2>`](file:///path/to/<file_2>), ...)
+- 🧪 **검증 요약**:
+  - Pytest: <Passed>/<Total> passed
+  - Lint / Types: Ruff PASS · Mypy PASS
+  - Diff Coverage: 100% (Scaffolding-Clean)
+
+---
+👉 **다음 단계**: `/check docs/specs/<spec_filename>.md`
+
+*(On Failure / Escalation)*:
+### 🔨 [IMPLEMENT] <Task Title>
+> 📄 **구현 스펙**: [`<spec_filename>.md`](file:///path/to/docs/specs/<spec_filename>.md)  
+> 🚦 **상태**: ❌ ESCALATED (또는 ❌ FAIL)
+
+- 📦 **수정 파일**: <Count>개 ([`<file_1>`](file:///path/to/<file_1>), ...)
+- 💥 **실패 지점**: [<Pytest | Ruff | Mypy | Diff Coverage | Anchor Wiring>] `<실패한 테스트명 또는 핵심 에러 1줄>`
