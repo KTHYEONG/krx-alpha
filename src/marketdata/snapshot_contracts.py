@@ -26,6 +26,7 @@ class SnapshotDataset(StrEnum):
     PROGRAM_TRADE = "program_trade"
     RANKING = "ranking"
     INDEX_SNAPSHOT = "index_snapshot"
+    INDEX_MINUTE_BAR = "index_minute_bar"
     NEWS_TITLE = "news_title"
     STOCK_MINUTE_BAR = "stock_minute_bar"
 
@@ -112,6 +113,17 @@ SNAPSHOT_SCHEMAS: dict[SnapshotDataset, dict[str, Any]] = {
         "advancers": pl.Int64,
         "decliners": pl.Int64,
     },
+    SnapshotDataset.INDEX_MINUTE_BAR: {
+        **COMMON_SNAPSHOT_COLUMNS,
+        "index_code": pl.String,
+        "bar_time": pl.String,
+        "open": pl.Float64,
+        "high": pl.Float64,
+        "low": pl.Float64,
+        "close": pl.Float64,
+        "volume": pl.Int64,
+        "cum_value_mil_krw": pl.Int64,
+    },
     SnapshotDataset.NEWS_TITLE: {
         **COMMON_SNAPSHOT_COLUMNS,
         "news_id": pl.String,
@@ -141,6 +153,7 @@ SNAPSHOT_DEDUP_KEYS: dict[SnapshotDataset, tuple[str, ...]] = {
     SnapshotDataset.INVESTOR_ESTIMATE: ("symbol", "bucket", "observed_at_ns"),
     SnapshotDataset.RANKING: ("list_kind", "rank", "observed_at_ns"),
     SnapshotDataset.INDEX_SNAPSHOT: ("index_code", "observed_at_ns"),
+    SnapshotDataset.INDEX_MINUTE_BAR: ("index_code", "bar_time"),
     SnapshotDataset.NEWS_TITLE: ("news_id",),
     SnapshotDataset.STOCK_MINUTE_BAR: ("symbol", "bar_time"),
 }
@@ -155,6 +168,7 @@ class SnapshotJobKind(StrEnum):
     PROGRAM_TRADE = "program_trade"
     RANKING = "ranking"
     INDEX_SNAPSHOT = "index_snapshot"
+    INDEX_MINUTE_BAR = "index_minute_bar"
     NEWS_TITLE = "news_title"
     EOD_MINUTE_BARS = "eod_minute_bars"
 
@@ -209,6 +223,24 @@ def _interval_series_inclusive(start: dt.datetime, interval_s: int, end_inclusiv
     return out
 
 
+def _coverage_series(start_exclusive: dt.datetime, interval_s: int, end_inclusive: dt.datetime) -> list[dt.datetime]:
+    """Build due times that guarantee a vendor 100-unit lookback window never gaps.
+
+    Each due time after the first is reachable from the previous one within
+    ``interval_s``, and the series always ends exactly at ``end_inclusive`` so
+    the closing bars are never missed even when the interval does not evenly
+    divide the session length.
+    """
+    out: list[dt.datetime] = []
+    cur = _add_seconds(start_exclusive, interval_s)
+    while cur < end_inclusive:
+        out.append(cur)
+        cur = _add_seconds(cur, interval_s)
+    if not out or out[-1] != end_inclusive:
+        out.append(end_inclusive)
+    return out
+
+
 def build_session_jobs(settings: SnapshotSettings, session_date: dt.date) -> tuple[SnapshotJob, ...]:
     """Expand snapshot settings into the ordered, KST-aware job plan of one session.
 
@@ -231,6 +263,7 @@ def build_session_jobs(settings: SnapshotSettings, session_date: dt.date) -> tup
         SnapshotJobKind.INVESTOR_ESTIMATE: [_aware(session_date, t) for t in (*settings.investor_estimate_times, settings.eod_collect_time)],
         SnapshotJobKind.RANKING: _interval_series(intraday_start, settings.ranking_interval_s, intraday_end),
         SnapshotJobKind.INDEX_SNAPSHOT: _interval_series(intraday_start, settings.index_interval_s, intraday_end),
+        SnapshotJobKind.INDEX_MINUTE_BAR: _coverage_series(intraday_start, settings.index_minute_interval_s, intraday_end),
         SnapshotJobKind.NEWS_TITLE: _interval_series(
             _aware(session_date, settings.news_start), settings.news_interval_s, run_end
         ),

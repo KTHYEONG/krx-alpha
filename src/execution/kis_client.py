@@ -56,6 +56,7 @@ TR_FLUCTUATION: str = "FHPST01700000"
 TR_INVESTOR_ESTIMATE: str = "HHPTJ04160200"
 TR_PROGRAM_TRADE: str = "FHPPG04650101"
 TR_INDEX_PRICE: str = "FHPUP02100000"
+TR_INDEX_MINUTE_CHART: str = "FHKUP03500200"
 TR_MINUTE_CHART: str = "FHKST03010200"
 TR_NEWS_TITLE: str = "FHKST01011800"
 
@@ -75,6 +76,7 @@ _PATH_FLUCTUATION = "/uapi/domestic-stock/v1/ranking/fluctuation"
 _PATH_INVESTOR_ESTIMATE = "/uapi/domestic-stock/v1/quotations/investor-trend-estimate"
 _PATH_PROGRAM_TRADE = "/uapi/domestic-stock/v1/quotations/program-trade-by-stock"
 _PATH_INDEX_PRICE = "/uapi/domestic-stock/v1/quotations/inquire-index-price"
+_PATH_INDEX_MINUTE_CHART = "/uapi/domestic-stock/v1/quotations/inquire-time-indexchartprice"
 _PATH_MINUTE_CHART = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
 _PATH_NEWS_TITLE = "/uapi/domestic-stock/v1/quotations/news-title"
 
@@ -877,6 +879,64 @@ class KisRestClient:
         }
         logger.debug("[DATA] stage=kis_snapshot tr=%s symbol=%s rows=1", TR_INDEX_PRICE, index_code)
         return row
+
+    def get_index_minute_bars(self, index_code: str, *, session_date: dt.date) -> tuple[dict[str, object], ...]:
+        """Fetch the vendor's most recent one-minute index bars (fixed 60-second interval).
+
+        The endpoint has no time cursor and no continuation mechanism, so one call
+        only ever returns its most recent page; full-day coverage depends on the
+        caller polling at an interval no longer than that page's span.
+
+        Args:
+            session_date: Trading date bars must belong to; other-day rows are
+                dropped rather than misfiled into this session.
+
+        Raises:
+            KisApiError: On transport/API failure, schema violation, or a bar
+                whose low/high does not bound its open and close.
+        """
+        stamp = session_date.strftime("%Y%m%d")
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "U",
+            "FID_ETC_CLS_CODE": "0",
+            "FID_INPUT_ISCD": index_code,
+            "FID_INPUT_HOUR_1": "60",
+            "FID_PW_DATA_INCU_YN": "Y",
+        }
+        body, _ = self._get(_PATH_INDEX_MINUTE_CHART, TR_INDEX_MINUTE_CHART, params)
+        rows = body.get("output2") or []
+        bars: dict[str, dict[str, object]] = {}
+        for raw in rows:
+            hour = _snapshot_code(raw, "stck_cntg_hour")
+            if hour in ("999999", "888888"):
+                continue
+            if str(raw.get("stck_bsop_date", "")) != stamp:
+                continue
+            if hour in bars:
+                continue
+            open_p = _snapshot_float(raw, "bstp_nmix_oprc")
+            high = _snapshot_float(raw, "bstp_nmix_hgpr")
+            low = _snapshot_float(raw, "bstp_nmix_lwpr")
+            close_p = _snapshot_float(raw, "bstp_nmix_prpr")
+            if low > min(open_p, close_p) or max(open_p, close_p) > high:
+                raise KisApiError("SCHEMA", f"bar range violated: {hour}")
+            bars[hour] = {
+                "source_tr": TR_INDEX_MINUTE_CHART,
+                "market_div_code": "U",
+                "index_code": index_code,
+                "bar_time": hour,
+                "open": open_p,
+                "high": high,
+                "low": low,
+                "close": close_p,
+                "volume": _snapshot_int(raw, "cntg_vol"),
+                "cum_value_mil_krw": _snapshot_int(raw, "acml_tr_pbmn"),
+            }
+        ordered = tuple(bars[key] for key in sorted(bars))
+        logger.debug(
+            "[DATA] stage=kis_snapshot tr=%s symbol=%s rows=%d", TR_INDEX_MINUTE_CHART, index_code, len(ordered)
+        )
+        return ordered
 
     def get_stock_minute_bars(
         self, symbol: str, *, session_date: dt.date, session_open: dt.time, session_close: dt.time

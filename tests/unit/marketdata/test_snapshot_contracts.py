@@ -38,7 +38,8 @@ def test_build_session_jobs_expands_counts_per_kind() -> None:
 
     counts = Counter(j.kind for j in jobs)
     assert counts[SnapshotJobKind.RANKING] == 390
-    assert counts[SnapshotJobKind.INDEX_SNAPSHOT] == 390
+    assert counts[SnapshotJobKind.INDEX_SNAPSHOT] == 78
+    assert counts[SnapshotJobKind.INDEX_MINUTE_BAR] == 5
     assert counts[SnapshotJobKind.AUCTION_OPEN] == 5
     assert counts[SnapshotJobKind.AUCTION_CLOSE] == 4
     assert counts[SnapshotJobKind.INVESTOR_ESTIMATE] == 6
@@ -122,3 +123,39 @@ def test_partition_due_jobs_rejects_naive_now() -> None:
 
     with pytest.raises(ValueError, match="tz-aware"):
         partition_due_jobs(jobs, completed=set(), now=dt.datetime(2026, 9, 17, 10, 0, 10))
+
+
+def _aware_at(hour: int, minute: int) -> dt.datetime:
+    return dt.datetime(2026, 9, 17, hour, minute, tzinfo=_KST)
+
+
+def test_coverage_series_always_ends_exactly_at_boundary() -> None:
+    from src.marketdata.snapshot_contracts import _coverage_series
+
+    result = _coverage_series(_aware_at(9, 0), 4800, _aware_at(15, 30))
+
+    assert result == [
+        _aware_at(10, 20),
+        _aware_at(11, 40),
+        _aware_at(13, 0),
+        _aware_at(14, 20),
+        _aware_at(15, 30),
+    ]
+    assert result[-1] == _aware_at(15, 30)
+
+
+def test_coverage_series_does_not_duplicate_when_interval_divides_evenly() -> None:
+    from src.marketdata.snapshot_contracts import _coverage_series
+
+    result = _coverage_series(_aware_at(9, 0), 23400, _aware_at(15, 30))
+
+    assert result == [_aware_at(15, 30)]
+
+
+def test_index_minute_bar_not_after_defaults_to_run_end_deadline() -> None:
+    settings = _settings()
+    jobs = build_session_jobs(settings, _SESSION_DATE)
+    by_id = {j.job_id: j for j in jobs}
+
+    assert by_id["index_minute_bar@153000"].not_after == dt.datetime(2026, 9, 17, 15, 39, tzinfo=_KST)
+    assert by_id["index_minute_bar@102000"].not_after == by_id["index_minute_bar@114000"].due_at

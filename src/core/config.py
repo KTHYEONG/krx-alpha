@@ -43,6 +43,10 @@ class DataPaths:
         return self.root / "market_map.json"
 
     @property
+    def program_trades_store(self) -> pathlib.Path:
+        return self.root / "bars" / "program_trades.parquet"
+
+    @property
     def candidates(self) -> pathlib.Path:
         return self.root / "candidates.json"
 
@@ -202,6 +206,26 @@ class TossCredentials(BaseSettings):
     toss_app_secret: str
 
 
+class TossProgramTradesSettings(BaseSettings):
+    """Toss program-trade backfill throttling (env_prefix='KRX_ALPHA_TOSS_PROGRAM_').
+
+    The vendor's STOCK_TRADING_TREND group caps at 10 req/s; the default
+    leaves headroom so a long backfill run never trips the vendor's own
+    rate-limit rejection mid-run.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_TOSS_PROGRAM_", extra="ignore")
+
+    rate_per_s: float = 8.0
+    request_timeout_s: float = 10.0
+
+    @model_validator(mode="after")
+    def check_positive(self) -> TossProgramTradesSettings:
+        if self.rate_per_s <= 0 or self.request_timeout_s <= 0:
+            raise ValueError("rate_per_s and request_timeout_s must be positive")
+        return self
+
+
 class LsCredentials(BaseSettings):
     """LS증권 자격증명 (필수, 빈 기본값 금지)."""
 
@@ -275,7 +299,8 @@ class SnapshotSettings(BaseSettings):
     intraday_start: dt.time = dt.time(9, 0)
     intraday_end: dt.time = dt.time(15, 30)
     ranking_interval_s: int = 60
-    index_interval_s: int = 60
+    index_interval_s: int = 300
+    index_minute_interval_s: int = 4800
     index_codes: tuple[str, ...] = ("0001", "1001", "2001")
     news_start: dt.time = dt.time(8, 0)
     news_interval_s: int = 30
@@ -316,9 +341,11 @@ class SnapshotSettings(BaseSettings):
             self.news_start < self.intraday_start < self.intraday_end <= self.eod_collect_time < self.run_end < SessionSchedule().market_close
         ):
             raise ValueError("session time order must satisfy news_start < intraday_start < intraday_end <= eod_collect_time < run_end < market_close")
-        for name in ("ranking_interval_s", "index_interval_s", "news_interval_s", "program_trade_interval_s"):
+        for name in ("ranking_interval_s", "index_interval_s", "index_minute_interval_s", "news_interval_s", "program_trade_interval_s"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
+        if not 0 < self.index_minute_interval_s <= 5400:
+            raise ValueError("index_minute_interval_s must be in (0, 5400] seconds")
         if self.news_max_pages < 1:
             raise ValueError("news_max_pages must be >= 1")
         if self.stock_minute_max_symbols < 0:

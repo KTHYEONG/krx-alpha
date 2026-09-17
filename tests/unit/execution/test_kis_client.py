@@ -1028,3 +1028,78 @@ def test_snapshot_parsing_rejects_missing_and_malformed_fields(tmp_path) -> None
         with pytest.raises(KisApiError) as excinfo:
             client.get_news_titles()
         assert excinfo.value.msg_cd == 'SCHEMA'
+
+
+def _index_minute_row(hour: str, *, date: str = '20260917', price: str = '822.18') -> dict[str, str]:
+    return {
+        'stck_bsop_date': date,
+        'stck_cntg_hour': hour,
+        'bstp_nmix_oprc': price,
+        'bstp_nmix_hgpr': '823.00',
+        'bstp_nmix_lwpr': '821.00',
+        'bstp_nmix_prpr': '822.50',
+        'cntg_vol': '1234',
+        'acml_tr_pbmn': '567890',
+    }
+
+
+def test_get_index_minute_bars_drops_summary_rows_and_maps_float_ohlc(tmp_path) -> None:
+    import datetime as dt
+
+    from tests.unit.execution.fakes import make_client
+
+    rows = [
+        _index_minute_row('999999'),
+        _index_minute_row('888888'),
+        _index_minute_row('090000'),
+    ]
+    client, session, _ = make_client(tmp_path, [_ok({'output2': rows})])
+
+    (bar,) = client.get_index_minute_bars('1001', session_date=dt.date(2026, 9, 17))
+
+    assert bar['bar_time'] == '090000'
+    assert isinstance(bar['open'], float)
+    assert isinstance(bar['high'], float)
+    assert isinstance(bar['low'], float)
+    assert isinstance(bar['close'], float)
+    assert bar['market_div_code'] == 'U'
+    params = session.calls[0]['params']
+    assert params['FID_INPUT_HOUR_1'] == '60'
+    assert params['FID_INPUT_ISCD'] == '1001'
+    assert params['FID_COND_MRKT_DIV_CODE'] == 'U'
+
+
+def test_get_index_minute_bars_drops_other_date_and_rejects_broken_bar(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import make_client
+
+    rows = [_index_minute_row('090000', date='20260916'), _index_minute_row('090100')]
+    client, _, _ = make_client(tmp_path, [_ok({'output2': rows})])
+
+    bars = client.get_index_minute_bars('1001', session_date=dt.date(2026, 9, 17))
+
+    assert [b['bar_time'] for b in bars] == ['090100']
+
+    broken = _index_minute_row('090200')
+    broken['bstp_nmix_hgpr'] = '820.00'
+    client, _, _ = make_client(tmp_path / 'broken', [_ok({'output2': [broken]})])
+    with pytest.raises(KisApiError) as excinfo:
+        client.get_index_minute_bars('1001', session_date=dt.date(2026, 9, 17))
+    assert excinfo.value.msg_cd == 'SCHEMA'
+
+
+def test_get_index_minute_bars_deduplicates_and_sorts_ascending(tmp_path) -> None:
+    import datetime as dt
+
+    from tests.unit.execution.fakes import make_client
+
+    rows = [_index_minute_row('090200'), _index_minute_row('090100'), _index_minute_row('090100')]
+    client, _, _ = make_client(tmp_path, [_ok({'output2': rows})])
+
+    bars = client.get_index_minute_bars('1001', session_date=dt.date(2026, 9, 17))
+
+    assert [b['bar_time'] for b in bars] == ['090100', '090200']
