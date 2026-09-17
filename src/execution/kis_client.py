@@ -585,7 +585,11 @@ class KisRestClient:
             "FID_DIV_CLS_CODE": "0",
             "FID_BLNG_CLS_CODE": "3",  # 3: 거래금액순 (실측 확인)
             "FID_TRGT_CLS_CODE": "0000000000",
-            "FID_TRGT_EXLS_CLS_CODE": "0000000000",
+            # 10자리: 위험/경고/주의 관리종목 정리매매 불성실공시 우선주 거래정지 ETF ETN
+            # 신용주문불가 SPAC 순. ETF/ETN(7,8번째 자리)을 제외하지 않으면 6자리 숫자가
+            # 아닌 종목코드(예: 단일종목 레버리지 ETF "0193T0")가 섞여 스키마 검증에서
+            # 거부된다(실측 확인).
+            "FID_TRGT_EXLS_CLS_CODE": "0000001100",
             "FID_INPUT_PRICE_1": "",
             "FID_INPUT_PRICE_2": "",
             "FID_VOL_CNT": "",

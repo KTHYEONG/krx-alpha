@@ -175,7 +175,7 @@ custtype: P
 > KIS에 존재하지 않는다(공식 `koreainvestment/open-trading-api` 재확인, 라이브
 > 호출로 검증). 거래대금순위는 아래처럼 `FID_BLNG_CLS_CODE="3"`으로 조회한다.
 * **Path:** `GET /uapi/domestic-stock/v1/quotations/volume-rank`
-* **Params:** `FID_COND_MRKT_DIV_CODE` (`J`), `FID_COND_SCR_DIV_CODE` (`20171`), `FID_INPUT_ISCD` (`0000`), `FID_DIV_CLS_CODE` (`0`), `FID_BLNG_CLS_CODE` (`0`: 평균거래량, `3`: 거래금액순), `FID_TRGT_CLS_CODE` (`0000000000`), `FID_TRGT_EXLS_CLS_CODE` (`0000000000`), `FID_INPUT_PRICE_1` (`""`), `FID_INPUT_PRICE_2` (`""`), `FID_VOL_CNT` (`""`), `FID_INPUT_DATE_1` (`""`).
+* **Params:** `FID_COND_MRKT_DIV_CODE` (`J`), `FID_COND_SCR_DIV_CODE` (`20171`), `FID_INPUT_ISCD` (`0000`), `FID_DIV_CLS_CODE` (`0`), `FID_BLNG_CLS_CODE` (`0`: 평균거래량, `3`: 거래금액순), `FID_TRGT_CLS_CODE` (`0000000000`), `FID_TRGT_EXLS_CLS_CODE` (`0000001100`: ETF·ETN 제외 — 미제외 시 6자리 숫자가 아닌 종목코드가 섞여 스키마 검증 거부됨, 실측 확인), `FID_INPUT_PRICE_1` (`""`), `FID_INPUT_PRICE_2` (`""`), `FID_VOL_CNT` (`""`), `FID_INPUT_DATE_1` (`""`).
 * **Output (`output`):** `mksc_shrn_iscd` (종목코드 — 5.1의 `stck_shrn_iscd`와 필드명이 다름), `hts_kor_isnm`, `stck_prpr`, `prdy_ctrt`, `acml_vol`, `acml_tr_pbmn` (누적거래대금).
 
 ### 5.4 `FHKST01010600` — 시가총액 순위 (Market Cap Ranking)

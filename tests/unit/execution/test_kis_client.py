@@ -531,6 +531,7 @@ def test_kis_rankings_use_correct_trs_and_reject_schema(tmp_path) -> None:
     assert [call['headers']['tr_id'] for call in session.calls] == ['FHPST01710000', 'FHPST01700000']
     assert session.calls[0]['url'].endswith('/uapi/domestic-stock/v1/quotations/volume-rank')
     assert session.calls[0]['params']['FID_BLNG_CLS_CODE'] == '3'
+    assert session.calls[0]['params']['FID_TRGT_EXLS_CLS_CODE'] == '0000001100'
     assert session.calls[1]['url'].endswith('/uapi/domestic-stock/v1/ranking/fluctuation')
     assert session.calls[1]['params']['FID_PRC_CLS_CODE'] == '0'
     assert session.calls[1]['params']['FID_INPUT_CNT_1'] == '200'
