@@ -272,3 +272,73 @@ def test_append_program_trades_preserves_corrupt_store_and_raises(tmp_path) -> N
     with pytest.raises(TossProgramTradesError, match="unreadable"):
         tpt.append_program_trades(store, [_row("005930", dt.date(2026, 9, 17))])
     assert store.read_bytes() == b"not-a-parquet"
+
+def test_symbols_needing_backfill_returns_all_when_store_missing(tmp_path) -> None:
+    # Given: 존재하지 않는 store 경로
+    store = tmp_path / "bars" / "program_trades.parquet"
+
+    # When
+    out = tpt.symbols_needing_backfill(store, ("005930", "000660"), dt.date(2026, 5, 20))
+
+    # Then: 입력 순서 그대로 전부 반환
+    assert out == ("005930", "000660")
+
+
+def test_symbols_needing_backfill_returns_empty_for_no_symbols(tmp_path) -> None:
+    # Given: 빈 심볼 목록
+    store = tmp_path / "bars" / "program_trades.parquet"
+
+    # When / Then: 벤더 호출 없이 즉시 빈 튜플
+    assert tpt.symbols_needing_backfill(store, (), dt.date(2026, 5, 20)) == ()
+
+
+def test_symbols_needing_backfill_skips_fully_covered_symbols(tmp_path) -> None:
+    # Given: 005930은 min_date 이전부터, 000660은 이후부터만 존재
+    import polars as pl
+
+    store = tmp_path / "bars" / "program_trades.parquet"
+    min_date = dt.date(2026, 5, 20)
+    tpt.append_program_trades(store, [_row("005930", dt.date(2026, 5, 19)), _row("005930", dt.date(2026, 9, 17))])
+    tpt.append_program_trades(store, [_row("000660", dt.date(2026, 5, 21)), _row("000660", dt.date(2026, 9, 17))])
+    assert pl.read_parquet(store).height == 4
+
+    # When
+    out = tpt.symbols_needing_backfill(store, ("005930", "000660"), min_date)
+
+    # Then: 커버리지 부족분만 반환
+    assert out == ("000660",)
+
+
+def test_symbols_needing_backfill_treats_absent_symbol_as_needing_backfill(tmp_path) -> None:
+    # Given: 스토어에 다른 심볼만 존재
+    store = tmp_path / "bars" / "program_trades.parquet"
+    tpt.append_program_trades(store, [_row("005930", dt.date(2026, 1, 5))])
+
+    # When
+    out = tpt.symbols_needing_backfill(store, ("000660",), dt.date(2026, 5, 20))
+
+    # Then: 이력 없는 심볼은 백필 대상
+    assert out == ("000660",)
+
+
+def test_symbols_needing_backfill_preserves_requested_order(tmp_path) -> None:
+    # Given: 스토어에 아무 이력도 없음(대상 심볼 부재)
+    store = tmp_path / "bars" / "program_trades.parquet"
+    tpt.append_program_trades(store, [_row("005930", dt.date(2026, 1, 5))])
+
+    # When
+    out = tpt.symbols_needing_backfill(store, ("B", "A"), dt.date(2026, 5, 20))
+
+    # Then: 정렬하지 않고 요청 순서 유지
+    assert out == ("B", "A")
+
+
+def test_symbols_needing_backfill_raises_on_corrupt_store(tmp_path) -> None:
+    # Given: 손상된 parquet 바이트 파일
+    store = tmp_path / "bars" / "program_trades.parquet"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_bytes(b"not-a-parquet")
+
+    # When / Then: fail-closed
+    with pytest.raises(TossProgramTradesError):
+        tpt.symbols_needing_backfill(store, ("005930",), dt.date(2026, 5, 20))

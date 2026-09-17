@@ -413,6 +413,34 @@ def test_toss_program_trades_settings_rejects_non_positive_rate() -> None:
     with pytest.raises(ValidationError):
         TossProgramTradesSettings(rate_per_s=0)
 
+def test_toss_program_trades_settings_auto_backfill_defaults(monkeypatch) -> None:
+    # Given: 환경변수 없음
+    import os
+
+    from src.core.config import TossProgramTradesSettings
+
+    for name in [n for n in os.environ if n.startswith("KRX_ALPHA_TOSS_PROGRAM_")]:
+        monkeypatch.delenv(name, raising=False)
+
+    # When
+    settings = TossProgramTradesSettings()
+
+    # Then: 자동 백필 기본값
+    assert settings.auto_backfill_enabled is True
+    assert settings.auto_backfill_lookback_days == 120
+
+
+def test_toss_program_trades_settings_rejects_non_positive_lookback() -> None:
+    # Given: 0인 lookback
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import TossProgramTradesSettings
+
+    # When / Then: 생성 시점에 fail-closed
+    with pytest.raises(ValidationError):
+        TossProgramTradesSettings(auto_backfill_lookback_days=0)
+
 
 def test_data_paths_program_trades_store_colocates_with_bars() -> None:
     import pathlib

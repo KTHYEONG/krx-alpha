@@ -354,3 +354,108 @@ def test_backfill_program_trades_wraps_token_issuance_failure(monkeypatch) -> No
             app_secret="s",
             rate_per_s=8.0,
         )
+
+def test_backfill_universe_program_trades_targets_only_uncovered_symbols(tmp_path, monkeypatch) -> None:
+    # Given: 3개 중 1개만 커버리지가 부족한 스토어
+    import datetime as dt
+
+    from src.marketdata import service
+    from src.marketdata.toss_program_trades import append_program_trades
+
+    store = tmp_path / "bars" / "program_trades.parquet"
+    reference_date = dt.date(2026, 9, 17)
+    min_date = reference_date - dt.timedelta(days=120)
+    append_program_trades(store, [_program_trade_row("005930", min_date - dt.timedelta(days=1))])
+    append_program_trades(store, [_program_trade_row("000660", min_date - dt.timedelta(days=1))])
+    append_program_trades(store, [_program_trade_row("035720", min_date + dt.timedelta(days=1))])
+
+    seen: dict[str, object] = {}
+
+    def _fake_backfill(**kwargs):
+        seen.update(kwargs)
+        return service.ProgramTradesBackfillResult(symbols_ok=1, symbols_failed=0, appended_rows=5)
+
+    monkeypatch.setattr(service, "backfill_program_trades", _fake_backfill)
+
+    # When
+    result = service.backfill_universe_program_trades(
+        store_path=store,
+        symbols=("005930", "000660", "035720"),
+        lookback_days=120,
+        reference_date=reference_date,
+        app_key="k",
+        app_secret="s",
+        rate_per_s=8.0,
+    )
+
+    # Then: 미커버 1개에만 위임하고 min_date가 lookback 기준으로 계산된다
+    assert seen["symbols"] == ("035720",)
+    assert seen["min_date"] == min_date
+    assert (result.symbols_ok, result.symbols_failed, result.appended_rows) == (1, 0, 5)
+
+
+def test_backfill_universe_program_trades_skips_vendor_call_when_all_covered(tmp_path, monkeypatch) -> None:
+    # Given: 모든 심볼이 이미 커버됨
+    import datetime as dt
+
+    from src.marketdata import service
+    from src.marketdata.toss_program_trades import append_program_trades
+
+    store = tmp_path / "bars" / "program_trades.parquet"
+    reference_date = dt.date(2026, 9, 17)
+    min_date = reference_date - dt.timedelta(days=120)
+    append_program_trades(store, [_program_trade_row("005930", min_date - dt.timedelta(days=1))])
+
+    class _ExplodingSession:
+        def get(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("no vendor call allowed when all covered")
+
+    calls: list[dict] = []
+
+    def _must_not_call(**kwargs):
+        calls.append(kwargs)
+        raise AssertionError("backfill_program_trades must not be called")
+
+    monkeypatch.setattr(service, "backfill_program_trades", _must_not_call)
+
+    # When
+    result = service.backfill_universe_program_trades(
+        store_path=store,
+        symbols=("005930",),
+        lookback_days=120,
+        reference_date=reference_date,
+        app_key="k",
+        app_secret="s",
+        rate_per_s=8.0,
+        session=_ExplodingSession(),
+    )
+
+    # Then: 벤더 호출 없이 전부 0인 결과
+    assert calls == []
+    assert (result.symbols_ok, result.symbols_failed, result.appended_rows) == (0, 0, 0)
+
+
+def test_backfill_universe_program_trades_returns_zero_result_for_empty_symbols(monkeypatch) -> None:
+    # Given: 빈 심볼 목록
+    import datetime as dt
+
+    from src.marketdata import service
+
+    def _must_not_call(**kwargs):
+        raise AssertionError("backfill_program_trades must not be called for empty symbols")
+
+    monkeypatch.setattr(service, "backfill_program_trades", _must_not_call)
+
+    # When
+    result = service.backfill_universe_program_trades(
+        store_path="x.parquet",
+        symbols=(),
+        lookback_days=120,
+        reference_date=dt.date(2026, 9, 17),
+        app_key="k",
+        app_secret="s",
+        rate_per_s=8.0,
+    )
+
+    # Then: 예외 없이 0 결과 반환
+    assert (result.symbols_ok, result.symbols_failed, result.appended_rows) == (0, 0, 0)

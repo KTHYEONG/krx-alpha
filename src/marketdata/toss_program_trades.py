@@ -204,3 +204,38 @@ def append_program_trades(store_path: pathlib.Path, rows: Sequence[Mapping[str, 
     combined.write_parquet(tmp, compression="zstd")
     os.replace(tmp, store)
     return added
+
+def symbols_needing_backfill(
+    store_path: pathlib.Path, symbols: Sequence[str], min_date: dt.date
+) -> tuple[str, ...]:
+    """Return the symbols whose stored history does not yet reach back to ``min_date``.
+
+    A symbol needs backfill when the store has no rows for it at all, or when
+    its earliest stored date is later than ``min_date``. Coverage is judged
+    solely by the earliest stored date because a symbol only ever gains rows
+    from a fully successful backfill run, so a partial or gapped history for
+    it cannot exist.
+
+    Raises:
+        TossProgramTradesError: If ``store_path`` exists but cannot be read.
+    """
+    if not symbols:
+        return ()
+    store = pathlib.Path(store_path)
+    if not store.exists():
+        return tuple(symbols)
+    try:
+        frame = pl.read_parquet(store).select(["symbol", "date"])
+    except Exception as exc:
+        raise TossProgramTradesError(f"toss program-trades store unreadable at {store}: {exc}") from exc
+    wanted = set(symbols)
+    covered = (
+        frame.filter(pl.col("symbol").is_in(wanted))
+        .group_by("symbol")
+        .agg(pl.col("date").min().alias("min_date"))
+        .filter(pl.col("min_date") <= min_date)
+        .get_column("symbol")
+        .to_list()
+    )
+    covered_set = set(covered)
+    return tuple(symbol for symbol in symbols if symbol not in covered_set)

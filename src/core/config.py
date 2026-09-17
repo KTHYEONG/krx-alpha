@@ -218,11 +218,13 @@ class TossProgramTradesSettings(BaseSettings):
 
     rate_per_s: float = 8.0
     request_timeout_s: float = 10.0
+    auto_backfill_enabled: bool = True
+    auto_backfill_lookback_days: int = 120
 
     @model_validator(mode="after")
     def check_positive(self) -> TossProgramTradesSettings:
-        if self.rate_per_s <= 0 or self.request_timeout_s <= 0:
-            raise ValueError("rate_per_s and request_timeout_s must be positive")
+        if self.rate_per_s <= 0 or self.request_timeout_s <= 0 or self.auto_backfill_lookback_days <= 0:
+            raise ValueError("rate_per_s, request_timeout_s, and auto_backfill_lookback_days must be positive")
         return self
 
 

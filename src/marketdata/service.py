@@ -28,6 +28,7 @@ from src.marketdata.toss_program_trades import (
     TossProgramTradesError,
     append_program_trades,
     backfill_program_trades_history,
+    symbols_needing_backfill,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,44 @@ def backfill_program_trades(
         appended_rows,
     )
     return ProgramTradesBackfillResult(symbols_ok=symbols_ok, symbols_failed=symbols_failed, appended_rows=appended_rows)
+
+def backfill_universe_program_trades(
+    *,
+    store_path: pathlib.Path,
+    symbols: Sequence[str],
+    lookback_days: int,
+    reference_date: dt.date,
+    app_key: str,
+    app_secret: str,
+    rate_per_s: float,
+    session: Any | None = None,
+) -> ProgramTradesBackfillResult:
+    """Backfill only universe symbols whose stored history misses the lookback window.
+
+    Runs once per session as part of pre-market orchestration so a symbol
+    newly entering the universe carries enough program-trade history for
+    rolling-window features from its first session, without re-fetching
+    symbols a prior day's run already covered.
+
+    Raises:
+        TossProgramTradesError: If the coverage check cannot read an existing
+            but corrupted store, or if token issuance for the backfill fails.
+    """
+    if not symbols:
+        return ProgramTradesBackfillResult(symbols_ok=0, symbols_failed=0, appended_rows=0)
+    min_date = reference_date - dt.timedelta(days=lookback_days)
+    targets = symbols_needing_backfill(store_path, symbols, min_date)
+    if not targets:
+        return ProgramTradesBackfillResult(symbols_ok=0, symbols_failed=0, appended_rows=0)
+    return backfill_program_trades(
+        store_path=store_path,
+        symbols=targets,
+        min_date=min_date,
+        app_key=app_key,
+        app_secret=app_secret,
+        rate_per_s=rate_per_s,
+        session=session,
+    )
 
 
 def refresh_bars(
