@@ -49,11 +49,7 @@ _MEMORY_FIELD_CHAR_CAP = 300
 
 
 def _cap_field(text: str) -> str:
-    """Hard backstop on why/what/impact -- these get echoed into every future
-    spec_init.py match, so an unbounded field taxes every later spec run, not
-    just this one. Prompt guidance (sync/SKILL.md) is the first line; this is
-    the fail-closed script-level one.
-    """
+    """Hard backstop on why/what/impact to keep future context lookups token-efficient."""
     text = text.strip()
     if len(text) <= _MEMORY_FIELD_CHAR_CAP:
         return text
