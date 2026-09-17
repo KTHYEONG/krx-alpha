@@ -391,3 +391,63 @@ def test_data_paths_snapshot_partition_matches_retention_date_pattern() -> None:
 
     assert part == pathlib.Path("var/krx/l1/snapshot/ranking/dt=2026-09-17.parquet")
     assert re.search(r"dt=\d{4}-\d{2}-\d{2}", part.name)
+
+
+def test_toss_program_trades_settings_defaults_are_positive(monkeypatch) -> None:
+    import os
+
+    from src.core.config import TossProgramTradesSettings
+
+    for name in [n for n in os.environ if n.startswith("KRX_ALPHA_TOSS_PROGRAM_")]:
+        monkeypatch.delenv(name, raising=False)
+
+    assert TossProgramTradesSettings().rate_per_s == 8.0
+
+
+def test_toss_program_trades_settings_rejects_non_positive_rate() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import TossProgramTradesSettings
+
+    with pytest.raises(ValidationError):
+        TossProgramTradesSettings(rate_per_s=0)
+
+
+def test_data_paths_program_trades_store_colocates_with_bars() -> None:
+    import pathlib
+
+    from src.core.config import CollectorSettings
+
+    assert CollectorSettings(data_root=pathlib.Path("var/krx")).paths.program_trades_store == pathlib.Path(
+        "var/krx/bars/program_trades.parquet"
+    )
+
+
+def test_snapshot_settings_default_index_intervals() -> None:
+    from src.core.config import SnapshotSettings
+
+    settings = SnapshotSettings()
+
+    assert settings.index_interval_s == 300
+    assert settings.index_minute_interval_s == 4800
+
+
+def test_snapshot_settings_rejects_index_minute_interval_over_cap() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import SnapshotSettings
+
+    with pytest.raises(ValidationError):
+        SnapshotSettings(index_minute_interval_s=5401)
+
+
+def test_snapshot_settings_rejects_zero_index_minute_interval() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import SnapshotSettings
+
+    with pytest.raises(ValidationError):
+        SnapshotSettings(index_minute_interval_s=0)

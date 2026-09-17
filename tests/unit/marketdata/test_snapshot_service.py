@@ -92,6 +92,21 @@ def _index_row(code: str) -> dict:
     }
 
 
+def _index_minute_row(code: str, bar_time: str = "090000") -> dict:
+    return {
+        "source_tr": "FHKUP03500200",
+        "market_div_code": "U",
+        "index_code": code,
+        "bar_time": bar_time,
+        "open": 822.18,
+        "high": 823.0,
+        "low": 821.0,
+        "close": 822.5,
+        "volume": 1234,
+        "cum_value_mil_krw": 567890,
+    }
+
+
 def _bar_row(symbol: str, bar_time: str = "093000") -> dict:
     return {
         "source_tr": "FHKST03010200",
@@ -141,6 +156,7 @@ class _FakeSource:
         self.investor: dict = {}
         self.program: dict = {}
         self.index: dict = {}
+        self.index_minute: dict = {}
         self.bars: dict = {}
         self.news: dict = {}
         self.trade_rows: tuple = ()
@@ -164,6 +180,13 @@ class _FakeSource:
 
     def get_index_snapshot(self, index_code: str) -> dict:
         return self._run("index", index_code, self.index)
+
+    def get_index_minute_bars(self, index_code: str, **kwargs) -> tuple:
+        self.calls.append(("index_minute", index_code, kwargs))
+        behavior = self.index_minute.get(index_code, self.index_minute.get("*"))
+        if isinstance(behavior, BaseException):
+            raise behavior
+        return behavior() if callable(behavior) else behavior
 
     def get_stock_minute_bars(self, symbol: str, **kwargs) -> tuple:
         self.calls.append(("bars", symbol, kwargs))
@@ -527,6 +550,7 @@ def _session_source() -> _FakeSource:
     source.investor = {"*": lambda: _investor_rows("s")}
     source.program = {"*": lambda: _program_row("s")}
     source.index = {"*": lambda: _index_row("c")}
+    source.index_minute = {"*": lambda: (_index_minute_row("c"),)}
     source.bars = {"*": lambda: (_bar_row("s"),)}
     source.news = {None: (_news_row("n1", 10, 0),), "*": ()}
     source.trade_rows = (KisRankingRow("005930", 1, 1.5, 100),)
@@ -710,3 +734,71 @@ def test_session_emits_heartbeat_after_interval(tmp_path, caplog) -> None:
         )
 
     assert sum("stage=snapshot_heartbeat" in rec.message for rec in caplog.records) == 2
+
+
+def test_index_minute_bar_job_writes_bars_for_each_index_code(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    settings = SnapshotSettings()
+    source = _FakeSource()
+    source.index_minute = {
+        code: (_index_minute_row(code, "090000"), _index_minute_row(code, "090100"))
+        for code in settings.index_codes
+    }
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    job = _job(SnapshotJobKind.INDEX_MINUTE_BAR, _t(10, 20), _t(11, 40))
+
+    result = run_snapshot_job(
+        job, source=source, store=store, settings=settings, symbols=(),
+        news_seen=set(), now_fn=lambda: _t(10, 20, 5), wall_ns=_counter(),
+    )
+
+    assert result.attempted == 3
+    assert store.frame(SnapshotDataset.INDEX_MINUTE_BAR).height == 6
+    assert [c for _, c, _ in source.calls] == list(settings.index_codes)
+
+
+def test_index_minute_bar_job_survives_one_index_failure(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    settings = SnapshotSettings()
+    codes = settings.index_codes
+    source = _FakeSource()
+    source.index_minute = {
+        codes[0]: (_index_minute_row(codes[0]),),
+        codes[1]: KisApiError("EGW00000", "bad"),
+        codes[2]: (_index_minute_row(codes[2]),),
+    }
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    job = _job(SnapshotJobKind.INDEX_MINUTE_BAR, _t(10, 20), _t(11, 40))
+
+    result = run_snapshot_job(
+        job, source=source, store=store, settings=settings, symbols=(),
+        news_seen=set(), now_fn=lambda: _t(10, 20, 5), wall_ns=_counter(),
+    )
+
+    assert (result.succeeded, result.failed) == (2, 1)
+    assert store.frame(SnapshotDataset.INDEX_MINUTE_BAR).height == 2
+
+
+def test_index_minute_bar_job_stops_after_window_closes(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    settings = SnapshotSettings()
+    codes = settings.index_codes
+    source = _FakeSource()
+    source.index_minute = {"*": lambda: (_index_minute_row("c"),)}
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    job = _job(SnapshotJobKind.INDEX_MINUTE_BAR, _t(10, 20), _t(10, 21))
+    ticks = [_t(10, 20, 5), _t(10, 21, 1)]
+
+    result = run_snapshot_job(
+        job, source=source, store=store, settings=settings, symbols=(),
+        news_seen=set(), now_fn=lambda: ticks.pop(0), wall_ns=_counter(),
+    )
+
+    assert [c for _, c, _ in source.calls] == [codes[0]]
+    assert result.truncated is True

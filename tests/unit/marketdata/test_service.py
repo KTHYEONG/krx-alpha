@@ -222,3 +222,135 @@ def test_kis_fallback_populates_ohl_and_base_price(tmp_path) -> None:
     assert saved["base_price"].to_list() == [950.0]
     assert saved["stock_cert_kind"].to_list() == [None]
     assert saved["section"].to_list() == [None]
+
+
+def _program_trade_row(symbol: str, day) -> dict:
+    return {
+        "symbol": symbol,
+        "date": day,
+        "arbitrage_buy_volume": 10,
+        "arbitrage_sell_volume": 4,
+        "arbitrage_net_volume": 6,
+        "non_arbitrage_buy_volume": 20,
+        "non_arbitrage_sell_volume": 5,
+        "non_arbitrage_net_volume": 15,
+    }
+
+
+def test_backfill_program_trades_persists_per_symbol_and_survives_one_failure(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    import polars as pl
+
+    from src.marketdata import service
+    from src.marketdata.toss_program_trades import TossProgramTradesError
+
+    rows_a = (_program_trade_row("005930", dt.date(2026, 9, 16)), _program_trade_row("005930", dt.date(2026, 9, 17)))
+    rows_c = (_program_trade_row("000660", dt.date(2026, 9, 17)),)
+
+    def _fake_history(symbol, **kwargs):
+        if symbol == "035720":
+            raise TossProgramTradesError("bad page")
+        return rows_a if symbol == "005930" else rows_c
+
+    monkeypatch.setattr(service, "backfill_program_trades_history", _fake_history)
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: "tok")
+
+    store = tmp_path / "bars" / "program_trades.parquet"
+
+    # When
+    with caplog.at_level(logging.WARNING):
+        result = service.backfill_program_trades(
+            store_path=store,
+            symbols=("005930", "035720", "000660"),
+            min_date=dt.date(2026, 9, 1),
+            app_key="k",
+            app_secret="s",
+            rate_per_s=1000.0,
+        )
+
+    # Then
+    assert (result.symbols_ok, result.symbols_failed, result.appended_rows) == (2, 1, 3)
+    saved = pl.read_parquet(store)
+    assert sorted(saved["symbol"].unique().to_list()) == ["000660", "005930"]
+    assert saved.height == 3
+    assert sum("status=SKIP" in record.message for record in caplog.records) == 1
+
+
+def test_backfill_program_trades_rejects_invalid_symbol_before_any_call(monkeypatch) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.marketdata import service
+
+    calls: list[str] = []
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: calls.append("token") or "tok")
+
+    class _ExplodingSession:
+        def get(self, *args, **kwargs):
+            raise AssertionError("no vendor call allowed before symbol validation")
+
+    # When / Then
+    with pytest.raises(ValueError, match="6-digit"):
+        service.backfill_program_trades(
+            store_path="x.parquet",
+            symbols=("12345",),
+            min_date=dt.date(2026, 9, 1),
+            app_key="k",
+            app_secret="s",
+            rate_per_s=8.0,
+            session=_ExplodingSession(),
+        )
+    assert calls == []
+
+
+def test_backfill_program_trades_issues_token_exactly_once(monkeypatch) -> None:
+    import datetime as dt
+
+    from src.marketdata import service
+
+    calls: list[dict] = []
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: calls.append(kwargs) or "tok")
+    monkeypatch.setattr(service, "backfill_program_trades_history", lambda *a, **k: ())
+    monkeypatch.setattr(service, "append_program_trades", lambda *a, **k: 0)
+
+    # When
+    service.backfill_program_trades(
+        store_path="x.parquet",
+        symbols=("005930", "000660", "035720"),
+        min_date=dt.date(2026, 9, 1),
+        app_key="k",
+        app_secret="s",
+        rate_per_s=8.0,
+    )
+
+    # Then
+    assert len(calls) == 1
+
+
+def test_backfill_program_trades_wraps_token_issuance_failure(monkeypatch) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.marketdata import service
+    from src.marketdata.toss_calendar import TossCalendarError
+    from src.marketdata.toss_program_trades import TossProgramTradesError
+
+    def _fail_token(**kwargs):
+        raise TossCalendarError("auth down")
+
+    monkeypatch.setattr(service, "issue_access_token", _fail_token)
+
+    # When / Then: 초기 토큰 발급 실패는 TossProgramTradesError로 표면화된다
+    with pytest.raises(TossProgramTradesError, match="token issuance"):
+        service.backfill_program_trades(
+            store_path="x.parquet",
+            symbols=("005930",),
+            min_date=dt.date(2026, 9, 1),
+            app_key="k",
+            app_secret="s",
+            rate_per_s=8.0,
+        )

@@ -1,0 +1,206 @@
+"""Toss program-trade daily history: paged backfill via the 'until' cursor (STOCK_TRADING_TREND, 10 req/s)."""
+
+from __future__ import annotations
+
+import datetime as dt
+import os
+import pathlib
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
+
+import polars as pl
+import requests
+
+from src.core.errors import KrxAlphaError
+
+TOSS_PROGRAM_TRADES_URL_TEMPLATE: str = "https://openapi.tossinvest.com/api/v1/stocks/{symbol}/program-trades"
+TOSS_PROGRAM_TRADES_PAGE_COUNT: int = 100
+
+PROGRAM_TRADE_HISTORY_SCHEMA: dict[str, type[pl.DataType]] = {
+    "symbol": pl.String,
+    "date": pl.Date,
+    "arbitrage_buy_volume": pl.Int64,
+    "arbitrage_sell_volume": pl.Int64,
+    "arbitrage_net_volume": pl.Int64,
+    "non_arbitrage_buy_volume": pl.Int64,
+    "non_arbitrage_sell_volume": pl.Int64,
+    "non_arbitrage_net_volume": pl.Int64,
+}
+
+
+class TossProgramTradesError(KrxAlphaError):
+    """Toss program-trade fetch/backfill fail-closed signal (auth, transport, or schema violation)."""
+
+
+def _parse_int(value: object) -> int:
+    return int(str(value))
+
+
+def _parse_side_volumes(side: object) -> tuple[int, int, int]:
+    if not isinstance(side, Mapping):
+        raise TossProgramTradesError(f"toss program-trade side envelope invalid: {side!r}")
+    try:
+        buy = _parse_int(side["buyVolume"])
+        sell = _parse_int(side["sellVolume"])
+        net = _parse_int(side["netBuyVolume"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise TossProgramTradesError(f"toss program-trade volume invalid: {exc}") from exc
+    if net != buy - sell:
+        raise TossProgramTradesError(f"toss program-trade net identity violated: net={net} buy={buy} sell={sell}")
+    return buy, sell, net
+
+
+def fetch_program_trades_page(
+    symbol: str, *, access_token: str, until: dt.date | None = None, session: Any | None = None
+) -> tuple[tuple[dict[str, object], ...], dt.date | None]:
+    """Fetch one page of Toss program-trade daily records for one symbol.
+
+    Args:
+        until: Inclusive upper date bound for backward pagination; ``None``
+            requests the newest page.
+
+    Returns:
+        ``(rows, next_until)``; ``next_until`` is ``None`` when the vendor has
+        no earlier page.
+
+    Raises:
+        TossProgramTradesError: On transport failure or a record whose
+            reported net volume does not equal buy minus sell.
+    """
+    sess = session if session is not None else requests
+    url = TOSS_PROGRAM_TRADES_URL_TEMPLATE.format(symbol=symbol)
+    params: dict[str, str] = {"count": str(TOSS_PROGRAM_TRADES_PAGE_COUNT)}
+    if until is not None:
+        params["until"] = until.isoformat()
+    try:
+        resp = sess.get(url, headers={"Authorization": f"Bearer {access_token}"}, params=params)
+        resp.raise_for_status()
+        body = resp.json()
+    except requests.RequestException as exc:
+        raise TossProgramTradesError(f"toss program-trades request failed for {symbol}: {exc}") from exc
+    try:
+        result = body["result"]
+        records = result["records"]
+    except (KeyError, TypeError) as exc:
+        raise TossProgramTradesError(f"toss program-trades envelope invalid for {symbol}: {exc}") from exc
+    if not isinstance(records, list):
+        raise TossProgramTradesError(f"toss program-trades records invalid for {symbol}")
+    rows: list[dict[str, object]] = []
+    for record in records:
+        try:
+            day = dt.date.fromisoformat(str(record["date"]))
+            arb = record["arbitrage"]
+            non_arb = record["nonArbitrage"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TossProgramTradesError(f"toss program-trades record invalid for {symbol}: {exc}") from exc
+        arb_buy, arb_sell, arb_net = _parse_side_volumes(arb)
+        non_buy, non_sell, non_net = _parse_side_volumes(non_arb)
+        rows.append(
+            {
+                "symbol": symbol,
+                "date": day,
+                "arbitrage_buy_volume": arb_buy,
+                "arbitrage_sell_volume": arb_sell,
+                "arbitrage_net_volume": arb_net,
+                "non_arbitrage_buy_volume": non_buy,
+                "non_arbitrage_sell_volume": non_sell,
+                "non_arbitrage_net_volume": non_net,
+            }
+        )
+    raw_next: object = None
+    if isinstance(result, Mapping):
+        raw_next = result.get("nextUntil")
+    if raw_next is None or (isinstance(raw_next, str) and not raw_next.strip()):
+        return tuple(rows), None
+    try:
+        next_until = dt.date.fromisoformat(str(raw_next))
+    except ValueError as exc:
+        raise TossProgramTradesError(f"toss program-trades nextUntil invalid for {symbol}: {exc}") from exc
+    return tuple(rows), next_until
+
+
+def backfill_program_trades_history(
+    symbol: str,
+    *,
+    access_token: str,
+    min_date: dt.date,
+    session: Any | None = None,
+    throttle: Callable[[], None] | None = None,
+    max_pages: int = 50,
+) -> tuple[dict[str, object], ...]:
+    """Walk the ``until`` cursor backward until coverage reaches ``min_date``.
+
+    Args:
+        throttle: Optional callable invoked before every page request so the
+            caller can enforce the vendor's per-second rate limit; this module
+            stays limiter-implementation-agnostic to avoid an upward layer
+            dependency on the execution-layer rate limiter.
+
+    Returns:
+        Rows with ``date >= min_date``, deduplicated by date (first-seen wins)
+        and sorted ascending.
+
+    Raises:
+        TossProgramTradesError: On a page fetch failure, or when pagination
+            does not make progress (repeated or missing cursor) before
+            reaching ``min_date`` within ``max_pages``.
+    """
+    by_date: dict[dt.date, dict[str, object]] = {}
+    until: dt.date | None = None
+    for _ in range(max_pages):
+        if throttle is not None:
+            throttle()
+        rows, next_until = fetch_program_trades_page(symbol, access_token=access_token, until=until, session=session)
+        if not rows:
+            break
+        days: list[dt.date] = []
+        for row in rows:
+            day = row["date"]
+            assert isinstance(day, dt.date)
+            days.append(day)
+            if day not in by_date:
+                by_date[day] = row
+        if all(day < min_date for day in days):
+            break
+        if next_until is None:
+            break
+        if next_until == until:
+            raise TossProgramTradesError(f"toss program-trades pagination stalled for {symbol} at {until}")
+        until = next_until
+    else:
+        raise TossProgramTradesError(f"toss program-trades pagination exceeded max_pages={max_pages} for {symbol}")
+    return tuple(by_date[day] for day in sorted(by_date) if day >= min_date)
+
+
+def append_program_trades(store_path: pathlib.Path, rows: Sequence[Mapping[str, object]]) -> int:
+    """Idempotently upsert program-trade history rows keyed by (symbol, date).
+
+    Raises:
+        TossProgramTradesError: If ``store_path`` exists but cannot be read as
+            a matching Parquet store.
+    """
+    if not rows:
+        return 0
+    store = pathlib.Path(store_path)
+    columns = list(PROGRAM_TRADE_HISTORY_SCHEMA)
+    incoming = pl.DataFrame(
+        [{key: row[key] for key in columns} for row in rows],
+        schema=PROGRAM_TRADE_HISTORY_SCHEMA,
+    ).select(columns)
+    if store.exists():
+        try:
+            existing = pl.read_parquet(store).select(columns)
+        except Exception as exc:
+            raise TossProgramTradesError(f"toss program-trades store unreadable at {store}: {exc}") from exc
+        new_rows = incoming.join(existing.select(["symbol", "date"]), on=["symbol", "date"], how="anti")
+        kept = existing.join(incoming.select(["symbol", "date"]), on=["symbol", "date"], how="anti")
+        combined = pl.concat([kept, incoming]).sort(["symbol", "date"])
+        added = new_rows.height
+    else:
+        combined = incoming.sort(["symbol", "date"])
+        added = incoming.height
+    store.parent.mkdir(parents=True, exist_ok=True)
+    tmp = store.parent / f".{store.name}.tmp"
+    combined.write_parquet(tmp, compression="zstd")
+    os.replace(tmp, store)
+    return added

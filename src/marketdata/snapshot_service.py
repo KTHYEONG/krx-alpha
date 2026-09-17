@@ -43,6 +43,7 @@ class SnapshotSource(Protocol):
     def get_investor_estimate(self, symbol: str) -> tuple[dict[str, object], ...]: ...
     def get_program_trade_latest(self, symbol: str) -> dict[str, object] | None: ...
     def get_index_snapshot(self, index_code: str) -> dict[str, object]: ...
+    def get_index_minute_bars(self, index_code: str, *, session_date: dt.date) -> tuple[dict[str, object], ...]: ...
     def get_stock_minute_bars(
         self, symbol: str, *, session_date: dt.date, session_open: dt.time, session_close: dt.time
     ) -> tuple[dict[str, object], ...]: ...
@@ -77,6 +78,7 @@ _KIND_DATASET: dict[SnapshotJobKind, SnapshotDataset] = {
     SnapshotJobKind.PROGRAM_TRADE: SnapshotDataset.PROGRAM_TRADE,
     SnapshotJobKind.RANKING: SnapshotDataset.RANKING,
     SnapshotJobKind.INDEX_SNAPSHOT: SnapshotDataset.INDEX_SNAPSHOT,
+    SnapshotJobKind.INDEX_MINUTE_BAR: SnapshotDataset.INDEX_MINUTE_BAR,
     SnapshotJobKind.NEWS_TITLE: SnapshotDataset.NEWS_TITLE,
     SnapshotJobKind.EOD_MINUTE_BARS: SnapshotDataset.STOCK_MINUTE_BAR,
 }
@@ -262,6 +264,23 @@ def run_snapshot_job(
             index_rows.append({**result, "session_date": session_date, "observed_at_ns": observed})
         if index_rows:
             rows_added += store.append(SnapshotDataset.INDEX_SNAPSHOT, index_rows)
+    elif job.kind is SnapshotJobKind.INDEX_MINUTE_BAR:
+        bar_rows: list[dict[str, object]] = []
+        for index_code in settings.index_codes:
+            outcome = _guarded_call(
+                partial(source.get_index_minute_bars, index_code, session_date=session_date)
+            )
+            taken = _take(outcome)
+            if taken is None:
+                if truncated:
+                    break
+                continue
+            result, observed = taken
+            bar_rows.extend(
+                {**row, "session_date": session_date, "observed_at_ns": observed} for row in result
+            )
+        if bar_rows:
+            rows_added += store.append(SnapshotDataset.INDEX_MINUTE_BAR, bar_rows)
     elif job.kind is SnapshotJobKind.NEWS_TITLE:
         news_rows: list[dict[str, object]] = []
         new_ids: list[str] = []
