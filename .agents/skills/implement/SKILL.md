@@ -59,25 +59,17 @@ Operate as a deterministic translator turning the specification into code and pa
 ## Output
 
 Keep chat output ultra-compact and token-efficient.
-**Strictly Prohibited**: Do NOT write lengthy implementation prose, detailed code changes, or verbose Problem / Root Cause / Impact explanations (the rationale is already documented in probe and spec). Only output the minimal summary card below:
+**Strictly Prohibited**: Do NOT write lengthy implementation prose, detailed code changes, verbose Problem / Root Cause / Impact explanations, or redundant lists of modified files (the spec and git already track them). Do NOT include "다음 단계" recommendations. Only output the minimal summary card below:
 
 ### 🔨 [IMPLEMENT] <Task Title>
 > 📄 **구현 스펙**: [`<spec_filename>.md`](file:///path/to/docs/specs/<spec_filename>.md)  
-> 🚦 **상태**: ✅ COMPLETE
+> 🚦 **상태**: ✅ COMPLETE (<Count>개 파일 수정)
 
-- 📦 **수정 파일**: <Count>개 ([`<file_1>`](file:///path/to/<file_1>), [`<file_2>`](file:///path/to/<file_2>), ...)
-- 🧪 **검증 요약**:
-  - Pytest: <Passed>/<Total> passed
-  - Lint / Types: Ruff PASS · Mypy PASS
-  - Diff Coverage: 100% (Scaffolding-Clean)
-
----
-👉 **다음 단계**: `/check docs/specs/<spec_filename>.md`
+- 🧪 **검증 요약**: Pytest PASS · Ruff PASS · Mypy PASS · Diff Coverage 100%
 
 *(On Failure / Escalation)*:
 ### 🔨 [IMPLEMENT] <Task Title>
 > 📄 **구현 스펙**: [`<spec_filename>.md`](file:///path/to/docs/specs/<spec_filename>.md)  
 > 🚦 **상태**: ❌ ESCALATED (또는 ❌ FAIL)
 
-- 📦 **수정 파일**: <Count>개 ([`<file_1>`](file:///path/to/<file_1>), ...)
 - 💥 **실패 지점**: [<Pytest | Ruff | Mypy | Diff Coverage | Anchor Wiring>] `<실패한 테스트명 또는 핵심 에러 1줄>`

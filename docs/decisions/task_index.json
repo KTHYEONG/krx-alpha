@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_TOSS_PROGRAM_TRADES_AND_INDEX_MINUTE_BAR",
+      "date": "2026-09-17",
+      "adr_id": "ADR_20260917_TOSS_PROGRAM_TRADES_AND_INDEX_MINUTE_BAR",
+      "domain": "marketdata",
+      "title": "Toss 프로그램매매 백필 CLI 및 KIS 지수 1분봉 스냅샷 잡 추가",
+      "why": "Toss 프로그램매매 커서 파라미터(until)와 KIS 지수분봉 간격 파라미터를 이전에 오판해 저비용 백필/OHLC 수집 기회를 놓치고 있었다",
+      "resolution": "종목별 2년치 프로그램매매 이력을 백필하는 CLI를 추가하고, INDEX_SNAPSHOT 주기를 5분으로 낮추며 80분 간격 INDEX_MINUTE_BAR 잡으로 정규장 전체 1분 OHLC를 재구성했다",
+      "impact": "지수 3종 기준 일일 호출을 1,170회에서 약 250여회로 절감하면서 OHLC 데이터 품질은 향상, 프로그램매매는 종목당 6회 호출로 600거래일 이력 확보 가능",
+      "caveat": "프로그램매매 백필은 데몬 상시 잡이 아닌 운영자 수동 실행 도구이며, 지수분봉 API는 페이징 커서가 없어 90분 상한 내 폴링 간격 준수가 빈틈없는 커버리지의 전제조건이다"
+    },
+    {
       "task_id": "TASK_SNAPSHOT_SOURCE_DATA",
       "date": "2026-09-17",
       "adr_id": "ADR_20260917_SNAPSHOT_SOURCE_DATA",
