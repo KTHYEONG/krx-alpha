@@ -114,3 +114,11 @@ def test_layer_rank_registers_runtime_env_provisioning() -> None:
     assert LAYER_RANK["src/core/runtime_env_provisioning.py"] == 0
     assert LAYER_RANK["src/core/kis_keypool_provisioning.py"] == 0
     assert LAYER_RANK["src/cli/provision_kis_keypool.py"] == 7
+
+
+def test_compose_enables_snapshot_collection() -> None:
+    from pathlib import Path
+
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "KRX_ALPHA_SNAPSHOT_ENABLED=true" in compose

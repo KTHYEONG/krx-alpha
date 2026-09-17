@@ -24,10 +24,13 @@ NEWHIGH_MIN_CHANGE_PCT: float = 5.0
 TV_MEDIAN_WINDOW: int = 20
 LIQUIDITY_FLOOR_100M: float = 50.0
 DEEP_SLOT_BUDGET: int = 90
+ELIGIBLE_STOCK_CERT_KIND: str = "보통주"
+EXCLUDED_SECTIONS: frozenset[str] = frozenset({"관리종목(소속부없음)", "SPAC(소속부없음)", "투자주의환기종목(소속부없음)"})
+SECURITY_CLASS_COLUMNS: tuple[str, ...] = ("section", "stock_cert_kind")
 
 
 def compute_selection_features(bars: pl.DataFrame) -> pl.DataFrame:
-    """일봉에 선정용 롤링 피처를 부여한다."""
+    """Attach rolling selection features; close_max_60 is corporate-action adjusted to each row's own price basis using only rows at or before it."""
     missing = [c for c in REQUIRED_BAR_COLUMNS if c not in bars.columns]
     if missing:
         raise ValueError(f"missing required bar columns: {missing}")
@@ -44,10 +47,13 @@ def compute_selection_features(bars: pl.DataFrame) -> pl.DataFrame:
         pl.col("volume").cast(pl.Int64),
         pl.col("daily_change_pct").cast(pl.Float64),
     ])
+    for column in SECURITY_CLASS_COLUMNS:
+        if column in clean.columns:
+            clean = clean.with_columns(pl.col(column).forward_fill().over("symbol"))
     clean = clean.with_columns([
         pl.col("trade_value_100m").rolling_median(window_size=TV_MEDIAN_WINDOW).over("symbol").alias("tv_median_20"),
-        pl.col("close").rolling_max(window_size=NEWHIGH_LOOKBACK).over("symbol").alias("close_max_60"),
     ])
+    clean = _with_close_max_60(clean)
     clean = clean.with_columns([
         pl.when(pl.col("tv_median_20") > 0)
         .then(pl.col("trade_value_100m") / pl.col("tv_median_20"))
@@ -56,6 +62,38 @@ def compute_selection_features(bars: pl.DataFrame) -> pl.DataFrame:
     ])
     logger.info("[DATA] stage=features shape=%s status=OK", str(clean.shape))
     return clean
+
+
+def _with_close_max_60(clean: pl.DataFrame) -> pl.DataFrame:
+    if "base_price" not in clean.columns:
+        return clean.with_columns(
+            pl.col("close").rolling_max(window_size=NEWHIGH_LOOKBACK).over("symbol").alias("close_max_60")
+        )
+    prev_close = pl.col("close").shift(1).over("symbol")
+    clean = clean.with_columns([
+        pl.when(
+            pl.col("base_price").is_not_null()
+            & (pl.col("base_price") > 0)
+            & prev_close.is_not_null()
+            & (prev_close > 0)
+        )
+        .then(pl.col("base_price") / prev_close)
+        .otherwise(1.0)
+        .alias("_event_ratio"),
+    ])
+    clean = clean.with_columns(pl.col("_event_ratio").cum_prod().over("symbol").alias("_cum_event"))
+    clean = clean.with_columns((pl.col("close") / pl.col("_cum_event")).alias("_norm_close"))
+    clean = clean.with_columns(
+        pl.col("_norm_close").rolling_max(window_size=NEWHIGH_LOOKBACK - 1).over("symbol").alias("_past_norm_max")
+    )
+    clean = clean.with_columns(pl.col("_past_norm_max").shift(1).over("symbol").alias("_past_norm_max"))
+    clean = clean.with_columns(
+        pl.when(pl.col("_past_norm_max").is_not_null())
+        .then(pl.max_horizontal([pl.col("_cum_event") * pl.col("_past_norm_max"), pl.col("close")]))
+        .otherwise(None)
+        .alias("close_max_60"),
+    )
+    return clean.drop(["_event_ratio", "_cum_event", "_norm_close", "_past_norm_max"])
 
 
 def select_universe(featured: pl.DataFrame, decision_date: dt.date, *, slot_budget: int = DEEP_SLOT_BUDGET) -> pl.DataFrame:
@@ -68,6 +106,14 @@ def select_universe(featured: pl.DataFrame, decision_date: dt.date, *, slot_budg
         if isinstance(max_date, dt.date) and max_date > decision_date:
             raise ValueError(f"lookahead: max date {max_date!r} exceeds decision_date {decision_date!r}")
     cand = featured.filter(pl.col("date") == decision_date)
+    eligible = cand.height
+    if "stock_cert_kind" in cand.columns:
+        cand = cand.filter(
+            pl.col("stock_cert_kind").is_null() | (pl.col("stock_cert_kind") == ELIGIBLE_STOCK_CERT_KIND)
+        )
+    if "section" in cand.columns:
+        cand = cand.filter(pl.col("section").is_null() | (~pl.col("section").is_in(EXCLUDED_SECTIONS)))
+    excluded = eligible - cand.height
     cond_limit_up = (pl.col("daily_change_pct") >= LIMIT_UP_PCT).fill_null(False)
     cond_surge10 = (pl.col("daily_change_pct") >= SURGE_PCT).fill_null(False)
     cond_volsurge = ((pl.col("tv_ratio") >= VOLSURGE_RATIO) & (pl.col("daily_change_pct") >= VOLSURGE_MIN_CHANGE_PCT)).fill_null(
@@ -98,5 +144,11 @@ def select_universe(featured: pl.DataFrame, decision_date: dt.date, *, slot_budg
         "trade_value_100m",
         "tv_ratio",
     ]).sort("symbol")
-    logger.info("[ALGO] decision=%s selected=%d budget=%d", decision_date.isoformat(), out.height, slot_budget)
+    logger.info(
+        "[ALGO] decision=%s selected=%d excluded=%d budget=%d",
+        decision_date.isoformat(),
+        out.height,
+        excluded,
+        slot_budget,
+    )
     return out

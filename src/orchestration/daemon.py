@@ -23,6 +23,7 @@ from src.core.config import (
     KisTokenSettings,
     KrxCredentials,
     ObservabilitySettings,
+    SnapshotSettings,
     TossCredentials,
     load_credentials,
 )
@@ -54,6 +55,7 @@ from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreake
 from src.realtime.contracts import MarketVenue
 from src.realtime.kis_sharding import AftermarketShard, load_kis_data_credentials, plan_aftermarket_shards
 from src.storage.remote import RemoteArchiveError
+from src.storage.snapshot_store import SnapshotStore
 from src.universe.aftermarket import AftermarketUniverseError, refresh_aftermarket_candidates
 from src.universe.ipc import CandidateFileError, read_candidate_snapshot, read_candidates
 from src.universe.service import UniversePlanResult as UniversePlanResult
@@ -150,12 +152,20 @@ def run_session_orchestration(
             decision_date.isoformat(),
         )
     # 선정 실패는 흡수하지 않는다: 직전 세션의 stale candidates 로 스트리밍하는 fail-open 을 차단.
+    try:
+        status_source: KisRestClient | None = _build_kis_client(paths)
+    except MissingCredentialsError as exc:
+        logger.warning("[DAEMON] stage=orchestration status=DEGRADED step=security_status reason=%s", str(exc))
+        status_source = None
     plan_universe(
         bars_path=paths.bars_store,
         decision_date=decision_date,
         out_path=paths.universe_out(decision_date),
         slot_budget=settings.universe_slot_budget,
         candidates_path=paths.candidates,
+        session_date=today,
+        status_source=status_source,
+        snapshot_store=SnapshotStore(paths=paths, session_date=today),
     )
     ready = _candidates_ready(paths.candidates)
     logger.info(
@@ -212,6 +222,19 @@ def _stream_cmd(today: dt.date, paths: DataPaths, *, degraded_reason: str | None
     if degraded_reason is not None:
         cmd += ["--degraded-reason", degraded_reason]
     return cmd
+
+
+def _snapshot_cmd(today: dt.date, paths: DataPaths) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "src.cli.main",
+        "collect-snapshots",
+        "--session-date",
+        today.isoformat(),
+        "--candidates-path",
+        str(paths.candidates),
+    ]
 
 
 def _aftermarket_stream_cmd(today: dt.date, paths: DataPaths, *, shard: AftermarketShard) -> list[str]:
@@ -295,6 +318,9 @@ def run_collector_daemon(
     aftermarket_plan: tuple[AftermarketShard, ...] = ()
     aftermarket_plan_day: dt.date | None = None
     aftermarket_refresh_day: dt.date | None = None
+    snapshot_cfg = SnapshotSettings()
+    snapshot_supervisor: ProcessSupervisor | None = None
+    last_snapshot_result: str | None = None
 
     while True:
         cycle += 1
@@ -330,6 +356,10 @@ def run_collector_daemon(
                     logger.warning("[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s", stale_stop)
                     supervisor = None
                     last_supervisor_result = None
+                if snapshot_supervisor is not None:
+                    snapshot_supervisor.stop(timeout_s=15.0)
+                    snapshot_supervisor = None
+                    last_snapshot_result = None
                 orchestration_day = today
                 next_orchestration_at = None
                 orchestration_attempts = 0
@@ -379,6 +409,14 @@ def run_collector_daemon(
                         )
                         degraded_active = False
                         last_supervisor_result = None
+                        if snapshot_cfg.enabled:
+                            if snapshot_supervisor is not None:
+                                snapshot_supervisor.stop(timeout_s=15.0)
+                            snapshot_supervisor = ProcessSupervisor(
+                                cmd=_snapshot_cmd(today, paths),
+                                breaker=RestartCircuitBreaker(),
+                            )
+                            last_snapshot_result = None
                     else:
                         next_orchestration_at = now + dt.timedelta(seconds=cfg.orchestration_retry_s)
                         log_fn = logger.critical if orchestration_attempts == 1 else logger.warning
@@ -397,6 +435,12 @@ def run_collector_daemon(
                                     cmd=_stream_cmd(today, paths, degraded_reason="orchestration_failed"),
                                     breaker=RestartCircuitBreaker(),
                                 )
+                                if snapshot_cfg.enabled and snapshot_supervisor is None:
+                                    snapshot_supervisor = ProcessSupervisor(
+                                        cmd=_snapshot_cmd(today, paths),
+                                        breaker=RestartCircuitBreaker(),
+                                    )
+                                    last_snapshot_result = None
                                 degraded_active = True
                                 last_supervisor_result = None
                                 logger.critical(
@@ -420,6 +464,16 @@ def run_collector_daemon(
                     elif result == "circuit_open" and last_supervisor_result != "circuit_open":
                         logger.critical("[DAEMON] stage=streamer status=FAIL reason=circuit_open")
                     last_supervisor_result = result
+                if snapshot_supervisor is not None and now.astimezone(_KST).time() < snapshot_cfg.run_end:
+                    snapshot_result = snapshot_supervisor.ensure_running()
+                    if snapshot_result == "restarted":
+                        logger.warning(
+                            "[DAEMON] stage=snapshots status=RESTARTED exit_code=%s",
+                            snapshot_supervisor.last_exit_code,
+                        )
+                    elif snapshot_result == "circuit_open" and last_snapshot_result != "circuit_open":
+                        logger.critical("[DAEMON] stage=snapshots status=FAIL reason=circuit_open")
+                    last_snapshot_result = snapshot_result
                 if (
                     state == SessionState.FULL_ACTIVE
                     and holiday_for != today
@@ -484,6 +538,10 @@ def run_collector_daemon(
                 supervisor = None
                 last_supervisor_result = None
                 degraded_active = False
+            if snapshot_supervisor is not None:
+                snapshot_supervisor.stop(timeout_s=15.0)
+                snapshot_supervisor = None
+                last_snapshot_result = None
             # 15:40 EOD 유지보수 (정규화 및 오래된 저널 prune + L1 오프로드)
             # 같은 거래일에 60초마다 재실행하지 않도록 날짜당 1회만 시도한다
             ref_day = now.astimezone(_KST).date()

@@ -1,8 +1,9 @@
-def test_fetch_daily_bars_maps_krx_response_to_required_columns() -> None:
-    # Given: 양 시장 모두 데이터가 존재하는 정상 응답 (완결성 게이트 통과 조건)
+def test_fetch_daily_bars_minimal_payload_keeps_required_mapping() -> None:
+    # Given: 선택 필드가 없는 기존 payload + 빈 base info (보조 소스 부재)
     import datetime as dt
 
     from src.marketdata.krx_bars import fetch_daily_bars
+    from src.marketdata.schema import STORED_BAR_COLUMNS
 
     kospi_payload = {'OutBlock_1': [{'BAS_DD': '20260907', 'ISU_CD': '005930', 'ISU_NM': '삼성전자', 'MKT_NM': 'KOSPI',
                                      'TDD_CLSPRC': '270000', 'ACC_TRDVOL': '18314016', 'ACC_TRDVAL': '4900114076282', 'FLUC_RT': '5.68'}]}
@@ -25,6 +26,8 @@ def test_fetch_daily_bars_maps_krx_response_to_required_columns() -> None:
 
         def post(self, url, **kw):
             self.urls.append(url)
+            if 'isu_base_info' in url:
+                return _Resp({'OutBlock_1': []})
             return _Resp(kospi_payload if 'stk_bydd_trd' in url else kosdaq_payload)
 
     session = _Session()
@@ -32,14 +35,201 @@ def test_fetch_daily_bars_maps_krx_response_to_required_columns() -> None:
     # When
     out = fetch_daily_bars(dt.date(2026, 9, 7), auth_key='k', session=session)
 
-    # Then: 양 시장 행이 필수 컬럼으로 정규화된다
+    # Then: 필수 컬럼 값은 불변, 선택 컬럼은 null, bydd 2 → base info 2 순서
     assert out['symbol'].to_list() == ['005930', '035720']
     assert out['close'].to_list() == [270000.0, 50000.0]
     assert out['volume'].to_list() == [18314016, 1000]
     assert round(out['trade_value_100m'][0], 5) == round(4900114076282 / 1e8, 5)
     assert out['daily_change_pct'].to_list() == [5.68, -1.20]
     assert out['market'].to_list() == ['KOSPI', 'KOSDAQ']
-    assert len(session.urls) == 2
+    assert out['open'].to_list() == [None, None]
+    assert out['base_price'].to_list() == [None, None]
+    assert out['stock_cert_kind'].to_list() == [None, None]
+    assert out.columns == list(STORED_BAR_COLUMNS)
+    assert len(session.urls) == 4
+    assert 'bydd_trd' in session.urls[0]
+    assert 'bydd_trd' in session.urls[1]
+    assert 'isu_base_info' in session.urls[2]
+    assert 'isu_base_info' in session.urls[3]
+
+
+def _four_way_session(bydd: dict, base: dict):
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    class _Session:
+        def __init__(self):
+            self.urls: list[str] = []
+
+        def post(self, url, **kw):
+            self.urls.append(url)
+            if 'isu_base_info' in url:
+                payload = base['kospi'] if '/sto/stk_' in url else base['kosdaq']
+            else:
+                payload = bydd['kospi'] if 'stk_bydd_trd' in url else bydd['kosdaq']
+            if isinstance(payload, BaseException):
+                raise payload
+            return _Resp(payload)
+
+    return _Session()
+
+
+def test_fetch_daily_bars_maps_ohl_base_price_and_security_class() -> None:
+    # Given: OHL·부호 포함 전일대비·시총·상장주식수·증권구분 + base info 종류주권
+    import datetime as dt
+
+    import polars as pl
+
+    from src.marketdata.krx_bars import fetch_daily_bars
+
+    bydd_row = {'ISU_CD': '005930', 'TDD_CLSPRC': '70000', 'ACC_TRDVOL': '1000', 'ACC_TRDVAL': '70000000',
+                'FLUC_RT': '1.0', 'TDD_OPNPRC': '69500', 'TDD_HGPRC': '70500', 'TDD_LWPRC': '69000',
+                'CMPPREVDD_PRC': '-14', 'MKTCAP': '400000000000', 'LIST_SHRS': '5900000', 'SECT_TP_NM': ' '}
+    bydd = {'kospi': {'OutBlock_1': [bydd_row]}, 'kosdaq': {'OutBlock_1': [dict(bydd_row, ISU_CD='035720')]}}
+    base_row = {'ISU_SRT_CD': '005930', 'KIND_STKCERT_TP_NM': '신형우선주', 'SECUGRP_NM': '주권'}
+    base = {'kospi': {'OutBlock_1': [base_row]}, 'kosdaq': {'OutBlock_1': [dict(base_row, ISU_SRT_CD='035720')]}}
+    session = _four_way_session(bydd, base)
+
+    # When
+    out = fetch_daily_bars(dt.date(2026, 9, 7), auth_key='k', session=session)
+
+    # Then
+    assert out.filter(pl.col('symbol') == '005930')['base_price'].to_list() == [70014.0]
+    assert out.filter(pl.col('symbol') == '005930')['stock_cert_kind'].to_list() == ['신형우선주']
+    assert out['open'].to_list() == [69500.0, 69500.0]
+    assert out['market_cap_krw'].to_list() == [400000000000, 400000000000]
+    assert out['listed_shares'].to_list() == [5900000, 5900000]
+    assert out['section'].to_list() == [None, None]
+    assert len(session.urls) == 4
+
+
+def test_fetch_daily_bars_nulls_ohl_for_zero_volume_rows() -> None:
+    # Given: 거래량 0 행의 시·고가가 "0"
+    import datetime as dt
+
+    from src.marketdata.krx_bars import fetch_daily_bars
+
+    row = {'ISU_CD': '005930', 'TDD_CLSPRC': '70000', 'ACC_TRDVOL': '0', 'ACC_TRDVAL': '0',
+           'FLUC_RT': '0.0', 'TDD_OPNPRC': '0', 'TDD_HGPRC': '0', 'TDD_LWPRC': '0'}
+    bydd = {'kospi': {'OutBlock_1': [row]}, 'kosdaq': {'OutBlock_1': [dict(row, ISU_CD='035720')]}}
+    base = {'kospi': {'OutBlock_1': []}, 'kosdaq': {'OutBlock_1': []}}
+    session = _four_way_session(bydd, base)
+
+    # When
+    out = fetch_daily_bars(dt.date(2026, 9, 7), auth_key='k', session=session)
+
+    # Then: 가격은 null, 종가는 유지
+    assert out['open'].to_list() == [None, None]
+    assert out['high'].to_list() == [None, None]
+    assert out['low'].to_list() == [None, None]
+    assert out['close'].to_list() == [70000.0, 70000.0]
+
+
+def test_fetch_daily_bars_degrades_class_columns_when_base_info_fails(caplog) -> None:
+    # Given: KOSPI base info가 전송 실패, KOSDAQ base info는 정상
+    import datetime as dt
+    import logging
+
+    import requests
+
+    from src.marketdata.krx_bars import fetch_daily_bars
+
+    row = {'ISU_CD': '005930', 'TDD_CLSPRC': '70000', 'ACC_TRDVOL': '1000', 'ACC_TRDVAL': '70000000', 'FLUC_RT': '1.0'}
+    bydd = {'kospi': {'OutBlock_1': [row]}, 'kosdaq': {'OutBlock_1': [dict(row, ISU_CD='035720')]}}
+    base = {
+        'kospi': requests.ConnectionError('boom'),
+        'kosdaq': {'OutBlock_1': [{'ISU_SRT_CD': '035720', 'KIND_STKCERT_TP_NM': '보통주', 'SECUGRP_NM': '주권'}]},
+    }
+    session = _four_way_session(bydd, base)
+
+    # When
+    with caplog.at_level(logging.WARNING, logger='src.marketdata.krx_bars'):
+        out = fetch_daily_bars(dt.date(2026, 9, 7), auth_key='k', session=session)
+
+    # Then: 예외 없이 반환, 실패 시장 클래스 null, DEGRADED 경고
+    assert out['stock_cert_kind'].to_list() == [None, '보통주']
+    assert any('stage=krx_base_info status=DEGRADED' in rec.message for rec in caplog.records)
+
+
+def test_fetch_daily_bars_degrades_class_columns_when_base_info_empty(caplog) -> None:
+    # Given: 빈 OutBlock_1 / ISU_SRT_CD 없는 행만 반환하는 base info
+    import datetime as dt
+    import logging
+
+    from src.marketdata.krx_bars import fetch_daily_bars
+
+    row = {'ISU_CD': '005930', 'TDD_CLSPRC': '70000', 'ACC_TRDVOL': '1000', 'ACC_TRDVAL': '70000000', 'FLUC_RT': '1.0'}
+    bydd = {'kospi': {'OutBlock_1': [row]}, 'kosdaq': {'OutBlock_1': [dict(row, ISU_CD='035720')]}}
+    base = {'kospi': {'OutBlock_1': []}, 'kosdaq': {'OutBlock_1': [{'KIND_STKCERT_TP_NM': '보통주'}]}}
+    session = _four_way_session(bydd, base)
+
+    # When
+    with caplog.at_level(logging.WARNING, logger='src.marketdata.krx_bars'):
+        out = fetch_daily_bars(dt.date(2026, 9, 7), auth_key='k', session=session)
+
+    # Then
+    assert out['stock_cert_kind'].to_list() == [None, None]
+    assert sum('stage=krx_base_info status=DEGRADED' in rec.message for rec in caplog.records) == 2
+
+
+def test_append_daily_bars_migrates_legacy_store_without_touching_old_rows(tmp_path) -> None:
+    # Given: 필수 6컬럼만 가진 기존 store + 확장 컬럼 포함 신규 일자
+    import datetime as dt
+
+    import polars as pl
+
+    from src.marketdata.krx_bars import append_daily_bars
+    from src.marketdata.schema import BAR_SCHEMA, STORED_BAR_COLUMNS
+
+    store_path = tmp_path / 'daily.parquet'
+    pl.DataFrame({
+        'date': [dt.date(2026, 9, 4)],
+        'symbol': ['005930'],
+        'close': [70000.0],
+        'volume': [1000],
+        'trade_value_100m': [700.0],
+        'daily_change_pct': [1.0],
+    }).write_parquet(store_path)
+    incoming = pl.DataFrame([{
+        'date': dt.date(2026, 9, 7),
+        'symbol': '005930',
+        'close': 71000.0,
+        'volume': 2000,
+        'trade_value_100m': 1420.0,
+        'daily_change_pct': 1.4,
+        'market': 'KOSPI',
+        'open': 70500.0,
+        'high': 71500.0,
+        'low': 70000.0,
+        'base_price': 70000.0,
+        'market_cap_krw': 400000000000,
+        'listed_shares': 5900000,
+        'section': None,
+        'stock_cert_kind': '보통주',
+        'security_group': '주권',
+    }], schema=BAR_SCHEMA)
+
+    # When
+    added = append_daily_bars(store_path, incoming)
+
+    # Then
+    assert added == 1
+    saved = pl.read_parquet(store_path)
+    assert saved.columns == list(STORED_BAR_COLUMNS)
+    old = saved.filter(pl.col('date') == dt.date(2026, 9, 4))
+    assert old['close'].to_list() == [70000.0]
+    assert old['open'].to_list() == [None]
+    assert old['stock_cert_kind'].to_list() == [None]
+    new = saved.filter(pl.col('date') == dt.date(2026, 9, 7))
+    assert new['open'].to_list() == [70500.0]
+    assert new['stock_cert_kind'].to_list() == ['보통주']
 
 
 def test_fetch_daily_bars_raises_on_empty_response() -> None:
@@ -151,6 +341,7 @@ def test_append_daily_bars_creates_new_store_file(tmp_path) -> None:
     import datetime as dt
     import polars as pl
     from src.marketdata.krx_bars import append_daily_bars
+    from src.marketdata.schema import STORED_BAR_COLUMNS
 
     store = tmp_path / 'bars.parquet'
     bars = pl.DataFrame({'date': [dt.date(2026, 9, 7)], 'symbol': ['005930'], 'close': [270000.0],
@@ -161,7 +352,7 @@ def test_append_daily_bars_creates_new_store_file(tmp_path) -> None:
     assert appended == 1
     assert store.exists()
     stored = pl.read_parquet(store)
-    assert stored.columns == ['date', 'symbol', 'close', 'volume', 'trade_value_100m', 'daily_change_pct']
+    assert stored.columns == list(STORED_BAR_COLUMNS)
 
 
 

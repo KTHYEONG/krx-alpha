@@ -295,3 +295,221 @@ def test_select_universe_accepts_44_candidates_with_default_budget() -> None:
     assert DEEP_SLOT_BUDGET == 90
     assert result.height == 44
     assert sorted(result["symbol"].to_list()) == sorted(symbols)
+
+
+def _selection_bars(entries) -> object:
+    import datetime as dt
+
+    import polars as pl
+
+    dates = [dt.date(2026, 3, 2), dt.date(2026, 3, 3)]
+    rows = []
+    for symbol, kind, section in entries:
+        for i, day in enumerate(dates):
+            last = i == 1
+            rows.append({
+                "date": day,
+                "symbol": symbol,
+                "close": 1300.0 if last else 1000.0,
+                "volume": 1000,
+                "trade_value_100m": 100.0,
+                "daily_change_pct": 29.9 if last else 0.0,
+                "section": section,
+                "stock_cert_kind": kind,
+            })
+    return pl.DataFrame(rows)
+
+
+def test_select_universe_excludes_preferred_spac_managed_and_caution_sections():
+    import datetime as dt
+
+    from src.universe.policy import compute_selection_features, select_universe
+
+    bars = _selection_bars([
+        ("000001", "보통주", ""),
+        ("000002", "구형우선주", ""),
+        ("000003", "보통주", "SPAC(소속부없음)"),
+        ("000004", "보통주", "관리종목(소속부없음)"),
+        ("000005", "보통주", "투자주의환기종목(소속부없음)"),
+    ])
+
+    result = select_universe(compute_selection_features(bars), dt.date(2026, 3, 3))
+
+    assert result["symbol"].to_list() == ["000001"]
+
+
+def test_select_universe_excludes_before_slot_budget_check():
+    import datetime as dt
+
+    import pytest
+
+    from src.core.errors import SlotBudgetExceededError
+    from src.universe.policy import compute_selection_features, select_universe
+
+    bars = _selection_bars([
+        ("000001", "보통주", ""),
+        ("000002", "구형우선주", ""),
+        ("000003", "신형우선주", ""),
+    ])
+
+    result = select_universe(compute_selection_features(bars), dt.date(2026, 3, 3), slot_budget=1)
+
+    assert result["symbol"].to_list() == ["000001"]
+    with pytest.raises(SlotBudgetExceededError):
+        select_universe(compute_selection_features(_selection_bars([
+            ("000001", "보통주", ""),
+            ("000002", "보통주", ""),
+        ])), dt.date(2026, 3, 3), slot_budget=1)
+
+
+def test_select_universe_keeps_rows_with_unknown_class():
+    import datetime as dt
+
+    from src.universe.policy import compute_selection_features, select_universe
+
+    bars = _selection_bars([("000001", None, None)])
+
+    result = select_universe(compute_selection_features(bars), dt.date(2026, 3, 3))
+
+    assert result["symbol"].to_list() == ["000001"]
+
+
+def test_compute_selection_features_forward_fills_class_from_past_only():
+    import datetime as dt
+
+    import polars as pl
+
+    from src.universe.policy import compute_selection_features
+
+    bars = pl.DataFrame({
+        "date": [dt.date(2026, 3, 2), dt.date(2026, 3, 3), dt.date(2026, 3, 4)],
+        "symbol": ["000001"] * 3,
+        "close": [1000.0, 1000.0, 1000.0],
+        "volume": [1000, 1000, 1000],
+        "trade_value_100m": [100.0, 100.0, 100.0],
+        "daily_change_pct": [0.0, 0.0, 0.0],
+        "stock_cert_kind": ["구형우선주", None, "보통주"],
+    })
+
+    out = compute_selection_features(bars)
+
+    assert out.filter(pl.col("date") == dt.date(2026, 3, 3))["stock_cert_kind"].to_list() == ["구형우선주"]
+
+
+def _ca_bars(closes, event_base, event_change=6.0) -> object:
+    import datetime as dt
+
+    import polars as pl
+
+    base = dt.date(2026, 1, 5)
+    dates = [base + dt.timedelta(days=i) for i in range(len(closes))]
+    bases = [closes[0], *closes[:-1]]
+    bases[-1] = event_base
+    return pl.DataFrame({
+        "date": dates,
+        "symbol": ["000001"] * len(closes),
+        "close": [float(v) for v in closes],
+        "volume": [1000] * len(closes),
+        "trade_value_100m": [100.0] * len(closes),
+        "daily_change_pct": [0.0] * (len(closes) - 1) + [event_change],
+        "base_price": [float(v) for v in bases],
+    })
+
+
+def test_newhigh60_adjusts_for_bonus_issue_base_price():
+    import datetime as dt
+
+    import polars as pl
+
+    from src.universe.policy import compute_selection_features, select_universe
+
+    closes = [9000.0] * 60 + [9000.0, 9300.0, 9000.0, 3150.0]
+    decision = dt.date(2026, 1, 5) + dt.timedelta(days=len(closes) - 1)
+    featured = compute_selection_features(_ca_bars(closes, 3000.0))
+
+    event = featured.filter(pl.col("date") == decision)
+
+    assert event["close_max_60"].to_list() == [3150.0]
+    result = select_universe(featured, decision)
+    assert "newhigh60" in result["selection_reasons"].to_list()[0]
+
+
+def test_newhigh60_rejects_false_high_after_reverse_split():
+    import datetime as dt
+
+    import polars as pl
+
+    from src.universe.policy import compute_selection_features, select_universe
+
+    closes = [800.0] * 60 + [800.0, 1000.0, 783.0, 1661.0]
+    decision = dt.date(2026, 1, 5) + dt.timedelta(days=len(closes) - 1)
+    featured = compute_selection_features(_ca_bars(closes, 1566.0, event_change=12.0))
+
+    event = featured.filter(pl.col("date") == decision)
+
+    assert event["close_max_60"].to_list() == [2000.0]
+    result = select_universe(featured, decision)
+    reasons = result["selection_reasons"].to_list()[0]
+    assert "surge10" in reasons
+    assert "newhigh60" not in reasons
+
+
+def test_close_max_60_is_exact_without_corporate_actions():
+    import datetime as dt
+
+    import polars as pl
+
+    from src.universe.policy import compute_selection_features
+
+    n = 70
+    base = dt.date(2026, 1, 5)
+    closes = [1000.0 + i for i in range(n)]
+    bars = pl.DataFrame({
+        "date": [base + dt.timedelta(days=i) for i in range(n)],
+        "symbol": ["000001"] * n,
+        "close": closes,
+        "volume": [1000] * n,
+        "trade_value_100m": [100.0] * n,
+        "daily_change_pct": [0.0] * n,
+        "base_price": [closes[0], *closes[:-1]],
+    })
+
+    out = compute_selection_features(bars)
+
+    pure = pl.Series(closes).rolling_max(window_size=60).to_list()
+    got = out["close_max_60"].to_list()
+    assert all((a == b) or (a is None and b is None) for a, b in zip(got, pure, strict=True))
+    assert got[-1] == closes[-1]
+
+
+def test_close_max_60_is_causal_under_future_perturbation():
+    import datetime as dt
+
+    import polars as pl
+
+    from src.universe.policy import compute_selection_features
+
+    n = 65
+    base = dt.date(2026, 1, 5)
+    closes = [1000.0 + (i % 7) * 10.0 for i in range(n)]
+    decision = base + dt.timedelta(days=n - 1)
+
+    def _frame(extra) -> object:
+        ext = closes + extra
+        dates = [base + dt.timedelta(days=i) for i in range(len(ext))]
+        bases = [ext[0], *ext[:-1]]
+        return pl.DataFrame({
+            "date": dates,
+            "symbol": ["000001"] * len(ext),
+            "close": [float(v) for v in ext],
+            "volume": [1000] * len(ext),
+            "trade_value_100m": [100.0] * len(ext),
+            "daily_change_pct": [0.0] * len(ext),
+            "base_price": [float(v) for v in bases],
+        })
+
+    before = compute_selection_features(_frame([])).filter(pl.col("date") <= decision)
+    after = compute_selection_features(_frame([5000.0, 10.0, 9000.0])).filter(pl.col("date") <= decision)
+
+    assert before["close_max_60"].to_list() == after["close_max_60"].to_list()
+    assert before["tv_ratio"].to_list() == after["tv_ratio"].to_list()

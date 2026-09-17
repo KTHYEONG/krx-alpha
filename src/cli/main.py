@@ -19,6 +19,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
         bars_refresh,
         collect_aftermarket,
         collect_init,
+        collect_snapshots,
         collect_status,
         collect_stream,
         order,
@@ -30,6 +31,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
     collect_init.add_parser(subparsers)
     collect_stream.add_parser(subparsers)
     collect_aftermarket.add_parser(subparsers)
+    collect_snapshots.add_parser(subparsers)
     bars_refresh.add_parser(subparsers)
     order.add_parser(subparsers)
 

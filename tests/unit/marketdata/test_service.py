@@ -127,6 +127,7 @@ def test_refresh_bars_via_kis_fallback_writes_valid_rows_and_skips_invalid(tmp_p
             return {
                 "stck_clpr": "269000", "acml_vol": "22517075",
                 "acml_tr_pbmn": "6028310398800", "prdy_vrss": "-500",
+                "stck_oprc": "268000", "stck_hgpr": "270000", "stck_lwpr": "267000",
             }
 
     result = refresh_bars_via_kis_fallback(
@@ -180,7 +181,8 @@ def test_refresh_bars_via_kis_fallback_zeroes_change_pct_when_prev_close_is_zero
 
     class _IpoClient:
         def get_daily_bar(self, symbol: str, day: dt.date) -> dict[str, str] | None:
-            return {"stck_clpr": "1000", "acml_vol": "500", "acml_tr_pbmn": "500000", "prdy_vrss": "1000"}
+            return {"stck_clpr": "1000", "acml_vol": "500", "acml_tr_pbmn": "500000", "prdy_vrss": "1000",
+                    "stck_oprc": "1000", "stck_hgpr": "1000", "stck_lwpr": "1000"}
 
     result = refresh_bars_via_kis_fallback(
         store_path=store_path, market_map_path=map_path, target_date=dt.date(2026, 9, 10), kis_client=_IpoClient(),
@@ -189,3 +191,34 @@ def test_refresh_bars_via_kis_fallback_zeroes_change_pct_when_prev_close_is_zero
     assert result.appended_rows == 1
     saved = pl.read_parquet(store_path)
     assert saved["daily_change_pct"].to_list() == [0.0]
+
+
+def test_kis_fallback_populates_ohl_and_base_price(tmp_path) -> None:
+    import datetime as dt
+    import json
+
+    import polars as pl
+
+    from src.marketdata.service import refresh_bars_via_kis_fallback
+
+    map_path = tmp_path / "market_map.json"
+    map_path.write_text(json.dumps({"005930": "KOSPI"}), encoding="utf-8")
+    store_path = tmp_path / "bars" / "daily.parquet"
+
+    class _OhlClient:
+        def get_daily_bar(self, symbol: str, day: dt.date) -> dict[str, str] | None:
+            return {"stck_clpr": "1000", "acml_vol": "500", "acml_tr_pbmn": "500000", "prdy_vrss": "50",
+                    "stck_oprc": "960", "stck_hgpr": "1010", "stck_lwpr": "950"}
+
+    result = refresh_bars_via_kis_fallback(
+        store_path=store_path, market_map_path=map_path, target_date=dt.date(2026, 9, 10), kis_client=_OhlClient(),
+    )
+
+    assert result.appended_rows == 1
+    saved = pl.read_parquet(store_path)
+    assert saved["open"].to_list() == [960.0]
+    assert saved["high"].to_list() == [1010.0]
+    assert saved["low"].to_list() == [950.0]
+    assert saved["base_price"].to_list() == [950.0]
+    assert saved["stock_cert_kind"].to_list() == [None]
+    assert saved["section"].to_list() == [None]

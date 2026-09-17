@@ -285,3 +285,109 @@ def test_aftermarket_settings_require_verified_capacity_when_enabled(monkeypatch
     assert AftermarketSettings().enabled is False
     with pytest.raises(ValidationError):
         AftermarketSettings(enabled=True)
+
+
+def _clear_snapshot_env(monkeypatch) -> None:
+    import os
+
+    for name in [n for n in os.environ if n.startswith("KRX_ALPHA_SNAPSHOT_")]:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_snapshot_settings_defaults_are_valid_and_disabled(monkeypatch) -> None:
+    from src.core.config import SnapshotSettings
+    from src.core.calendar import SessionSchedule
+
+    _clear_snapshot_env(monkeypatch)
+    settings = SnapshotSettings()
+
+    assert settings.enabled is False
+    assert settings.run_end < SessionSchedule().market_close
+
+
+def test_snapshot_settings_rejects_auction_after_deadline() -> None:
+    import datetime as dt
+
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import SnapshotSettings
+
+    with pytest.raises(ValidationError):
+        SnapshotSettings(auction_open_times=(dt.time(8, 40), dt.time(9, 0)))
+
+
+def test_snapshot_settings_rejects_run_end_at_or_after_market_close() -> None:
+    import datetime as dt
+
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import SnapshotSettings
+
+    with pytest.raises(ValidationError):
+        SnapshotSettings(run_end=dt.time(15, 40))
+
+
+def test_snapshot_settings_rejects_non_monotonic_times() -> None:
+    import datetime as dt
+
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import SnapshotSettings
+
+    with pytest.raises(ValidationError):
+        SnapshotSettings(investor_estimate_times=(dt.time(10, 5), dt.time(9, 35)))
+
+
+def test_snapshot_settings_rejects_each_contract_violation() -> None:
+    import datetime as dt
+
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import SnapshotSettings
+
+    bad_kwargs: list[dict] = [
+        {"auction_open_times": ()},
+        {"auction_close_times": (dt.time(15, 25), dt.time(15, 21))},
+        {"investor_estimate_times": ()},
+        {"auction_open_deadline": dt.time(8, 30)},
+        {"auction_close_deadline": dt.time(15, 20)},
+        {"auction_close_times": (dt.time(8, 30),)},
+        {"investor_estimate_times": (dt.time(8, 30),)},
+        {"investor_estimate_times": (dt.time(15, 35),)},
+        {"news_start": dt.time(9, 30)},
+        {"eod_collect_time": dt.time(15, 20)},
+        {"run_end": dt.time(15, 35)},
+        {"ranking_interval_s": 0},
+        {"index_interval_s": -1},
+        {"news_interval_s": 0},
+        {"program_trade_interval_s": 0},
+        {"news_max_pages": 0},
+        {"stock_minute_max_symbols": -1},
+        {"rest_rate_per_s": 0.0},
+        {"idle_sleep_cap_s": 0.0},
+        {"index_codes": ()},
+        {"index_codes": ("0001", "abc")},
+        {"index_codes": ("001",)},
+    ]
+    for kwargs in bad_kwargs:
+        with pytest.raises(ValidationError):
+            SnapshotSettings(**kwargs)
+
+
+def test_data_paths_snapshot_partition_matches_retention_date_pattern() -> None:
+    import datetime as dt
+    import pathlib
+    import re
+
+    from src.core.config import CollectorSettings
+
+    paths = CollectorSettings(data_root=pathlib.Path("var/krx")).paths
+
+    part = paths.snapshot_partition("ranking", dt.date(2026, 9, 17))
+
+    assert part == pathlib.Path("var/krx/l1/snapshot/ranking/dt=2026-09-17.parquet")
+    assert re.search(r"dt=\d{4}-\d{2}-\d{2}", part.name)
