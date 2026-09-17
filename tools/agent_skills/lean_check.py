@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Smart Selective Lean Check: Fast, token-efficient static checks and tests."""
+"""Smart Selective Lean Check: Fast, token-efficient mechanical audit gate."""
 
 from __future__ import annotations
 
 import argparse
-import ast
 import contextlib
-import functools
 import json
 import os
 import re
@@ -38,18 +36,14 @@ def _emit_json(
     )
 
 
-def _fail_exit_many(phase: str, header: str, diags: list[JsonDiag]) -> None:
+def _exit_with_diags(phase: str, header: str, diags: list[JsonDiag], exit_code: int = 1) -> None:
     print(header)
     for d in diags:
-        print(f"FAIL | {d.get('error', '')}")
+        err = d.get("error", "")
+        if err:
+            print(f"FAIL | {err}")
     print(_emit_json("FAIL", phase, diags), file=sys.stderr)
-    sys.exit(1)
-
-
-def _fail_exit(phase: str, msg: str, diag: JsonDiag) -> None:
-    print(msg)
-    print(_emit_json("FAIL", phase, [diag]), file=sys.stderr)
-    sys.exit(1)
+    sys.exit(exit_code)
 
 
 def run_cmd(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
@@ -76,63 +70,19 @@ def run_cmd(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[s
         )
 
 
-def _repo_relative(path: str) -> str:
-    if not os.path.isabs(path):
-        return path
+def _available_memory_gb() -> float:
+    """Return available system RAM in gigabytes using Linux procfs or sysconf."""
     try:
-        return os.path.relpath(path, os.getcwd())
-    except ValueError:
-        return path
-
-
-# ---------------------------------------------------------------------------
-# AST Test-to-Source Matching (Used by both lean_check and gen_code_map)
-# ---------------------------------------------------------------------------
-
-
-@functools.cache
-def _repository_test_files() -> list[str]:
-    """Return test modules in deterministic order for semantic source matching."""
-    test_files: list[str] = []
-    for root, _dirs, files in os.walk("tests"):
-        test_files.extend(
-            os.path.join(root, filename)
-            for filename in sorted(files)
-            if filename.startswith("test_") and filename.endswith(".py")
-        )
-    return sorted(test_files)
-
-
-@functools.cache
-def _load_test_ast(test_file: str) -> ast.AST | None:
-    """Parse a test file once for repeated semantic source checks."""
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / (1024 * 1024)
+    except (OSError, ValueError):
+        pass
     try:
-        with open(test_file, encoding="utf-8") as handle:
-            return ast.parse(handle.read(), filename=test_file)
-    except (OSError, SyntaxError):
-        return None
-
-
-@functools.cache
-def _imported_source_modules(test_file: str) -> frozenset[str]:
-    """Return imported module paths from a cached test AST."""
-    tree = _load_test_ast(test_file)
-    if tree is None:
-        return frozenset()
-    modules: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            modules.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            modules.add(node.module)
-            modules.update(f"{node.module}.{alias.name}" for alias in node.names if alias.name != "*")
-    return frozenset(modules)
-
-
-def _test_references_source(test_file: str, source_file: str) -> bool:
-    """Match a test to a source module through its imports."""
-    source_module = source_file[:-3].replace("/", ".")
-    return source_module in _imported_source_modules(test_file)
+        return (os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_AVPHYS_PAGES")) / (1024**3)
+    except (ValueError, OSError, AttributeError):
+        return 8.0
 
 
 # ---------------------------------------------------------------------------
@@ -162,12 +112,7 @@ _SCAFFOLDING_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 def _check_scaffolding_leaks(py_files: list[str]) -> list[JsonDiag]:
     """Verify that no temporary spec recipes or placeholders remain in production code."""
     diags: list[JsonDiag] = []
-    # Check modified src/ files only (allow arbitrary test fixtures if needed)
-    src_files = [
-        f
-        for f in py_files
-        if (_repo_relative(f).startswith("src/") or "/src/" in f or f.startswith("src/")) and os.path.isfile(f)
-    ]
+    src_files = [f for f in py_files if (f.startswith("src/") or "/src/" in f) and os.path.isfile(f)]
 
     for fpath in src_files:
         try:
@@ -187,120 +132,164 @@ def _check_scaffolding_leaks(py_files: list[str]) -> list[JsonDiag]:
                             "fix_hint": "Remove temporary spec/recipe directives and write clean production code/docstring",
                         }
                     )
-                    break  # report first leak on this line
+                    break
     return diags
 
 
 # ---------------------------------------------------------------------------
-# Spec Parsing & Compliance (Lightweight Compatibility Layer)
+# Direct Test Matching (Predictable, zero-cascade convention mapping)
 # ---------------------------------------------------------------------------
 
 
-def _extract_tests_from_spec(spec_path: str) -> list[str]:
-    """Lightweight extraction of target test files from spec file."""
-    if not os.path.isfile(spec_path):
-        return []
-    try:
-        with open(spec_path, encoding="utf-8", errors="ignore") as f:
-            content = f.read()
-    except OSError:
-        return []
+def _find_test_files(py_files: list[str], spec_path: str | None = None) -> list[str]:
+    """Find direct unit tests corresponding to modified source files."""
+    test_files = [f for f in py_files if f.startswith("tests/") or "test_" in f]
+    source_files = [f for f in py_files if f.startswith("src/") and not f.endswith("__init__.py")]
 
-    if spec_path.endswith(".json"):
-        with contextlib.suppress(Exception):
-            data = json.loads(content)
-            tests: list[str] = []
-            for sc in data.get("scenarios", []) or data.get("tests", []):
-                ttf = _repo_relative(sc.get("target_test_file", ""))
-                if ttf and os.path.exists(ttf):
-                    tests.append(ttf)
-            return tests
+    # 1. Direct path convention: src/path/module.py -> tests/unit/path/test_module.py
+    for sf in source_files:
+        rel = sf[4:]  # strip 'src/'
+        parts = rel.split("/")
+        mod_name = parts[-1]
+        test_name = f"test_{mod_name}"
+        sub_path = "/".join(parts[:-1])
 
-    # Markdown spec: extract ## Test Suite: <path>
-    matches = re.findall(r"(?m)^##\s+Test\s+Suite:\s*`?([^\n`]+)`?", content)
-    return [m.strip() for m in matches if os.path.exists(m.strip())]
+        candidates = [
+            f"tests/unit/{sub_path}/{test_name}" if sub_path else f"tests/unit/{test_name}",
+            f"tests/unit/{test_name}",
+            f"tests/contract/{sub_path}/{test_name}" if sub_path else f"tests/contract/{test_name}",
+        ]
+        for cand in candidates:
+            if cand in test_files:
+                break
+            if os.path.isfile(cand):
+                test_files.append(cand)
+                break
 
-
-def _check_spec_compliance(spec_path: str, pre_impl: bool = False) -> tuple[int, list[JsonDiag]]:
-    """Lightweight compatibility stub: validates spec file existence and target directories."""
-    if not os.path.isfile(spec_path):
-        return 1, [{"file": spec_path, "line": 0, "error": f"Spec file not found: {spec_path}", "fix_hint": ""}]
-
-    if pre_impl:
-        # Check target directories referenced in spec
-        try:
+    # 2. Spec test suites if provided
+    if spec_path and os.path.isfile(spec_path):
+        with contextlib.suppress(OSError):
             with open(spec_path, encoding="utf-8", errors="ignore") as f:
                 content = f.read()
-            targets = re.findall(r"(?m)^##\s+Target:\s*`?([^\n`]+)`?", content)
-            for t in targets:
-                target_path = t.strip()
-                parent_dir = os.path.dirname(target_path)
-                if parent_dir and not os.path.exists(parent_dir):
-                    return 1, [
+            matches = re.findall(
+                r"(?m)^##\s+(?:Test\s+Suite|Invariant\s+Scenarios):\s*`?([^\n`]+)`?",
+                content,
+            )
+            for m in matches:
+                tf = m.strip().strip("`").strip()
+                if os.path.isfile(tf) and tf not in test_files:
+                    test_files.append(tf)
+
+    return sorted(dict.fromkeys(test_files))
+
+
+def _check_pre_impl_spec(spec_path: str) -> tuple[int, list[JsonDiag]]:
+    """Validate spec blueprint paths, targets, caller files, and anchors before implementation."""
+    diags: list[JsonDiag] = []
+    if not os.path.isfile(spec_path):
+        return 1, [
+            {
+                "file": spec_path,
+                "line": 0,
+                "error": f"Spec file not found: {spec_path}",
+                "fix_hint": "Check spec file path",
+            }
+        ]
+
+    try:
+        with open(spec_path, encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+    except OSError as e:
+        return 1, [
+            {
+                "file": spec_path,
+                "line": 0,
+                "error": f"Cannot read spec file: {e}",
+                "fix_hint": "Check file permissions",
+            }
+        ]
+
+    current_caller: str | None = None
+    target_found = False
+
+    for idx, line in enumerate(lines, start=1):
+        stripped = line.strip()
+
+        # Check Target
+        m_target = re.match(r"^##\s+Target:\s*`?([^\n`]+)`?", stripped)
+        if m_target:
+            target_file = m_target.group(1).strip().strip("`").strip()
+            target_found = True
+            parent = os.path.dirname(target_file)
+            if parent and not os.path.isdir(parent):
+                diags.append(
+                    {
+                        "file": spec_path,
+                        "line": idx,
+                        "error": f"Target parent directory does not exist: '{parent}' for target '{target_file}'",
+                        "fix_hint": f"Create directory {parent} or fix path in spec",
+                    }
+                )
+
+        # Check Wiring caller file
+        m_wiring = re.match(r"^##\s+Wiring:\s*`?([^\n`]+)`?", stripped)
+        if m_wiring:
+            current_caller = m_wiring.group(1).strip().strip("`").strip()
+            if not os.path.isfile(current_caller):
+                diags.append(
+                    {
+                        "file": spec_path,
+                        "line": idx,
+                        "error": f"Wiring caller file does not exist: '{current_caller}'",
+                        "fix_hint": f"Verify caller file path in {spec_path}",
+                    }
+                )
+
+        # Check Anchor in caller file
+        m_anchor = re.match(r"^-\s*(?:Anchor|anchor):\s*`?([^\n`]+)`?", stripped)
+        if m_anchor and current_caller and os.path.isfile(current_caller):
+            anchor = m_anchor.group(1).strip().strip("`").strip()
+            try:
+                with open(current_caller, encoding="utf-8", errors="ignore") as cf:
+                    caller_content = cf.read()
+                if anchor not in caller_content:
+                    diags.append(
                         {
-                            "file": target_path,
+                            "file": current_caller,
                             "line": 0,
-                            "error": f"Target parent directory not found: {parent_dir}",
-                            "fix_hint": f"Ensure valid directory path for {target_path}",
+                            "error": f"Wiring anchor '{anchor}' not found in caller file '{current_caller}'",
+                            "fix_hint": f"Ensure anchor '{anchor}' matches an existing symbol or line in {current_caller}",
                         }
-                    ]
-        except Exception as e:
-            return 1, [{"file": spec_path, "line": 0, "error": f"Spec check error: {e}", "fix_hint": ""}]
+                    )
+            except OSError:
+                pass
 
-    return 0, []
+        # Check Invariant Scenarios / Test Suite test file
+        m_test = re.match(r"^##\s+(?:Invariant\s+Scenarios|Test\s+Suite):\s*`?([^\n`]+)`?", stripped)
+        if m_test:
+            test_file = m_test.group(1).strip().strip("`").strip()
+            parent = os.path.dirname(test_file)
+            if parent and not os.path.isdir(parent):
+                diags.append(
+                    {
+                        "file": spec_path,
+                        "line": idx,
+                        "error": f"Test suite directory does not exist: '{parent}' for '{test_file}'",
+                        "fix_hint": f"Create directory {parent} or fix path in spec",
+                    }
+                )
 
+    if not target_found:
+        diags.append(
+            {
+                "file": spec_path,
+                "line": 0,
+                "error": "Spec missing mandatory '## Target: <path>' section",
+                "fix_hint": "Add '## Target: <relative_path>' section to spec",
+            }
+        )
 
-# ---------------------------------------------------------------------------
-# Test Discovery & Change Impact
-# ---------------------------------------------------------------------------
-
-
-def _analyze_impact_level(py_files: list[str]) -> tuple[int, str]:
-    """Analyze change scope and return (impact_level, reason)."""
-    if not py_files:
-        return 1, "No python files modified"
-
-    core_keywords = ("config", "base", "core", "schema", "contract")
-    is_core_modified = any(any(kw in f.lower() for kw in core_keywords) for f in py_files)
-    if is_core_modified or len(py_files) >= 5:
-        return 3, "Core module or large multi-file change detected"
-
-    src_files = [f for f in py_files if f.startswith("src/")]
-    if not src_files:
-        return 1, "Only test or tool files modified"
-
-    return 1, "Standard module change"
-
-
-def _find_test_files(py_files: list[str], impact_level: int = 1) -> list[str]:
-    """Find relevant pytest files for modified python files."""
-    test_files = [f for f in py_files if f.startswith("tests/") or "test_" in f]
-    source_files = [f for f in py_files if not (f.startswith("tests/") or "test_" in f)]
-    repository_files = _repository_test_files()
-
-    for sf in source_files:
-        if sf.startswith("src/") and not sf.endswith("__init__.py"):
-            parts = sf.split("/")
-            module_name = parts[-1]
-            test_name = f"test_{module_name}"
-            found_direct = False
-            for category in ["unit", "integration", "e2e", "contract"]:
-                sub_path = "/".join(parts[1:-1])
-                td = f"tests/{category}/{sub_path}" if sub_path else f"tests/{category}"
-                tp = f"{td}/{test_name}"
-                if tp in test_files:
-                    found_direct = True
-                    break
-                if os.path.exists(tp):
-                    test_files.append(tp)
-                    found_direct = True
-                    break
-
-            if not found_direct or impact_level >= 2:
-                for tp in repository_files:
-                    if tp not in test_files and _test_references_source(tp, sf):
-                        test_files.append(tp)
-    return test_files
+    return (1 if diags else 0), diags
 
 
 # ---------------------------------------------------------------------------
@@ -384,38 +373,54 @@ def _check_diff_coverage(src_files: list[str], cov_json_path: str) -> tuple[list
 
 
 # ---------------------------------------------------------------------------
-# CLI Entry Point
+# Main CLI Entry Point
 # ---------------------------------------------------------------------------
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Smart Selective Lean Check.")
-    parser.add_argument("--files", nargs="*", default=[])
-    parser.add_argument("--spec", default=None, help="Path to spec file")
+    parser = argparse.ArgumentParser(description="Smart Selective Lean Check: Tier 1 Mechanical Gate.")
+    parser.add_argument("--files", nargs="*", default=[], help="Explicit files to check")
+    parser.add_argument("--spec", default=None, help="Path to markdown/JSON spec file")
+    parser.add_argument("--fast", action="store_true", help="Run static checks only (scaffolding, ruff, mypy)")
     parser.add_argument("--skip-lint", action="store_true", help="Skip Ruff linting")
     parser.add_argument("--skip-mypy", action="store_true", help="Skip Mypy static check")
-    parser.add_argument("--fast", action="store_true", help="Skip pytest and run static checks only")
-    parser.add_argument("--pre-impl", action="store_true", help="Pre-implementation spec validation")
-    parser.add_argument("--deselect", nargs="*", default=[], help="Pytest node ids to deselect")
-    parser.add_argument("--pytest-timeout", type=int, default=None, help="Seconds for pytest step")
-    parser.add_argument("--test-timeout", type=int, default=120, help="Per-test wall-clock limit in seconds")
     parser.add_argument("--no-cov", action="store_true", help="Disable diff-coverage gate")
-    parser.add_argument("--no-xdist", action="store_true", help="Force serial pytest execution")
+    parser.add_argument("--no-xdist", action="store_true", help="Force serial pytest execution (-n 0)")
+    parser.add_argument("--timeout", type=int, default=None, help="Pytest timeout in seconds")
+    parser.add_argument(
+        "--pre-impl",
+        action="store_true",
+        help="Validate spec blueprint paths and wiring anchors before implementation",
+    )
     args = parser.parse_args()
 
-    # 1. Pre-implementation check
+    # 0. Pre-implementation Spec Blueprint Gate
     if args.pre_impl:
         if not args.spec:
-            print("FAIL | --pre-impl requires --spec")
-            sys.exit(2)
-        ec, diags = _check_spec_compliance(args.spec, pre_impl=True)
-        if ec != 0:
-            _fail_exit_many("spec-compliance", "FAIL | Spec pre-impl validation failed", diags)
-        print("PASS | Spec validation verified (pre-impl)")
-        print(_emit_json("PASS", "spec-compliance", []), file=sys.stderr)
-        sys.exit(0)
+            _exit_with_diags(
+                "pre-impl",
+                "FAIL | --pre-impl requires --spec <spec_file>",
+                [
+                    {
+                        "file": "",
+                        "line": 0,
+                        "error": "--pre-impl requires --spec argument",
+                        "fix_hint": "Pass --spec docs/specs/<feature>_spec.md",
+                    }
+                ],
+            )
+        code, diags = _check_pre_impl_spec(args.spec)
+        if code != 0:
+            _exit_with_diags(
+                "pre-impl",
+                f"FAIL | Pre-impl spec validation failed ({len(diags)} error(s))",
+                diags,
+            )
+        print("PASS | Spec blueprint paths and wiring anchors verified (pre-impl)")
+        print(_emit_json("PASS", "pre-impl", []), file=sys.stderr)
+        return
 
-    # 2. File discovery from git if not explicitly passed
+    # 1. File discovery from git if not explicitly passed
     if not args.files:
         try:
             diff_res = subprocess.run(
@@ -442,82 +447,71 @@ def main() -> None:
         print("ALLCHECKS:PASS | No modified .py files detected")
         sys.exit(0)
 
-    # 3. Regenerate code map self-healing
-    try:
-        from tools.agent_skills import gen_code_map
-
-        gen_code_map.main()
-    except Exception as e:
-        print(f"INFO | code_map self-heal skipped: {e}")
-
-    # 4. Scaffolding Leak Guard: Stop spec metadata from entering production code
+    # 2. Scaffolding Leak Guard
     scaffolding_diags = _check_scaffolding_leaks(py_files)
     if scaffolding_diags:
-        _fail_exit_many(
+        _exit_with_diags(
             "scaffolding-guard",
             f"FAIL | Scaffolding Leak: {len(scaffolding_diags)} temporary spec/recipe artifact(s) found in code",
             scaffolding_diags,
         )
 
-    # 5. Test Discovery
-    impact_level, impact_reason = _analyze_impact_level(py_files)
-    print(f"INFO | Impact Level: {impact_level} ({impact_reason})")
-    test_files = _find_test_files(py_files, impact_level=impact_level)
-
-    if args.spec:
-        spec_tests = _extract_tests_from_spec(args.spec)
-        for st in spec_tests:
-            if st not in test_files:
-                test_files.append(st)
-
-    # 6. Parallel Static Checks (Ruff, Mypy)
-    def check_ruff_task() -> tuple[str, int, list[JsonDiag], str]:
+    # 3. Parallel Static Checks (Ruff, Mypy)
+    def check_ruff() -> tuple[str, int, list[JsonDiag], str]:
         if args.skip_lint or not py_files:
             return "ruff", 0, [], ""
-        ruff_res = run_cmd(["uv", "run", "ruff", "check", *py_files, "--quiet"])
-        if ruff_res.returncode != 0:
-            out_sliced = "\n".join((ruff_res.stdout or ruff_res.stderr).strip().splitlines()[:10])
-            d = {"file": py_files[0], "line": 0, "error": out_sliced, "fix_hint": "Fix ruff lint errors"}
-            return "ruff", 1, [d], "FAIL | Ruff Lint Failed"
+        res = run_cmd(["uv", "run", "ruff", "check", *py_files, "--quiet"])
+        if res.returncode != 0:
+            out = "\n".join((res.stdout or res.stderr).strip().splitlines()[:10])
+            return "ruff", 1, [{"file": py_files[0], "line": 0, "error": out, "fix_hint": "Fix ruff lint errors"}], "FAIL | Ruff Lint Failed"
         return "ruff", 0, [], ""
 
-    def check_mypy_task() -> tuple[str, int, list[JsonDiag], str]:
+    def check_mypy() -> tuple[str, int, list[JsonDiag], str]:
         if args.skip_mypy or not py_files:
             return "mypy", 0, [], ""
         target_mypy = [f for f in py_files if f.startswith("src/")] or py_files
-        mypy_res = run_cmd(["uv", "run", "mypy", *target_mypy, "--ignore-missing-imports"])
-        if mypy_res.returncode != 0:
-            out_sliced = "\n".join((mypy_res.stdout or mypy_res.stderr).strip().splitlines()[:10])
-            d = {"file": target_mypy[0], "line": 0, "error": out_sliced, "fix_hint": "Fix mypy type errors"}
-            return "mypy", 1, [d], "FAIL | Mypy Type Check Failed"
+        res = run_cmd(["uv", "run", "mypy", *target_mypy, "--ignore-missing-imports"])
+        if res.returncode != 0:
+            out = "\n".join((res.stdout or res.stderr).strip().splitlines()[:10])
+            return "mypy", 1, [{"file": target_mypy[0], "line": 0, "error": out, "fix_hint": "Fix mypy type errors"}], "FAIL | Mypy Type Check Failed"
         return "mypy", 0, [], ""
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        f_ruff = executor.submit(check_ruff_task)
-        f_mypy = executor.submit(check_mypy_task)
-
+        f_ruff = executor.submit(check_ruff)
+        f_mypy = executor.submit(check_mypy)
         for f in [f_ruff, f_mypy]:
             phase, code, diags, msg = f.result()
             if code != 0:
-                if len(diags) > 1:
-                    _fail_exit_many(phase, msg, diags)
-                else:
-                    _fail_exit(phase, msg, diags[0] if diags else {})
+                _exit_with_diags(phase, msg, diags)
 
     if args.fast:
         print("PASS | Fast Check Passed (Scaffolding, Ruff, Mypy verified)")
         print(_emit_json("PASS", "fast-check", [], None), file=sys.stderr)
         return
 
-    # 7. Pytest & Diff Coverage
+    # 4. Direct Test Discovery
+    test_files = _find_test_files(py_files, spec_path=args.spec)
     if not test_files:
         print("PASS | Lint & Type check passed (no tests to run)")
         print(_emit_json("PASS", "all", [], None), file=sys.stderr)
         return
 
-    deselect_args = [f"--deselect={node}" for node in args.deselect]
-    timeout_args = [f"--timeout={args.test_timeout}", "--timeout-method=thread"] if args.test_timeout > 0 else []
-    xdist_args = ["-p", "no:cacheprovider", "-n", "0"] if args.no_xdist else []
+    # 5. Smart Pytest Execution (Resource Safety Guard)
+    env_workers = os.environ.get("LEAN_CHECK_WORKERS")
+    avail_mem_gb = _available_memory_gb()
+
+    if (
+        args.no_xdist
+        or len(test_files) <= 5
+        or (env_workers and env_workers in ("0", "1"))
+        or avail_mem_gb < 2.0
+    ):
+        xdist_args = ["-p", "no:cacheprovider", "-n", "0"]
+    else:
+        target_workers = int(env_workers) if env_workers and env_workers.isdigit() else 2
+        worker_count = min(target_workers, os.cpu_count() or 2, len(test_files))
+        xdist_args = ["-p", "no:cacheprovider", "-n", str(worker_count)]
+
     src_files = [f for f in py_files if f.startswith("src/")]
     cov_json_path = "tmp/lean_check_coverage.json"
     cov_args: list[str] = []
@@ -526,34 +520,41 @@ def main() -> None:
         os.makedirs("tmp", exist_ok=True)
         with contextlib.suppress(OSError):
             os.remove(cov_json_path)
-        cov_args = ["--cov=src", f"--cov-report=json:{cov_json_path}"]
+        pkgs = {f.split("/")[1] for f in src_files if len(f.split("/")) >= 2}
+        cov_pkgs = [f"--cov=src/{p}" for p in sorted(pkgs)] if pkgs else ["--cov=src"]
+        cov_args = [*cov_pkgs, f"--cov-report=json:{cov_json_path}"]
 
-    core_cmd = [
+    pytest_cmd = [
         sys.executable,
         "-m",
         "pytest",
         "-m",
         "not slow",
         *test_files,
-        *deselect_args,
-        *timeout_args,
         *xdist_args,
         *cov_args,
         "-q",
         "--tb=line",
     ]
-    pytest_timeout = args.pytest_timeout or max(120, min(600, 120 * len(test_files)))
-    pt_res = run_cmd(core_cmd, timeout=pytest_timeout)
+    pytest_timeout = args.timeout or max(60, min(240, 20 * len(test_files)))
+    pt_res = run_cmd(pytest_cmd, timeout=pytest_timeout)
 
-    if pt_res.returncode == 124 and not args.no_xdist:
-        print("INFO | pytest timed out under xdist; retrying serially with -n0")
-        serial_cmd = [*core_cmd, "-p", "no:cacheprovider", "-n", "0"]
-        pt_res = run_cmd(serial_cmd, timeout=pytest_timeout)
+    if pt_res.returncode == 124:
+        _exit_with_diags(
+            "pytest-timeout",
+            f"FAIL | Pytest Timed Out ({pytest_timeout}s)",
+            [{
+                "file": "",
+                "line": 0,
+                "error": f"pytest timed out after {pytest_timeout}s across {len(test_files)} file(s).",
+                "fix_hint": "Use --files to scope checks, investigate slow tests, or pass --timeout with a larger value.",
+            }],
+        )
 
     if pt_res.returncode == 0:
         cov_diags, cov_pct = _check_diff_coverage(src_files, cov_json_path) if cov_args else ([], None)
         if cov_diags:
-            _fail_exit_many(
+            _exit_with_diags(
                 "coverage",
                 f"FAIL | Diff Coverage: {len(cov_diags)} file(s) with untested new lines",
                 cov_diags,
@@ -569,8 +570,11 @@ def main() -> None:
         ]
         cause = last_err[-1] if last_err else (pt_res.stderr or "Check pytest output.").strip()
         cause_sliced = "\n".join(cause.splitlines()[:10])
-        d = {"file": "", "line": 0, "error": cause_sliced, "fix_hint": "Fix failing pytest assertions"}
-        _fail_exit("pytest", f"FAIL | Pytest Failed: {cause_sliced}", d)
+        _exit_with_diags(
+            "pytest",
+            f"FAIL | Pytest Failed: {cause_sliced}",
+            [{"file": "", "line": 0, "error": cause_sliced, "fix_hint": "Fix failing pytest assertions"}],
+        )
 
 
 if __name__ == "__main__":
