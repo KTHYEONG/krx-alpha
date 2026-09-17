@@ -11,9 +11,9 @@ Produce an unambiguous implementation blueprint (`docs/specs/<feature>_spec.md`)
 
 The design rationale and empirical proof are resolved in `/probe`.
 Your output in `/spec` focuses strictly on:
-1. **Target Interfaces & Invariants**: Exact signatures, finalized production docstrings (explaining Why and constraints), and bulleted core invariants. Do not include temporary pseudo-code or recipes in docstrings.
+1. **Target Interfaces & Invariants**: Exact signatures, finalized production docstrings (explaining Why and constraints), and bulleted core invariants. Do not include temporary pseudo-code, code skeletons, or recipes in docstrings or invariants (prevents model anchoring and scaffolding leaks).
 2. **Wiring Points**: Caller anchor and invocation snippet.
-3. **Executable Test Suites**: Concrete pytest functions with strict assertions.
+3. **Invariant Verification Scenarios**: Concrete scenarios (Given / When / Invariant) validating contracts without freezing internal test syntax prematurely.
 
 ## Directives
 
@@ -21,35 +21,55 @@ Your output in `/spec` focuses strictly on:
    - Infer feature context, invariants, and decisions directly from the preceding probe step.
    - Inspect target files and immediate callers for exact imports and AST anchors without scanning unrelated paths.
 
-2. **Blueprint Structure (`docs/specs/<feature>_spec.md`)**:
-   Pure Markdown specification with three sections:
+2. **Sizing & Modularity (Single-Bolt Rule)**:
+   - **Sweet Spot**: A single spec typically targets 2–4 related production files, 1–2 test files, and 10–15 invariant scenarios (200–350 lines).
+   - **Mandatory Split**: Split into sequential sub-specs (e.g. ordered by layer or dependency: `<feature>_<sub_layer>_spec.md`) if:
+     1) Total invariant scenarios exceed 20 or spec exceeds 500 lines.
+     2) Targets span distinct architectural layers (e.g., Domain Core Engine vs. CLI / External Adapters).
+
+3. **Blueprint Structure (`docs/specs/<feature>_spec.md`)**:
+   Organize targets with **component-centric co-location** (group Target, Wiring, and Invariant Scenarios together per component to prevent cross-referencing context loss). For multi-component specs, repeat this 3-part sequence for each component unit:
 
    ### A. Target Blueprint (`## Target: <relative_path>`)
    - Function/class signature with finalized production docstring (domain context, Args, Returns, Raises).
-   - Core Invariants: bulleted preconditions, calculation sequence, edge case handling, and postconditions.
+   - Core Invariants: bulleted preconditions, calculation sequence, negative constraints ("Do NOT..."), edge case handling, and postconditions.
+   - **No Code Skeletons**: Specify strict types and invariants only; do not provide implementation code snippets or algorithms to avoid model overfitting.
 
    ### B. Wiring Blueprint (`## Wiring: <caller_file>`)
    - Anchor point (`- Anchor: <symbol_or_line>`) and invocation snippet.
 
-   ### C. Test Suite (`## Test Suite: <target_test_file>`)
-   - Complete, executable pytest test functions validating the invariants.
+   ### C. Invariant Scenarios (`## Invariant Scenarios: <target_test_file>`)
+   - Bulleted test scenarios with descriptive domain titles:
+     - `- **<Behavior/Invariant Name>** Given ...; When ...; Invariant: ...`
+     - Keep titles clear so they translate directly into clean test function names (`test_<target>_<behavior>`).
 
-3. **Validation**:
-   Validate spec path and target directories:
+4. **Validation**:
+   Validate blueprint paths and caller anchors:
    ```bash
    uv run python tools/agent_skills/lean_check.py --spec docs/specs/<feature>_spec.md --pre-impl
    ```
 
 ## Chat Output Format
 
-Keep chat output ultra-compact:
+Keep chat output ultra-compact. When the feature is split into multiple sub-specs, output copy-paste-friendly separate command blocks for **all** $N$ sub-specs in sequential execution order:
 
 ### 📐 [SPEC] <기능명>
 > 📄 **청사진**: [`docs/specs/<feature>_spec.md`](file:///docs/specs/<feature>_spec.md)  
 > 🚦 **하네스 검증**: `lean_check --pre-impl` **PASS**
 
 - 🎯 **작업 요약**: <구현할 핵심 기능 1줄 요약>
-- 📦 **작업 규모**: <N>개 파일 수정 · <N>개 테스트 작성 완료
+- 📦 **작업 규모**: <N>개 파일 대상 · <N>개 테스트 시나리오 명세
 
 ---
+*(단일 스펙인 경우)*
 👉 **다음 단계**: `/implement docs/specs/<feature>_spec.md`
+
+*(다중 스펙으로 분할된 경우: 분할된 모든 $N$개 서브 스펙을 의존성 순서대로 각각 1개씩 복사 가능한 코드 블록으로 나열)*
+👉 **다음 단계 (순차 실행)**:
+```bash
+/implement docs/specs/<sub_spec_1>.md
+```
+```bash
+/implement docs/specs/<sub_spec_2>.md
+```
+<!-- Repeat a separate code block for each remaining sub-spec (e.g. sub_spec_3, sub_spec_4, ..., sub_spec_N) -->
