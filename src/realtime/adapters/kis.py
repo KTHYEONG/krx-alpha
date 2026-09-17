@@ -93,10 +93,28 @@ class KisRealtimeAdapter:
                     "body": {"input": {"tr_id": stream, "tr_key": symbol}},
                 })
             )
-            raw = await self._ws.receive_str()
-            ack = self._parse_ack(raw, symbol, stream)
+            ack = await self._await_subscribe_ack(symbol, stream)
             acks.append(ack)
         return acks
+
+    async def _await_subscribe_ack(self, symbol: str, stream: str) -> VendorAck:  # pragma: no cover - exercised only via live subscribe path
+        # 40개 심볼을 순차 구독하는 동안 이미 등록된 심볼의 실시간 틱("0|"/"1|" 접두)이나
+        # PINGPONG 하트비트가 다음 ACK보다 먼저 도착할 수 있다(실측 확인). 이를 이번 요청의
+        # ACK으로 오인해 json.loads 에 실패시키지 않도록, ACK이 아닌 프레임은 건너뛰며
+        # 실시간 틱은 recv() 가 나중에 소비하도록 큐에 적재한다.
+        while True:
+            raw = await self._ws.receive_str()
+            if raw[:1] in ("0", "1") and "|" in raw:
+                self._pending.extend(self._parse_envelope(raw))
+                continue
+            try:
+                header = json.loads(raw).get("header", {})
+            except ValueError:
+                header = {}
+            if isinstance(header, dict) and str(header.get("tr_id", "")) == "PINGPONG":
+                await self._ws.send_str(raw)
+                continue
+            return self._parse_ack(raw, symbol, stream)
 
     def _parse_ack(self, raw: str, symbol: str, stream: str) -> VendorAck:  # pragma: no cover - exercised only via live subscribe path
         try:

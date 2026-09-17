@@ -92,6 +92,41 @@ def test_kis_adapter_rejects_non_integer_and_misaligned_envelopes():
         adapter._parse_envelope('0|H0NXCNT0|001|005930')
 
 
+def test_kis_adapter_subscribe_skips_interleaved_ticks_and_pingpong():
+    import asyncio
+    import json
+
+    from src.realtime.adapters.kis import KisRealtimeAdapter
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import StreamRoute
+
+    sent = []
+
+    class Ws:
+        def __init__(self):
+            self._replies = iter([
+                '0|H0NXCNT0|001|005930^154001^a^b',
+                json.dumps({"header": {"tr_id": "PINGPONG"}}),
+                '{"header":{"tr_id":"H0NXCNT0"},"body":{"rt_cd":"0","msg_cd":"OPSP0000"}}',
+            ])
+
+        async def send_str(self, payload):
+            sent.append(payload)
+
+        async def receive_str(self):
+            return next(self._replies)
+
+    adapter = KisRealtimeAdapter(app_key='k', app_secret='s', http=object(), route=StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER), allowed_streams=('H0NXCNT0', 'H0NXASP0'), capacity_pairs=4)
+    adapter._ws = Ws()
+    acks = asyncio.run(adapter.subscribe([('005930', 'H0NXCNT0')]))
+
+    assert (acks[0].symbol, acks[0].stream, acks[0].accepted) == ('005930', 'H0NXCNT0', True)
+    assert len(adapter._pending) == 1
+    assert adapter._pending[0].raw == '005930^154001^a^b'
+    # PINGPONG 프레임은 그대로 에코 응답되어야 한다(마지막 send가 pong).
+    assert json.loads(sent[-1])['header']['tr_id'] == 'PINGPONG'
+
+
 def test_kis_websocket_lease_exclusive_and_adapter_lifecycle(tmp_path) -> None:
     import asyncio
     import pytest
