@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
 import pathlib
 from typing import Any, cast
@@ -13,10 +14,14 @@ import requests
 from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_attempt
 
 from src.core.errors import KrxAlphaError
-from src.marketdata.schema import BAR_SCHEMA, REQUIRED_BAR_COLUMNS
+from src.marketdata.schema import BAR_SCHEMA, STORED_BAR_COLUMNS
 
 KOSPI_URL = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd"
 KOSDAQ_URL = "https://data-dbg.krx.co.kr/svc/apis/sto/ksq_bydd_trd"
+KOSPI_BASE_INFO_URL = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_isu_base_info"
+KOSDAQ_BASE_INFO_URL = "https://data-dbg.krx.co.kr/svc/apis/sto/ksq_isu_base_info"
+
+logger = logging.getLogger(__name__)
 
 
 class KrxBarsError(KrxAlphaError):
@@ -68,6 +73,17 @@ def _post_krx(session: Any, url: str, auth_key: str, date: dt.date) -> dict[str,
 
 
 def fetch_daily_bars(date: dt.date, *, auth_key: str, session: Any | None = None) -> pl.DataFrame:
+    """Fetch KOSPI/KOSDAQ daily bars for one date with security classification.
+
+    Trading data is authoritative and fail-closed; the listing base info that
+    supplies share class and security group is auxiliary, so its failure only
+    leaves the class columns null.
+
+    Raises:
+        KrxTransportError: Trading data transport failure after retries.
+        KrxNoTradingDataError: Both markets returned no trading rows.
+        IncompleteMarketError: Exactly one market returned no trading rows.
+    """
     sess = session or requests
     try:
         kospi = _post_krx(sess, KOSPI_URL, auth_key, date)
@@ -81,21 +97,84 @@ def fetch_daily_bars(date: dt.date, *, auth_key: str, session: Any | None = None
     if not kospi_rows or not kosdaq_rows:
         empty = "KOSPI" if not kospi_rows else "KOSDAQ"
         raise IncompleteMarketError(f"partial market data for {date}: empty {empty}")
-    rows: list[dict[str, object]] = []
-    for payload, market in ((kospi, "KOSPI"), (kosdaq, "KOSDAQ")):
-        rows.extend(
-            {
-                "date": date,
-                "symbol": str(row["ISU_CD"]),
-                "close": float(row["TDD_CLSPRC"]),
-                "volume": int(row["ACC_TRDVOL"]),
-                "trade_value_100m": float(row["ACC_TRDVAL"]) / 1e8,
-                "daily_change_pct": float(row["FLUC_RT"]),
-                "market": market,
-            }
-            for row in payload.get("OutBlock_1", [])
+    kospi_classes = _fetch_base_classes(sess, KOSPI_BASE_INFO_URL, auth_key, date, "KOSPI")
+    kosdaq_classes = _fetch_base_classes(sess, KOSDAQ_BASE_INFO_URL, auth_key, date, "KOSDAQ")
+    rows: list[dict[str, object]] = [
+        _map_trading_row(date, row, market, classes)
+        for payload, market, classes in (
+            (kospi, "KOSPI", kospi_classes),
+            (kosdaq, "KOSDAQ", kosdaq_classes),
         )
+        for row in payload.get("OutBlock_1", [])
+    ]
     return pl.DataFrame(rows, schema=BAR_SCHEMA)
+
+
+def _opt_text(row: dict[str, Any], key: str) -> str | None:
+    if key not in row:
+        return None
+    text = str(row[key]).strip()
+    return text or None
+
+
+def _opt_float(row: dict[str, Any], key: str) -> float | None:
+    text = _opt_text(row, key)
+    return float(text) if text is not None else None
+
+
+def _opt_int(row: dict[str, Any], key: str) -> int | None:
+    text = _opt_text(row, key)
+    return int(text) if text is not None else None
+
+
+def _map_trading_row(
+    date: dt.date, row: dict[str, Any], market: str, classes: dict[str, dict[str, str | None]]
+) -> dict[str, object]:
+    volume = int(row["ACC_TRDVOL"])
+    close = float(row["TDD_CLSPRC"])
+    diff_text = _opt_text(row, "CMPPREVDD_PRC")
+    class_info = classes.get(str(row["ISU_CD"]), {})
+    return {
+        "date": date,
+        "symbol": str(row["ISU_CD"]),
+        "close": close,
+        "volume": volume,
+        "trade_value_100m": float(row["ACC_TRDVAL"]) / 1e8,
+        "daily_change_pct": float(row["FLUC_RT"]),
+        "market": market,
+        "open": None if volume == 0 else _opt_float(row, "TDD_OPNPRC"),
+        "high": None if volume == 0 else _opt_float(row, "TDD_HGPRC"),
+        "low": None if volume == 0 else _opt_float(row, "TDD_LWPRC"),
+        "base_price": None if diff_text is None else close - float(diff_text),
+        "market_cap_krw": _opt_int(row, "MKTCAP"),
+        "listed_shares": _opt_int(row, "LIST_SHRS"),
+        "section": _opt_text(row, "SECT_TP_NM"),
+        "stock_cert_kind": class_info.get("stock_cert_kind"),
+        "security_group": class_info.get("security_group"),
+    }
+
+
+def _fetch_base_classes(
+    sess: Any, url: str, auth_key: str, date: dt.date, market: str
+) -> dict[str, dict[str, str | None]]:
+    try:
+        body = _post_krx(sess, url, auth_key, date)
+    except requests.RequestException as exc:
+        logger.warning("[DATA] stage=krx_base_info status=DEGRADED market=%s reason=%s", market, str(exc))
+        return {}
+    rows = body.get("OutBlock_1", [])
+    if not rows or all("ISU_SRT_CD" not in row for row in rows):
+        reason = "empty OutBlock_1" if not rows else "missing ISU_SRT_CD"
+        logger.warning("[DATA] stage=krx_base_info status=DEGRADED market=%s reason=%s", market, reason)
+        return {}
+    return {
+        str(row["ISU_SRT_CD"]): {
+            "stock_cert_kind": _opt_text(row, "KIND_STKCERT_TP_NM"),
+            "security_group": _opt_text(row, "SECUGRP_NM"),
+        }
+        for row in rows
+        if "ISU_SRT_CD" in row
+    }
 
 
 def latest_trading_day(
@@ -118,18 +197,20 @@ def derive_market_map(bars: pl.DataFrame) -> dict[str, str]:
 
 def append_daily_bars(store_path: pathlib.Path, bars: pl.DataFrame) -> int:
     store = pathlib.Path(store_path)
-    incoming = bars.select(REQUIRED_BAR_COLUMNS).with_columns(
-        [
-            pl.col("date").cast(BAR_SCHEMA["date"]),
-            pl.col("symbol").cast(BAR_SCHEMA["symbol"]),
-            pl.col("close").cast(BAR_SCHEMA["close"]),
-            pl.col("volume").cast(BAR_SCHEMA["volume"]),
-            pl.col("trade_value_100m").cast(BAR_SCHEMA["trade_value_100m"]),
-            pl.col("daily_change_pct").cast(BAR_SCHEMA["daily_change_pct"]),
-        ]
-    )
+    present = [c for c in STORED_BAR_COLUMNS if c in bars.columns]
+    incoming = bars.select(present)
+    for column in STORED_BAR_COLUMNS:
+        if column not in incoming.columns:
+            incoming = incoming.with_columns(pl.lit(None).cast(BAR_SCHEMA[column]).alias(column))
+    incoming = incoming.select(STORED_BAR_COLUMNS).with_columns([
+        pl.col(column).cast(BAR_SCHEMA[column]) for column in STORED_BAR_COLUMNS
+    ])
     if store.exists():
         existing = pl.read_parquet(store)
+        for column in STORED_BAR_COLUMNS:
+            if column not in existing.columns:
+                existing = existing.with_columns(pl.lit(None).cast(BAR_SCHEMA[column]).alias(column))
+        existing = existing.select(STORED_BAR_COLUMNS)
         incoming_dates = incoming["date"].unique().to_list()
         prior = existing.filter(~pl.col("date").is_in(incoming_dates))
         if prior.height > 0:

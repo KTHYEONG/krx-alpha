@@ -85,6 +85,15 @@ class DataPaths:
     def universe_out(self, day: dt.date) -> pathlib.Path:
         return self.universe_dir / f"{day.isoformat()}.parquet"
 
+    def snapshot_partition(self, dataset: str, day: dt.date) -> pathlib.Path:
+        """Return the L1 day partition for a REST snapshot dataset.
+
+        Snapshot partitions live under the L1 archive root so the existing remote
+        offload and verified local pruning apply unchanged; the file name must keep
+        the ``dt=YYYY-MM-DD`` form that retention parses.
+        """
+        return self.archive_root / "snapshot" / dataset / f"dt={day.isoformat()}.parquet"
+
     def aftermarket_candidates(self, day: dt.date) -> pathlib.Path:
         return self.universe_dir / "aftermarket" / f"{day.isoformat()}.json"
 
@@ -232,6 +241,97 @@ class KisTokenSettings(BaseSettings):
         validation_alias=AliasChoices("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", "token_cache_dir"),
     )
     allow_issue: bool = True
+
+
+class SnapshotSettings(BaseSettings):
+    """Intraday REST snapshot collection contract (env_prefix='KRX_ALPHA_SNAPSHOT_').
+
+    All times are KST wall-clock times on the session date. The collector must
+    finish before the session EOD offload starts, because EOD uploads and later
+    prunes the same L1 partitions.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_SNAPSHOT_", extra="ignore")
+
+    enabled: bool = False
+    kis_data_slot: str = "1"
+    rest_rate_per_s: float = 18.0
+    request_timeout_s: float = 5.0
+    auction_open_times: tuple[dt.time, ...] = (
+        dt.time(8, 40),
+        dt.time(8, 50),
+        dt.time(8, 55),
+        dt.time(8, 58),
+        dt.time(8, 59, 30),
+    )
+    auction_open_deadline: dt.time = dt.time(9, 0)
+    auction_close_times: tuple[dt.time, ...] = (
+        dt.time(15, 21),
+        dt.time(15, 25),
+        dt.time(15, 28),
+        dt.time(15, 29, 30),
+    )
+    auction_close_deadline: dt.time = dt.time(15, 30)
+    intraday_start: dt.time = dt.time(9, 0)
+    intraday_end: dt.time = dt.time(15, 30)
+    ranking_interval_s: int = 60
+    index_interval_s: int = 60
+    index_codes: tuple[str, ...] = ("0001", "1001", "2001")
+    news_start: dt.time = dt.time(8, 0)
+    news_interval_s: int = 30
+    news_max_pages: int = 5
+    investor_estimate_times: tuple[dt.time, ...] = (
+        dt.time(9, 35),
+        dt.time(10, 5),
+        dt.time(11, 25),
+        dt.time(13, 25),
+        dt.time(14, 35),
+    )
+    program_trade_interval_s: int = 1800
+    eod_collect_time: dt.time = dt.time(15, 35)
+    run_end: dt.time = dt.time(15, 39)
+    stock_minute_max_symbols: int = 60
+    idle_sleep_cap_s: float = 5.0
+
+    @model_validator(mode="after")
+    def check_snapshot_contract(self) -> SnapshotSettings:
+        for name in ("auction_open_times", "auction_close_times", "investor_estimate_times"):
+            times = getattr(self, name)
+            if len(times) == 0:
+                raise ValueError(f"{name} must not be empty")
+            for idx in range(1, len(times)):
+                if times[idx] <= times[idx - 1]:
+                    raise ValueError(f"{name} must be strictly ascending")
+        if not (max(self.auction_open_times) < self.auction_open_deadline <= self.intraday_start):
+            raise ValueError("auction_open window must satisfy max(times) < deadline <= intraday_start")
+        if not (self.intraday_start < min(self.auction_close_times)):
+            raise ValueError("intraday_start must precede auction_close_times")
+        if not (max(self.auction_close_times) < self.auction_close_deadline <= self.intraday_end):
+            raise ValueError("auction_close window must satisfy max(times) < deadline <= intraday_end")
+        if not (self.intraday_start < min(self.investor_estimate_times)):
+            raise ValueError("intraday_start must precede investor_estimate_times")
+        if not (max(self.investor_estimate_times) < self.intraday_end):
+            raise ValueError("investor_estimate_times must precede intraday_end")
+        if not (
+            self.news_start < self.intraday_start < self.intraday_end <= self.eod_collect_time < self.run_end < SessionSchedule().market_close
+        ):
+            raise ValueError("session time order must satisfy news_start < intraday_start < intraday_end <= eod_collect_time < run_end < market_close")
+        for name in ("ranking_interval_s", "index_interval_s", "news_interval_s", "program_trade_interval_s"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
+        if self.news_max_pages < 1:
+            raise ValueError("news_max_pages must be >= 1")
+        if self.stock_minute_max_symbols < 0:
+            raise ValueError("stock_minute_max_symbols must be >= 0")
+        if self.rest_rate_per_s <= 0:
+            raise ValueError("rest_rate_per_s must be positive")
+        if self.idle_sleep_cap_s <= 0:
+            raise ValueError("idle_sleep_cap_s must be positive")
+        if len(self.index_codes) == 0:
+            raise ValueError("index_codes must not be empty")
+        if any(len(c) != 4 or not c.isdigit() for c in self.index_codes):
+            raise ValueError("index_codes must each be a 4-digit numeric string")
+        return self
 
 
 class ExecutionSettings(BaseSettings):

@@ -102,6 +102,10 @@ def refresh_bars_via_kis_fallback(
                 "trade_value_100m": float(row["acml_tr_pbmn"]) / 1e8,
                 "daily_change_pct": change_pct,
                 "market": market,
+                "open": float(row["stck_oprc"]),
+                "high": float(row["stck_hgpr"]),
+                "low": float(row["stck_lwpr"]),
+                "base_price": prev_close,
             }
         )
     if not rows:

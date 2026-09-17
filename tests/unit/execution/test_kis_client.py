@@ -557,3 +557,474 @@ def test_fluctuation_ranking_defaults_missing_trade_value_to_zero(tmp_path) -> N
 
     assert row.symbol == '042040'
     assert row.trade_value_krw == 0
+
+
+def _status_output(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        'iscd_stat_cls_code': '51',
+        'mang_issu_cls_code': 'Y',
+        'mrkt_warn_cls_code': '00',
+        'short_over_yn': 'N',
+        'invt_caful_yn': 'N',
+        'sltr_yn': 'N',
+        'temp_stop_yn': 'N',
+        'vi_cls_code': '',
+        'ovtm_vi_cls_code': '',
+        'crdt_able_yn': 'Y',
+        'stck_prpr': '70000',
+        'stck_sdpr': '69500',
+        'stck_mxpr': '90350',
+        'stck_llam': '48650',
+    }
+    base.update(overrides)
+    return base
+
+
+def _ok(body: dict[str, object]) -> object:
+    from tests.unit.execution.fakes import FakeResponse
+
+    return FakeResponse({'rt_cd': '0', 'msg_cd': 'MCA00000', 'msg1': 'ok', **body})
+
+
+def test_get_security_status_maps_flags_and_limits(tmp_path) -> None:
+    from src.execution.contracts import KisApiError  # noqa: F401
+    from tests.unit.execution.fakes import make_client
+
+    client, session, _ = make_client(tmp_path, [_ok({'output': _status_output()})])
+
+    row = client.get_security_status('005930')
+
+    assert row == {
+        'source_tr': 'FHKST01010100',
+        'market_div_code': 'J',
+        'symbol': '005930',
+        'status_code': '51',
+        'managed': True,
+        'market_warning_code': '00',
+        'short_overheated': False,
+        'investment_caution': False,
+        'liquidation_trading': False,
+        'trading_halted': False,
+        'vi_code': '',
+        'overtime_vi_code': '',
+        'credit_available': True,
+        'last_price': 70000,
+        'base_price': 69500,
+        'upper_limit': 90350,
+        'lower_limit': 48650,
+    }
+    assert session.calls[0]['params'] == {'FID_COND_MRKT_DIV_CODE': 'J', 'FID_INPUT_ISCD': '005930'}
+
+
+def test_get_security_status_rejects_unknown_flag_value(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import make_client
+
+    client, _, _ = make_client(tmp_path, [_ok({'output': _status_output(temp_stop_yn='X')})])
+
+    with pytest.raises(KisApiError) as excinfo:
+        client.get_security_status('005930')
+    assert excinfo.value.msg_cd == 'SCHEMA'
+
+
+def _asking_output1(levels: int) -> dict[str, str]:
+    out: dict[str, str] = {'aspr_acpt_hour': '085900'}
+    for i in range(1, 11):
+        fill = str(1000 + i) if i <= levels else ''
+        out[f'askp{i}'] = fill
+        out[f'askp_rsqn{i}'] = str(10 * i) if i <= levels else ''
+        out[f'bidp{i}'] = str(990 - i) if i <= levels else ''
+        out[f'bidp_rsqn{i}'] = str(5 * i) if i <= levels else ''
+    out['total_askp_rsqn'] = '300'
+    out['total_bidp_rsqn'] = '150'
+    return out
+
+
+def _asking_output2() -> dict[str, str]:
+    return {
+        'antc_mkop_cls_code': '1',
+        'antc_cnpr': '70100',
+        'antc_vol': '1234',
+        'antc_cntg_prdy_ctrt': '1.45',
+        'vi_cls_code': '',
+        'stck_prpr': '70000',
+        'stck_sdpr': '69500',
+    }
+
+
+def test_get_auction_book_keeps_ten_positional_levels(tmp_path) -> None:
+    from tests.unit.execution.fakes import make_client
+
+    client, _, _ = make_client(tmp_path, [_ok({'output1': _asking_output1(3), 'output2': _asking_output2()})])
+
+    row = client.get_auction_book('005930')
+
+    assert len(row['ask_prices']) == 10
+    assert len(row['ask_sizes']) == 10
+    assert len(row['bid_prices']) == 10
+    assert len(row['bid_sizes']) == 10
+    assert row['ask_prices'][3:] == [0] * 7
+    assert row['bid_sizes'][3:] == [0] * 7
+    assert all(isinstance(v, int) for v in row['ask_prices'])
+    assert row['expected_price'] == 70100
+    assert row['expected_change_pct'] == 1.45
+    assert 'phase' not in row
+
+
+def _estimate_row(bucket: str, foreign: str, orgn: str, total: str) -> dict[str, str]:
+    return {
+        'bsop_hour_gb': bucket,
+        'frgn_fake_ntby_qty': foreign,
+        'orgn_fake_ntby_qty': orgn,
+        'sum_fake_ntby_qty': total,
+    }
+
+
+def test_get_investor_estimate_parses_signed_padded_quantities(tmp_path) -> None:
+    from tests.unit.execution.fakes import make_client
+
+    rows = [_estimate_row(str(b), '-00000000000718000', '00000000000010000', '-00000000000708000') for b in (5, 4, 3, 2, 1)]
+    client, session, _ = make_client(tmp_path, [_ok({'output2': rows})])
+
+    got = client.get_investor_estimate('005930')
+
+    assert [r['bucket'] for r in got] == [1, 2, 3, 4, 5]
+    assert got[0]['foreign_net_qty'] == -718000
+    assert got[0]['institution_net_qty'] == 10000
+    assert got[0]['total_net_qty'] == -708000
+    assert got[0]['market_div_code'] == ''
+    assert session.calls[0]['params'] == {'MKSC_SHRN_ISCD': '005930'}
+
+
+def test_get_investor_estimate_rejects_out_of_range_bucket(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import make_client
+
+    client, _, _ = make_client(tmp_path, [_ok({'output2': [_estimate_row('6', '0', '0', '0')]})])
+
+    with pytest.raises(KisApiError) as excinfo:
+        client.get_investor_estimate('005930')
+    assert excinfo.value.msg_cd == 'SCHEMA'
+
+
+def test_get_investor_estimate_handles_empty_and_duplicate_buckets(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import make_client
+
+    client, _, _ = make_client(tmp_path, [_ok({'output2': []})])
+    assert client.get_investor_estimate('005930') == ()
+
+    dup = [_estimate_row('1', '0', '0', '0'), _estimate_row('1', '0', '0', '0')]
+    client, _, _ = make_client(tmp_path / 'dup', [_ok({'output2': dup})])
+    with pytest.raises(KisApiError) as excinfo:
+        client.get_investor_estimate('005930')
+    assert excinfo.value.msg_cd == 'SCHEMA'
+
+
+def _program_row(hour: str, sell: str, buy: str, net: str, sell_v: str, buy_v: str, net_v: str) -> dict[str, str]:
+    return {
+        'bsop_hour': hour,
+        'acml_vol': '5000',
+        'whol_smtn_seln_vol': sell,
+        'whol_smtn_shnu_vol': buy,
+        'whol_smtn_ntby_qty': net,
+        'whol_smtn_seln_tr_pbmn': sell_v,
+        'whol_smtn_shnu_tr_pbmn': buy_v,
+        'whol_smtn_ntby_tr_pbmn': net_v,
+    }
+
+
+def test_get_program_trade_latest_selects_max_time_and_checks_net_identity(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import make_client
+
+    rows = [
+        _program_row('150000', '100', '150', '50', '1000', '1500', '500'),
+        _program_row('093000', '10', '12', '2', '100', '120', '20'),
+    ]
+    client, _, _ = make_client(tmp_path, [_ok({'output': rows})])
+
+    row = client.get_program_trade_latest('005930')
+
+    assert row is not None
+    assert row['trade_time'] == '150000'
+    assert row['net_qty'] == 50
+    assert row['market_div_code'] == 'J'
+
+    broken = [_program_row('150000', '100', '150', '51', '1000', '1500', '500')]
+    client, _, _ = make_client(tmp_path / 'broken', [_ok({'output': broken})])
+    with pytest.raises(KisApiError) as excinfo:
+        client.get_program_trade_latest('005930')
+    assert excinfo.value.msg_cd == 'SCHEMA'
+
+    client, _, _ = make_client(tmp_path / 'empty', [_ok({'output': []})])
+    assert client.get_program_trade_latest('005930') is None
+
+
+def test_get_index_snapshot_maps_breadth_and_turnover(tmp_path) -> None:
+    from tests.unit.execution.fakes import make_client
+
+    output = {
+        'bstp_nmix_prpr': '822.18',
+        'bstp_nmix_prdy_ctrt': '0.87',
+        'acml_tr_pbmn': '123456',
+        'ascn_issu_cnt': '945',
+        'down_issu_cnt': '123',
+    }
+    client, session, _ = make_client(tmp_path, [_ok({'output': output})])
+
+    row = client.get_index_snapshot('1001')
+
+    assert row['index_value'] == 822.18
+    assert row['advancers'] == 945
+    assert row['decliners'] == 123
+    assert row['cum_value_mil_krw'] == 123456
+    assert row['market_div_code'] == 'U'
+    assert session.calls[0]['params']['FID_COND_MRKT_DIV_CODE'] == 'U'
+
+
+def _minute_row(hour: str, price: str = '70000', volume: str = '10', date: str = '20260917') -> dict[str, str]:
+    return {
+        'stck_bsop_date': date,
+        'stck_cntg_hour': hour,
+        'stck_oprc': price,
+        'stck_hgpr': price,
+        'stck_lwpr': price,
+        'stck_prpr': price,
+        'cntg_vol': volume,
+    }
+
+
+def _minute_hours(start: str, end: str) -> list[str]:
+    import datetime as dt
+
+    cur = dt.datetime.strptime(start, '%H%M%S')
+    stop = dt.datetime.strptime(end, '%H%M%S')
+    out: list[str] = []
+    while cur >= stop:
+        out.append(cur.strftime('%H%M%S'))
+        cur -= dt.timedelta(minutes=1)
+    return out
+
+
+def test_get_stock_minute_bars_walks_cursor_and_filters_session(tmp_path) -> None:
+    import datetime as dt
+
+    from tests.unit.execution.fakes import make_client
+
+    page1 = [_minute_row(h, volume='0') if h > '153000' else _minute_row(h) for h in _minute_hours('153500', '150600')]
+    page2 = [_minute_row(h) for h in _minute_hours('150500', '143600')]
+    client, session, _ = make_client(
+        tmp_path, [_ok({'output2': page1}), _ok({'output2': page2}), _ok({'output2': []})]
+    )
+
+    bars = client.get_stock_minute_bars(
+        '005930', session_date=dt.date(2026, 9, 17), session_open=dt.time(9, 0), session_close=dt.time(15, 30)
+    )
+
+    assert [call['params']['FID_INPUT_HOUR_1'] for call in session.calls] == ['153000', '150500', '143500']
+    assert session.calls[0]['params']['FID_COND_MRKT_DIV_CODE'] == 'J'
+    times = [b['bar_time'] for b in bars]
+    assert times == sorted(set(times))
+    assert all(t <= '153000' for t in times)
+    assert len(bars) == 55
+    assert bars[0]['volume'] == 10
+
+
+def test_get_stock_minute_bars_drops_other_date_and_rejects_broken_bar(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import make_client
+
+    page = [_minute_row('150000', date='20260916'), _minute_row('145900')]
+    client, _, _ = make_client(tmp_path, [_ok({'output2': page}), _ok({'output2': []})])
+
+    bars = client.get_stock_minute_bars(
+        '005930', session_date=dt.date(2026, 9, 17), session_open=dt.time(9, 0), session_close=dt.time(15, 30)
+    )
+
+    assert [b['bar_time'] for b in bars] == ['145900']
+
+    broken = dict(_minute_row('145800'))
+    broken['stck_hgpr'] = '69000'
+    client, _, _ = make_client(tmp_path / 'broken', [_ok({'output2': [broken]}), _ok({'output2': []})])
+    with pytest.raises(KisApiError) as excinfo:
+        client.get_stock_minute_bars(
+            '005930', session_date=dt.date(2026, 9, 17), session_open=dt.time(9, 0), session_close=dt.time(15, 30)
+        )
+    assert excinfo.value.msg_cd == 'SCHEMA'
+
+
+def test_get_stock_minute_bars_stops_on_stale_and_open_cursor(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import make_client
+
+    dup = [_minute_row('145900')]
+    client, session, _ = make_client(tmp_path, [_ok({'output2': dup}), _ok({'output2': dup})])
+
+    bars = client.get_stock_minute_bars(
+        '005930', session_date=dt.date(2026, 9, 17), session_open=dt.time(9, 0), session_close=dt.time(15, 30)
+    )
+
+    assert [b['bar_time'] for b in bars] == ['145900']
+    assert len(session.calls) == 2
+
+    reaching_open = [_minute_row('150000'), _minute_row('145900')]
+    client, session, _ = make_client(tmp_path / 'open', [_ok({'output2': reaching_open})])
+    bars = client.get_stock_minute_bars(
+        '005930', session_date=dt.date(2026, 9, 17), session_open=dt.time(14, 59), session_close=dt.time(15, 30)
+    )
+
+    assert [b['bar_time'] for b in bars] == ['145900', '150000']
+    assert len(session.calls) == 1
+
+    malformed = [_minute_row('25AB00')]
+    client, _, _ = make_client(tmp_path / 'malformed', [_ok({'output2': malformed})])
+    with pytest.raises(KisApiError) as excinfo:
+        client.get_stock_minute_bars(
+            '005930', session_date=dt.date(2026, 9, 17), session_open=dt.time(9, 0), session_close=dt.time(15, 30)
+        )
+    assert excinfo.value.msg_cd == 'SCHEMA'
+
+
+def test_get_stock_minute_bars_rejects_page_cap_overflow(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import make_client
+
+    pages = []
+    cur = dt.datetime.strptime('153000', '%H%M%S')
+    for _ in range(100):
+        pages.append(_ok({'output2': [_minute_row(cur.strftime('%H%M%S'))]}))
+        cur -= dt.timedelta(minutes=1)
+    client, _, _ = make_client(tmp_path, pages)
+
+    with pytest.raises(KisApiError) as excinfo:
+        client.get_stock_minute_bars(
+            '005930', session_date=dt.date(2026, 9, 17), session_open=dt.time(9, 0), session_close=dt.time(15, 30)
+        )
+    assert excinfo.value.msg_cd == 'PAGINATION'
+
+
+def _news_row(news_id: str = '202609170001', **overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        'cntt_usiq_srno': news_id,
+        'data_dt': '20260917',
+        'data_tm': '203306',
+        'dorg': '거래소 공시',
+        'news_ofer_entp_code': '1',
+        'news_lrdv_code': 'A',
+        'hts_pbnt_titl_cntt': '제목',
+        'iscd1': '066570',
+        'iscd2': ' ',
+    }
+    for i in range(3, 11):
+        base[f'iscd{i}'] = ''
+    base.update(overrides)
+    return base
+
+
+def test_get_news_titles_converts_kst_time_and_collects_symbols(tmp_path) -> None:
+    import datetime as dt
+
+    from tests.unit.execution.fakes import make_client
+
+    client, session, _ = make_client(tmp_path, [_ok({'output': [_news_row()]})])
+
+    (row,) = client.get_news_titles()
+
+    pub = dt.datetime(2026, 9, 17, 11, 33, 6, tzinfo=dt.UTC)
+    epoch = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
+    assert row['published_at_ns'] == int((pub - epoch).total_seconds()) * 1_000_000_000
+    assert row['symbols'] == ['066570']
+    assert row['market_div_code'] == ''
+    assert set(session.calls[0]['params']) == {
+        'FID_NEWS_OFER_ENTP_CODE',
+        'FID_COND_MRKT_CLS_CODE',
+        'FID_INPUT_ISCD',
+        'FID_TITL_CNTT',
+        'FID_INPUT_DATE_1',
+        'FID_INPUT_HOUR_1',
+        'FID_RANK_SORT_CLS_CODE',
+        'FID_INPUT_SRNO',
+    }
+    assert all(v == '' for v in session.calls[0]['params'].values())
+
+
+def test_get_news_titles_sends_inclusive_cursor(tmp_path) -> None:
+    from tests.unit.execution.fakes import make_client
+
+    client, session, _ = make_client(tmp_path, [_ok({'output': []})])
+
+    assert client.get_news_titles(before=('20260917', '201739')) == ()
+    assert session.calls[0]['params']['FID_INPUT_DATE_1'] == '20260917'
+    assert session.calls[0]['params']['FID_INPUT_HOUR_1'] == '201739'
+
+
+def test_get_news_titles_rejects_empty_news_id(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import make_client
+
+    client, _, _ = make_client(tmp_path, [_ok({'output': [_news_row(news_id='  ')]})])
+
+    with pytest.raises(KisApiError) as excinfo:
+        client.get_news_titles()
+    assert excinfo.value.msg_cd == 'SCHEMA'
+
+
+def test_snapshot_parsing_rejects_missing_and_malformed_fields(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import make_client
+
+    cases = [
+        ('missing key', _status_output(), ['stck_prpr'], 'get_security_status', ('005930',), {}),
+        ('bad int', _status_output(stck_prpr='abc'), [], 'get_security_status', ('005930',), {}),
+        ('fractional int', _status_output(stck_prpr='1.5'), [], 'get_security_status', ('005930',), {}),
+    ]
+    for label, output, drop, method, args, kwargs in cases:
+        for key in drop:
+            del output[key]
+        client, _, _ = make_client(tmp_path / label.replace(' ', '_'), [_ok({'output': output})])
+        with pytest.raises(KisApiError) as excinfo:
+            getattr(client, method)(*args, **kwargs)
+        assert excinfo.value.msg_cd == 'SCHEMA', label
+
+    for bad_float in ('xyz', 'Infinity'):
+        output2 = _asking_output2()
+        output2['antc_cntg_prdy_ctrt'] = bad_float
+        client, _, _ = make_client(
+            tmp_path / f'float_{bad_float}', [_ok({'output1': _asking_output1(1), 'output2': output2})]
+        )
+        with pytest.raises(KisApiError) as excinfo:
+            client.get_auction_book('005930')
+        assert excinfo.value.msg_cd == 'SCHEMA'
+
+    for bad_dt, bad_tm in (('20260917', '2033'), ('20260230', '203306')):
+        client, _, _ = make_client(
+            tmp_path / f'news_{bad_dt}_{bad_tm}', [_ok({'output': [_news_row(data_dt=bad_dt, data_tm=bad_tm)]})]
+        )
+        with pytest.raises(KisApiError) as excinfo:
+            client.get_news_titles()
+        assert excinfo.value.msg_cd == 'SCHEMA'

@@ -2227,3 +2227,290 @@ def test_daemon_blocks_aftermarket_when_reselection_fails(monkeypatch, tmp_path,
     assert any('collect-stream' in cmd for cmd in commands)
     assert not any('collect-aftermarket' in cmd for cmd in commands)
     assert any('aftermarket' in record.getMessage().lower() for record in caplog.records)
+
+
+def test_run_session_orchestration_passes_status_source_and_store(tmp_path, monkeypatch) -> None:
+    # Given: KIS 자격증명 없이 plan_universe를 가짜로 둔 오케스트레이션
+    import datetime as dt
+    import pathlib
+
+    import polars as pl
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+    from src.storage.snapshot_store import SnapshotStore
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
+    for name in ("KIS_APP_KEY", "KIS_APP_SECRET", "KIS_ACCOUNT_NO", "KIS_ACCOUNT_PRODUCT_CODE"):
+        monkeypatch.delenv(name, raising=False)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "date": [dt.date(2026, 9, 9)],
+        "symbol": ["000001"],
+        "close": [1000.0],
+        "volume": [1000],
+        "trade_value_100m": [100.0],
+        "daily_change_pct": [1.0],
+    }).write_parquet(settings.paths.bars_store)
+
+    calls: dict[str, object] = {}
+
+    def _fake_refresh(**kwargs):
+        return daemon.BarsRefreshResult(trading_day=dt.date(2026, 9, 9), appended_rows=0, backfilled_days=0)
+
+    def _fake_plan(**kwargs):
+        calls["plan"] = kwargs
+        settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+        write_candidates(settings.paths.candidates, [{"symbol": "000001", "selection_reasons": ["limit_up"]}], rev=1)
+        return daemon.UniversePlanResult(
+            decision_date=dt.date(2026, 9, 9), selected=1, out_path=kwargs["out_path"], candidates_emitted=1
+        )
+
+    monkeypatch.setattr(daemon, "refresh_bars", _fake_refresh)
+    monkeypatch.setattr(daemon, "plan_universe", _fake_plan)
+
+    # When
+    ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 10), settings=settings)
+
+    # Then
+    assert ready is True
+    assert calls["plan"]["status_source"] is None
+    assert calls["plan"]["session_date"] == dt.date(2026, 9, 10)
+    assert isinstance(calls["plan"]["snapshot_store"], SnapshotStore)
+
+
+def _snapshot_fake_supervisor(monkeypatch, daemon_mod):
+    created: list = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = list(cmd)
+            self.ensure_calls = 0
+            self.stop_calls: list = []
+            created.append(self)
+
+        def ensure_running(self):
+            self.ensure_calls += 1
+            return 'started'
+
+        def stop(self, *, timeout_s=15.0):
+            self.stop_calls.append(timeout_s)
+            return 'graceful'
+
+    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _FakeSupervisor)
+    return created
+
+
+def _snapshot_ready_daemon(monkeypatch, daemon_mod):
+    monkeypatch.setattr(daemon_mod, 'resolve_trading_day', lambda ref_date: None)
+    monkeypatch.setattr(daemon_mod, 'run_session_orchestration', lambda **kw: True)
+
+
+def test_daemon_spawns_snapshot_supervisor_when_enabled(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+    import src.orchestration.daemon as daemon_mod
+    from src.orchestration.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('KRX_ALPHA_SNAPSHOT_ENABLED', 'true')
+    _snapshot_ready_daemon(monkeypatch, daemon_mod)
+    created = _snapshot_fake_supervisor(monkeypatch, daemon_mod)
+
+    run_collector_daemon(
+        sleep_fn=MagicMock(), max_cycles=1,
+        now_fn=lambda: dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo('Asia/Seoul')),
+    )
+
+    kinds = ['snapshots' if 'collect-snapshots' in sup.cmd else 'streamer' for sup in created]
+    assert sorted(kinds) == ['snapshots', 'streamer']
+    assert all(sup.ensure_calls == 1 for sup in created)
+
+
+def test_daemon_does_not_restart_snapshots_after_run_end(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+    import src.orchestration.daemon as daemon_mod
+    from src.orchestration.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('KRX_ALPHA_SNAPSHOT_ENABLED', 'true')
+    _snapshot_ready_daemon(monkeypatch, daemon_mod)
+    created = _snapshot_fake_supervisor(monkeypatch, daemon_mod)
+
+    run_collector_daemon(
+        sleep_fn=MagicMock(), max_cycles=1,
+        now_fn=lambda: dt.datetime(2026, 9, 8, 15, 39, 30, tzinfo=ZoneInfo('Asia/Seoul')),
+    )
+
+    by_kind = {'snapshots' if 'collect-snapshots' in sup.cmd else 'streamer': sup for sup in created}
+    assert set(by_kind) == {'snapshots', 'streamer'}
+    assert by_kind['snapshots'].ensure_calls == 0
+    assert by_kind['streamer'].ensure_calls == 1
+
+
+def test_daemon_stops_snapshot_supervisor_at_eod(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+    import src.orchestration.daemon as daemon_mod
+    from src.orchestration.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('KRX_ALPHA_SNAPSHOT_ENABLED', 'true')
+    _snapshot_ready_daemon(monkeypatch, daemon_mod)
+    created = _snapshot_fake_supervisor(monkeypatch, daemon_mod)
+    kst = ZoneInfo('Asia/Seoul')
+    times = iter([
+        dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=kst),
+        dt.datetime(2026, 9, 8, 15, 45, 0, tzinfo=kst),
+    ])
+
+    run_collector_daemon(sleep_fn=MagicMock(), max_cycles=2, now_fn=lambda: next(times))
+
+    snapshots = [sup for sup in created if 'collect-snapshots' in sup.cmd]
+    assert len(snapshots) == 1
+    assert snapshots[0].stop_calls == [15.0]
+
+
+def test_daemon_without_snapshot_flag_keeps_existing_spawn_set(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+    import src.orchestration.daemon as daemon_mod
+    from src.orchestration.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv('KRX_ALPHA_SNAPSHOT_ENABLED', raising=False)
+    _snapshot_ready_daemon(monkeypatch, daemon_mod)
+    created = _snapshot_fake_supervisor(monkeypatch, daemon_mod)
+
+    run_collector_daemon(
+        sleep_fn=MagicMock(), max_cycles=1,
+        now_fn=lambda: dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo('Asia/Seoul')),
+    )
+
+    assert len(created) == 1
+    assert 'collect-snapshots' not in created[0].cmd
+
+
+def test_daemon_recreates_snapshot_supervisor_after_degraded_retry(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+    import src.orchestration.daemon as daemon_mod
+    from src.orchestration.daemon import run_collector_daemon
+    from src.core.config import CollectorSettings
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('KRX_ALPHA_SNAPSHOT_ENABLED', 'true')
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+    write_candidates(settings.paths.candidates, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+    created: list = []
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = list(cmd)
+            self.stop_calls: list = []
+            created.append(self)
+
+        def ensure_running(self):
+            return 'started'
+
+        def stop(self, *, timeout_s=15.0):
+            self.stop_calls.append(timeout_s)
+            return 'graceful'
+
+    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _FakeSupervisor)
+    monkeypatch.setattr(daemon_mod, 'resolve_trading_day', lambda ref_date: None)
+    outcomes = iter([False, True])
+    monkeypatch.setattr(daemon_mod, 'run_session_orchestration', lambda **kw: next(outcomes))
+    kst = ZoneInfo('Asia/Seoul')
+    times = iter([
+        dt.datetime(2026, 9, 14, 8, 25, tzinfo=kst),
+        dt.datetime(2026, 9, 14, 8, 31, tzinfo=kst),
+    ])
+
+    run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: next(times))
+
+    snapshots = [sup for sup in created if 'collect-snapshots' in sup.cmd]
+    assert len(snapshots) == 2
+    assert snapshots[0].stop_calls == [15.0]
+
+
+def test_daemon_stops_stale_snapshot_supervisor_on_day_change(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+    import src.orchestration.daemon as daemon_mod
+    from src.orchestration.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('KRX_ALPHA_SNAPSHOT_ENABLED', 'true')
+    _snapshot_ready_daemon(monkeypatch, daemon_mod)
+    created = _snapshot_fake_supervisor(monkeypatch, daemon_mod)
+    kst = ZoneInfo('Asia/Seoul')
+    times = iter([
+        dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=kst),
+        dt.datetime(2026, 9, 9, 9, 0, 0, tzinfo=kst),
+    ])
+
+    run_collector_daemon(sleep_fn=MagicMock(), max_cycles=2, now_fn=lambda: next(times))
+
+    snapshots = [sup for sup in created if 'collect-snapshots' in sup.cmd]
+    assert len(snapshots) == 2
+    assert snapshots[0].stop_calls == [15.0]
+
+
+def test_daemon_logs_snapshot_restart_and_circuit_open(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+    import src.orchestration.daemon as daemon_mod
+    from src.orchestration.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('KRX_ALPHA_SNAPSHOT_ENABLED', 'true')
+    _snapshot_ready_daemon(monkeypatch, daemon_mod)
+
+    class _FlappingSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = list(cmd)
+            self.last_exit_code = 3
+
+        def ensure_running(self):
+            return 'restarted' if 'collect-snapshots' in self.cmd else 'started'
+
+        def stop(self, *, timeout_s=15.0):
+            return 'graceful'
+
+    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _FlappingSupervisor)
+
+    with caplog.at_level(logging.WARNING):
+        run_collector_daemon(
+            sleep_fn=MagicMock(), max_cycles=1,
+            now_fn=lambda: dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo('Asia/Seoul')),
+        )
+
+    assert 'stage=snapshots status=RESTARTED' in caplog.text
+
+    class _TrippingSupervisor(_FlappingSupervisor):
+        def ensure_running(self):
+            return 'circuit_open' if 'collect-snapshots' in self.cmd else 'started'
+
+    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _TrippingSupervisor)
+
+    with caplog.at_level(logging.CRITICAL):
+        run_collector_daemon(
+            sleep_fn=MagicMock(), max_cycles=1,
+            now_fn=lambda: dt.datetime(2026, 9, 8, 9, 5, 0, tzinfo=ZoneInfo('Asia/Seoul')),
+        )
+
+    assert 'stage=snapshots status=FAIL reason=circuit_open' in caplog.text

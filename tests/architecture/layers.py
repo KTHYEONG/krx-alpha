@@ -12,3 +12,7 @@ LAYER_RANK['src/core/kis_keypool_provisioning.py'] = 0
 LAYER_RANK['src/core/runtime_env_provisioning.py'] = 0
 LAYER_RANK['src/cli/provision_kis_keypool.py'] = 7
 LAYER_RANK['src/universe/aftermarket.py'] = 4
+LAYER_RANK['src/marketdata/snapshot_contracts.py'] = 1
+LAYER_RANK['src/storage/snapshot_store.py'] = 2
+LAYER_RANK['src/marketdata/snapshot_service.py'] = 4
+LAYER_RANK['src/cli/collect_snapshots.py'] = 7
