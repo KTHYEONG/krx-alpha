@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_SNAPSHOT_SOURCE_DATA",
+      "date": "2026-09-17",
+      "adr_id": "ADR_20260917_SNAPSHOT_SOURCE_DATA",
+      "domain": "marketdata",
+      "title": "장중 REST 스냅샷 원천데이터 확보 및 증권구분 제외",
+      "why": "단타 자동매매를 위해 동시호가/수급/프로그램매매/순위/지수/뉴스/급등주 분봉 원천데이터가 부재했고 유니버스에 우선주·스팩·관리종목이 섞여 있었다",
+      "resolution": "KIS 데이터 슬롯 키로 8종 스냅샷을 세션 잡 플랜에 따라 수집해 L1 parquet에 영속화하고, KRX 증권기본정보+KIS 관리종목 플래그로 유니버스에서 우선주/스팩/관리/환기종목을 제외하며 기준가 기반 기업이벤트 보정을 적용했다",
+      "impact": "일 ~6~7k REST 호출·저장 3MB 미만으로 저비용 확보, 기존 오프로드/보존 파이프라인을 그대로 재사용, 유니버스 오염 제거",
+      "caveat": "VPS 데이터 슬롯 1번 KIS 토큰 캐시 사전 워밍 필요, 기존 daily.parquet 과거 행은 신규 컬럼 null이라 이벤트 보정은 배포 이후 데이터부터 적용"
+    },
+    {
       "task_id": "TASK_UNIVERSE_SELECTION_FEEDBACK",
       "date": "2026-09-16",
       "adr_id": "ADR_20260916_UNIVERSE_SELECTION_FEEDBACK",
