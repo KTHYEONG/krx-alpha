@@ -11,3 +11,4 @@ LAYER_RANK['src/core/observability.py'] = 0
 LAYER_RANK['src/core/kis_keypool_provisioning.py'] = 0
 LAYER_RANK['src/core/runtime_env_provisioning.py'] = 0
 LAYER_RANK['src/cli/provision_kis_keypool.py'] = 7
+LAYER_RANK['src/universe/aftermarket.py'] = 4

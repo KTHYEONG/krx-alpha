@@ -47,7 +47,11 @@ TR_ORDERABLE: str = "TTTC8408R"
 TR_PRICE: str = "FHKST01010100"
 TR_ASKING: str = "FHKST01010200"
 TR_DAILY_CHART: str = "FHKST03010100"
-TR_TRADE_AMOUNT: str = "FHPST01720000"
+# 실측 정정(2026-09-17): FHPST01720000/"/ranking/trade-amount"는 공식 KIS 스펙상
+# "거래대금순위"가 아니라 "호가잔량순위"이며 해당 경로는 404를 반환한다(공식
+# koreainvestment/open-trading-api 재확인). 거래대금순위는 거래량순위 TR에
+# FID_BLNG_CLS_CODE="3"(거래금액순)을 지정해 조회한다.
+TR_TRADE_AMOUNT: str = "FHPST01710000"
 TR_FLUCTUATION: str = "FHPST01700000"
 
 ORD_DVSN: dict[OrderType, str] = {OrderType.LIMIT: "00", OrderType.MARKET: "01"}
@@ -61,7 +65,7 @@ _PATH_BALANCE = "/uapi/domestic-stock/v1/trading/inquire-balance"
 _PATH_ORDERABLE = "/uapi/domestic-stock/v1/trading/inquire-psbl-order"
 _PATH_DAILY = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
 _PATH_TOKEN = "/oauth2/tokenP"  # noqa: S105 - public endpoint, not a secret
-_PATH_TRADE_AMOUNT = "/uapi/domestic-stock/v1/ranking/trade-amount"
+_PATH_TRADE_AMOUNT = "/uapi/domestic-stock/v1/quotations/volume-rank"
 _PATH_FLUCTUATION = "/uapi/domestic-stock/v1/ranking/fluctuation"
 
 _RATE_LIMIT_CODES: frozenset[str] = frozenset({"EGW00201"})
@@ -573,13 +577,46 @@ class KisRestClient:
             )
 
     def get_trade_amount_ranking(self) -> tuple[KisRankingRow, ...]:
-        """거래대금 랭킹(TR FHPST01720000)을 조회한다."""
-        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20172", "FID_INPUT_ISCD": "0000", "FID_INPUT_CNT_1": "100"}
+        """거래대금 랭킹(TR FHPST01710000, 거래량순위 화면의 거래금액순 정렬)을 조회한다."""
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_COND_SCR_DIV_CODE": "20171",
+            "FID_INPUT_ISCD": "0000",
+            "FID_DIV_CLS_CODE": "0",
+            "FID_BLNG_CLS_CODE": "3",  # 3: 거래금액순 (실측 확인)
+            "FID_TRGT_CLS_CODE": "0000000000",
+            "FID_TRGT_EXLS_CLS_CODE": "0000000000",
+            "FID_INPUT_PRICE_1": "",
+            "FID_INPUT_PRICE_2": "",
+            "FID_VOL_CNT": "",
+            "FID_INPUT_DATE_1": "",
+        }
         body, _ = self._get(_PATH_TRADE_AMOUNT, TR_TRADE_AMOUNT, params)
-        return _parse_ranking_rows(list(body.get("output") or []))
+        # 이 화면의 종목코드 필드는 mksc_shrn_iscd 이며 등락률 화면(stck_shrn_iscd)과
+        # 다르다(실측 확인). 공용 파서가 stck_shrn_iscd 만 읽으므로 여기서 정규화한다.
+        rows = [
+            {**row, "stck_shrn_iscd": row.get("stck_shrn_iscd") or row.get("mksc_shrn_iscd", "")}
+            for row in (body.get("output") or [])
+        ]
+        return _parse_ranking_rows(rows)
 
     def get_fluctuation_ranking(self) -> tuple[KisRankingRow, ...]:
         """등락률 랭킹(TR FHPST01700000)을 조회한다."""
-        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20170", "FID_INPUT_ISCD": "0000", "FID_RANK_SORT_CLS_CODE": "0", "FID_INPUT_CNT_1": "200", "FID_RSFL_RATE1": "0", "FID_RSFL_RATE2": "30"}
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_COND_SCR_DIV_CODE": "20170",
+            "FID_INPUT_ISCD": "0000",
+            "FID_RANK_SORT_CLS_CODE": "0",
+            "FID_INPUT_CNT_1": "200",
+            "FID_PRC_CLS_CODE": "0",
+            "FID_INPUT_PRICE_1": "",
+            "FID_INPUT_PRICE_2": "",
+            "FID_VOL_CNT": "",
+            "FID_TRGT_CLS_CODE": "0",
+            "FID_TRGT_EXLS_CLS_CODE": "0",
+            "FID_DIV_CLS_CODE": "0",
+            "FID_RSFL_RATE1": "0",
+            "FID_RSFL_RATE2": "30",
+        }
         body, _ = self._get(_PATH_FLUCTUATION, TR_FLUCTUATION, params)
         return _parse_ranking_rows(list(body.get("output") or []))
