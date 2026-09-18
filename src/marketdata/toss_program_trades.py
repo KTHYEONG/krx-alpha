@@ -10,11 +10,35 @@ from typing import Any
 
 import polars as pl
 import requests
+from tenacity import retry, retry_if_exception_type, stop_after_attempt
 
 from src.core.errors import KrxAlphaError
+from src.marketdata.krx_bars import retry_wait_seconds
 
 TOSS_PROGRAM_TRADES_URL_TEMPLATE: str = "https://openapi.tossinvest.com/api/v1/stocks/{symbol}/program-trades"
 TOSS_PROGRAM_TRADES_PAGE_COUNT: int = 100
+
+# 연결 리셋/타임아웃은 벤더 측 일시 장애로 재시도하면 대개 회복된다(실측: 2026-09-17
+# 전체 백필 중 ConnectionResetError 4건 전량 재실행으로 복구). 반면 HTTPError(4xx/5xx,
+# raise_for_status 발생분)는 URL 자체의 응답이므로 같은 요청을 반복해도 결과가 같아
+# 재시도 대상에서 제외한다(실측: 상장폐지 종목의 404는 재시도해도 그대로 404).
+_TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=retry_wait_seconds,
+    retry=retry_if_exception_type(_TRANSIENT_EXCEPTIONS),
+    reraise=True,
+)
+def _send_program_trades_request(sess: Any, url: str, headers: dict[str, str], params: dict[str, str]) -> Any:
+    resp = sess.get(url, headers=headers, params=params)
+    resp.raise_for_status()
+    return resp
 
 PROGRAM_TRADE_HISTORY_SCHEMA: dict[str, type[pl.DataType]] = {
     "symbol": pl.String,
@@ -73,8 +97,7 @@ def fetch_program_trades_page(
     if until is not None:
         params["until"] = until.isoformat()
     try:
-        resp = sess.get(url, headers={"Authorization": f"Bearer {access_token}"}, params=params)
-        resp.raise_for_status()
+        resp = _send_program_trades_request(sess, url, {"Authorization": f"Bearer {access_token}"}, params)
         body = resp.json()
     except requests.RequestException as exc:
         raise TossProgramTradesError(f"toss program-trades request failed for {symbol}: {exc}") from exc

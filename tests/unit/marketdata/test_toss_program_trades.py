@@ -1,6 +1,7 @@
 import datetime as dt
 
 import pytest
+import requests
 
 from src.marketdata import toss_program_trades as tpt
 from src.marketdata.toss_program_trades import TossProgramTradesError
@@ -272,6 +273,80 @@ def test_append_program_trades_preserves_corrupt_store_and_raises(tmp_path) -> N
     with pytest.raises(TossProgramTradesError, match="unreadable"):
         tpt.append_program_trades(store, [_row("005930", dt.date(2026, 9, 17))])
     assert store.read_bytes() == b"not-a-parquet"
+
+class _FlakySession:
+    """지정한 횟수만큼 전송 계층 예외를 던진 뒤 정상 응답으로 전환되는 가짜 세션."""
+
+    def __init__(self, exc: Exception, *, fail_times: int, body: dict) -> None:
+        self._exc = exc
+        self._fail_times = fail_times
+        self._body = body
+        self.calls = 0
+
+    def get(self, url: str, **kwargs: object) -> _Resp:
+        self.calls += 1
+        if self.calls <= self._fail_times:
+            raise self._exc
+        return _Resp(self._body)
+
+
+class _RaisingResp:
+    """raise_for_status()에서 HTTPError를 던지는 가짜 응답 (4xx/5xx 재현용)."""
+
+    def __init__(self, status: int) -> None:
+        self.status_code = status
+
+    def raise_for_status(self) -> None:
+        raise requests.exceptions.HTTPError(f"{self.status_code} Client Error", response=self)
+
+    def json(self) -> dict:
+        raise AssertionError("json() must not be called when raise_for_status raises")
+
+
+class _AlwaysHttpErrorSession:
+    def __init__(self, status: int) -> None:
+        self._status = status
+        self.calls = 0
+
+    def get(self, url: str, **kwargs: object) -> _RaisingResp:
+        self.calls += 1
+        return _RaisingResp(self._status)
+
+
+def test_fetch_program_trades_page_retries_transient_connection_error_and_succeeds() -> None:
+    # Given: 연결 리셋 2회 후 정상 응답으로 회복되는 세션
+    exc = requests.exceptions.ConnectionError("Connection aborted.")
+    session = _FlakySession(exc, fail_times=2, body={"result": {"records": [_record("2026-09-17")], "nextUntil": None}})
+
+    # When
+    rows, next_until = tpt.fetch_program_trades_page("199730", access_token="tok", session=session)
+
+    # Then: 재시도 끝에 정상 결과, 총 3회 호출
+    assert len(rows) == 1
+    assert next_until is None
+    assert session.calls == 3
+
+
+def test_fetch_program_trades_page_raises_after_exhausting_retries() -> None:
+    # Given: 계속 연결이 끊기는 세션(3회 시도 모두 실패)
+    exc = requests.exceptions.ConnectionError("Connection aborted.")
+    session = _FlakySession(exc, fail_times=99, body={"result": {"records": [], "nextUntil": None}})
+
+    # When / Then: 재시도 소진 후 fail-closed, 정확히 3회 시도
+    with pytest.raises(TossProgramTradesError, match="request failed"):
+        tpt.fetch_program_trades_page("199730", access_token="tok", session=session)
+    assert session.calls == 3
+
+
+def test_fetch_program_trades_page_does_not_retry_permanent_http_error() -> None:
+    # Given: 상장폐지 종목의 404 (동일 요청을 반복해도 결과가 같은 영구 오류)
+    session = _AlwaysHttpErrorSession(404)
+
+    # When / Then: 재시도 없이 즉시 실패, 호출 1회뿐
+    with pytest.raises(TossProgramTradesError, match="request failed"):
+        tpt.fetch_program_trades_page("094800", access_token="tok", session=session)
+    assert session.calls == 1
+
 
 def test_symbols_needing_backfill_returns_all_when_store_missing(tmp_path) -> None:
     # Given: 존재하지 않는 store 경로
