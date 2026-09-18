@@ -289,7 +289,10 @@ def test_send_digest_sends_via_sender_when_alerts_enabled(caplog) -> None:
         ok = send_digest("[krx-alpha] EOD 2026-09-14 OK", "status=OK", settings=settings, sender=lambda s, b: sent.append((s, b)))
 
     assert ok is True
-    assert sent == [("[krx-alpha] EOD 2026-09-14 OK", "status=OK")]
+    assert len(sent) == 1
+    assert sent[0][0] == "[krx-alpha] EOD 2026-09-14 OK"
+    assert "일일 마감 리포트" in sent[0][1]
+    assert "정상 완료" in sent[0][1]
     assert "stage=digest status=SENT" in caplog.text
 
 def test_send_digest_skips_when_alerts_disabled(caplog) -> None:
@@ -367,16 +370,15 @@ def test_format_alert_text_and_html() -> None:
     }
 
     text = format_alert_text(record, "daemon", "daemon-123", fields)
-    assert "🤖 [krx-alpha] CRITICAL 장애 알림" in text
-    assert "• 위치: daemon > 백업점검" in text
-    assert "• 원인: GDrive 인증 만료" in text
-    assert "rclone config reconnect gdrive:" in text
+    assert "🚨 [krx-alpha] 장애 발생 알림" in text
+    assert "• 문제위치: daemon > 백업점검" in text
+    assert "• 장애원인: GDrive 인증 만료" in text
+    assert "• Run ID:   daemon-123" in text
     assert "stage: backup_freshness" in text
 
     html = format_alert_html(record, "daemon", "daemon-123", fields)
     assert "🚨 [krx-alpha] 장애 알림" in html
     assert "GDrive 인증 만료" in html
-    assert "rclone config reconnect gdrive:" in html
     assert "Run ID: daemon-123" in html
 
 
@@ -387,12 +389,16 @@ def test_format_digest_html_renders_ok_and_degraded() -> None:
     html_ok = format_digest_html("[krx-alpha] EOD 2026-09-14 OK", ok_body)
     assert "정상 완료되었습니다" in html_ok
     assert "#16a34a" in html_ok
+    assert "L1 원격 업로드" in html_ok
+    assert "파티션 정리" in html_ok
 
-    degraded_body = "status=DEGRADED\nuploaded=0\npurged=0\nreconciled=False\nbackup_missing=2"
+    degraded_body = "status=DEGRADED\nuploaded=0\npurged=0\nreconciled=False\nbackup_missing=2\nrun_id=daemon-999"
     html_degraded = format_digest_html("[krx-alpha] EOD 2026-09-14 DEGRADED", degraded_body)
     assert "이상이 감지되었습니다" in html_degraded
     assert "#dc2626" in html_degraded
     assert "DEGRADED" in html_degraded
+    assert "2건 (누락)" in html_degraded
+    assert "daemon-999" in html_degraded
 
 
 def test_gmail_sender_sends_multipart_when_html_body_provided(monkeypatch) -> None:
