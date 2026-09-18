@@ -11,7 +11,7 @@ Independent audit gate completing the development loop (`probe` -> `spec` -> `im
 
 1. **Scope Identification**:
    - Inspect modified files using `git status --short`.
-   - Identify active spec under `docs/specs/*_spec.md` or `docs/specs/*_contract.json`.
+   - Identify active spec under `docs/specs/*_spec.md`.
 
 2. **Tier 1: Deterministic Verification**:
    - Run the lean check runner:
@@ -34,6 +34,10 @@ Independent audit gate completing the development loop (`probe` -> `spec` -> `im
      2) Test fixture adjustments or assertion strengthening.
      3) Removal of dead code or temporary comments.
    - Re-run `lean_check.py` to confirm the fix is green.
+
+5. **Non-Destructive Audit Rule (CRITICAL)**:
+   - **NEVER delete, rename, or purge spec files (`docs/specs/*_spec.md`).**
+   - The audit gate is strictly non-destructive. Spec archival and cleanup is exclusively reserved for the downstream `/sync` phase.
 
 ## Output
 

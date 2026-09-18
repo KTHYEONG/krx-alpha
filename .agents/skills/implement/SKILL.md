@@ -5,7 +5,7 @@ description: Implement an approved spec mechanically with focused invariant guar
 
 # Implement Protocol
 
-Fast-execution protocol for mechanical code implementation based strictly on frozen specs (`_spec.md` or `contract.json`).
+Fast-execution protocol for mechanical code implementation based strictly on frozen specs (`_spec.md`).
 
 ## Execution Principles
 

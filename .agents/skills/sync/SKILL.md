@@ -20,7 +20,7 @@ Post-development protocol for task finalization, compact decision recording, and
    - Keep each field strictly to 1 concise sentence to preserve token efficiency for future sessions.
 
 2. **Complete Artifact Cleanup**:
-   - `sync_task.py` completely purges all temporary files: `docs/specs/*_spec.md`, `docs/specs/*_contract.json`, `scratch/` probe files, `tmp/` test roots, and logs.
+   - `sync_task.py` completely purges all temporary files: `docs/specs/*_spec.md`, `scratch/` probe files, `tmp/` test roots, and logs.
    - Zero archive files are left behind, ensuring 100% clean Git history and zero file sprawl.
 
 ## Output

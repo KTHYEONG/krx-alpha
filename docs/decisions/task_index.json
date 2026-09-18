@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_REFACTOR_TOOLING",
+      "date": "2026-09-18",
+      "adr_id": "ADR_20260918_REFACTOR_TOOLING",
+      "domain": "tooling",
+      "title": "Refactoring Safety Tooling",
+      "why": "모듈 분리 시 상대 임포트와 영향 테스트를 놓치면 기능 회귀를 조기에 발견할 수 없습니다.",
+      "resolution": "정적 의존성 그래프와 순환 검사, 의미 기반 영향 테스트 선택, 기존 코드맵 메타데이터 보존을 도입했습니다.",
+      "impact": "AI가 변경 영향과 검증 범위를 일관되게 찾고 기존 아키텍처 기록을 유지할 수 있습니다.",
+      "caveat": "운영 모듈 구조와 금융 동작은 변경하지 않았으며 동적 임포트는 정적 분석 대상이 아닙니다."
+    },
+    {
       "task_id": "TASK_PROGRAM_TRADES_AUTO_BACKFILL",
       "date": "2026-09-17",
       "adr_id": "ADR_20260917_PROGRAM_TRADES_AUTO_BACKFILL",
