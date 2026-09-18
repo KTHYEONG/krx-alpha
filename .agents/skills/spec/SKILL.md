@@ -43,33 +43,25 @@ Your output in `/spec` focuses strictly on:
      - `- **<Behavior/Invariant Name>** Given ...; When ...; Invariant: ...`
      - Keep titles clear so they translate directly into clean test function names (`test_<target>_<behavior>`).
 
-4. **Validation**:
-   Validate blueprint paths and caller anchors:
-   ```bash
-   uv run python tools/agent_skills/lean_check.py --spec docs/specs/<feature>_spec.md --pre-impl
-   ```
-
 ## Chat Output Format
 
-Keep chat output ultra-compact. When the feature is split into multiple sub-specs, output copy-paste-friendly separate command blocks for **all** $N$ sub-specs in sequential execution order:
+Keep chat output ultra-compact and token-efficient. Do NOT execute CLI commands or pre-impl validation loops.
+Output only the minimal card below:
 
 ### 📐 [SPEC] <기능명>
-> 📄 **청사진**: [`docs/specs/<feature>_spec.md`](file:///docs/specs/<feature>_spec.md)  
-> 🚦 **하네스 검증**: `lean_check --pre-impl` **PASS**
+> 📄 **청사진**: [`docs/specs/<feature>_spec.md`](file:///docs/specs/<feature>_spec.md)
 
-- 🎯 **작업 요약**: <구현할 핵심 기능 1줄 요약>
-- 📦 **작업 규모**: <N>개 파일 대상 · <N>개 테스트 시나리오 명세
+- 🎯 **작업 요약**: <구현할 핵심 기능 1줄 요약> (<N>개 파일 대상 · <N>개 시나리오)
 
----
-*(단일 스펙인 경우)*
-👉 **다음 단계**: `/implement docs/specs/<feature>_spec.md`
+*(단일 스펙인 경우)*:
+```bash
+/implement docs/specs/<feature>_spec.md
+```
 
-*(다중 스펙으로 분할된 경우: 분할된 모든 $N$개 서브 스펙을 의존성 순서대로 각각 1개씩 복사 가능한 코드 블록으로 나열)*
-👉 **다음 단계 (순차 실행)**:
+*(다중 스펙으로 분할된 경우: 순차 실행할 /implement 명령어를 복사하기 쉽게 나열)*:
 ```bash
 /implement docs/specs/<sub_spec_1>.md
 ```
 ```bash
 /implement docs/specs/<sub_spec_2>.md
 ```
-<!-- Repeat a separate code block for each remaining sub-spec (e.g. sub_spec_3, sub_spec_4, ..., sub_spec_N) -->
