@@ -1,42 +1,55 @@
 def test_no_upward_layer_dependency_in_src() -> None:
     # Given: 레이어 랭크 계약 (신규 모듈은 반드시 등재되어야 한다)
-    import ast
     import pathlib
 
     from tests.architecture.layers import LAYER_RANK
+    from tools.agent_skills.dependency_graph import internal_dependencies, repository_source_files
 
-    src_root = pathlib.Path("src")
-    modules = sorted(
-        p.as_posix()
-        for p in src_root.rglob("*.py")
-        if p.name != "__init__.py" and "__pycache__" not in p.parts
-    )
+    source_files = repository_source_files(pathlib.Path("."))
+    modules = [m for m in source_files if not m.endswith("__init__.py")]
 
     # Then: 미등재 모듈 0건
     assert [m for m in modules if m not in LAYER_RANK] == []
 
     # When: 함수 내부 지연 임포트를 포함한 모든 내부 의존 간선을 수집한다
     violations: list[str] = []
-    for module in modules:
+    initializer_violations: list[str] = []
+    for module in source_files:
+        dependencies = internal_dependencies(module, source_files, root=pathlib.Path("."))
+        if module.endswith("__init__.py"):
+            initializer_violations.extend(
+                f"{module} initializer must remain dependency-neutral -> {dep}"
+                for dep in sorted(dependencies)
+                if dep in LAYER_RANK
+            )
+            continue
         rank = LAYER_RANK[module]
-        tree = ast.parse(pathlib.Path(module).read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            targets: list[str] = []
-            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("src"):
-                targets = [f"{node.module}.{alias.name}" for alias in node.names] + [node.module]
-            elif isinstance(node, ast.Import):
-                targets = [alias.name for alias in node.names if alias.name.startswith("src")]
-            for dotted in targets:
-                dep = dotted.replace(".", "/") + ".py"
-                if dep not in LAYER_RANK or dep == module:
-                    continue
-                dep_rank = LAYER_RANK[dep]
-                same_package = module.split("/")[1] == dep.split("/")[1]
-                if dep_rank > rank or (dep_rank == rank and not same_package):
-                    violations.append(f"{module}(L{rank}) -> {dep}(L{dep_rank})")
+        for dep in sorted(dependencies):
+            if dep not in LAYER_RANK or dep == module:
+                continue
+            dep_rank = LAYER_RANK[dep]
+            same_package = module.split("/")[1] == dep.split("/")[1]
+            if dep_rank > rank or (dep_rank == rank and not same_package):
+                violations.append(f"{module}(L{rank}) -> {dep}(L{dep_rank})")
 
     # Then: 상위/동일랭크 교차패키지 의존 0건
+    assert initializer_violations == []
     assert violations == []
+
+
+def test_no_dependency_cycles_in_src() -> None:
+    import pathlib
+
+    from tools.agent_skills.dependency_graph import (
+        dependency_cycles,
+        internal_dependencies,
+        repository_source_files,
+    )
+
+    source_files = repository_source_files(pathlib.Path("."))
+    graph = {module: internal_dependencies(module, source_files, root=pathlib.Path(".")) for module in source_files}
+
+    assert dependency_cycles(graph) == [], f"cyclic components: {dependency_cycles(graph)}"
 
 
 def test_no_hardcoded_filesystem_paths_outside_config() -> None:
