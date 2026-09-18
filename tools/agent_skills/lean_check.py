@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import json
 import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -17,6 +19,8 @@ JsonDiag = dict[str, Any]
 
 if os.getcwd() not in sys.path:
     sys.path.insert(0, os.getcwd())
+
+from tools.agent_skills.dependency_graph import internal_dependencies, repository_source_files  # noqa: E402
 
 
 def _emit_json(
@@ -137,50 +141,285 @@ def _check_scaffolding_leaks(py_files: list[str]) -> list[JsonDiag]:
 
 
 # ---------------------------------------------------------------------------
-# Direct Test Matching (Predictable, zero-cascade convention mapping)
+# Affected-Test Selection (deterministic semantic matching over resolved graph)
 # ---------------------------------------------------------------------------
+
+_ARCH_SUITE = "tests/architecture/test_layering.py"
+
+
+def _repository_test_files() -> list[str]:
+    """Discover active test modules for deterministic affected-suite selection.
+
+    Returns:
+        Sorted repository-relative POSIX paths matching tests/**/test_*.py.
+
+    Raises:
+        FileNotFoundError: If the tests directory is absent.
+        OSError: If discovery cannot complete.
+    """
+    tests_dir = pathlib.Path("tests")
+    if not tests_dir.is_dir():
+        raise FileNotFoundError(f"{tests_dir.as_posix()}: tests directory is absent")
+    try:
+        paths = {
+            p.as_posix()
+            for p in tests_dir.rglob("test_*.py")
+            if "__pycache__" not in p.parts and p.name not in {"__init__.py", "conftest.py"}
+        }
+    except OSError as exc:
+        raise OSError(f"{tests_dir.as_posix()}: test discovery cannot complete: {exc}") from exc
+    return sorted(paths)
+
+
+def _resolve_literal_module(literal: str, source_set: set[str]) -> str | None:
+    parts = literal.split(".")
+    for width in range(len(parts), 0, -1):
+        prefix = "/".join(parts[:width])
+        if f"{prefix}.py" in source_set:
+            return f"{prefix}.py"
+        if f"{prefix}/__init__.py" in source_set:
+            return f"{prefix}/__init__.py"
+    return None
+
+
+def _patch_target_modules(test_file: str, source_set: set[str]) -> set[str]:
+    try:
+        text = pathlib.Path(test_file).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise OSError(f"{test_file}: cannot read inspected file: {exc}") from exc
+    try:
+        tree = ast.parse(text, filename=test_file)
+    except SyntaxError as exc:
+        raise SyntaxError(f"{test_file}: invalid Python at line {exc.lineno}: {exc.msg}") from exc
+    targets: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        is_target_call = False
+        if isinstance(func, ast.Attribute) and func.attr in {"setattr", "delattr"}:
+            is_target_call = isinstance(func.value, ast.Name) and func.value.id == "monkeypatch"
+        elif isinstance(func, ast.Name) and func.id == "patch":
+            is_target_call = True
+        elif isinstance(func, ast.Attribute) and func.attr == "patch":
+            is_target_call = True
+        elif isinstance(func, ast.Attribute) and func.attr == "object":
+            value = func.value
+            is_target_call = (isinstance(value, ast.Name) and value.id == "patch") or (
+                isinstance(value, ast.Attribute) and value.attr == "patch"
+            )
+        if not is_target_call or not node.args:
+            continue
+        first = node.args[0]
+        if not isinstance(first, ast.Constant) or not isinstance(first.value, str):
+            continue
+        resolved = _resolve_literal_module(first.value, source_set)
+        if resolved is not None:
+            targets.add(resolved)
+    return targets
+
+
+def _build_selection_state() -> dict[str, Any]:
+    """Build a fresh selection graph; the state stays local to one selection operation."""
+    root = pathlib.Path(".")
+    source_files = repository_source_files(root)
+    repository_tests = _repository_test_files()
+    source_set = set(source_files)
+    graph: dict[str, set[str]] = {}
+    for source in source_files:
+        graph[source] = internal_dependencies(source, source_files, root=root)
+    reachable: dict[str, set[str]] = {}
+    for source in source_files:
+        seen = {source}
+        stack = sorted(graph[source])
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            stack.extend(sorted(graph[current] - seen))
+        reachable[source] = seen
+    test_deps: dict[str, set[str]] = {}
+    test_patches: dict[str, set[str]] = {}
+    for test in repository_tests:
+        test_deps[test] = internal_dependencies(test, source_files, root=root)
+        test_patches[test] = _patch_target_modules(test, source_set)
+    state: dict[str, Any] = {
+        "source_files": source_files,
+        "source_set": source_set,
+        "test_files": repository_tests,
+        "graph": graph,
+        "reachable": reachable,
+        "test_deps": test_deps,
+        "test_patches": test_patches,
+    }
+    return state
+
+
+def _references_with_state(state: dict[str, Any], test_file: str, source_file: str) -> bool:
+    reachable: dict[str, set[str]] = state["reachable"]
+    test_deps: dict[str, set[str]] = state["test_deps"]
+    test_patches: dict[str, set[str]] = state["test_patches"]
+    direct = test_deps.get(test_file)
+    if direct is None:
+        return False
+    if source_file in direct:
+        return True
+    for dep in direct:
+        if source_file in reachable.get(dep, set()):
+            return True
+    for patched in test_patches.get(test_file, set()):
+        if patched == source_file or source_file in reachable.get(patched, set()):
+            return True
+    return False
+
+
+def _references_ondemand(state: dict[str, Any], test_file: str, source_file: str) -> bool:
+    """Evaluate one test file absent from the shared state without rebuilding the graph."""
+    if not os.path.isfile(test_file):
+        raise OSError(f"{test_file}: cannot read inspected test file")
+    root = pathlib.Path(".")
+    source_files: list[str] = state["source_files"]
+    source_set: set[str] = state["source_set"]
+    reachable: dict[str, set[str]] = state["reachable"]
+    direct = internal_dependencies(test_file, source_files, root=root)
+    if source_file in direct:
+        return True
+    for dep in direct:
+        if source_file in reachable.get(dep, set()):
+            return True
+    for patched in _patch_target_modules(test_file, source_set):
+        if patched == source_file or source_file in reachable.get(patched, set()):
+            return True
+    return False
+
+
+def _test_references_source(test_file: str, source_file: str) -> bool:
+    """Determine whether a test statically reaches a source module or its source callers.
+
+    Args:
+        test_file: Repository-relative test module path.
+        source_file: Existing active source module path.
+
+    Returns:
+        Whether imports or literal patch targets reach the module through the source graph.
+
+    Raises:
+        SyntaxError: If a required Python file cannot be parsed.
+        ValueError: If an explicit source import or source path cannot resolve.
+        OSError: If a required Python file cannot be read.
+    """
+    state = _build_selection_state()
+    source_set: set[str] = state["source_set"]
+    if source_file not in source_set:
+        raise ValueError(f"{source_file}: selection requires a current source path")
+    test_deps: dict[str, set[str]] = state["test_deps"]
+    if test_file in test_deps:
+        return _references_with_state(state, test_file, source_file)
+    return _references_ondemand(state, test_file, source_file)
+
+
+def _mirrored_candidates(source_file: str) -> list[str]:
+    rel = source_file[4:]
+    parts = rel.split("/")
+    test_name = f"test_{parts[-1]}"
+    sub_path = "/".join(parts[:-1])
+    return [
+        f"tests/unit/{sub_path}/{test_name}" if sub_path else f"tests/unit/{test_name}",
+        f"tests/unit/{test_name}",
+        f"tests/contract/{sub_path}/{test_name}" if sub_path else f"tests/contract/{test_name}",
+    ]
+
+
+def _is_mirrored(source_file: str, test_file: str) -> bool:
+    return test_file in _mirrored_candidates(source_file)
 
 
 def _find_test_files(py_files: list[str], spec_path: str | None = None) -> list[str]:
-    """Find direct unit tests corresponding to modified source files."""
-    test_files = [f for f in py_files if f.startswith("tests/") or "test_" in f]
-    source_files = [f for f in py_files if f.startswith("src/") and not f.endswith("__init__.py")]
+    """Select affected suites without losing tests when source modules are extracted.
 
-    # 1. Direct path convention: src/path/module.py -> tests/unit/path/test_module.py
-    for sf in source_files:
-        rel = sf[4:]  # strip 'src/'
-        parts = rel.split("/")
-        mod_name = parts[-1]
-        test_name = f"test_{mod_name}"
-        sub_path = "/".join(parts[:-1])
+    Args:
+        py_files: Changed source and explicitly selected test paths.
+        spec_path: Optional spec supplying additional invariant suites.
 
-        candidates = [
-            f"tests/unit/{sub_path}/{test_name}" if sub_path else f"tests/unit/{test_name}",
-            f"tests/unit/{test_name}",
-            f"tests/contract/{sub_path}/{test_name}" if sub_path else f"tests/contract/{test_name}",
-        ]
-        for cand in candidates:
-            if cand in test_files:
-                break
-            if os.path.isfile(cand):
-                test_files.append(cand)
-                break
+    Returns:
+        Sorted unique paths for explicit, mirrored and dependency-related suites.
 
-    # 2. Spec test suites if provided
+    Raises:
+        ValueError: If a changed source file has no discoverable or explicitly declared suite.
+        SyntaxError: If dependency analysis encounters invalid Python.
+        OSError: If required files cannot be read.
+    """
+    selected: set[str] = set()
+    for candidate in py_files:
+        if candidate.startswith("tests/") or "test_" in candidate:
+            selected.add(candidate)
+    changed_sources = [candidate for candidate in py_files if candidate.startswith("src/")]
+
+    # Spec-declared suites are unioned with discovered tests.
     if spec_path and os.path.isfile(spec_path):
         with contextlib.suppress(OSError):
-            with open(spec_path, encoding="utf-8", errors="ignore") as f:
-                content = f.read()
+            with open(spec_path, encoding="utf-8", errors="ignore") as handle:
+                content = handle.read()
             matches = re.findall(
                 r"(?m)^##\s+(?:Test\s+Suite|Invariant\s+Scenarios):\s*`?([^\n`]+)`?",
                 content,
             )
-            for m in matches:
-                tf = m.strip().strip("`").strip()
-                if os.path.isfile(tf) and tf not in test_files:
-                    test_files.append(tf)
+            for match in matches:
+                suite = match.strip().strip("`").strip()
+                if os.path.isfile(suite):
+                    selected.add(suite)
 
-    return sorted(dict.fromkeys(test_files))
+    if not changed_sources:
+        return sorted(selected)
+
+    repository_tests = _repository_test_files()
+    state = _build_selection_state()
+    source_set: set[str] = state["source_set"]
+    for changed in changed_sources:
+        if changed not in source_set:
+            raise ValueError(
+                f"{changed}: selection requires a current source path "
+                "or explicit deletion handling in a separate change"
+            )
+    if os.path.isfile(_ARCH_SUITE):
+        selected.add(_ARCH_SUITE)
+
+    # Mirrored unit/contract path conventions are preserved.
+    for changed in changed_sources:
+        if changed.endswith("__init__.py"):
+            continue
+        for candidate in _mirrored_candidates(changed):
+            if candidate in selected:
+                break
+            if os.path.isfile(candidate):
+                selected.add(candidate)
+                break
+
+    # Semantic matches from every active test module; never stop at a mirrored match.
+    for changed in changed_sources:
+        if changed.endswith("__init__.py"):
+            continue
+        for test in repository_tests:
+            if test == _ARCH_SUITE:
+                continue
+            if _references_with_state(state, test, changed):
+                selected.add(test)
+
+    # Fail closed: each changed non-initializer source needs a non-architecture suite.
+    non_arch = {item for item in selected if item != _ARCH_SUITE}
+    for changed in changed_sources:
+        if changed.endswith("__init__.py"):
+            continue
+        covered = any(
+            _is_mirrored(changed, item) or _references_with_state(state, item, changed) for item in non_arch
+        )
+        if not covered:
+            raise ValueError(
+                f"{changed}: no discoverable or explicitly declared non-architecture suite covers this source"
+            )
+
+    return sorted(selected)
 
 
 def _check_pre_impl_spec(spec_path: str) -> tuple[int, list[JsonDiag]]:
@@ -490,7 +729,22 @@ def main() -> None:
         return
 
     # 4. Direct Test Discovery
-    test_files = _find_test_files(py_files, spec_path=args.spec)
+    try:
+        test_files = _find_test_files(py_files, spec_path=args.spec)
+    except (OSError, SyntaxError, ValueError) as exc:
+        _exit_with_diags(
+            "test-selection",
+            f"FAIL | Test selection failed: {exc}",
+            [
+                {
+                    "file": "",
+                    "line": 0,
+                    "error": str(exc),
+                    "fix_hint": "Add a mirrored or dependency-related suite for the changed source, or declare it in the spec",
+                }
+            ],
+        )
+        raise AssertionError("unreachable: selection failure always exits") from exc
     if not test_files:
         print("PASS | Lint & Type check passed (no tests to run)")
         print(_emit_json("PASS", "all", [], None), file=sys.stderr)
