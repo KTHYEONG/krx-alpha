@@ -360,6 +360,7 @@ def run_collector_daemon(
     aftermarket_plan: tuple[AftermarketShard, ...] = ()
     aftermarket_plan_day: dt.date | None = None
     aftermarket_refresh_day: dt.date | None = None
+    next_aftermarket_refresh_at: dt.datetime | None = None
     snapshot_cfg = SnapshotSettings()
     snapshot_supervisor: ProcessSupervisor | None = None
     last_snapshot_result: str | None = None
@@ -408,6 +409,7 @@ def run_collector_daemon(
                 degraded_active = False
                 last_ingest_check = None
                 ingest_stale = False
+                next_aftermarket_refresh_at = None
             if (
                 state is not SessionState.AFTER_MARKET_ACTIVE
                 and orchestrated_for != today
@@ -540,12 +542,28 @@ def run_collector_daemon(
                     ingest_stale = stale
                 if state == SessionState.FULL_ACTIVE and cfg.after_market_enabled:
                     after_cfg = AftermarketSettings()
-                    if now.astimezone(_KST).time() >= after_cfg.selection_time and aftermarket_refresh_day != today:
-                        aftermarket_refresh_day = today
+                    if (
+                        now.astimezone(_KST).time() >= after_cfg.selection_time
+                        and aftermarket_refresh_day != today
+                        and (next_aftermarket_refresh_at is None or now >= next_aftermarket_refresh_at)
+                    ):
                         try:
-                            refresh_aftermarket_candidates(session_date=today, generated_at=now, client=_build_kis_client(paths), out_path=paths.aftermarket_candidates(today), capacity=after_cfg.max_symbols)
+                            refresh_aftermarket_candidates(
+                                session_date=today,
+                                generated_at=now,
+                                client=_build_kis_client(paths),
+                                out_path=paths.aftermarket_candidates(today),
+                                capacity=after_cfg.max_symbols,
+                            )
+                            aftermarket_refresh_day = today
+                            next_aftermarket_refresh_at = None
                         except (MissingCredentialsError, KisApiError, AftermarketUniverseError, CandidateFileError) as exc:
-                            logger.critical("[DAEMON] stage=aftermarket_reselection status=FAIL reason=%s", str(exc))
+                            next_aftermarket_refresh_at = now + dt.timedelta(seconds=60.0)
+                            logger.critical(
+                                "[DAEMON] stage=aftermarket_reselection status=FAIL reason=%s next_retry=%s",
+                                str(exc),
+                                next_aftermarket_refresh_at.isoformat(),
+                            )
                 if state == SessionState.AFTER_MARKET_ACTIVE and cfg.after_market_enabled:
                     if aftermarket_plan_day != today:
                         try:

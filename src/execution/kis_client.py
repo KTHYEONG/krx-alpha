@@ -102,20 +102,37 @@ def _parse_ranking_rows(rows: list[dict[str, Any]]) -> tuple[KisRankingRow, ...]
     try:
         parsed: list[KisRankingRow] = []
         seen: set[str] = set()
-        ok = bool(rows)
-        for index, row in enumerate(rows, start=1):
+        for row in rows:
             symbol = str(row.get("stck_shrn_iscd", ""))
-            change = Decimal(str(row.get("prdy_ctrt", "")))
+            # 6자리 숫자 보통주 코드가 아니거나 중복 종목이면 건너뛴다
+            if not (symbol.isdigit() and len(symbol) == 6) or symbol in seen:
+                continue
+            change_raw = str(row.get("prdy_ctrt", ""))
+            try:
+                change = Decimal(change_raw)
+            except (ValueError, TypeError, ArithmeticError):
+                continue
+            if not change.is_finite():
+                continue
             # 등락률 랭킹(FHPST01700000)은 acml_tr_pbmn 필드를 아예 반환하지 않는다
             # (실측 확인) -- 선택 순위는 랭크 위치로만 결정되고 이 값은 메타데이터
             # 표시용이라, 미제공을 0으로 취급해도 선정 로직에 영향이 없다.
-            trade_value = int(Decimal(str(row.get("acml_tr_pbmn") or "0")))
-            if not (symbol.isdigit() and len(symbol) == 6) or not change.is_finite() or trade_value < 0 or symbol in seen:
-                ok = False
-                break
+            try:
+                trade_value = int(Decimal(str(row.get("acml_tr_pbmn") or "0")))
+            except (ValueError, TypeError, ArithmeticError):
+                continue
+            if trade_value < 0:
+                continue
             seen.add(symbol)
-            parsed.append(KisRankingRow(symbol=symbol, rank=index, change_pct=float(change), trade_value_krw=trade_value))
-        if not ok:
+            parsed.append(
+                KisRankingRow(
+                    symbol=symbol,
+                    rank=len(parsed) + 1,
+                    change_pct=float(change),
+                    trade_value_krw=trade_value,
+                )
+            )
+        if not parsed:
             raise ValueError("invalid ranking schema")
         return tuple(parsed)
     except (ValueError, KeyError, TypeError, AttributeError, ArithmeticError) as exc:
@@ -667,10 +684,10 @@ class KisRestClient:
             "FID_BLNG_CLS_CODE": "3",  # 3: 거래금액순 (실측 확인)
             "FID_TRGT_CLS_CODE": "0000000000",
             # 10자리: 위험/경고/주의 관리종목 정리매매 불성실공시 우선주 거래정지 ETF ETN
-            # 신용주문불가 SPAC 순. ETF/ETN(7,8번째 자리)을 제외하지 않으면 6자리 숫자가
-            # 아닌 종목코드(예: 단일종목 레버리지 ETF "0193T0")가 섞여 스키마 검증에서
-            # 거부된다(실측 확인).
-            "FID_TRGT_EXLS_CLS_CODE": "0000001100",
+            # 신용주문불가 SPAC 순. 우선주(5번째 자리) 및 ETF/ETN(7,8번째 자리)을 제외하여
+            # 6자리 숫자가 아닌 종목코드(예: 우선주 "0161M0", 레버리지 ETF "0193T0")가
+            # 랭킹에 유입되는 것을 방지한다(실측 확인: 2026-09-21 네오사피엔스 0161M0 회귀).
+            "FID_TRGT_EXLS_CLS_CODE": "0000101100",
             "FID_INPUT_PRICE_1": "",
             "FID_INPUT_PRICE_2": "",
             "FID_VOL_CNT": "",

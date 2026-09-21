@@ -459,3 +459,35 @@ def test_backfill_universe_program_trades_returns_zero_result_for_empty_symbols(
 
     # Then: 예외 없이 0 결과 반환
     assert (result.symbols_ok, result.symbols_failed, result.appended_rows) == (0, 0, 0)
+
+
+def test_backfill_universe_program_trades_skips_non_digit_symbols_gracefully(tmp_path, monkeypatch) -> None:
+    """실측 회귀: 유니버스 후보에 우선주/특수증권(예: 0004V0, 0015S0)이 포함되어도 에러 없이 보통주만 백필한다."""
+    import datetime as dt
+
+    from src.marketdata import service
+
+    store = tmp_path / "bars" / "program_trades.parquet"
+    reference_date = dt.date(2026, 9, 21)
+    seen: dict[str, object] = {}
+
+    def _fake_backfill(**kwargs):
+        seen.update(kwargs)
+        return service.ProgramTradesBackfillResult(symbols_ok=1, symbols_failed=0, appended_rows=10)
+
+    monkeypatch.setattr(service, "backfill_program_trades", _fake_backfill)
+
+    # When: 비정형 심볼이 포함된 유니버스 전달
+    result = service.backfill_universe_program_trades(
+        store_path=store,
+        symbols=("005930", "0004V0", "0015S0"),
+        lookback_days=120,
+        reference_date=reference_date,
+        app_key="k",
+        app_secret="s",
+        rate_per_s=8.0,
+    )
+
+    # Then: 유효한 보통주 005930만 전달되고 비정형 심볼로 인한 예외가 발생하지 않는다
+    assert seen["symbols"] == ("005930",)
+    assert (result.symbols_ok, result.symbols_failed, result.appended_rows) == (1, 0, 10)
