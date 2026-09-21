@@ -531,7 +531,7 @@ def test_kis_rankings_use_correct_trs_and_reject_schema(tmp_path) -> None:
     assert [call['headers']['tr_id'] for call in session.calls] == ['FHPST01710000', 'FHPST01700000']
     assert session.calls[0]['url'].endswith('/uapi/domestic-stock/v1/quotations/volume-rank')
     assert session.calls[0]['params']['FID_BLNG_CLS_CODE'] == '3'
-    assert session.calls[0]['params']['FID_TRGT_EXLS_CLS_CODE'] == '0000001100'
+    assert session.calls[0]['params']['FID_TRGT_EXLS_CLS_CODE'] == '0000101100'
     assert session.calls[1]['url'].endswith('/uapi/domestic-stock/v1/ranking/fluctuation')
     assert session.calls[1]['params']['FID_PRC_CLS_CODE'] == '0'
     assert session.calls[1]['params']['FID_INPUT_CNT_1'] == '200'
@@ -541,6 +541,29 @@ def test_kis_rankings_use_correct_trs_and_reject_schema(tmp_path) -> None:
     with pytest.raises(KisApiError) as excinfo:
         client.get_trade_amount_ranking()
     assert excinfo.value.msg_cd == 'SCHEMA'
+
+
+def test_ranking_parser_skips_non_digit_symbol_and_retains_valid_rows(tmp_path) -> None:
+    """실측 회귀: 거래대금 랭킹에 우선주/특수증권(예: 0161M0)이 유입되어도 해당 종목만 건너뛰고 정상 종목으로 랭킹을 구성한다."""
+    from tests.unit.execution.fakes import FakeResponse, make_client
+
+    mixed = FakeResponse({
+        'rt_cd': '0',
+        'msg_cd': '0',
+        'msg1': 'ok',
+        'output': [
+            {'mksc_shrn_iscd': '005930', 'prdy_ctrt': '1.25', 'acml_tr_pbmn': '100000'},
+            {'mksc_shrn_iscd': '0161M0', 'prdy_ctrt': '29.50', 'acml_tr_pbmn': '50000'},  # 비정형 종목코드
+            {'mksc_shrn_iscd': '000660', 'prdy_ctrt': '3.40', 'acml_tr_pbmn': '80000'},
+        ],
+    })
+    client, _, _ = make_client(tmp_path, [mixed])
+    ranking = client.get_trade_amount_ranking()
+    assert len(ranking) == 2
+    assert ranking[0].symbol == '005930'
+    assert ranking[0].rank == 1
+    assert ranking[1].symbol == '000660'
+    assert ranking[1].rank == 2
 
 
 def test_fluctuation_ranking_defaults_missing_trade_value_to_zero(tmp_path) -> None:

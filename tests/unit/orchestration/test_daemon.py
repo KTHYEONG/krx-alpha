@@ -2229,6 +2229,83 @@ def test_daemon_blocks_aftermarket_when_reselection_fails(monkeypatch, tmp_path,
     assert any('aftermarket' in record.getMessage().lower() for record in caplog.records)
 
 
+def test_daemon_retries_aftermarket_reselection_on_failure(monkeypatch, tmp_path) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.execution.contracts import KisApiError
+    from src.orchestration import daemon
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+
+    settings = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
+    commands: list[list[str]] = []
+
+    class Supervisor:
+        def __init__(self, *, cmd, breaker):
+            commands.append(cmd)
+        def ensure_running(self):
+            return 'running'
+        def stop(self, *, timeout_s=15.0):
+            return 'stopped'
+
+    attempts = 0
+    refreshed: list[dict] = []
+
+    def mock_refresh(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise KisApiError('SCHEMA', 'temporary ranking schema failure')
+        refreshed.append(kwargs)
+        # Write dummy snapshot
+        from src.universe.ipc import CandidateSnapshot, write_candidate_snapshot
+        write_candidate_snapshot(
+            kwargs['out_path'],
+            CandidateSnapshot(
+                schema_version=1,
+                rev=20260916,
+                session_date=kwargs['session_date'],
+                session='aftermarket',
+                generated_at=kwargs['generated_at'],
+                source_asof=kwargs['generated_at'],
+                effective_from=kwargs['generated_at'],
+                policy_version='aftermarket_v1',
+                capacity=40,
+                eligible_count=1,
+                selected_count=1,
+                candidates=({'symbol': '005930', 'rank': 1, 'source_ranks': {'trade_amount': 1}, 'metrics': {'trade_value_krw': 1, 'change_pct': 1.0}, 'selection_reasons': ['trade_amount']},),
+            ),
+        )
+
+    plan = (AftermarketShard(MarketVenue.NXT, 0, ('005930',), ('H0NXCNT0', 'H0NXASP0'), '1', 'id1'),)
+    monkeypatch.setattr(daemon, 'refresh_aftermarket_candidates', mock_refresh)
+    monkeypatch.setattr(daemon, '_build_kis_client', lambda _: object())
+    monkeypatch.setattr(daemon, 'plan_aftermarket_shards', lambda **_: plan)
+    monkeypatch.setattr(daemon, 'load_kis_data_credentials', lambda: ())
+    monkeypatch.setattr(daemon, 'run_session_orchestration', lambda **_: True)
+    monkeypatch.setattr(daemon, '_resolve_trading_day_with_cache', lambda *_: None)
+    monkeypatch.setattr(daemon, 'ProcessSupervisor', Supervisor)
+
+    kst = ZoneInfo('Asia/Seoul')
+    times = iter([
+        dt.datetime(2026, 9, 16, 15, 31, 0, tzinfo=kst),  # 1st attempt: fails
+        dt.datetime(2026, 9, 16, 15, 31, 30, tzinfo=kst), # skipped: cooldown
+        dt.datetime(2026, 9, 16, 15, 32, 5, tzinfo=kst),  # 2nd attempt: succeeds
+        dt.datetime(2026, 9, 16, 15, 40, 0, tzinfo=kst),  # aftermarket starts
+    ])
+
+    daemon.run_collector_daemon(settings=settings, now_fn=lambda: next(times), sleep_fn=MagicMock(), max_cycles=4)
+
+    assert attempts == 2
+    assert len(refreshed) == 1
+    aftermarket = [cmd for cmd in commands if 'collect-aftermarket' in cmd]
+    assert len(aftermarket) == 1
+
+
+
 def test_run_session_orchestration_passes_status_source_and_store(tmp_path, monkeypatch) -> None:
     # Given: KIS 자격증명 없이 plan_universe를 가짜로 둔 오케스트레이션
     import datetime as dt

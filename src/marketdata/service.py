@@ -67,8 +67,6 @@ def backfill_program_trades(
     One symbol's fetch failure does not abort the run: over-skipping a
     problem symbol can be corrected by re-running the tool, but losing every
     already-fetched symbol's history to one bad response would waste the
-    whole call budget.
-
     Raises:
         ValueError: If ``symbols`` is empty or contains a non-6-digit code.
         TossProgramTradesError: If the initial token issuance fails.
@@ -127,8 +125,16 @@ def backfill_universe_program_trades(
     """
     if not symbols:
         return ProgramTradesBackfillResult(symbols_ok=0, symbols_failed=0, appended_rows=0)
+    clean_symbols = tuple(code for code in symbols if len(code) == 6 and code.isdigit())
+    skipped = set(symbols) - set(clean_symbols)
+    if skipped:
+        logger.warning(
+            "[DATA] stage=toss_program_backfill status=SKIP_NON_DIGIT symbols=%s", sorted(skipped)
+        )
+    if not clean_symbols:
+        return ProgramTradesBackfillResult(symbols_ok=0, symbols_failed=0, appended_rows=0)
     min_date = reference_date - dt.timedelta(days=lookback_days)
-    targets = symbols_needing_backfill(store_path, symbols, min_date)
+    targets = symbols_needing_backfill(store_path, clean_symbols, min_date)
     if not targets:
         return ProgramTradesBackfillResult(symbols_ok=0, symbols_failed=0, appended_rows=0)
     return backfill_program_trades(
