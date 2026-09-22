@@ -323,3 +323,102 @@ def partition_due_jobs(
         elif now >= job.not_after:
             expired.append(job)
     return tuple(due), tuple(expired)
+
+
+def snapshot_row_violations(dataset: SnapshotDataset, frame: pl.DataFrame) -> pl.Series:
+    """Return a per-row boolean mask marking rows that violate dataset value identities.
+
+    Identities are structural facts every genuine KIS observation satisfies
+    (non-negative quantities, prices inside the daily limit band, OHLC order,
+    buy/sell/net arithmetic). Nullability is governed by the dataset schema, so
+    a rule is evaluated only on rows where all of its inputs are non-null; a
+    null input never marks a row as violating.
+
+    Args:
+        dataset: Snapshot dataset whose identities apply.
+        frame: Rows already cast to ``SNAPSHOT_SCHEMAS[dataset]``.
+
+    Returns:
+        Boolean series aligned with ``frame`` rows; True means reject.
+    """
+    height = frame.height
+    if height == 0:
+        return pl.Series([], dtype=pl.Boolean)
+    if dataset in (SnapshotDataset.INVESTOR_ESTIMATE, SnapshotDataset.NEWS_TITLE):
+        return pl.Series([False] * height, dtype=pl.Boolean)
+    if dataset is SnapshotDataset.SECURITY_STATUS:
+        expr = (
+            (pl.col("last_price").is_not_null() & (pl.col("last_price") <= 0))
+            | (
+                pl.col("lower_limit").is_not_null()
+                & pl.col("upper_limit").is_not_null()
+                & (pl.col("lower_limit") >= pl.col("upper_limit"))
+            )
+            | (
+                pl.col("lower_limit").is_not_null()
+                & pl.col("last_price").is_not_null()
+                & pl.col("upper_limit").is_not_null()
+                & ((pl.col("last_price") < pl.col("lower_limit")) | (pl.col("last_price") > pl.col("upper_limit")))
+            )
+            | (
+                pl.col("lower_limit").is_not_null()
+                & pl.col("base_price").is_not_null()
+                & pl.col("upper_limit").is_not_null()
+                & ((pl.col("base_price") < pl.col("lower_limit")) | (pl.col("base_price") > pl.col("upper_limit")))
+            )
+        )
+    elif dataset is SnapshotDataset.AUCTION_BOOK:
+        expr = (
+            (pl.col("expected_price").is_not_null() & (pl.col("expected_price") < 0))
+            | (pl.col("expected_volume").is_not_null() & (pl.col("expected_volume") < 0))
+        )
+    elif dataset is SnapshotDataset.PROGRAM_TRADE:
+        expr = (
+            (pl.col("sell_qty").is_not_null() & (pl.col("sell_qty") < 0))
+            | (pl.col("buy_qty").is_not_null() & (pl.col("buy_qty") < 0))
+            | (pl.col("cum_volume").is_not_null() & (pl.col("cum_volume") < 0))
+            | (
+                pl.col("net_qty").is_not_null()
+                & pl.col("buy_qty").is_not_null()
+                & pl.col("sell_qty").is_not_null()
+                & (pl.col("net_qty") != pl.col("buy_qty") - pl.col("sell_qty"))
+            )
+            | (
+                pl.col("net_value_krw").is_not_null()
+                & pl.col("buy_value_krw").is_not_null()
+                & pl.col("sell_value_krw").is_not_null()
+                & (pl.col("net_value_krw") != pl.col("buy_value_krw") - pl.col("sell_value_krw"))
+            )
+        )
+    elif dataset is SnapshotDataset.RANKING:
+        expr = (pl.col("rank").is_not_null() & (pl.col("rank") < 1)) | (
+            pl.col("trade_value_krw").is_not_null() & (pl.col("trade_value_krw") < 0)
+        )
+    elif dataset is SnapshotDataset.INDEX_SNAPSHOT:
+        expr = (
+            (pl.col("index_value").is_not_null() & (pl.col("index_value") <= 0))
+            | (pl.col("cum_value_mil_krw").is_not_null() & (pl.col("cum_value_mil_krw") < 0))
+            | (pl.col("advancers").is_not_null() & (pl.col("advancers") < 0))
+            | (pl.col("decliners").is_not_null() & (pl.col("decliners") < 0))
+        )
+    else:
+        expr = (
+            (pl.col("open").is_not_null() & (pl.col("open") <= 0))
+            | (pl.col("high").is_not_null() & (pl.col("high") <= 0))
+            | (pl.col("low").is_not_null() & (pl.col("low") <= 0))
+            | (pl.col("close").is_not_null() & (pl.col("close") <= 0))
+            | (
+                pl.col("high").is_not_null()
+                & pl.col("open").is_not_null()
+                & pl.col("close").is_not_null()
+                & ((pl.col("high") < pl.col("open")) | (pl.col("high") < pl.col("close")))
+            )
+            | (
+                pl.col("low").is_not_null()
+                & pl.col("open").is_not_null()
+                & pl.col("close").is_not_null()
+                & ((pl.col("low") > pl.col("open")) | (pl.col("low") > pl.col("close")))
+            )
+            | (pl.col("volume").is_not_null() & (pl.col("volume") < 0))
+        )
+    return frame.select(expr.alias("__violation__")).to_series()

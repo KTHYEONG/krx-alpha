@@ -142,3 +142,60 @@ def test_uncastable_existing_partition_fails_closed(tmp_path: pathlib.Path) -> N
 
     with pytest.raises(SnapshotStoreError):
         _store(tmp_path).append(SnapshotDataset.RANKING, [_ranking_row(rank=2, observed_at_ns=2_000)])
+
+
+def _program_trade_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "session_date": _SESSION_DATE,
+        "observed_at_ns": 1_000,
+        "source_tr": "program_tr",
+        "market_div_code": "J",
+        "symbol": "005930",
+        "trade_time": "090000",
+        "cum_volume": 1000,
+        "sell_qty": 100,
+        "buy_qty": 150,
+        "net_qty": 50,
+        "sell_value_krw": 1000,
+        "buy_value_krw": 1500,
+        "net_value_krw": 500,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_append_drops_invalid_rows_and_persists_valid_ones(tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    store = _store(tmp_path)
+    broken = _program_trade_row(observed_at_ns=2_000, net_qty=999)
+    with caplog.at_level(logging.WARNING):
+        added = store.append(SnapshotDataset.PROGRAM_TRADE, [_program_trade_row(), broken])
+
+    assert added == 1
+    frame = store.frame(SnapshotDataset.PROGRAM_TRADE)
+    assert frame.height == 1
+    assert frame["observed_at_ns"].to_list() == [1_000]
+    assert "stage=snapshot_dq" in caplog.text
+
+
+def test_append_rejected_key_does_not_block_later_valid_observation(tmp_path: pathlib.Path) -> None:
+    store = _store(tmp_path)
+    broken = _program_trade_row(net_qty=999)
+
+    assert store.append(SnapshotDataset.PROGRAM_TRADE, [broken]) == 0
+    assert store.append(SnapshotDataset.PROGRAM_TRADE, [_program_trade_row()]) == 1
+    assert store.frame(SnapshotDataset.PROGRAM_TRADE).height == 1
+
+
+def test_append_fully_rejected_batch_writes_nothing_and_alerts(tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    store = _store(tmp_path)
+    broken = _program_trade_row(net_qty=999)
+    with caplog.at_level(logging.CRITICAL):
+        added = store.append(SnapshotDataset.PROGRAM_TRADE, [broken])
+
+    assert added == 0
+    assert not (tmp_path / "l1" / "snapshot" / "program_trade" / "dt=2026-09-17.parquet").exists()
+    assert any(r.levelno == logging.CRITICAL and "status=FAIL" in r.getMessage() for r in caplog.records)

@@ -9,7 +9,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 
-from src.core.config import CollectorSettings, ObservabilitySettings, child_process_env
+from src.core.config import CollectorSettings, DataQualitySettings, ObservabilitySettings, child_process_env
 from src.core.observability import configure_logging
 from src.storage.retention import L1NormalizationError, L1WorkerCrashError, normalize_l0_partition
 
@@ -80,6 +80,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             pathlib.Path(args.part),
             pathlib.Path(args.out),
             work_root=pathlib.Path(args.work_root) if args.work_root is not None else None,
+            dq_settings=DataQualitySettings(),
         )
     except L1NormalizationError as exc:
         print(json.dumps({"error": str(exc)}), flush=True)  # noqa: T201 - child stdout protocol, read by parent

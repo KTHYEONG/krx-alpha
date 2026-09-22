@@ -6,20 +6,44 @@ import itertools
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 
 import polars as pl
 
+from src.core.config import DataQualitySettings
+
 _TICK_STREAM: str = "H0STCNT0"
+_TICK_STREAMS: tuple[str, ...] = ("H0STCNT0", "H0NXCNT0")
 _PRICE_BAND_RATIO: float = 0.30
 
 _TICK_BODY_FIELDS: tuple[str, ...] = ("shcode", "price", "cvolume", "volume", "change", "sign", "drate", "mdchecnt", "mschecnt")
 _QUOTE_STREAM: str = "H0STASP0"
+_QUOTE_STREAMS: tuple[str, ...] = ("H0STASP0", "H0NXASP0")
 _SCHEMA_DISAGREE_TOLERANCE: float = 0.01
 _QUOTE_LEVELS: int = 10
 _QUOTE_CHUNK_ROWS: int = 20_000
 _TICK_CHUNK_ROWS: int = 20_000
 _BUCKET_HASH_SEED: int = 0x9E3779B1
 _AUCTION_WINDOWS: tuple[tuple[int, int], ...] = ((83000, 90000), (152000, 153000))
+_KIS_TICK_MIN_FIELDS: int = 17
+_KIS_TICK_SYMBOL: int = 0
+_KIS_TICK_PRICE: int = 2
+_KIS_TICK_SIGN: int = 3
+_KIS_TICK_CHANGE: int = 4
+_KIS_TICK_DRATE: int = 5
+_KIS_TICK_CVOLUME: int = 12
+_KIS_TICK_VOLUME: int = 13
+_KIS_TICK_MDCHECNT: int = 15
+_KIS_TICK_MSCHECNT: int = 16
+_KIS_QUOTE_MIN_FIELDS: int = 45
+_KIS_QUOTE_SYMBOL: int = 0
+_KIS_QUOTE_HOTIME: int = 1
+_KIS_QUOTE_ASK_BASE: int = 3
+_KIS_QUOTE_BID_BASE: int = 13
+_KIS_QUOTE_ASKREM_BASE: int = 23
+_KIS_QUOTE_BIDREM_BASE: int = 33
+_KIS_QUOTE_TOT_ASK: int = 43
+_KIS_QUOTE_TOT_BID: int = 44
 _QUOTE_BODY_FIELDS: tuple[str, ...] = (
     "shcode",
     "hotime",
@@ -52,6 +76,105 @@ class QuoteQualitySummary:
     crossed_book: int
     negative_remain: int
     total_remain_short: int
+
+
+class DqStatus(StrEnum):
+    PASS = "PASS"  # noqa: S105
+    WARN = "WARN"  # noqa: S105
+    FAIL = "FAIL"  # noqa: S105
+
+
+DQ_METADATA_KEY: str = "krx_alpha.dq"
+
+
+@dataclass(frozen=True)
+class DqVerdict:
+    status: DqStatus
+    tick: TickQualitySummary | None
+    quote: QuoteQualitySummary | None
+    reasons: tuple[str, ...]
+
+    def to_metadata(self) -> dict[str, str]:
+        """Serialize into parquet footer key-value metadata under key ``krx_alpha.dq``."""
+        payload = {
+            "quote": None if self.quote is None else {
+                "crossed_book": self.quote.crossed_book,
+                "decode_fail": self.quote.decode_fail,
+                "ladder_disorder": self.quote.ladder_disorder,
+                "negative_remain": self.quote.negative_remain,
+                "rows": self.quote.rows,
+                "total_remain_short": self.quote.total_remain_short,
+            },
+            "reasons": list(self.reasons),
+            "status": self.status.value,
+            "tick": None if self.tick is None else {
+                "cum_volume_regression": self.tick.cum_volume_regression,
+                "decode_fail": self.tick.decode_fail,
+                "lost_volume": self.tick.lost_volume,
+                "price_band_violation": self.tick.price_band_violation,
+                "rows": self.tick.rows,
+                "schema_disagree": self.tick.schema_disagree,
+                "tick_loss": self.tick.tick_loss,
+                "zero_volume": self.tick.zero_volume,
+            },
+        }
+        return {DQ_METADATA_KEY: json.dumps(payload, sort_keys=True)}
+
+
+def evaluate_stream_quality(
+    tick: TickQualitySummary | None,
+    quote: QuoteQualitySummary | None,
+    *,
+    settings: DataQualitySettings,
+) -> DqVerdict:
+    """Classify one L1 partition's DQ counters into a PASS/WARN/FAIL verdict.
+
+    PASS means every counter is zero. WARN means some counter is non-zero but
+    every ratio stays within its configured ceiling (known vendor noise). FAIL
+    means at least one ratio exceeds its ceiling, i.e. the feed or the decoder
+    is structurally broken for this partition.
+
+    Args:
+        tick: Tick summary, or None when the partition holds no tick rows.
+        quote: Quote summary, or None when the partition holds no quote rows.
+        settings: Ratio ceilings.
+
+    Returns:
+        Verdict with human-readable reasons naming each exceeded counter and ratio.
+
+    Raises:
+        ValueError: If both summaries are None.
+    """
+    if tick is None and quote is None:
+        raise ValueError("both tick and quote summaries are None")
+    reasons: list[str] = []
+    any_nonzero = False
+
+    def _check(count: int, rows: int, ceiling: float, name: str) -> None:
+        nonlocal any_nonzero
+        if rows <= 0:
+            return
+        if count > 0:
+            any_nonzero = True
+            ratio = count / rows
+            if ratio > ceiling:
+                reasons.append(f"{name}={count}/{rows} ratio={ratio:.6f} exceeds {ceiling:.6f}")
+
+    if tick is not None:
+        _check(tick.decode_fail, tick.rows, settings.max_decode_fail_ratio, "tick.decode_fail")
+        _check(tick.zero_volume, tick.rows, settings.max_invariant_violation_ratio, "tick.zero_volume")
+        _check(tick.price_band_violation, tick.rows, settings.max_invariant_violation_ratio, "tick.price_band_violation")
+        _check(tick.cum_volume_regression, tick.rows, settings.max_invariant_violation_ratio, "tick.cum_volume_regression")
+        _check(tick.schema_disagree, tick.rows, settings.max_invariant_violation_ratio, "tick.schema_disagree")
+        _check(tick.tick_loss, tick.rows, settings.max_invariant_violation_ratio, "tick.tick_loss")
+    if quote is not None:
+        _check(quote.decode_fail, quote.rows, settings.max_decode_fail_ratio, "quote.decode_fail")
+        _check(quote.ladder_disorder, quote.rows, settings.max_invariant_violation_ratio, "quote.ladder_disorder")
+        _check(quote.crossed_book, quote.rows, settings.max_invariant_violation_ratio, "quote.crossed_book")
+        _check(quote.negative_remain, quote.rows, settings.max_invariant_violation_ratio, "quote.negative_remain")
+        _check(quote.total_remain_short, quote.rows, settings.max_total_remain_short_ratio, "quote.total_remain_short")
+    status = DqStatus.FAIL if reasons else (DqStatus.WARN if any_nonzero else DqStatus.PASS)
+    return DqVerdict(status=status, tick=tick, quote=quote, reasons=tuple(reasons))
 
 
 def _safe_parse_ls_body(raw: str) -> dict[str, object] | None:
@@ -126,6 +249,126 @@ def _decode_tick_chunk(chunk: pl.DataFrame) -> pl.DataFrame:
             strict=False,
         )
     return raw_fields
+
+
+def _decode_kis_tick_chunk(chunk: pl.DataFrame) -> pl.DataFrame:
+    rows: list[dict[str, object]] = []
+    for raw, wall in zip(chunk["raw"].to_list(), chunk["recv_wall_ns"].to_list(), strict=True):
+        parts = raw.split("^") if isinstance(raw, str) else []
+        if len(parts) < _KIS_TICK_MIN_FIELDS:
+            rows.append({
+                "shcode": None, "price_raw": None, "cvolume_raw": None, "volume_raw": None,
+                "change_raw": None, "sign": None, "drate_raw": None,
+                "mdchecnt_raw": None, "mschecnt_raw": None, "recv_wall_ns": wall,
+            })
+            continue
+        change_raw = parts[_KIS_TICK_CHANGE]
+        if isinstance(change_raw, str) and change_raw.startswith("-"):
+            change_raw = change_raw[1:]
+        rows.append({
+            "shcode": parts[_KIS_TICK_SYMBOL],
+            "price_raw": parts[_KIS_TICK_PRICE],
+            "cvolume_raw": parts[_KIS_TICK_CVOLUME],
+            "volume_raw": parts[_KIS_TICK_VOLUME],
+            "change_raw": change_raw,
+            "sign": parts[_KIS_TICK_SIGN],
+            "drate_raw": parts[_KIS_TICK_DRATE],
+            "mdchecnt_raw": parts[_KIS_TICK_MDCHECNT],
+            "mschecnt_raw": parts[_KIS_TICK_MSCHECNT],
+            "recv_wall_ns": wall,
+        })
+    return pl.DataFrame(
+        rows,
+        schema={
+            "shcode": pl.String, "price_raw": pl.String, "cvolume_raw": pl.String,
+            "volume_raw": pl.String, "change_raw": pl.String, "sign": pl.String,
+            "drate_raw": pl.String, "mdchecnt_raw": pl.String, "mschecnt_raw": pl.String,
+            "recv_wall_ns": pl.Int64,
+        },
+        strict=False,
+    )
+
+
+def _split_kis_ls(chunk: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
+    if "vendor" not in chunk.columns:
+        return chunk.slice(0, 0), chunk
+    kis = chunk.filter(pl.col("vendor") == "kis")
+    ls = chunk.filter((pl.col("vendor") != "kis") | pl.col("vendor").is_null())
+    return kis, ls
+
+
+def _decode_tick_chunk_mixed(chunk: pl.DataFrame) -> pl.DataFrame:
+    kis, ls = _split_kis_ls(chunk)
+    parts: list[pl.DataFrame] = []
+    if kis.height > 0:
+        parts.append(_decode_kis_tick_chunk(kis))
+    if ls.height > 0:
+        parts.append(_decode_tick_chunk(ls))
+    return pl.concat(parts)
+
+
+def _decode_kis_quote_frame(chunk: pl.DataFrame) -> pl.DataFrame:
+    data: dict[str, list[object]] = {"shcode": [], "hotime": [], "totofferrem": [], "totbidrem": []}
+    for k in range(1, _QUOTE_LEVELS + 1):
+        data[f"offerho{k}"] = []
+        data[f"bidho{k}"] = []
+    for k in range(1, _QUOTE_LEVELS + 1):
+        data[f"offerrem{k}"] = []
+        data[f"bidrem{k}"] = []
+    for raw in chunk["raw"].to_list():
+        parts = raw.split("^") if isinstance(raw, str) else []
+        if len(parts) < _KIS_QUOTE_MIN_FIELDS:
+            for key in data:
+                data[key].append(None)
+            continue
+        data["shcode"].append(parts[_KIS_QUOTE_SYMBOL])
+        data["hotime"].append(parts[_KIS_QUOTE_HOTIME])
+        for k in range(1, _QUOTE_LEVELS + 1):
+            data[f"offerho{k}"].append(parts[_KIS_QUOTE_ASK_BASE + k - 1])
+            data[f"bidho{k}"].append(parts[_KIS_QUOTE_BID_BASE + k - 1])
+        for k in range(1, _QUOTE_LEVELS + 1):
+            data[f"offerrem{k}"].append(parts[_KIS_QUOTE_ASKREM_BASE + k - 1])
+            data[f"bidrem{k}"].append(parts[_KIS_QUOTE_BIDREM_BASE + k - 1])
+        data["totofferrem"].append(parts[_KIS_QUOTE_TOT_ASK])
+        data["totbidrem"].append(parts[_KIS_QUOTE_TOT_BID])
+    num_quote_fields = [f for f in _QUOTE_BODY_FIELDS if f != "shcode"]
+    raw_frame = pl.DataFrame(
+        data,
+        schema={**{"shcode": pl.String}, **dict.fromkeys(num_quote_fields, pl.String)},
+        strict=False,
+    )
+    casts = [pl.col("shcode")]
+    casts.extend(pl.col(c).cast(pl.Int32, strict=False).alias(c) for c in num_quote_fields)
+    return raw_frame.select(casts)
+
+
+def _decode_ls_quote_chunk(chunk: pl.DataFrame) -> pl.DataFrame:
+    body_dtype = pl.Struct(dict.fromkeys(_QUOTE_BODY_FIELDS, pl.String))
+    raw_dtype = pl.Struct({"header": pl.Struct({"tr_cd": pl.String, "tr_key": pl.String}), "body": body_dtype})
+    num_fields = [f for f in _QUOTE_BODY_FIELDS if f != "shcode"]
+    try:
+        decoded = chunk.with_columns(pl.col("raw").str.json_decode(raw_dtype).alias("decoded"))
+        selects = [pl.col("decoded").struct.field("body").struct.field("shcode").alias("shcode")]
+        selects.extend(
+            pl.col("decoded").struct.field("body").struct.field(c).cast(pl.Int32, strict=False).alias(c) for c in num_fields
+        )
+        return decoded.select(selects)
+    except pl.exceptions.ComputeError:
+        fallback: list[dict[str, object]] = []
+        for raw in chunk["raw"].to_list():
+            row = _safe_parse_ls_quote_body(raw)
+            if row is None:
+                fallback.append(dict.fromkeys(_QUOTE_BODY_FIELDS, None))
+            else:
+                fallback.append({field: row[field] for field in _QUOTE_BODY_FIELDS})
+        raw_frame = pl.DataFrame(
+            fallback,
+            schema={**{"shcode": pl.String}, **dict.fromkeys(num_fields, pl.String)},
+            strict=False,
+        )
+        casts = [pl.col("shcode")]
+        casts.extend(pl.col(c).cast(pl.Int32, strict=False).alias(c) for c in num_fields)
+        return raw_frame.select(casts)
 
 
 def _summarize_tick_fields(raw_fields: pl.DataFrame, *, rows: int) -> TickQualitySummary:
@@ -224,13 +467,13 @@ def decode_tick_raw_fields(df: pl.DataFrame, *, chunk_rows: int = _TICK_CHUNK_RO
         Callers needing a one-shot in-memory summary instead of the raw
         fields should use decode_and_flag_ticks.
     """
-    ticks = df.filter(pl.col("tr_id") == _TICK_STREAM)
+    ticks = df.filter(pl.col("tr_id").is_in(_TICK_STREAMS))
     if ticks.height == 0:
         return None
     if chunk_rows <= 0:
         raise ValueError(f"chunk_rows must be > 0, got {chunk_rows}")
     # 청크 단위 디코딩으로 피크 메모리를 chunk_rows 행으로 묶는다
-    return pl.concat([_decode_tick_chunk(ticks.slice(offset, chunk_rows)) for offset in range(0, ticks.height, chunk_rows)])
+    return pl.concat([_decode_tick_chunk_mixed(ticks.slice(offset, chunk_rows)) for offset in range(0, ticks.height, chunk_rows)])
 
 
 def decode_and_flag_ticks(df: pl.DataFrame, *, chunk_rows: int = _TICK_CHUNK_ROWS) -> TickQualitySummary | None:
@@ -335,12 +578,9 @@ def _flag_quote_invariants(frame: pl.DataFrame) -> pl.DataFrame:
 
 
 def decode_and_flag_quotes(df: pl.DataFrame, *, chunk_rows: int = _QUOTE_CHUNK_ROWS) -> QuoteQualitySummary | None:
-    quotes = df.filter(pl.col("tr_id") == _QUOTE_STREAM)
+    quotes = df.filter(pl.col("tr_id").is_in(_QUOTE_STREAMS))
     if quotes.height == 0:
         return None
-    body_dtype = pl.Struct(dict.fromkeys(_QUOTE_BODY_FIELDS, pl.String))
-    raw_dtype = pl.Struct({"header": pl.Struct({"tr_cd": pl.String, "tr_key": pl.String}), "body": body_dtype})
-    num_fields = [f for f in _QUOTE_BODY_FIELDS if f != "shcode"]
     decode_fail = 0
     ladder_disorder = 0
     crossed_book = 0
@@ -348,29 +588,13 @@ def decode_and_flag_quotes(df: pl.DataFrame, *, chunk_rows: int = _QUOTE_CHUNK_R
     total_remain_short = 0
     for offset in range(0, quotes.height, chunk_rows):
         chunk = quotes.slice(offset, chunk_rows)
-        try:
-            decoded = chunk.with_columns(pl.col("raw").str.json_decode(raw_dtype).alias("decoded"))
-            selects = [pl.col("decoded").struct.field("body").struct.field("shcode").alias("shcode")]
-            selects.extend(
-                pl.col("decoded").struct.field("body").struct.field(c).cast(pl.Int32, strict=False).alias(c) for c in num_fields
-            )
-            frame = decoded.select(selects)
-        except pl.exceptions.ComputeError:
-            fallback: list[dict[str, object]] = []
-            for raw in chunk["raw"].to_list():
-                row = _safe_parse_ls_quote_body(raw)
-                if row is None:
-                    fallback.append(dict.fromkeys(_QUOTE_BODY_FIELDS, None))
-                else:
-                    fallback.append({field: row[field] for field in _QUOTE_BODY_FIELDS})
-            raw_frame = pl.DataFrame(
-                fallback,
-                schema={**{"shcode": pl.String}, **dict.fromkeys(num_fields, pl.String)},
-                strict=False,
-            )
-            casts = [pl.col("shcode")]
-            casts.extend(pl.col(c).cast(pl.Int32, strict=False).alias(c) for c in num_fields)
-            frame = raw_frame.select(casts)
+        kis, ls = _split_kis_ls(chunk)
+        frames: list[pl.DataFrame] = []
+        if kis.height > 0:
+            frames.append(_decode_kis_quote_frame(kis))
+        if ls.height > 0:
+            frames.append(_decode_ls_quote_chunk(ls))
+        frame = pl.concat(frames) if len(frames) > 1 else frames[0]
         flagged = _flag_quote_invariants(frame)
         decode_fail += int(flagged["dq_decode_fail"].sum())
         ladder_disorder += int(flagged["dq_ladder_disorder"].sum())

@@ -400,6 +400,21 @@ class ObservabilitySettings(BaseSettings):
     run_id: str = ""
 
 
+class DataQualitySettings(BaseSettings):
+    """Stream data-quality verdict thresholds (env_prefix='KRX_ALPHA_DQ_').
+
+    Ratios are violating rows divided by decoded stream rows of one L1 partition.
+    Defaults sit well above the measured daily vendor noise floor so that FAIL
+    means a structural feed defect, not routine vendor jitter.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_DQ_", extra="ignore")
+
+    max_decode_fail_ratio: float = Field(default=0.001, ge=0.0, le=1.0)
+    max_invariant_violation_ratio: float = Field(default=0.001, ge=0.0, le=1.0)
+    max_total_remain_short_ratio: float = Field(default=0.05, ge=0.0, le=1.0)
+
+
 class AlertSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 

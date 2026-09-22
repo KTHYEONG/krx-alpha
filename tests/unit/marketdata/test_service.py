@@ -125,6 +125,7 @@ def test_refresh_bars_via_kis_fallback_writes_valid_rows_and_skips_invalid(tmp_p
             if symbol == "000660":
                 raise KisApiError("EGW00000", "boom")
             return {
+                "stck_bsop_date": "20260910",
                 "stck_clpr": "269000", "acml_vol": "22517075",
                 "acml_tr_pbmn": "6028310398800", "prdy_vrss": "-500",
                 "stck_oprc": "268000", "stck_hgpr": "270000", "stck_lwpr": "267000",
@@ -181,7 +182,7 @@ def test_refresh_bars_via_kis_fallback_zeroes_change_pct_when_prev_close_is_zero
 
     class _IpoClient:
         def get_daily_bar(self, symbol: str, day: dt.date) -> dict[str, str] | None:
-            return {"stck_clpr": "1000", "acml_vol": "500", "acml_tr_pbmn": "500000", "prdy_vrss": "1000",
+            return {"stck_bsop_date": "20260910", "stck_clpr": "1000", "acml_vol": "500", "acml_tr_pbmn": "500000", "prdy_vrss": "1000",
                     "stck_oprc": "1000", "stck_hgpr": "1000", "stck_lwpr": "1000"}
 
     result = refresh_bars_via_kis_fallback(
@@ -207,7 +208,7 @@ def test_kis_fallback_populates_ohl_and_base_price(tmp_path) -> None:
 
     class _OhlClient:
         def get_daily_bar(self, symbol: str, day: dt.date) -> dict[str, str] | None:
-            return {"stck_clpr": "1000", "acml_vol": "500", "acml_tr_pbmn": "500000", "prdy_vrss": "50",
+            return {"stck_bsop_date": "20260910", "stck_clpr": "1000", "acml_vol": "500", "acml_tr_pbmn": "500000", "prdy_vrss": "50",
                     "stck_oprc": "960", "stck_hgpr": "1010", "stck_lwpr": "950"}
 
     result = refresh_bars_via_kis_fallback(
@@ -491,3 +492,67 @@ def test_backfill_universe_program_trades_skips_non_digit_symbols_gracefully(tmp
     # Then: 유효한 보통주 005930만 전달되고 비정형 심볼로 인한 예외가 발생하지 않는다
     assert seen["symbols"] == ("005930",)
     assert (result.symbols_ok, result.symbols_failed, result.appended_rows) == (1, 0, 10)
+
+
+def _kis_row(bsop_date="20260910", close="70000", vol="1000", value="70000000", vrss="700", oprc="69500", hgpr="70500", lwpr="69000"):
+    return {
+        "stck_bsop_date": bsop_date, "stck_clpr": close, "acml_vol": vol, "acml_tr_pbmn": value,
+        "prdy_vrss": vrss, "stck_oprc": oprc, "stck_hgpr": hgpr, "stck_lwpr": lwpr,
+    }
+
+
+def test_refresh_bars_via_kis_fallback_skips_bar_from_another_session(tmp_path, caplog) -> None:
+    import datetime as dt
+    import json
+    import logging
+
+    import polars as pl
+
+    from src.marketdata.service import refresh_bars_via_kis_fallback
+
+    target = dt.date(2026, 9, 10)
+    map_path = tmp_path / "market_map.json"
+    map_path.write_text(json.dumps({"005930": "KOSPI", "000660": "KOSPI"}), encoding="utf-8")
+    store_path = tmp_path / "bars" / "daily.parquet"
+
+    class _MixedDateClient:
+        def get_daily_bar(self, symbol: str, day: dt.date):
+            if symbol == "000660":
+                return _kis_row(bsop_date="20260909")
+            return _kis_row(bsop_date="20260910")
+
+    with caplog.at_level(logging.WARNING):
+        result = refresh_bars_via_kis_fallback(
+            store_path=store_path, market_map_path=map_path, target_date=target, kis_client=_MixedDateClient(),
+        )
+
+    assert result.trading_day == target
+    assert result.appended_rows == 1
+    saved = pl.read_parquet(store_path)
+    assert saved["symbol"].to_list() == ["005930"]
+    assert saved["date"].to_list() == [target]
+    assert "date_mismatch" in caplog.text
+
+
+def test_refresh_bars_via_kis_fallback_fails_closed_when_all_dates_mismatched(tmp_path) -> None:
+    import datetime as dt
+    import json
+
+    import pytest
+
+    from src.marketdata.service import KisFallbackError, refresh_bars_via_kis_fallback
+
+    target = dt.date(2026, 9, 10)
+    map_path = tmp_path / "market_map.json"
+    map_path.write_text(json.dumps({"005930": "KOSPI"}), encoding="utf-8")
+    store_path = tmp_path / "bars" / "daily.parquet"
+
+    class _StaleClient:
+        def get_daily_bar(self, symbol: str, day: dt.date):
+            return _kis_row(bsop_date="20260909")
+
+    with pytest.raises(KisFallbackError, match="0 rows"):
+        refresh_bars_via_kis_fallback(
+            store_path=store_path, market_map_path=map_path, target_date=target, kis_client=_StaleClient(),
+        )
+    assert not store_path.exists()

@@ -44,6 +44,99 @@ class ImplausibleRowCountError(KrxBarsError):
     """직전 거래일 대비 행수 급감(절단 응답) fail-closed 신호."""
 
 
+class ImplausibleBarValuesError(KrxBarsError):
+    """Daily bars violate a structural price/volume identity (fail-closed, whole day rejected)."""
+
+
+MAX_CHANGE_PCT_DISAGREEMENT_PP: float = 0.1
+
+
+def validate_daily_bars(bars: pl.DataFrame) -> None:
+    """Reject a daily-bars batch that violates structural price/volume identities.
+
+    Only identities that must hold for every genuine KRX session row are
+    checked, so legitimate extremes (liquidation trading, new listings,
+    after-hours value outside the regular range) never trip the gate. A single
+    violating row rejects the whole batch: storing a partially-trusted day would
+    let a vendor defect silently bias cross-sectional features, while a raised
+    ``KrxBarsError`` lets the caller fall back to another source.
+
+    Args:
+        bars: Frame with at least ``STORED_BAR_COLUMNS`` cast to ``BAR_SCHEMA``.
+
+    Raises:
+        ImplausibleBarValuesError: When any identity fails; the message names
+            each violated rule with its row count and up to five sample
+            ``date:symbol`` keys.
+    """
+    violations: list[str] = []
+
+    def _samples(frame: pl.DataFrame) -> list[str]:
+        return [f"{row[0]}:{row[1]}" for row in frame.select(["date", "symbol"]).head(5).iter_rows()]
+
+    def _report(rule: str, frame: pl.DataFrame) -> None:
+        if frame.height > 0:
+            violations.append(f"{rule}={frame.height} rows {','.join(_samples(frame))}")
+
+    _report("duplicate_key", bars.filter(pl.struct(["date", "symbol"]).is_duplicated()))
+    if "close" in bars.columns:
+        _report("close_positive", bars.filter(pl.col("close").is_not_null() & (pl.col("close") <= 0)))
+    if "volume" in bars.columns:
+        _report("volume_non_negative", bars.filter(pl.col("volume").is_not_null() & (pl.col("volume") < 0)))
+    if "trade_value_100m" in bars.columns:
+        _report(
+            "trade_value_non_negative",
+            bars.filter(pl.col("trade_value_100m").is_not_null() & (pl.col("trade_value_100m") < 0)),
+        )
+    if "volume" in bars.columns and "trade_value_100m" in bars.columns:
+        _report(
+            "volume_trade_value_consistency",
+            bars.filter(
+                pl.col("volume").is_not_null()
+                & pl.col("trade_value_100m").is_not_null()
+                & ((pl.col("volume") == 0) != (pl.col("trade_value_100m") == 0))
+            ),
+        )
+    for rule, condition in (
+        ("low_positive", pl.col("low").is_not_null() & (pl.col("low") <= 0)),
+        (
+            "low_high_order",
+            pl.col("low").is_not_null() & pl.col("high").is_not_null() & (pl.col("low") > pl.col("high")),
+        ),
+        (
+            "open_in_range",
+            pl.col("low").is_not_null()
+            & pl.col("open").is_not_null()
+            & pl.col("high").is_not_null()
+            & ((pl.col("open") < pl.col("low")) | (pl.col("open") > pl.col("high"))),
+        ),
+        (
+            "close_in_range",
+            pl.col("low").is_not_null()
+            & pl.col("close").is_not_null()
+            & pl.col("high").is_not_null()
+            & ((pl.col("close") < pl.col("low")) | (pl.col("close") > pl.col("high"))),
+        ),
+    ):
+        _report(rule, bars.filter(pl.col("volume").is_not_null() & (pl.col("volume") > 0) & condition))
+    if all(c in bars.columns for c in ("close", "base_price", "daily_change_pct")):
+        _report(
+            "change_pct_agreement",
+            bars.filter(
+                pl.col("base_price").is_not_null()
+                & (pl.col("base_price") > 0)
+                & pl.col("close").is_not_null()
+                & pl.col("daily_change_pct").is_not_null()
+                & (
+                    ((pl.col("close") / pl.col("base_price") - 1) * 100 - pl.col("daily_change_pct")).abs()
+                    > MAX_CHANGE_PCT_DISAGREEMENT_PP
+                )
+            ),
+        )
+    if violations:
+        raise ImplausibleBarValuesError(f"implausible daily bars: {'; '.join(violations)}")
+
+
 RETRY_WAIT_BASE_S: float = 1.0
 RETRY_WAIT_MAX_S: float = 4.0
 
@@ -196,6 +289,12 @@ def derive_market_map(bars: pl.DataFrame) -> dict[str, str]:
 
 
 def append_daily_bars(store_path: pathlib.Path, bars: pl.DataFrame) -> int:
+    """Append one trading day of bars, filling missing columns and casting to the store schema.
+
+    Raises:
+        ImplausibleBarValuesError: When the incoming batch violates a structural identity.
+        ImplausibleRowCountError: When the incoming batch is implausibly small.
+    """
     store = pathlib.Path(store_path)
     present = [c for c in STORED_BAR_COLUMNS if c in bars.columns]
     incoming = bars.select(present)
@@ -205,6 +304,7 @@ def append_daily_bars(store_path: pathlib.Path, bars: pl.DataFrame) -> int:
     incoming = incoming.select(STORED_BAR_COLUMNS).with_columns([
         pl.col(column).cast(BAR_SCHEMA[column]) for column in STORED_BAR_COLUMNS
     ])
+    validate_daily_bars(incoming)
     if store.exists():
         existing = pl.read_parquet(store)
         for column in STORED_BAR_COLUMNS:

@@ -159,3 +159,96 @@ def test_index_minute_bar_not_after_defaults_to_run_end_deadline() -> None:
 
     assert by_id["index_minute_bar@153000"].not_after == dt.datetime(2026, 9, 17, 15, 39, tzinfo=_KST)
     assert by_id["index_minute_bar@102000"].not_after == by_id["index_minute_bar@114000"].due_at
+
+
+def _common(**overrides):
+    row = {
+        "session_date": _SESSION_DATE,
+        "observed_at_ns": 1_000,
+        "source_tr": "tr",
+        "market_div_code": "J",
+    }
+    row.update(overrides)
+    return row
+
+
+def _frame(dataset, rows) -> object:
+    import polars as pl
+
+    from src.marketdata.snapshot_contracts import SNAPSHOT_SCHEMAS
+
+    return pl.DataFrame(rows, schema=SNAPSHOT_SCHEMAS[dataset])
+
+
+def test_snapshot_row_violations_accepts_clean_security_status_row() -> None:
+    from src.marketdata.snapshot_contracts import SnapshotDataset, snapshot_row_violations
+
+    row = _common(
+        symbol="005930", status_code="00", managed=False, market_warning_code="00",
+        short_overheated=False, investment_caution=False, liquidation_trading=False,
+        trading_halted=False, vi_code="00", overtime_vi_code="00", credit_available=True,
+        last_price=70000, base_price=69300, upper_limit=80000, lower_limit=60000,
+    )
+    mask = snapshot_row_violations(SnapshotDataset.SECURITY_STATUS, _frame(SnapshotDataset.SECURITY_STATUS, [row]))
+    assert mask.to_list() == [False]
+
+
+def test_snapshot_row_violations_flags_price_outside_limit_band() -> None:
+    from src.marketdata.snapshot_contracts import SnapshotDataset, snapshot_row_violations
+
+    row = _common(
+        symbol="005930", status_code="00", managed=False, market_warning_code="00",
+        short_overheated=False, investment_caution=False, liquidation_trading=False,
+        trading_halted=False, vi_code="00", overtime_vi_code="00", credit_available=True,
+        last_price=90000, base_price=69300, upper_limit=80000, lower_limit=60000,
+    )
+    mask = snapshot_row_violations(SnapshotDataset.SECURITY_STATUS, _frame(SnapshotDataset.SECURITY_STATUS, [row]))
+    assert mask.to_list() == [True]
+
+
+def test_snapshot_row_violations_flags_program_trade_arithmetic() -> None:
+    from src.marketdata.snapshot_contracts import SnapshotDataset, snapshot_row_violations
+
+    row = _common(
+        symbol="005930", trade_time="090000", cum_volume=1000, sell_qty=100, buy_qty=150,
+        net_qty=999, sell_value_krw=1000, buy_value_krw=1500, net_value_krw=500,
+    )
+    mask = snapshot_row_violations(SnapshotDataset.PROGRAM_TRADE, _frame(SnapshotDataset.PROGRAM_TRADE, [row]))
+    assert mask.to_list() == [True]
+
+
+def test_snapshot_row_violations_flags_inverted_minute_bar() -> None:
+    from src.marketdata.snapshot_contracts import SnapshotDataset, snapshot_row_violations
+
+    row = _common(symbol="005930", bar_time="090100", open=70000, high=70000, low=69500, close=70200, volume=100)
+    mask = snapshot_row_violations(SnapshotDataset.STOCK_MINUTE_BAR, _frame(SnapshotDataset.STOCK_MINUTE_BAR, [row]))
+    assert mask.to_list() == [True]
+
+
+def test_snapshot_row_violations_ignores_null_ranking_trade_value() -> None:
+    from src.marketdata.snapshot_contracts import SnapshotDataset, snapshot_row_violations
+
+    row = _common(list_kind="fluctuation", rank=1, symbol="005930", change_pct=1.5, trade_value_krw=None)
+    mask = snapshot_row_violations(SnapshotDataset.RANKING, _frame(SnapshotDataset.RANKING, [row]))
+    assert mask.to_list() == [False]
+
+
+def test_snapshot_row_violations_never_flags_signed_investor_flow() -> None:
+    from src.marketdata.snapshot_contracts import SnapshotDataset, snapshot_row_violations
+
+    rows = [
+        _common(symbol="005930", bucket=1, foreign_net_qty=-100, institution_net_qty=-200, total_net_qty=-300),
+        _common(symbol="000660", bucket=2, foreign_net_qty=-5, institution_net_qty=10, total_net_qty=5),
+    ]
+    mask = snapshot_row_violations(SnapshotDataset.INVESTOR_ESTIMATE, _frame(SnapshotDataset.INVESTOR_ESTIMATE, rows))
+    assert mask.to_list() == [False, False]
+
+
+def test_snapshot_row_violations_returns_empty_mask_for_empty_frame() -> None:
+    import polars as pl
+
+    from src.marketdata.snapshot_contracts import SNAPSHOT_SCHEMAS, SnapshotDataset, snapshot_row_violations
+
+    frame = pl.DataFrame(schema=SNAPSHOT_SCHEMAS[SnapshotDataset.RANKING], strict=True)
+    mask = snapshot_row_violations(SnapshotDataset.RANKING, frame)
+    assert len(mask) == 0

@@ -712,3 +712,133 @@ def test_post_krx_sleeps_between_attempts_using_retry_wait(monkeypatch) -> None:
         bars_mod.fetch_daily_bars(dt.date(2026, 9, 11), auth_key="k", session=_Session())
     assert attempts["n"] == 3
     assert slept == [0.5, 1.0]
+
+
+def _valid_bar_row(**overrides):
+    import datetime as dt
+
+    row = {
+        "date": dt.date(2026, 9, 8),
+        "symbol": "005930",
+        "close": 70000.0,
+        "volume": 1000,
+        "trade_value_100m": 700.0,
+        "daily_change_pct": 1.01,
+        "market": "KOSPI",
+        "open": 69500.0,
+        "high": 70500.0,
+        "low": 69000.0,
+        "base_price": 69300.0,
+        "market_cap_krw": None,
+        "listed_shares": None,
+        "section": None,
+        "stock_cert_kind": None,
+        "security_group": None,
+    }
+    row.update(overrides)
+    return row
+
+
+def _bars_frame(rows) -> object:
+    import polars as pl
+
+    from src.marketdata.schema import BAR_SCHEMA
+
+    return pl.DataFrame(rows, schema=BAR_SCHEMA)
+
+
+def test_validate_daily_bars_accepts_clean_traded_and_halted_rows() -> None:
+    import datetime as dt
+
+    from src.marketdata.krx_bars import validate_daily_bars
+
+    halted = _valid_bar_row(
+        symbol="000660", close=50000.0, volume=0, trade_value_100m=0.0, daily_change_pct=0.0,
+        open=None, high=None, low=None, base_price=None,
+    )
+    validate_daily_bars(_bars_frame([_valid_bar_row(), halted]))
+    assert dt.date(2026, 9, 8).isoformat() == "2026-09-08"
+
+
+def test_validate_daily_bars_accepts_extreme_but_genuine_change() -> None:
+    from src.marketdata.krx_bars import validate_daily_bars
+
+    row = _valid_bar_row(close=1000.0, volume=100, trade_value_100m=1.0, daily_change_pct=-94.95, base_price=None, open=1000.0, high=1100.0, low=900.0)
+    validate_daily_bars(_bars_frame([row]))
+
+
+def test_validate_daily_bars_rejects_zero_close() -> None:
+    import pytest
+
+    from src.marketdata.krx_bars import ImplausibleBarValuesError, validate_daily_bars
+
+    with pytest.raises(ImplausibleBarValuesError, match="close_positive"):
+        validate_daily_bars(_bars_frame([_valid_bar_row(close=0.0, low=0.0, open=0.0, high=1.0)]))
+
+
+def test_validate_daily_bars_rejects_inverted_high_low() -> None:
+    import pytest
+
+    from src.marketdata.krx_bars import ImplausibleBarValuesError, validate_daily_bars
+
+    with pytest.raises(ImplausibleBarValuesError, match="low_high_order"):
+        validate_daily_bars(_bars_frame([_valid_bar_row(high=69000.0, low=70000.0, open=69500.0, close=69500.0)]))
+
+
+def test_validate_daily_bars_rejects_close_outside_range() -> None:
+    import pytest
+
+    from src.marketdata.krx_bars import ImplausibleBarValuesError, validate_daily_bars
+
+    with pytest.raises(ImplausibleBarValuesError, match="close_in_range"):
+        validate_daily_bars(_bars_frame([_valid_bar_row(close=71000.0)]))
+
+
+def test_validate_daily_bars_rejects_volume_without_value() -> None:
+    import pytest
+
+    from src.marketdata.krx_bars import ImplausibleBarValuesError, validate_daily_bars
+
+    with pytest.raises(ImplausibleBarValuesError, match="volume_trade_value_consistency"):
+        validate_daily_bars(_bars_frame([_valid_bar_row(trade_value_100m=0.0)]))
+
+
+def test_validate_daily_bars_rejects_change_pct_disagreement() -> None:
+    import pytest
+
+    from src.marketdata.krx_bars import ImplausibleBarValuesError, validate_daily_bars
+
+    row = _valid_bar_row(close=1100.0, open=1050.0, high=1150.0, low=1000.0, base_price=1000.0, daily_change_pct=5.0)
+    with pytest.raises(ImplausibleBarValuesError, match="change_pct_agreement"):
+        validate_daily_bars(_bars_frame([row]))
+
+
+def test_validate_daily_bars_rejects_duplicate_key() -> None:
+    import pytest
+
+    from src.marketdata.krx_bars import ImplausibleBarValuesError, validate_daily_bars
+
+    with pytest.raises(ImplausibleBarValuesError, match="duplicate_key"):
+        validate_daily_bars(_bars_frame([_valid_bar_row(), _valid_bar_row()]))
+
+
+def test_validate_daily_bars_skips_null_ohl_on_traded_legacy_row() -> None:
+    from src.marketdata.krx_bars import validate_daily_bars
+
+    row = _valid_bar_row(open=None, high=None, low=None, base_price=None)
+    validate_daily_bars(_bars_frame([row]))
+
+
+def test_append_daily_bars_leaves_store_untouched_on_implausible_batch(tmp_path) -> None:
+    import polars as pl
+    import pytest
+
+    from src.marketdata.krx_bars import ImplausibleBarValuesError, append_daily_bars
+
+    store = tmp_path / "daily.parquet"
+    append_daily_bars(store, _bars_frame([_valid_bar_row()]))
+    before = store.read_bytes()
+    with pytest.raises(ImplausibleBarValuesError):
+        append_daily_bars(store, _bars_frame([_valid_bar_row(close=0.0, low=0.0, open=0.0, high=1.0)]))
+    assert store.read_bytes() == before
+    assert pl.read_parquet(store).height == 1

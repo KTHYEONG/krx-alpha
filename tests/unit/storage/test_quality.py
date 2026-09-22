@@ -787,3 +787,217 @@ def test_sum_quote_summaries_adds_all_fields_and_returns_none_when_empty() -> No
     )
     assert sum_quote_summaries([]) is None
 
+
+def _kis_tick_raw(symbol='005930', hotime='154001', price='70000', sign='5', change='-5000', drate='-6.67', cvolume='10', volume='100', mdchecnt='10', mschecnt='5', nfields=47) -> str:
+    fields = ['0'] * nfields
+    fields[0] = symbol
+    fields[1] = hotime
+    fields[2] = price
+    fields[3] = sign
+    fields[4] = change
+    fields[5] = drate
+    fields[12] = cvolume
+    fields[13] = volume
+    fields[15] = mdchecnt
+    fields[16] = mschecnt
+    return '^'.join(fields)
+
+
+def _kis_quote_raw(symbol='005930', hotime='101500', asks=None, bids=None, askrems=None, bidrems=None, tot_ask=None, tot_bid=None, nfields=63) -> str:
+    asks = asks if asks is not None else [70100 + k * 100 for k in range(10)]
+    bids = bids if bids is not None else [69900 - k * 100 for k in range(10)]
+    askrems = askrems if askrems is not None else [100] * 10
+    bidrems = bidrems if bidrems is not None else [100] * 10
+    tot_ask = tot_ask if tot_ask is not None else sum(askrems)
+    tot_bid = tot_bid if tot_bid is not None else sum(bidrems)
+    fields = ['0'] * nfields
+    fields[0] = symbol
+    fields[1] = hotime
+    for k in range(10):
+        fields[3 + k] = str(asks[k])
+        fields[13 + k] = str(bids[k])
+        fields[23 + k] = str(askrems[k])
+        fields[33 + k] = str(bidrems[k])
+    fields[43] = str(tot_ask)
+    fields[44] = str(tot_bid)
+    return '^'.join(fields)
+
+
+def test_decode_kis_tick_clean_row_not_flagged() -> None:
+    import polars as pl
+    from src.storage.quality import decode_and_flag_ticks
+
+    df = pl.DataFrame({'raw': [_kis_tick_raw()], 'tr_id': ['H0STCNT0'], 'vendor': ['kis'], 'recv_wall_ns': [100]})
+    summary = decode_and_flag_ticks(df)
+    assert summary is not None
+    assert summary.rows == 1
+    assert summary.decode_fail == 0
+    assert summary.zero_volume == 0
+    assert summary.price_band_violation == 0
+    assert summary.cum_volume_regression == 0
+    assert summary.schema_disagree == 0
+    assert summary.tick_loss == 0
+
+
+def test_decode_nxt_tick_stream_is_decoded() -> None:
+    import polars as pl
+    from src.storage.quality import decode_and_flag_ticks
+
+    df = pl.DataFrame({'raw': [_kis_tick_raw()], 'tr_id': ['H0NXCNT0'], 'vendor': ['kis'], 'recv_wall_ns': [100]})
+    summary = decode_and_flag_ticks(df)
+    assert summary is not None
+    assert summary.rows == 1
+
+
+def test_decode_kis_tick_price_band_violation_detected() -> None:
+    import polars as pl
+    from src.storage.quality import decode_and_flag_ticks
+
+    raw = _kis_tick_raw(price='2000', sign='2', change='1000', drate='100.00')
+    df = pl.DataFrame({'raw': [raw], 'tr_id': ['H0STCNT0'], 'vendor': ['kis'], 'recv_wall_ns': [100]})
+    summary = decode_and_flag_ticks(df)
+    assert summary is not None
+    assert summary.price_band_violation == 1
+
+
+def test_decode_kis_tick_cum_volume_regression_detected() -> None:
+    import polars as pl
+    from src.storage.quality import decode_and_flag_ticks
+
+    raws = [_kis_tick_raw(volume='500'), _kis_tick_raw(volume='300')]
+    df = pl.DataFrame({'raw': raws, 'tr_id': ['H0STCNT0', 'H0STCNT0'], 'vendor': ['kis', 'kis'], 'recv_wall_ns': [100, 200]})
+    summary = decode_and_flag_ticks(df)
+    assert summary is not None
+    assert summary.cum_volume_regression == 1
+
+
+def test_decode_truncated_kis_row_is_decode_fail_not_crash() -> None:
+    import polars as pl
+    from src.storage.quality import decode_and_flag_ticks
+
+    df = pl.DataFrame({'raw': ['005930^154001'], 'tr_id': ['H0STCNT0'], 'vendor': ['kis'], 'recv_wall_ns': [100]})
+    summary = decode_and_flag_ticks(df)
+    assert summary is not None
+    assert summary.decode_fail == 1
+
+
+def test_decode_kis_quote_clean_book_not_flagged() -> None:
+    import polars as pl
+    from src.storage.quality import decode_and_flag_quotes
+
+    df = pl.DataFrame({'raw': [_kis_quote_raw()], 'tr_id': ['H0STASP0'], 'vendor': ['kis'], 'recv_wall_ns': [100]})
+    summary = decode_and_flag_quotes(df)
+    assert summary is not None
+    assert summary.rows == 1
+    assert summary.decode_fail == 0
+    assert summary.ladder_disorder == 0
+    assert summary.crossed_book == 0
+    assert summary.negative_remain == 0
+    assert summary.total_remain_short == 0
+
+
+def test_decode_nxt_62_field_quote_decoded() -> None:
+    import polars as pl
+    from src.storage.quality import decode_and_flag_quotes
+
+    raw = _kis_quote_raw(nfields=62)
+    assert raw.count('^') == 61
+    df = pl.DataFrame({'raw': [raw], 'tr_id': ['H0NXASP0'], 'vendor': ['kis'], 'recv_wall_ns': [100]})
+    summary = decode_and_flag_quotes(df)
+    assert summary is not None
+    assert summary.decode_fail == 0
+
+
+def test_decode_kis_quote_ladder_disorder_detected() -> None:
+    import polars as pl
+    from src.storage.quality import decode_and_flag_quotes
+
+    asks = [70100 + k * 100 for k in range(10)]
+    asks[2], asks[3] = asks[3], asks[2]
+    df = pl.DataFrame({'raw': [_kis_quote_raw(asks=asks)], 'tr_id': ['H0STASP0'], 'vendor': ['kis'], 'recv_wall_ns': [100]})
+    summary = decode_and_flag_quotes(df)
+    assert summary is not None
+    assert summary.ladder_disorder == 1
+
+
+def test_decode_frame_without_vendor_column_stays_on_ls_path() -> None:
+    import json
+    import polars as pl
+    from src.storage.quality import decode_and_flag_ticks
+
+    body = {'shcode': '005930', 'price': '70000', 'cvolume': '10', 'volume': '100', 'change': '0', 'sign': '3'}
+    raw = json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': body}, ensure_ascii=False)
+    df = pl.DataFrame({'raw': [raw], 'tr_id': ['H0STCNT0'], 'recv_wall_ns': [100]})
+    summary = decode_and_flag_ticks(df)
+    assert summary is not None
+    assert summary.rows == 1
+    assert summary.decode_fail == 0
+
+
+def test_evaluate_verdict_pass_on_all_zero_counters() -> None:
+    from src.core.config import DataQualitySettings
+    from src.storage.quality import QuoteQualitySummary, TickQualitySummary, evaluate_stream_quality
+
+    tick = TickQualitySummary(rows=1, decode_fail=0, zero_volume=0, price_band_violation=0, cum_volume_regression=0, schema_disagree=0, tick_loss=0, lost_volume=0)
+    quote = QuoteQualitySummary(rows=1, decode_fail=0, ladder_disorder=0, crossed_book=0, negative_remain=0, total_remain_short=0)
+    verdict = evaluate_stream_quality(tick, quote, settings=DataQualitySettings())
+    assert verdict.status.value == 'PASS'
+    assert verdict.reasons == ()
+
+
+def test_evaluate_verdict_warn_within_noise_ceiling() -> None:
+    from src.core.config import DataQualitySettings
+    from src.storage.quality import QuoteQualitySummary, evaluate_stream_quality
+
+    quote = QuoteQualitySummary(rows=100, decode_fail=0, ladder_disorder=0, crossed_book=0, negative_remain=0, total_remain_short=2)
+    verdict = evaluate_stream_quality(None, quote, settings=DataQualitySettings())
+    assert verdict.status.value == 'WARN'
+
+
+def test_evaluate_verdict_fail_on_full_decode_failure() -> None:
+    from src.core.config import DataQualitySettings
+    from src.storage.quality import TickQualitySummary, evaluate_stream_quality
+
+    tick = TickQualitySummary(rows=5, decode_fail=5, zero_volume=0, price_band_violation=0, cum_volume_regression=0, schema_disagree=0, tick_loss=0, lost_volume=0)
+    verdict = evaluate_stream_quality(tick, None, settings=DataQualitySettings())
+    assert verdict.status.value == 'FAIL'
+    assert any('decode_fail' in r for r in verdict.reasons)
+
+
+def test_evaluate_verdict_boundary_is_inclusive_pass() -> None:
+    from src.core.config import DataQualitySettings
+    from src.storage.quality import TickQualitySummary, evaluate_stream_quality
+
+    tick = TickQualitySummary(rows=1000, decode_fail=1, zero_volume=0, price_band_violation=0, cum_volume_regression=0, schema_disagree=0, tick_loss=0, lost_volume=0)
+    verdict = evaluate_stream_quality(tick, None, settings=DataQualitySettings())
+    assert verdict.status.value != 'FAIL'
+
+
+def test_evaluate_verdict_rejects_empty_input() -> None:
+    import pytest
+    from src.core.config import DataQualitySettings
+    from src.storage.quality import evaluate_stream_quality
+
+    with pytest.raises(ValueError, match="both"):
+        evaluate_stream_quality(None, None, settings=DataQualitySettings())
+
+
+def test_evaluate_verdict_rows_zero_contributes_no_ratio() -> None:
+    from src.core.config import DataQualitySettings
+    from src.storage.quality import QuoteQualitySummary, TickQualitySummary, evaluate_stream_quality
+
+    tick = TickQualitySummary(rows=0, decode_fail=0, zero_volume=0, price_band_violation=0, cum_volume_regression=0, schema_disagree=0, tick_loss=0, lost_volume=0)
+    quote = QuoteQualitySummary(rows=1, decode_fail=0, ladder_disorder=0, crossed_book=0, negative_remain=0, total_remain_short=0)
+    verdict = evaluate_stream_quality(tick, quote, settings=DataQualitySettings())
+    assert verdict.status.value == 'PASS'
+
+
+def test_decode_truncated_kis_quote_is_decode_fail_not_crash() -> None:
+    import polars as pl
+    from src.storage.quality import decode_and_flag_quotes
+
+    df = pl.DataFrame({'raw': ['005930^101500'], 'tr_id': ['H0STASP0'], 'vendor': ['kis'], 'recv_wall_ns': [100]})
+    summary = decode_and_flag_quotes(df)
+    assert summary is not None
+    assert summary.decode_fail == 1
+
