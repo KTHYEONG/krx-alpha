@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import os
 from collections.abc import Mapping, Sequence
 
@@ -14,7 +15,10 @@ from src.marketdata.snapshot_contracts import (
     SNAPSHOT_DEDUP_KEYS,
     SNAPSHOT_SCHEMAS,
     SnapshotDataset,
+    snapshot_row_violations,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SnapshotStoreError(KrxAlphaError):
@@ -82,6 +86,9 @@ class SnapshotStore:
     def append(self, dataset: SnapshotDataset, rows: Sequence[Mapping[str, object]]) -> int:
         """Validate, deduplicate and persist rows; return the number of new rows.
 
+        Rows violating dataset value identities are dropped before
+        deduplication and counted in a ``[DATA] stage=snapshot_dq`` warning; they never abort the append.
+
         Raises:
             SnapshotStoreError: On column set mismatch, dtype cast failure,
                 session_date mismatch, or an unreadable existing partition.
@@ -97,9 +104,34 @@ class SnapshotStore:
             if row["session_date"] != self._session_date:
                 raise SnapshotStoreError(f"session_date mismatch for {dataset.value}")
         existing = self._ensure_loaded(dataset)
+        try:
+            batch = pl.DataFrame([dict(row) for row in rows], schema=schema, strict=True).select(list(schema))
+        except Exception as exc:
+            raise SnapshotStoreError(f"dtype cast failure for {dataset.value} ({exc})") from exc
+        mask = snapshot_row_violations(dataset, batch)
+        rejected = int(mask.sum())
+        total = batch.height
+        if rejected > 0:
+            if rejected == total:
+                logger.critical(
+                    "[DATA] stage=snapshot_dq dataset=%s rejected=%d total=%d status=FAIL",
+                    dataset.value,
+                    rejected,
+                    total,
+                )
+            else:
+                logger.warning(
+                    "[DATA] stage=snapshot_dq dataset=%s rejected=%d total=%d status=WARN",
+                    dataset.value,
+                    rejected,
+                    total,
+                )
+            batch = batch.filter(~mask)
+            if batch.height == 0:
+                return 0
         seen = set(self._keys[dataset])
         fresh: list[dict[str, object]] = []
-        for row in rows:
+        for row in batch.to_dicts():
             key = self._dedup_key(dataset, row)
             if key in seen:
                 continue
@@ -107,11 +139,8 @@ class SnapshotStore:
             fresh.append(dict(row))
         if not fresh:
             return 0
-        try:
-            batch = pl.DataFrame(fresh, schema=schema, strict=True).select(list(schema))
-        except Exception as exc:
-            raise SnapshotStoreError(f"dtype cast failure for {dataset.value} ({exc})") from exc
-        combined = pl.concat([existing, batch], how="vertical")
+        fresh_batch = pl.DataFrame(fresh, schema=schema, strict=True).select(list(schema))
+        combined = pl.concat([existing, fresh_batch], how="vertical")
         path = self._paths.snapshot_partition(dataset.value, self._session_date)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.parent / (path.name + ".tmp")

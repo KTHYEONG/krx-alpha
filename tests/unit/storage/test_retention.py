@@ -321,7 +321,7 @@ def test_normalize_l0_partition_logs_tick_quality_summary(tmp_path, caplog) -> N
     part.mkdir(parents=True, exist_ok=True)
     body = {'shcode': '005930', 'price': '70000', 'cvolume': '10', 'volume': '100', 'change': '0', 'sign': '3'}
     raw = json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': body}, ensure_ascii=False)
-    rec = {'raw': raw, 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
+    rec = {'raw': raw, 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'ls', 'tr_id': 'H0STCNT0'}
     payload = (json.dumps(rec) + '\n').encode('utf-8')
     (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
     out_path = tmp_path / 'l1' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
@@ -336,7 +336,7 @@ def test_normalize_l0_partition_logs_tick_quality_summary(tmp_path, caplog) -> N
     assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id', 'venue', 'session', 'stream', 'symbol', 'exchange_event_time'}
     assert 'stage=quality' in caplog.text
     assert 'decode_fail=0' in caplog.text
-    assert 'status=OK' in caplog.text
+    assert 'status=PASS' in caplog.text
 
 
 def test_normalize_l0_partition_logs_quote_quality_summary(tmp_path, caplog) -> None:
@@ -364,7 +364,7 @@ def test_normalize_l0_partition_logs_quote_quality_summary(tmp_path, caplog) -> 
     clean_bid = [69900 - k * 100 for k in range(10)]
     body = _quote_body(101500, clean_offer, clean_bid)
     raw = json.dumps({'header': {'tr_cd': 'H1_', 'tr_key': '005930'}, 'body': body}, ensure_ascii=False)
-    rec = {'raw': raw, 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STASP0'}
+    rec = {'raw': raw, 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'ls', 'tr_id': 'H0STASP0'}
     payload = (json.dumps(rec) + '\n').encode('utf-8')
     (part / '10.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
     out_path = tmp_path / 'l1' / 'kis' / 'H0STASP0' / 'dt=2026-09-01.parquet'
@@ -380,7 +380,7 @@ def test_normalize_l0_partition_logs_quote_quality_summary(tmp_path, caplog) -> 
     assert 'stage=quality' in caplog.text
     assert 'tr_id=H0STASP0' in caplog.text
     assert 'ladder_disorder=0' in caplog.text
-    assert 'status=OK' in caplog.text
+    assert 'status=PASS' in caplog.text
 
 
 def test_normalize_l0_partition_logs_extended_tick_quality_fields(tmp_path, caplog) -> None:
@@ -397,7 +397,7 @@ def test_normalize_l0_partition_logs_extended_tick_quality_fields(tmp_path, capl
         'sign': '3', 'drate': '0.00', 'mdchecnt': '10', 'mschecnt': '5',
     }
     raw = json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': body}, ensure_ascii=False)
-    rec = {'raw': raw, 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
+    rec = {'raw': raw, 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'ls', 'tr_id': 'H0STCNT0'}
     payload = (json.dumps(rec) + '\n').encode('utf-8')
     (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
     out_path = tmp_path / 'l1' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
@@ -412,7 +412,7 @@ def test_normalize_l0_partition_logs_extended_tick_quality_fields(tmp_path, capl
     assert 'schema_disagree=0' in caplog.text
     assert 'tick_loss=0' in caplog.text
     assert 'lost_volume=0' in caplog.text
-    assert 'status=OK' in caplog.text
+    assert 'status=PASS' in caplog.text
 
 
 def test_normalize_l0_partition_raises_on_conn_seq_collision(tmp_path) -> None:
@@ -1033,3 +1033,98 @@ def test_prune_keeps_unverified_aftermarket_l0(tmp_path):
     deleted = prune_old_journals(tmp_path/'l0', retain_days=3, reference_date=dt.date(2026,9,15), archive_root=tmp_path/'l1', verified_remote_l1=frozenset())
     assert deleted == 0
     assert (part/'15.jsonl.zst').exists()
+
+
+def _kis_tick_raw_for_l1(price='70000', sign='5', change='-5000', drate='-6.67', cvolume='10', volume='100') -> str:
+    fields = ['0'] * 47
+    fields[0] = '005930'
+    fields[1] = '154001'
+    fields[2] = price
+    fields[3] = sign
+    fields[4] = change
+    fields[5] = drate
+    fields[12] = cvolume
+    fields[13] = volume
+    fields[15] = '10'
+    fields[16] = '5'
+    return '^'.join(fields)
+
+
+def _write_l0_partition(tmp_path, raw, tr_id='H0STCNT0', vendor='kis'):
+    import json
+    import zstandard as zstd
+    part = tmp_path / 'l0' / 'kis' / tr_id / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    rec = {'raw': raw, 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': vendor, 'tr_id': tr_id}
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress((json.dumps(rec) + '\n').encode()))
+    return part
+
+
+def test_l1_footer_carries_dq_verdict(tmp_path) -> None:
+    import json
+    import pyarrow.parquet as pq
+    from src.storage.retention import normalize_l0_partition
+
+    part = _write_l0_partition(tmp_path, _kis_tick_raw_for_l1())
+    out_path = tmp_path / 'l1' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+    rows = normalize_l0_partition(part, out_path)
+    meta = pq.read_metadata(out_path).metadata
+    assert meta is not None
+    assert b'krx_alpha.dq' in meta
+    payload = json.loads(meta[b'krx_alpha.dq'].decode())
+    assert payload['status'] == 'PASS'
+    assert payload['tick']['rows'] == rows
+
+
+def test_fail_verdict_still_writes_l1_and_logs_critical(tmp_path, caplog) -> None:
+    import json
+    import logging
+    import pyarrow.parquet as pq
+    from src.storage.retention import normalize_l0_partition
+
+    part = _write_l0_partition(tmp_path, '005930^154001')
+    out_path = tmp_path / 'l1' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+    with caplog.at_level(logging.CRITICAL):
+        rows = normalize_l0_partition(part, out_path)
+    assert out_path.exists()
+    assert rows == 1
+    meta = pq.read_metadata(out_path).metadata
+    assert meta is not None
+    assert b'krx_alpha.dq' in meta
+    assert json.loads(meta[b'krx_alpha.dq'].decode())['status'] == 'FAIL'
+    assert any(r.levelno == logging.CRITICAL and 'stage=quality' in r.getMessage() for r in caplog.records)
+
+
+def test_warn_verdict_logs_warning_with_relaxed_ceiling(tmp_path, caplog) -> None:
+    import json
+    import logging
+    import pyarrow.parquet as pq
+    from src.core.config import DataQualitySettings
+    from src.storage.retention import normalize_l0_partition
+
+    part = _write_l0_partition(tmp_path, '005930^154001')
+    out_path = tmp_path / 'l1' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+    settings = DataQualitySettings(max_decode_fail_ratio=1.0, max_invariant_violation_ratio=1.0, max_total_remain_short_ratio=1.0)
+    with caplog.at_level(logging.WARNING):
+        rows = normalize_l0_partition(part, out_path, dq_settings=settings)
+    assert rows == 1
+    meta = pq.read_metadata(out_path).metadata
+    assert meta is not None
+    assert b'krx_alpha.dq' in meta
+    assert json.loads(meta[b'krx_alpha.dq'].decode())['status'] == 'WARN'
+    assert any(r.levelno == logging.WARNING and 'stage=quality' in r.getMessage() for r in caplog.records)
+
+
+def test_partition_without_tick_or_quote_writes_no_dq_metadata(tmp_path, caplog) -> None:
+    import logging
+    import pyarrow.parquet as pq
+    from src.storage.retention import normalize_l0_partition
+
+    part = _write_l0_partition(tmp_path, 'x', tr_id='H0XXYYY', vendor='ls')
+    out_path = tmp_path / 'l1' / 'kis' / 'H0XXYYY' / 'dt=2026-09-01.parquet'
+    with caplog.at_level(logging.INFO):
+        rows = normalize_l0_partition(part, out_path)
+    assert rows == 1
+    meta = pq.read_metadata(out_path).metadata
+    assert meta is None or b'krx_alpha.dq' not in (meta or {})
+    assert 'stage=quality' not in caplog.text

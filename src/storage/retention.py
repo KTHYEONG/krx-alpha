@@ -20,12 +20,15 @@ import polars as pl
 import pyarrow.parquet as pq
 import zstandard as zstd
 
+from src.core.config import DataQualitySettings
 from src.core.errors import KrxAlphaError
 from src.storage.quality import (
+    DqStatus,
     QuoteQualitySummary,
     TickQualitySummary,
     decode_and_flag_quotes,
     decode_tick_raw_fields,
+    evaluate_stream_quality,
     sum_quote_summaries,
     summarize_tick_fields_bucketed,
 )
@@ -143,13 +146,18 @@ class _SpillReader:
         return taken
 
 
-def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path, *, work_root: pathlib.Path | None = None) -> int:
+def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path, *, work_root: pathlib.Path | None = None, dq_settings: DataQualitySettings | None = None) -> int:
     """Normalize one L0 day-partition into a deduplicated, sorted L1 parquet file.
+
+    The partition's DQ verdict is embedded in the output parquet footer under
+    ``krx_alpha.dq``; a FAIL verdict is logged at CRITICAL but does not block the write because L1 retains every raw
+    frame.
 
     Args:
         part_dir: L0 partition directory holding hourly .jsonl.zst files.
         out_path: Destination L1 parquet path (written atomically via .tmp).
         work_root: Spill directory root; a fresh temp dir when None.
+        dq_settings: DQ ratio ceilings; defaults to DataQualitySettings().
 
     Returns:
         Number of L1 rows written.
@@ -237,8 +245,11 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path, *, wo
         out.parent.mkdir(parents=True, exist_ok=True)
         quote_parts: list[QuoteQualitySummary] = []
         tick_rows = 0
+        vendors: set[str] = set()
+        settings = dq_settings if dq_settings is not None else DataQualitySettings()
         for ci, lo in enumerate(range(0, order.size, _GATHER_ROWS)):
             chunk = reader.take(order[lo : lo + _GATHER_ROWS])
+            vendors.update(v for v in chunk["vendor"].unique().to_list() if v is not None)
             qs = decode_and_flag_quotes(chunk)
             if qs is not None:
                 quote_parts.append(qs)
@@ -253,8 +264,6 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path, *, wo
             writer.write_table(table)
         # raw_records>=1 and conflict==0 이므로 최소 한 청크는 써서 writer가 열려 있다
         assert writer is not None
-        writer.close()
-        writer = None
         # 버킷 요약 순간 피크와 겹치지 않도록 gather 캐시·마지막 청크를 먼저 놓는다
         del reader, chunk, table, fields
         tick_summary: TickQualitySummary | None = (
@@ -263,36 +272,54 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path, *, wo
             else None
         )
         quote_summary: QuoteQualitySummary | None = sum_quote_summaries(quote_parts) if quote_parts else None
-        if tick_summary is not None:
-            quality = tick_summary
-            status = "WARN" if any((quality.decode_fail, quality.zero_volume, quality.price_band_violation, quality.cum_volume_regression, quality.schema_disagree, quality.tick_loss, quality.lost_volume)) else "OK"
-            (logger.warning if status == "WARN" else logger.info)(
-                "[DATA] stage=quality tr_id=%s rows=%d decode_fail=%d zero_volume=%d price_band_violation=%d cum_volume_regression=%d schema_disagree=%d tick_loss=%d lost_volume=%d status=%s",
-                "H0STCNT0",
-                quality.rows,
-                quality.decode_fail,
-                quality.zero_volume,
-                quality.price_band_violation,
-                quality.cum_volume_regression,
-                quality.schema_disagree,
-                quality.tick_loss,
-                quality.lost_volume,
-                status,
-            )
-        if quote_summary is not None:
-            quote_quality = quote_summary
-            quote_status = "WARN" if any((quote_quality.decode_fail, quote_quality.ladder_disorder, quote_quality.crossed_book, quote_quality.negative_remain, quote_quality.total_remain_short)) else "OK"
-            (logger.warning if quote_status == "WARN" else logger.info)(
-                "[DATA] stage=quality tr_id=%s rows=%d decode_fail=%d ladder_disorder=%d crossed_book=%d negative_remain=%d total_remain_short=%d status=%s",
-                "H0STASP0",
-                quote_quality.rows,
-                quote_quality.decode_fail,
-                quote_quality.ladder_disorder,
-                quote_quality.crossed_book,
-                quote_quality.negative_remain,
-                quote_quality.total_remain_short,
-                quote_status,
-            )
+        vendor_label = ",".join(sorted(vendors)) if vendors else ""
+        if tick_summary is not None or quote_summary is not None:
+            verdict = evaluate_stream_quality(tick_summary, quote_summary, settings=settings)
+            writer.add_key_value_metadata(verdict.to_metadata())
+            writer.close()
+            writer = None
+            if verdict.status is DqStatus.FAIL:
+                dq_log = logger.critical
+            elif verdict.status is DqStatus.WARN:
+                dq_log = logger.warning
+            else:
+                dq_log = logger.info
+            reasons = ",".join(verdict.reasons)
+            if tick_summary is not None:
+                quality = tick_summary
+                dq_log(
+                    "[DATA] stage=quality tr_id=%s vendor=%s rows=%d decode_fail=%d zero_volume=%d price_band_violation=%d cum_volume_regression=%d schema_disagree=%d tick_loss=%d lost_volume=%d status=%s reasons=%s",
+                    stream_name,
+                    vendor_label,
+                    quality.rows,
+                    quality.decode_fail,
+                    quality.zero_volume,
+                    quality.price_band_violation,
+                    quality.cum_volume_regression,
+                    quality.schema_disagree,
+                    quality.tick_loss,
+                    quality.lost_volume,
+                    verdict.status.value,
+                    reasons,
+                )
+            if quote_summary is not None:
+                quote_quality = quote_summary
+                dq_log(
+                    "[DATA] stage=quality tr_id=%s vendor=%s rows=%d decode_fail=%d ladder_disorder=%d crossed_book=%d negative_remain=%d total_remain_short=%d status=%s reasons=%s",
+                    stream_name,
+                    vendor_label,
+                    quote_quality.rows,
+                    quote_quality.decode_fail,
+                    quote_quality.ladder_disorder,
+                    quote_quality.crossed_book,
+                    quote_quality.negative_remain,
+                    quote_quality.total_remain_short,
+                    verdict.status.value,
+                    reasons,
+                )
+        else:
+            writer.close()
+            writer = None
         os.replace(tmp_path, out)
         logger.info(
             "[DATA] stage=normalize part=%s raw_records=%d l1_rows=%d dedup_dropped=%d conn_seq_conflict=%d status=OK",

@@ -184,13 +184,17 @@ def refresh_bars_via_kis_fallback(
     target_date: dt.date,
     kis_client: KisRestClient,
 ) -> BarsRefreshResult:
-    """직전 성공 market_map.json 유니버스를 KIS 일봉으로 적재한다 (KRX 장애시 1회성 폴백)."""
+    """직전 성공 market_map.json 유니버스를 KIS 일봉으로 적재한다 (KRX 장애시 1회성 폴백).
+
+    Bars whose session date differs from ``target_date`` are never stored.
+    """
     try:
         market_map = json.loads(pathlib.Path(market_map_path).read_text(encoding="utf-8"))
     except OSError as exc:
         raise KisFallbackError(f"no market_map for kis fallback: {exc}") from exc
     if not market_map:
         raise KisFallbackError("empty market_map for kis fallback")
+    want = target_date.strftime("%Y%m%d")
     rows: list[dict[str, object]] = []
     for symbol, market in market_map.items():
         try:
@@ -199,6 +203,15 @@ def refresh_bars_via_kis_fallback(
             logger.warning("[DATA] stage=kis_fallback status=SKIP symbol=%s reason=%s", symbol, str(exc))
             continue
         if row is None:
+            continue
+        got = str(row.get("stck_bsop_date", ""))
+        if got != want:
+            logger.warning(
+                "[DATA] stage=kis_fallback status=SKIP symbol=%s reason=date_mismatch got=%s want=%s",
+                symbol,
+                got,
+                want,
+            )
             continue
         close = float(row["stck_clpr"])
         vrss = float(row.get("prdy_vrss", "0"))
