@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_STREAM_DQ_COVERAGE",
+      "date": "2026-09-22",
+      "adr_id": "ADR_20260922_STREAM_DQ_COVERAGE",
+      "domain": "data-infra",
+      "title": "수집 데이터 무결성(DQ) 검사 보완: KIS 장후 스트림·일봉·스냅샷",
+      "why": "장후 KIS 틱/호가는 LS 전용 DQ 디코더가 100% decode_fail로 오판(실측 9/21 107005/107005, 379978/379978)해 사실상 검사가 이뤄지지 않았고, DQ 위반은 로그만 남고 저장을 막지 못했으며, 일봉/스냅샷은 값 수준 검증이 전무했다.",
+      "resolution": "KIS 캐럿 포맷 디코더와 비율기반 PASS/WARN/FAIL 판정을 추가해 L1 parquet 푸터에 기록하고 FAIL은 CRITICAL 알림으로 연결했으며, 일봉엔 OHLC/거래대금 정합성 게이트(위반시 KIS 폴백 자동 전환 + 폴백 응답일자 검증)를, 스냅샷엔 행 단위 값 검증(위반 행만 드롭)을 추가했다.",
+      "impact": "장후 KRX/NXT 스트림 DQ 커버리지가 0%에서 100%로 확대되고 실데이터 재검증시 위반 0건, 정규장 LS 일일 노이즈(호가 total_remain_short~2%)는 오탐 없이 WARN에 머문다.",
+      "caveat": "KIS 호가 디코더가 행 단위 파이썬 루프라 38만행에 약 2.9초 소요(EOD 1회성이라 허용범위); DQ 임계값은 KRX_ALPHA_DQ_* 환경변수로 조정 가능."
+    },
+    {
       "task_id": "TASK_REFACTOR_TOOLING",
       "date": "2026-09-18",
       "adr_id": "ADR_20260918_REFACTOR_TOOLING",
