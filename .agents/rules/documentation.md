@@ -1,10 +1,3 @@
----
-trigger:
-  - on_file_path_regex: "src/.*\\.py"
-  - on_file_path_regex: "docs/.*\\.md"
-priority: 8
----
-
 # Documentation & Code Commenting Directives
 
 > **Explain the non-obvious "Why" behind domain logic, math, and constraints, not the mechanical "What" visible in code. Keep comments and docs focused on stable architecture, invariants, and trade-offs. Never embed ephemeral spec paths or AI session logs into persistent code.**
@@ -13,7 +6,7 @@ priority: 8
 - **Focus on Rationale:** Document business context, mathematical derivations, domain constraints, timing semantics, units, and non-obvious trade-offs. Omit comments that merely paraphrase readable code.
 - **Conciseness with Clarity:** Keep comments focused and compact. Use extended explanations only when the rationale cannot be clearly expressed briefly.
 - **No Ephemeral Spec References:** NEVER reference temporary `docs/specs/*.md` paths in code, docstrings, or comments. Specs are transient working files that get purged. Use persistent `ADR-XXXX` IDs or self-contained domain rationale.
-- **No Diagnostic or Session Artifacts:** Never leave AI task logs, revision chronicles, or linter fix annotations (e.g., `# fix mypy error`) in production code or comments.
+- **No Diagnostic or Session Artifacts:** Never leave AI task logs, revision chronicles, or linter fix annotations in production code or comments.
 
 ## 2. Docstring Standards
 - **Contract-Driven Documentation:** Document public interfaces when behavior, side effects, units, timing assumptions, or failure conditions are not self-evident from type signatures and function names.
