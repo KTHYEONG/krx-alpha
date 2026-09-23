@@ -52,6 +52,7 @@ from src.orchestration.eod import (
     classify_remote_failure,
     run_eod_maintenance,
     run_eod_offload,
+    run_eod_remote_l0_purge,
 )
 from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker
 from src.realtime.contracts import MarketVenue
@@ -674,6 +675,14 @@ def run_collector_daemon(
                                 verified_remote_l1=verified,
                             )
                             deleted = int(deleted) + int(post_deleted)
+                            try:
+                                run_eod_remote_l0_purge(paths.journal_root, verified)
+                            except Exception as exc:  # noqa: BLE001 - purge failure never fails EOD
+                                logger.error(
+                                    "[DAEMON] stage=eod_l0_remote_purge status=FAIL error=%s",
+                                    str(exc),
+                                    exc_info=True,
+                                )
                         except (KrxAlphaError, OSError) as e:
                             maintenance_ok = False
                             logger.critical("[DAEMON] stage=eod_maintenance status=FAIL reason=maintenance_error error=%s", str(e))

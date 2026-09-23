@@ -77,6 +77,12 @@ jobs:
           # docker-compose.yml 전송
           scp $SSH_OPTS docker-compose.yml "$REMOTE_USER@$HOST:~/krx-alpha/"
 
+          # 호스트 백업 스크립트/필터/유닛 전송
+          ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/krx-alpha/deploy/host ~/.config/systemd/user"
+          scp $SSH_OPTS deploy/host/krx-host-backup.sh "$REMOTE_USER@$HOST:~/krx-alpha/deploy/host/"
+          scp $SSH_OPTS deploy/host/krx-alpha.rclone-filter "$REMOTE_USER@$HOST:~/krx-alpha/deploy/host/"
+          scp $SSH_OPTS deploy/host/krx-host-backup.service deploy/host/krx-host-backup.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
+
           # 원격 컨테이너 최신 이미지 pull 및 재기동
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" bash -s <<EOF
           set -e
@@ -197,6 +203,24 @@ jobs:
           chmod 600 "\$DROPIN_DIR/10-kis-data-env.conf"
           systemctl --user daemon-reload
           systemctl --user enable --now kca-kis-token-warmup.timer
+          chmod +x ~/krx-alpha/deploy/host/krx-host-backup.sh
+          systemctl --user enable --now krx-host-backup.timer
+          # 공용 quant-lake 타이머 폐기 가드: PROJECTS 항목이 krx-alpha뿐일 때만 폐기한다.
+          # 원격 셸에서 평가되도록 \$ 이스케이프(비인용 heredoc은 러너에서 먼저 확장된다).
+          # QUANT_LAKE_RETIRE_GUARD_BEGIN
+          if [ -f ~/.config/systemd/user/quant-lake-backup.timer ] && [ -f ~/bin/quant-lake-backup.sh ]; then
+            other_projects=\$(grep -E '^[[:space:]]*\[[^]]+\]=' ~/bin/quant-lake-backup.sh | grep -cv '\[krx-alpha\]' || true)
+            if [ "\$other_projects" -eq 0 ]; then
+              systemctl --user disable --now quant-lake-backup.timer || true
+              rm -f ~/.config/systemd/user/quant-lake-backup.timer ~/.config/systemd/user/quant-lake-backup.service
+              rm -rf ~/.config/systemd/user/quant-lake-backup.service.d
+              mv ~/bin/quant-lake-backup.sh ~/bin/quant-lake-backup.sh.retired.\$(date -u +%Y%m%dT%H%M%SZ)
+            else
+              echo "WARNING: shared quant-lake-backup.sh still serves other PROJECTS; leaving quant-lake-backup.timer untouched" >&2
+            fi
+          fi
+          # QUANT_LAKE_RETIRE_GUARD_END
+          fi
 
           # rclone config directory bootstrap (directory mount follows host re-authorization)
           mkdir -p ~/.config/rclone

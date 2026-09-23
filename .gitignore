@@ -217,7 +217,8 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Project temporary directories
+# Project temporary and scratch directories
+scratch/
 tm/
 tmp/
 

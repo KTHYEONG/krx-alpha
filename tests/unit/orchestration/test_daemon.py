@@ -2836,3 +2836,49 @@ def test_program_trades_auto_backfill_isolates_unexpected_failure(tmp_path, monk
     with caplog.at_level(logging.ERROR):
         daemon._run_program_trades_auto_backfill(settings.paths, dt.date(2026, 9, 10))
     assert "program_trades_auto_backfill" in caplog.text
+
+
+def test_eod_remote_l0_purge_runs_after_pruning_and_cannot_fail_eod(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    order: list[str] = []
+
+    def _maintenance(journal_root, **kw):
+        order.append("maintenance")
+        return 0
+
+    class _Offload:
+        verified_remote_l1 = frozenset({"l1/ls/H0STASP0/dt=2026-09-11.parquet"})
+        l1 = type("S", (), {"uploaded": 1})()
+        purged = 0
+
+    def _offload(*a, **kw):
+        return _Offload()
+
+    def _purge(journal_root, verified):
+        order.append("purge")
+        assert verified == _Offload.verified_remote_l1
+        raise RuntimeError("purge boom")
+
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", _maintenance)
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", _offload)
+    monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", _purge)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    assert order.count("maintenance") == 2
+    assert order[-1] == "purge"
+    assert "stage=eod_l0_remote_purge status=FAIL" in caplog.text
+    assert "deleted_partitions=0 uploaded=1 purged=0 status=OK" in caplog.text

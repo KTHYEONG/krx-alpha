@@ -1,0 +1,11 @@
+[Unit]
+Description=krx-alpha host Drive backup
+OnFailure=kca-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/krx-alpha/deploy/host/krx-host-backup.sh
+TimeoutStartSec=4h
+
+[Install]
+WantedBy=default.target

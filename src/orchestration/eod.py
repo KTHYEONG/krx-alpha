@@ -16,7 +16,7 @@ import polars as pl
 from src.realtime.kis_sharding import AftermarketShard
 from src.realtime.manifest import SessionManifest
 from src.storage.normalize_worker import run_isolated_normalize
-from src.storage.remote import GDriveArchiver, RcloneArchiver, RemoteArchiveError, SyncStats
+from src.storage.remote import GDriveArchiver, PurgeStats, RcloneArchiver, RemoteArchiveError, SyncStats
 from src.storage.retention import prune_local_l1, prune_old_journals
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,24 @@ def run_eod_offload(
     return EodOffloadResult(
         l1=l1_stats, manifests=manifests_stats, verified_remote_l1=frozenset(verified), purged=purged
     )
+
+
+def run_eod_remote_l0_purge(
+    journal_root: pathlib.Path,
+    verified_remote_l1: AbstractSet[str],
+    *,
+    archiver: Any = None,
+) -> PurgeStats:
+    """Purge Drive L0 partitions superseded by remote-verified L1 after local L0 pruning.
+
+    Returns zero stats (and logs CRITICAL reason=rclone_settings_missing) when no
+    archiver can be built, mirroring run_eod_offload.
+    """
+    arc = archiver if archiver is not None else GDriveArchiver.try_from_env()
+    if arc is None:
+        logger.critical("[DAEMON] stage=eod_l0_remote_purge status=FAIL reason=rclone_settings_missing")
+        return PurgeStats()
+    return arc.purge_superseded_l0(verified_remote_l1, pathlib.Path(journal_root))
 
 
 def _regular_session_gap_s(gaps: list[dict[str, object]], date: dt.date) -> float:
