@@ -220,7 +220,6 @@ jobs:
             fi
           fi
           # QUANT_LAKE_RETIRE_GUARD_END
-          fi
 
           # rclone config directory bootstrap (directory mount follows host re-authorization)
           mkdir -p ~/.config/rclone
