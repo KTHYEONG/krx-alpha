@@ -463,3 +463,336 @@ def test_sync_manifest_tree_raises_on_unverified_upload(tmp_path):
         archiver = GDriveArchiver(remote_name='gdrive', remote_path='quant-lake/live/krx-alpha/data', runner=_runner)
         with pytest.raises(RemoteArchiveError, match=message):
             archiver.sync_manifest_tree(tmp_path)
+
+
+def test_l0_partition_for_l1_maps_journal_partitions() -> None:
+    from src.storage.remote import l0_partition_for_l1
+
+    assert (
+        l0_partition_for_l1("l1/ls/krx/regular/H0STASP0/dt=2026-09-18.parquet")
+        == "l0/ls/krx/regular/H0STASP0/dt=2026-09-18"
+    )
+    assert l0_partition_for_l1("l1/ls/H0STASP0/dt=2026-09-11.parquet") == "l0/ls/H0STASP0/dt=2026-09-11"
+
+
+def test_l0_partition_for_l1_returns_none_for_snapshot_and_malformed() -> None:
+    from src.storage.remote import l0_partition_for_l1
+
+    assert l0_partition_for_l1("l1/snapshot/ranking/dt=2026-09-18.parquet") is None
+    assert l0_partition_for_l1("bars/daily.parquet") is None
+    assert l0_partition_for_l1("l1/x/foo.parquet") is None
+    assert l0_partition_for_l1("l1/ls/H0STASP0/dt=2026-13-99.parquet") is None
+    assert l0_partition_for_l1("l1/dt=2026-09-18.parquet") is None
+    assert l0_partition_for_l1("l1//dt=2026-09-18.parquet") is None
+
+
+def test_sync_l1_tree_lists_l1_prefix_once_with_fast_list(tmp_path) -> None:
+    import json
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    for i in range(3):
+        part = tmp_path / "ls" / "H0STASP0" / f"dt=2026-09-{10 + i:02d}.parquet"
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(b"x" * (10 + i))
+    calls: list[list[str]] = []
+    remote_sizes: dict[str, int] = {}
+
+    def _runner(args, **kwargs):
+        calls.append(args)
+        if "--recursive" in args:
+            assert args[2].endswith("/l1")
+            assert "--fast-list" in args
+            return SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr="")
+        if args[1] == "copyto":
+            import pathlib as _pl
+
+            dest = args[3]
+            repo_path = dest.split("quant-lake/live/krx-alpha/data/", 1)[1]
+            remote_sizes[repo_path] = _pl.Path(args[2]).stat().st_size
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        dest = args[2]
+        repo_path = dest.split("quant-lake/live/krx-alpha/data/", 1)[1]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([{"Path": repo_path, "Size": remote_sizes[repo_path], "IsDir": False}]),
+            stderr="",
+        )
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    stats = arc.sync_l1_tree(tmp_path)
+
+    recursive = [c for c in calls if "--recursive" in c]
+    singles = [c for c in calls if len(c) > 1 and c[1] == "lsjson" and "--recursive" not in c]
+    assert len(recursive) == 1
+    assert stats.uploaded == 3
+    assert len(singles) == 3
+
+
+def test_sync_manifest_tree_lists_manifests_prefix_once_sorted(tmp_path) -> None:
+    import json
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    for name in ("b.json", "a.json"):
+        (tmp_path / name).write_text("{}", encoding="utf-8")
+    calls: list[list[str]] = []
+    uploaded: list[str] = []
+
+    def _runner(args, **kwargs):
+        calls.append(args)
+        if "--recursive" in args:
+            assert args[2].endswith("/manifests")
+            assert "--fast-list" in args
+            return SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr="")
+        if args[1] == "copyto":
+            uploaded.append(args[3].rsplit("/", 1)[-1])
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        dest = args[2]
+        repo_path = dest.split("quant-lake/live/krx-alpha/data/", 1)[1]
+        import pathlib as _pl
+
+        # single-object verify: find local size by name
+        local = tmp_path / repo_path.split("/", 1)[1]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([{"Path": repo_path, "Size": _pl.Path(local).stat().st_size, "IsDir": False}]),
+            stderr="",
+        )
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    stats = arc.sync_manifest_tree(tmp_path)
+
+    assert stats.uploaded == 2
+    assert uploaded == ["a.json", "b.json"]
+    assert sum(1 for c in calls if "--recursive" in c) == 1
+
+
+def test_missing_remote_prefix_returns_empty_listing(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    def _runner(args, **kwargs):
+        if "--recursive" in args:
+            return SimpleNamespace(returncode=3, stdout="", stderr="directory not found")
+        if args[1] == "copyto":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        import json
+
+        dest = args[2]
+        repo_path = dest.split("quant-lake/live/krx-alpha/data/", 1)[1]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([{"Path": repo_path, "Size": 5, "IsDir": False}]),
+            stderr="",
+        )
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    assert arc.remote_file_sizes("l1/") == {}
+
+    root = tmp_path / "l1root"
+    (root / "ls" / "H0STASP0").mkdir(parents=True)
+    (root / "ls" / "H0STASP0" / "dt=2026-09-18.parquet").write_bytes(b"x" * 5)
+    stats = arc.sync_l1_tree(root)
+    assert stats.uploaded == 1
+
+
+def test_sync_l1_tree_counts_failed_verification_without_relisting(tmp_path, caplog) -> None:
+    import json
+    import logging
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    part = tmp_path / "ls" / "H0STASP0"
+    part.mkdir(parents=True)
+    (part / "dt=2026-09-18.parquet").write_bytes(b"x" * 10)
+
+    def _runner(args, **kwargs):
+        if "--recursive" in args:
+            return SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr="")
+        if args[1] == "copyto":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(
+            returncode=0, stdout=json.dumps([{"Path": "x", "Size": 9, "IsDir": False}]), stderr=""
+        )
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    with caplog.at_level(logging.CRITICAL):
+        stats = arc.sync_l1_tree(tmp_path)
+
+    assert stats.failed_verification == 1
+    assert stats.uploaded == 0
+
+
+def test_lsjson_recursive_reframes_prefix_relative_entries() -> None:
+    import json
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    def _runner(args, **kwargs):
+        assert args[2].endswith("/l1")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([{"Path": "ls/H0STASP0/dt=2026-09-18.parquet", "Size": 5, "IsDir": False}]),
+            stderr="",
+        )
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    assert arc.remote_file_sizes("l1/") == {"l1/ls/H0STASP0/dt=2026-09-18.parquet": 5}
+
+
+def test_lsjson_recursive_empty_prefix_lists_root() -> None:
+    import json
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    def _runner(args, **kwargs):
+        assert args[2] == "gdrive:quant-lake/live/krx-alpha/data"
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([{"Path": "l1/a.parquet", "Size": 1, "IsDir": False}]),
+            stderr="",
+        )
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    assert arc.remote_files("") == {"l1/a.parquet"}
+
+
+def test_purge_superseded_l0_requires_absent_local(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    journal = tmp_path / "l0"
+    present_parent = journal / "ls" / "krx" / "regular" / "H0STASP1"
+    present_parent.mkdir(parents=True)
+    (present_parent / "dt=2026-09-18").mkdir(parents=True)
+    verified = {
+        "l1/ls/krx/regular/H0STASP0/dt=2026-09-18.parquet",
+        "l1/ls/krx/regular/H0STASP1/dt=2026-09-18.parquet",
+    }
+    purged_targets: list[str] = []
+
+    def _runner(args, **kwargs):
+        if args[1] == "lsjson":
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        assert args[1] == "purge"
+        purged_targets.append(args[2])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    stats = arc.purge_superseded_l0(verified, journal)
+
+    assert stats.purged == 1
+    assert stats.skipped_local_present == 1
+    assert len(purged_targets) == 1
+    assert purged_targets[0].endswith("/l0/ls/krx/regular/H0STASP0/dt=2026-09-18")
+
+
+def test_purge_superseded_l0_skips_absent_remote(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    def _runner(args, **kwargs):
+        assert args[1] == "lsjson"
+        return SimpleNamespace(returncode=3, stdout="", stderr="not found")
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    stats = arc.purge_superseded_l0({"l1/ls/H0STASP0/dt=2026-09-11.parquet"}, tmp_path / "l0")
+
+    assert stats.skipped_absent == 1
+    assert stats.purged == 0
+
+
+def test_purge_superseded_l0_failures_never_raise(tmp_path, caplog) -> None:
+    import logging
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    def _runner(args, **kwargs):
+        if args[1] == "lsjson":
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    with caplog.at_level(logging.CRITICAL):
+        stats = arc.purge_superseded_l0({"l1/ls/H0STASP0/dt=2026-09-11.parquet"}, tmp_path / "l0")
+
+    assert stats.failed == 1
+    assert "stage=l0_remote_purge" in caplog.text
+
+
+def test_purge_superseded_l0_probe_failure_counts_failed(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    def _runner(args, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    stats = arc.purge_superseded_l0({"l1/ls/H0STASP0/dt=2026-09-11.parquet"}, tmp_path / "l0")
+
+    assert stats.failed == 1
+
+
+def test_purge_superseded_l0_never_leaves_l0_tree(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import src.storage.remote as remote_mod
+    from src.storage.remote import GDriveArchiver
+
+    mutating: list[list[str]] = []
+    real_mapper = remote_mod.l0_partition_for_l1
+
+    def _runner(args, **kwargs):
+        if args[1] in ("purge", "copyto"):
+            mutating.append(args)
+        if args[1] == "lsjson":
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        remote_mod,
+        "l0_partition_for_l1",
+        lambda p: "bars/daily" if p == "l1/x/y.parquet" else real_mapper(p),
+    )
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    stats = arc.purge_superseded_l0(
+        {"l1/x/y.parquet", "l1/snapshot/ranking/dt=2026-09-18.parquet"}, tmp_path / "l0"
+    )
+
+    assert stats.purged == 0
+    assert mutating == []
+
+    def _runner2(args, **kwargs):
+        if args[1] in ("purge",):
+            mutating.append(args)
+        if args[1] == "lsjson":
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    arc2 = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner2)
+    stats2 = arc2.purge_superseded_l0({"l1/ls/H0STASP0/dt=2026-09-11.parquet"}, tmp_path / "l0")
+    assert stats2.purged == 1
+    assert all("/l0/" in argv[2] for argv in mutating if argv[1] == "purge")
+
+
+def test_purge_superseded_l0_runner_exception_counts_failed(tmp_path) -> None:
+    from src.storage.remote import GDriveArchiver
+
+    def _runner(args, **kwargs):
+        raise OSError("spawn failed")
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    stats = arc.purge_superseded_l0({"l1/ls/H0STASP0/dt=2026-09-11.parquet"}, tmp_path / "l0")
+
+    assert stats.failed == 1

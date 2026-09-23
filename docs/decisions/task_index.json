@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_20260923_GDRIVE_BACKUP_HARDENING",
+      "date": "2026-09-23",
+      "adr_id": "ADR_20260923_20260923_GDRIVE_BACKUP_HARDENING",
+      "domain": "data_collection",
+      "title": "krx-alpha EOD 오프로드 원격조회 경계축소 및 L0 초과분 원격정리, 호스트 백업 자체소유",
+      "why": "sync_l1_tree가 업로드마다 원격 전체를 재귀조회해 EOD가 O(업로드x원격규모)로 느려졌고, 호스트 공용 백업이 컨테이너와 같은 l1/manifest 경로에 락 없이 동시 쓰기를 했다",
+      "resolution": "lsjson을 접두사 1회 조회+단건 검증으로 축소하고 remote-verified L1에 대응하는 Drive L0 파티션을 EOD 후 정리하는 purge_superseded_l0를 추가했으며, 호스트 백업을 repo-owned krx-host-backup.sh(l1/manifest/work 제외, flock, 버전보관)로 분리하고 배포시 공용 타이머를 안전하게 폐기하는 가드를 넣었다",
+      "impact": "EOD 오프로드 소요가 원격 규모에 무관해지고 Drive L0 중복 축적이 멈추며, 컨테이너와 호스트의 Drive 쓰기 경합이 사라진다",
+      "caveat": "서버 배포와 실제 Drive 정리(gdrive_cleanup)는 후속 단계로 남아있고 컨테이너는 호스트 flock을 공유할 수 없어 시간 분리에 의존한다"
+    },
+    {
       "task_id": "TASK_STREAM_DQ_COVERAGE",
       "date": "2026-09-22",
       "adr_id": "ADR_20260922_STREAM_DQ_COVERAGE",

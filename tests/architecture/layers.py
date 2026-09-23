@@ -18,3 +18,4 @@ LAYER_RANK['src/marketdata/snapshot_contracts.py'] = 1
 LAYER_RANK['src/storage/snapshot_store.py'] = 2
 LAYER_RANK['src/marketdata/snapshot_service.py'] = 4
 LAYER_RANK['src/cli/collect_snapshots.py'] = 7
+LAYER_RANK['src/cli/gdrive_cleanup.py'] = 7

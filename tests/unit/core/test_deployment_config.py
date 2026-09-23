@@ -122,3 +122,73 @@ def test_compose_enables_snapshot_collection() -> None:
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
 
     assert "KRX_ALPHA_SNAPSHOT_ENABLED=true" in compose
+
+
+def test_deploy_installs_host_backup_and_retires_shared_timer_only_when_krx_only() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert "deploy/host/krx-host-backup.sh" in workflow
+    assert "deploy/host/krx-alpha.rclone-filter" in workflow
+    assert "deploy/host/krx-host-backup.service" in workflow
+    assert "deploy/host/krx-host-backup.timer" in workflow
+    assert "enable --now krx-host-backup.timer" in workflow
+    assert "disable --now quant-lake-backup.timer" in workflow
+
+
+def _run_retire_guard(tmp_path, projects: list[str]) -> tuple[bool, bool]:
+    """Execute the workflow's retirement guard as the remote shell would and report (retired, timer_disabled)."""
+    import os
+    import subprocess
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    block = workflow.split("# QUANT_LAKE_RETIRE_GUARD_BEGIN", 1)[1].split("# QUANT_LAKE_RETIRE_GUARD_END", 1)[0]
+    # 비인용 heredoc이 러너에서 \$ -> $ 로 풀린 뒤 원격에서 실행되는 형태를 재현한다
+    remote_script = block.replace("\\$", "$")
+    home = tmp_path / "home"
+    units = home / ".config" / "systemd" / "user"
+    units.mkdir(parents=True)
+    (units / "quant-lake-backup.timer").write_text("[Timer]\n", encoding="utf-8")
+    (units / "quant-lake-backup.service").write_text("[Service]\n", encoding="utf-8")
+    (home / "bin").mkdir()
+    entries = "\n".join(f'  [{name}]="$HOME/{name}/data"' for name in projects)
+    (home / "bin" / "quant-lake-backup.sh").write_text(
+        "declare -A PROJECTS=(\n" + entries + "\n)\n"
+        "declare -A EXTRA_ARGS=()\n"
+        'EXTRA_ARGS[crypto-pilot]="--filter-from x"\n',
+        encoding="utf-8",
+    )
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    record = tmp_path / "systemctl.log"
+    stub = fakebin / "systemctl"
+    stub.write_text(f'#!/bin/sh\necho "$@" >> {record}\n', encoding="utf-8")
+    stub.chmod(0o755)
+    env = {**os.environ, "HOME": str(home), "PATH": f"{fakebin}:{os.environ['PATH']}"}
+    subprocess.run(["bash", "-ec", remote_script], env=env, check=True, capture_output=True, text=True)  # noqa: S603, S607 - hermetic guard replay
+    retired = not (home / "bin" / "quant-lake-backup.sh").exists() and any(
+        f.name.startswith("quant-lake-backup.sh.retired.") for f in (home / "bin").iterdir()
+    )
+    disabled = record.exists() and "disable --now quant-lake-backup.timer" in record.read_text(encoding="utf-8")
+    return retired, disabled
+
+
+def test_retire_guard_keeps_shared_timer_while_other_projects_remain(tmp_path) -> None:
+    retired, disabled = _run_retire_guard(tmp_path, ["mt-etf-king-2026", "krx-alpha", "crypto-pilot"])
+    assert (retired, disabled) == (False, False)
+
+
+def test_retire_guard_retires_shared_timer_when_krx_only(tmp_path) -> None:
+    retired, disabled = _run_retire_guard(tmp_path, ["krx-alpha"])
+    assert (retired, disabled) == (True, True)
+
+
+def test_timer_keeps_nightly_kst_slot() -> None:
+    from pathlib import Path
+
+    timer = Path("deploy/host/krx-host-backup.timer").read_text(encoding="utf-8")
+
+    assert "OnCalendar=*-*-* 23:30:00 Asia/Seoul" in timer
+    assert "Persistent=true" in timer

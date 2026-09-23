@@ -1,0 +1,177 @@
+"""Host backup script hermetic tests (fake rclone, tmp lock/log/root)."""
+
+from __future__ import annotations
+
+import os
+import stat
+import subprocess
+from pathlib import Path
+
+SCRIPT = Path("deploy/host/krx-host-backup.sh")
+FILTER = Path("deploy/host/krx-alpha.rclone-filter")
+
+
+def _write_fake_rclone(path: Path, argv_log: Path) -> Path:
+    bin_path = path
+    bin_path.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf \'%s\\n\' "$*" >> "{argv_log}"\n'
+        'cmd="$1"\n'
+        'if [ "$cmd" = "copy" ]; then exit "${FAKE_COPY_RC:-0}"; fi\n'
+        'if [ "$cmd" = "lsf" ]; then\n'
+        '  printf \'%s\' "${FAKE_LSF_OUTPUT:-}"\n'
+        "  exit \"${FAKE_LSF_RC:-0}\"\n"
+        "fi\n"
+        'if [ "$cmd" = "purge" ]; then exit "${FAKE_PURGE_RC:-0}"; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    bin_path.chmod(bin_path.stat().st_mode | stat.S_IEXEC)
+    return bin_path
+
+
+def _base_env(tmp_path: Path, argv_log: Path) -> dict[str, str]:
+    krx_root = tmp_path / "krx"
+    (krx_root / "data").mkdir(parents=True)
+    fake_bin = _write_fake_rclone(tmp_path / "fake-rclone.sh", argv_log)
+    env = dict(os.environ)
+    env.update(
+        {
+            "KRX_ROOT": str(krx_root),
+            "RCLONE_BIN": str(fake_bin),
+            "REMOTE_ROOT": "gdrive:test-root",
+            "QUANT_GDRIVE_LOCK": str(tmp_path / "quant-gdrive.lock"),
+            "LOCK_WAIT_SEC": "5",
+            "VERSION_RETENTION_DAYS": "30",
+            "BACKUP_TODAY_UTC": "2026-09-23",
+            "LOG_DIR": str(tmp_path / "logs"),
+            "FAKE_COPY_RC": "0",
+            "FAKE_LSF_RC": "3",
+            "FAKE_LSF_OUTPUT": "",
+        }
+    )
+    return env
+
+
+def _read_argv(argv_log: Path) -> list[str]:
+    if not argv_log.exists():
+        return []
+    return argv_log.read_text(encoding="utf-8").splitlines()
+
+
+def test_host_copy_excludes_container_owned_trees(tmp_path) -> None:
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+
+    result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    lines = _read_argv(argv_log)
+    copies = [line for line in lines if line.startswith("copy ")]
+    assert len(copies) == 1
+    copy = copies[0]
+    assert "--filter-from" in copy
+    assert "krx-alpha.rclone-filter" in copy
+    assert "--backup-dir gdrive:test-root/_versions/2026-09-23/data" in copy
+    text = FILTER.read_text(encoding="utf-8")
+    assert "- /l1/**" in text
+    assert "- /manifest/**" in text
+    assert "- /work/**" in text
+    assert text.index("- /l1/**") < text.index("+ **")
+    assert text.index("- /manifest/**") < text.index("+ **")
+    assert text.index("- /work/**") < text.index("+ **")
+
+
+def test_version_prune_keys_on_folder_date_only(tmp_path) -> None:
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+    env["FAKE_LSF_RC"] = "0"
+    env["FAKE_LSF_OUTPUT"] = "2026-08-23/\n2026-08-24/\njunk/\n"
+
+    result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    lines = _read_argv(argv_log)
+    purges = [line for line in lines if line.startswith("purge ")]
+    assert purges == ["purge gdrive:test-root/_versions/2026-08-23"]
+
+
+def test_held_lock_blocks_all_drive_calls(tmp_path) -> None:
+    import fcntl
+
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+    env["LOCK_WAIT_SEC"] = "1"
+    lock_path = Path(env["QUANT_GDRIVE_LOCK"])
+    lock_path.touch()
+    with open(lock_path, "w", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+            ["bash", str(SCRIPT)],  # noqa: S607
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    assert result.returncode == 75
+    assert _read_argv(argv_log) == []
+
+
+def test_failed_copy_still_prunes_and_exits_nonzero(tmp_path) -> None:
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+    env["FAKE_COPY_RC"] = "1"
+    env["FAKE_LSF_RC"] = "0"
+    env["FAKE_LSF_OUTPUT"] = "2026-08-23/\n"
+
+    result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 1
+    lines = _read_argv(argv_log)
+    assert any(line.startswith("lsf ") for line in lines)
+    assert any(line.startswith("purge ") for line in lines)
+
+
+def test_no_destructive_sync_semantics(tmp_path) -> None:
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+    env["FAKE_LSF_RC"] = "0"
+    env["FAKE_LSF_OUTPUT"] = "2026-08-23/\n"
+
+    result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    for line in _read_argv(argv_log):
+        parts = line.split()
+        assert "sync" not in parts
+        assert "move" not in parts
+        assert "delete" not in parts
+        assert "--min-age" not in parts
+        assert "--max-age" not in parts
+        if parts and parts[0] == "purge":
+            assert "_versions/" in line

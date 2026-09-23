@@ -684,3 +684,44 @@ def test_aftermarket_eod_ready_rejects_wrong_aftermarket_session(tmp_path) -> No
     path = tmp_path / "wrong-session.json"
     manifest.save(path)
     assert aftermarket_eod_ready(manifests=[path], date=dt.date(2026, 9, 15), now=dt.datetime(2026, 9, 15, 20, 1, tzinfo=ZoneInfo("Asia/Seoul")), expected_shards=(shard,)) is False
+
+
+def test_run_eod_remote_l0_purge_delegates_with_journal_root(tmp_path) -> None:
+    import pathlib
+
+    from src.orchestration.eod import run_eod_remote_l0_purge
+    from src.storage.remote import PurgeStats
+
+    seen: dict[str, object] = {}
+
+    class _Fake:
+        def purge_superseded_l0(self, verified, journal_root):
+            seen["verified"] = set(verified)
+            seen["root"] = journal_root
+            return PurgeStats(purged=2, skipped_local_present=1, skipped_absent=0, failed=0)
+
+    verified = {"l1/ls/H0STASP0/dt=2026-09-18.parquet"}
+    out = run_eod_remote_l0_purge(pathlib.Path(tmp_path) / "l0", verified, archiver=_Fake())
+
+    assert seen["verified"] == verified
+    assert seen["root"] == pathlib.Path(tmp_path) / "l0"
+    assert out.purged == 2
+
+
+def test_run_eod_remote_l0_purge_returns_zero_stats_without_archiver(tmp_path, caplog, monkeypatch) -> None:
+    import logging
+    import pathlib
+
+    from src.orchestration.eod import run_eod_remote_l0_purge
+    from src.storage.remote import GDriveArchiver
+
+    monkeypatch.setattr(GDriveArchiver, "try_from_env", staticmethod(lambda: None))
+
+    with caplog.at_level(logging.CRITICAL):
+        out = run_eod_remote_l0_purge(pathlib.Path(tmp_path) / "l0", set())
+
+    assert out.purged == 0
+    assert out.skipped_local_present == 0
+    assert out.skipped_absent == 0
+    assert out.failed == 0
+    assert "rclone_settings_missing" in caplog.text
