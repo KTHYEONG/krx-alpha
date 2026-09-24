@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import polars as pl
 
 from src.core.config import SnapshotSettings
+from src.core.symbols import KRX_SHORT_CODE_PATTERN
 from src.execution.contracts import KisApiError
 from src.execution.kis_client import (
     TR_FLUCTUATION,
@@ -103,7 +104,7 @@ def _eod_targets(
         ranked.filter(
             ~pl.col("symbol").is_in(list(symbols))
             & ~pl.col("symbol").is_in(sorted(have))
-            & pl.col("symbol").str.contains(r"^\d{6}$")
+            & pl.col("symbol").str.contains(KRX_SHORT_CODE_PATTERN)
         )
         .group_by("symbol")
         .agg(

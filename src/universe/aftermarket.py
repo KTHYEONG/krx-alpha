@@ -8,6 +8,7 @@ import pathlib
 from typing import cast
 
 from src.core.errors import KrxAlphaError
+from src.core.symbols import is_krx_short_code
 from src.execution.kis_client import KisRankingRow, KisRestClient
 from src.universe.ipc import CandidateSnapshot, write_candidate_snapshot
 
@@ -23,6 +24,7 @@ def build_aftermarket_snapshot(
     trade_amount_rows: tuple[KisRankingRow, ...],
     fluctuation_rows: tuple[KisRankingRow, ...],
     capacity: int,
+    excluded_symbols: frozenset[str] = frozenset(),
     policy_version: str = "aftermarket_v1",
 ) -> CandidateSnapshot:
     kst_offset = dt.timedelta(hours=9)
@@ -33,7 +35,7 @@ def build_aftermarket_snapshot(
         return (
             bool(rows)
             and len(set(symbols)) == len(symbols)
-            and all(symbol.isdigit() and len(symbol) == 6 for symbol in symbols)
+            and all(is_krx_short_code(symbol) for symbol in symbols)
             and all(
                 isinstance(row.rank, int)
                 and row.rank >= 1
@@ -54,6 +56,9 @@ def build_aftermarket_snapshot(
     ta_by_symbol = {row.symbol: row for row in trade_amount_rows}
     fl_by_symbol = {row.symbol: row for row in fluctuation_rows}
     union = set(ta_rank) | set(fl_rank)
+    union -= set(excluded_symbols)
+    if not union:
+        raise AftermarketUniverseError("no eligible aftermarket candidates")
     ordered: list[dict[str, object]] = []
     for symbol in union:
         ta_row = ta_by_symbol.get(symbol)
@@ -90,9 +95,10 @@ def refresh_aftermarket_candidates(
     client: KisRestClient,
     out_path: pathlib.Path,
     capacity: int,
+    excluded_symbols: frozenset[str] = frozenset(),
 ) -> CandidateSnapshot:
     trade_amount_rows = client.get_trade_amount_ranking()
     fluctuation_rows = client.get_fluctuation_ranking()
-    snapshot = build_aftermarket_snapshot(session_date=session_date, generated_at=generated_at, trade_amount_rows=trade_amount_rows, fluctuation_rows=fluctuation_rows, capacity=capacity)
+    snapshot = build_aftermarket_snapshot(session_date=session_date, generated_at=generated_at, trade_amount_rows=trade_amount_rows, fluctuation_rows=fluctuation_rows, capacity=capacity, excluded_symbols=excluded_symbols)
     write_candidate_snapshot(out_path, snapshot)
     return snapshot

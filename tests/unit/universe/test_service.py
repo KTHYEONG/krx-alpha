@@ -73,7 +73,7 @@ def _status_row(symbol, managed) -> dict:
         "liquidation_trading": False,
         "trading_halted": False,
         "vi_code": "",
-        "overtime_vi_code": "",
+        "ovtm_vi_cls_code": "",
         "credit_available": True,
         "last_price": 1300,
         "base_price": 1000,

@@ -21,6 +21,9 @@ VOLSURGE_RATIO: float = 5.0
 VOLSURGE_MIN_CHANGE_PCT: float = 5.0
 NEWHIGH_LOOKBACK: int = 60
 NEWHIGH_MIN_CHANGE_PCT: float = 5.0
+# 소수 둘째 자리 daily_change_pct 반올림 오차는 상대오차 1e-4 이하(실측 최대 7.05e-5)이며,
+# 실제 분할·병합은 기준가가 2배 이상 움직이므로 0.5%는 양쪽과 두 자릿수 격차로 구분된다.
+IMPLIED_BASE_EVENT_TOLERANCE: float = 0.005
 TV_MEDIAN_WINDOW: int = 20
 LIQUIDITY_FLOOR_100M: float = 50.0
 DEEP_SLOT_BUDGET: int = 90
@@ -65,20 +68,52 @@ def compute_selection_features(bars: pl.DataFrame) -> pl.DataFrame:
 
 
 def _with_close_max_60(clean: pl.DataFrame) -> pl.DataFrame:
-    if "base_price" not in clean.columns:
-        return clean.with_columns(
-            pl.col("close").rolling_max(window_size=NEWHIGH_LOOKBACK).over("symbol").alias("close_max_60")
-        )
     prev_close = pl.col("close").shift(1).over("symbol")
+    implied_expr = pl.col("close") / (1.0 + pl.col("daily_change_pct") / 100.0)
+    implied_valid = (
+        implied_expr.is_not_null() & implied_expr.is_finite() & (implied_expr > 0)
+    ).fill_null(False)
+    clean = clean.with_columns([
+        implied_expr.alias("_implied_base"),
+        implied_valid.alias("_implied_valid"),
+        prev_close.alias("_prev_close"),
+    ])
+    if "base_price" in clean.columns:
+        base_valid = (
+            pl.col("base_price").is_not_null() & (pl.col("base_price") > 0)
+        ).fill_null(False)
+        clean = clean.with_columns(base_valid.alias("_base_valid"))
+        clean = clean.with_columns([
+            pl.when(pl.col("_base_valid"))
+            .then(pl.col("base_price").cast(pl.Float64))
+            .when(pl.col("_implied_valid"))
+            .then(pl.col("_implied_base"))
+            .otherwise(None)
+            .alias("_event_base"),
+            (pl.col("_base_valid").not_() & pl.col("_implied_valid")).alias("_is_implied"),
+        ])
+    else:
+        clean = clean.with_columns([
+            pl.when(pl.col("_implied_valid"))
+            .then(pl.col("_implied_base"))
+            .otherwise(None)
+            .alias("_event_base"),
+            pl.col("_implied_valid").alias("_is_implied"),
+        ])
     clean = clean.with_columns([
         pl.when(
-            pl.col("base_price").is_not_null()
-            & (pl.col("base_price") > 0)
-            & prev_close.is_not_null()
-            & (prev_close > 0)
+            pl.col("_event_base").is_not_null()
+            & pl.col("_prev_close").is_not_null()
+            & (pl.col("_prev_close") > 0)
         )
-        .then(pl.col("base_price") / prev_close)
+        .then(pl.col("_event_base") / pl.col("_prev_close"))
         .otherwise(1.0)
+        .alias("_event_ratio_raw"),
+    ])
+    clean = clean.with_columns([
+        pl.when(pl.col("_is_implied") & ((pl.col("_event_ratio_raw") - 1.0).abs() <= IMPLIED_BASE_EVENT_TOLERANCE))
+        .then(1.0)
+        .otherwise(pl.col("_event_ratio_raw"))
         .alias("_event_ratio"),
     ])
     clean = clean.with_columns(pl.col("_event_ratio").cum_prod().over("symbol").alias("_cum_event"))
@@ -93,7 +128,36 @@ def _with_close_max_60(clean: pl.DataFrame) -> pl.DataFrame:
         .otherwise(None)
         .alias("close_max_60"),
     )
-    return clean.drop(["_event_ratio", "_cum_event", "_norm_close", "_past_norm_max"])
+    drop_cols = [c for c in ["_implied_base", "_implied_valid", "_prev_close", "_base_valid", "_event_base", "_is_implied", "_event_ratio_raw", "_event_ratio", "_cum_event", "_norm_close", "_past_norm_max"] if c in clean.columns]
+    return clean.drop(drop_cols)
+
+
+def ineligible_security_symbols(bars: pl.DataFrame) -> frozenset[str]:
+    """Symbols whose latest known classification excludes them from collection universes.
+
+    Applies the same security-class rule as ``select_universe``: a symbol is
+    ineligible when its most recent non-null ``stock_cert_kind`` differs from
+    ``ELIGIBLE_STOCK_CERT_KIND`` or its most recent non-null ``section`` is in
+    ``EXCLUDED_SECTIONS``. Unknown classification (no non-null value, e.g. a
+    listing newer than the bar store) stays eligible, matching the regular
+    universe. Callers must pass bars observable at decision time only.
+
+    Args:
+        bars: Daily bars with ``date`` and ``symbol``; ``stock_cert_kind`` and
+            ``section`` are optional.
+
+    Returns:
+        Frozen set of ineligible symbols; empty when neither classification
+        column exists.
+    """
+    out: set[str] = set()
+    if "stock_cert_kind" in bars.columns:
+        latest = bars.drop_nulls("stock_cert_kind").sort("date").group_by("symbol").last()
+        out.update(latest.filter(pl.col("stock_cert_kind") != ELIGIBLE_STOCK_CERT_KIND)["symbol"].to_list())
+    if "section" in bars.columns:
+        latest = bars.drop_nulls("section").sort("date").group_by("symbol").last()
+        out.update(latest.filter(pl.col("section").is_in(EXCLUDED_SECTIONS))["symbol"].to_list())
+    return frozenset(out)
 
 
 def select_universe(featured: pl.DataFrame, decision_date: dt.date, *, slot_budget: int = DEEP_SLOT_BUDGET) -> pl.DataFrame:

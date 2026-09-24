@@ -513,3 +513,257 @@ def test_close_max_60_is_causal_under_future_perturbation():
 
     assert before["close_max_60"].to_list() == after["close_max_60"].to_list()
     assert before["tv_ratio"].to_list() == after["tv_ratio"].to_list()
+
+
+def _class_bars(rows: list[tuple]) -> object:
+    import polars as pl
+
+    return pl.DataFrame(
+        {
+            "date": [row[0] for row in rows],
+            "symbol": [row[1] for row in rows],
+            "stock_cert_kind": [row[2] for row in rows],
+            "section": [row[3] for row in rows],
+        },
+        schema={"date": pl.Date, "symbol": pl.String, "stock_cert_kind": pl.String, "section": pl.String},
+        strict=False,
+    )
+
+
+def test_ineligible_security_symbols_flags_preferred_share() -> None:
+    import datetime as dt
+
+    from src.universe.policy import ineligible_security_symbols
+
+    bars = _class_bars([(dt.date(2026, 9, 22), "005935", "구형우선주", None)])
+
+    assert ineligible_security_symbols(bars) == frozenset({"005935"})
+
+
+def test_ineligible_security_symbols_flags_excluded_section() -> None:
+    import datetime as dt
+
+    from src.universe.policy import ineligible_security_symbols
+
+    bars = _class_bars([(dt.date(2026, 9, 22), "000001", "보통주", "SPAC(소속부없음)")])
+
+    assert ineligible_security_symbols(bars) == frozenset({"000001"})
+
+
+def test_ineligible_security_symbols_latest_classification_wins() -> None:
+    import datetime as dt
+
+    from src.universe.policy import ineligible_security_symbols
+
+    bars = _class_bars([
+        (dt.date(2026, 9, 21), "005935", "구형우선주", None),
+        (dt.date(2026, 9, 22), "005935", "보통주", None),
+        (dt.date(2026, 9, 22), "000001", "보통주", "SPAC(소속부없음)"),
+        (dt.date(2026, 9, 21), "000001", "보통주", None),
+    ])
+
+    assert ineligible_security_symbols(bars) == frozenset({"000001"})
+
+
+def test_ineligible_security_symbols_unknown_classification_stays_eligible() -> None:
+    import datetime as dt
+
+    from src.universe.policy import ineligible_security_symbols
+
+    bars = _class_bars([(dt.date(2026, 9, 22), "0007J0", None, None)])
+
+    assert ineligible_security_symbols(bars) == frozenset()
+
+
+def test_ineligible_security_symbols_empty_without_classification_columns() -> None:
+    import datetime as dt
+
+    import polars as pl
+
+    from src.universe.policy import ineligible_security_symbols
+
+    bars = pl.DataFrame({"date": [dt.date(2026, 9, 22)], "symbol": ["005930"]})
+
+    assert ineligible_security_symbols(bars) == frozenset()
+
+
+def _implied_bars(closes, event_pct=None, with_base_col=True, base_values=None) -> object:
+    import datetime as dt
+
+    import polars as pl
+
+    base = dt.date(2026, 1, 5)
+    dates = [base + dt.timedelta(days=i) for i in range(len(closes))]
+    pcts: list[float] = [0.0] * len(closes)
+    for i in range(1, len(closes) - (1 if event_pct is not None else 0)):
+        pcts[i] = round((closes[i] / closes[i - 1] - 1.0) * 100.0, 2)
+    if event_pct is not None:
+        pcts[-1] = float(event_pct)
+    data = {
+        "date": dates,
+        "symbol": ["000001"] * len(closes),
+        "close": [float(v) for v in closes],
+        "volume": [1000] * len(closes),
+        "trade_value_100m": [100.0] * len(closes),
+        "daily_change_pct": pcts,
+    }
+    if with_base_col:
+        if base_values is None:
+            base_values = [None] * len(closes)
+        data["base_price"] = base_values
+    return pl.DataFrame(data)
+
+
+def test_close_max_60_suppresses_false_high_on_reverse_split_without_base_price():
+
+    from src.universe.policy import compute_selection_features
+
+    hist = [1000.0] * 30 + [1100.0] + [1000.0] * 29
+    closes = [*hist, 5100.0]
+    bars = _implied_bars(closes, event_pct=2.0)
+
+    out = compute_selection_features(bars)
+    got = out["close_max_60"].to_list()[-1]
+
+    assert got == 5500.0
+
+
+def test_close_max_60_keeps_genuine_high_on_forward_split_without_base_price():
+    import polars as pl
+
+    from src.universe.policy import compute_selection_features, select_universe
+
+    closes = [10000.0] * 60 + [2120.0]
+    bars = _implied_bars(closes, event_pct=6.0)
+    featured = compute_selection_features(bars)
+
+    event = featured.filter(pl.col("date") == featured["date"].max())
+
+    assert event["close_max_60"].to_list() == [2120.0]
+    result = select_universe(featured, featured["date"].max())
+    assert "newhigh60" in result["selection_reasons"].to_list()[0]
+
+
+def test_close_max_60_ignores_rounding_noise_without_base_price():
+    import polars as pl
+
+    from src.universe.policy import compute_selection_features
+
+    closes = [1000.0 + i * 3.0 + (i % 5) * 1.7 for i in range(80)]
+    bars = _implied_bars(closes)
+    out = compute_selection_features(bars)
+
+    pure = pl.Series(closes).rolling_max(window_size=60).to_list()
+    got = out["close_max_60"].to_list()
+    assert all((a == b) or (a is None and b is None) for a, b in zip(got, pure, strict=True))
+
+
+def test_close_max_60_matches_legacy_base_price_path():
+    import polars as pl
+
+    from src.universe.policy import NEWHIGH_LOOKBACK, compute_selection_features
+
+    closes = [9000.0] * 60 + [9000.0, 9300.0, 9000.0, 3150.0]
+    bases = [closes[0], *closes[:-1]]
+    bases[-1] = 3000.0
+    bars = _implied_bars(closes, event_pct=6.0, base_values=[float(v) for v in bases])
+
+    got = compute_selection_features(bars)["close_max_60"].to_list()
+
+    def _legacy(clean: pl.DataFrame) -> list:
+        prev_close = pl.col("close").shift(1).over("symbol")
+        tmp = clean.with_columns([
+            pl.when(
+                pl.col("base_price").is_not_null()
+                & (pl.col("base_price") > 0)
+                & prev_close.is_not_null()
+                & (prev_close > 0)
+            )
+            .then(pl.col("base_price") / prev_close)
+            .otherwise(1.0)
+            .alias("_event_ratio"),
+        ])
+        tmp = tmp.with_columns(pl.col("_event_ratio").cum_prod().over("symbol").alias("_cum_event"))
+        tmp = tmp.with_columns((pl.col("close") / pl.col("_cum_event")).alias("_norm_close"))
+        tmp = tmp.with_columns(
+            pl.col("_norm_close").rolling_max(window_size=NEWHIGH_LOOKBACK - 1).over("symbol").alias("_past_norm_max")
+        )
+        tmp = tmp.with_columns(pl.col("_past_norm_max").shift(1).over("symbol").alias("_past_norm_max"))
+        tmp = tmp.with_columns(
+            pl.when(pl.col("_past_norm_max").is_not_null())
+            .then(pl.max_horizontal([pl.col("_cum_event") * pl.col("_past_norm_max"), pl.col("close")]))
+            .otherwise(None)
+            .alias("close_max_60"),
+        )
+        return tmp["close_max_60"].to_list()
+
+    expected = _legacy(bars.sort(["symbol", "date"]))
+    assert got == expected
+    assert got[-1] == 3150.0
+
+
+def test_close_max_60_adjusts_mixed_implied_and_base_price_history():
+    from src.universe.policy import compute_selection_features
+
+    hist = [1000.0] * 30 + [1100.0] + [1000.0] * 29
+    closes = hist + [5100.0] + [5100.0] * 19 + [10404.0]
+    first = len(hist)
+    last = len(closes) - 1
+    pcts: list[float] = [0.0] * len(closes)
+    for i in range(1, len(closes)):
+        if i in (first, last):
+            continue
+        pcts[i] = round((closes[i] / closes[i - 1] - 1.0) * 100.0, 2)
+    pcts[first] = 2.0
+    pcts[last] = 2.0
+    bases: list = [None] * len(closes)
+    bases[last] = 10200.0
+    bars = _implied_bars(closes, base_values=bases)
+    # _implied_bars가 계산한 pct를 혼합 시나리오 pct로 교체한다.
+    import polars as pl
+
+    bars = bars.with_columns(pl.Series("daily_change_pct", pcts))
+
+    out = compute_selection_features(bars)
+    got = out["close_max_60"].to_list()
+
+    assert got[first] == 5500.0
+    assert got[-1] == 11000.0
+
+
+def test_close_max_60_adjusts_without_base_price_column():
+    from src.universe.policy import compute_selection_features
+
+    hist = [1000.0] * 30 + [1100.0] + [1000.0] * 29
+    closes = [*hist, 10200.0]
+    bars = _implied_bars(closes, event_pct=2.0, with_base_col=False)
+
+    out = compute_selection_features(bars)
+
+    assert "base_price" not in bars.columns
+    assert out["close_max_60"].to_list()[-1] == 11000.0
+
+
+def test_close_max_60_is_causal_with_implied_events_under_future_perturbation():
+    import polars as pl
+
+    from src.universe.policy import compute_selection_features
+
+    hist = [1000.0] * 30 + [1100.0] + [1000.0] * 29
+    closes = [*hist, 5100.0]
+    merge_idx = len(hist)
+
+    def _frame(extra) -> object:
+        ext = closes + extra
+        frame = _implied_bars(ext, with_base_col=True)
+        pcts = frame["daily_change_pct"].to_list()
+        pcts[merge_idx] = 2.0
+        return frame.with_columns(pl.Series("daily_change_pct", pcts))
+
+    import datetime as dt
+
+    decision = dt.date(2026, 1, 5) + dt.timedelta(days=len(closes) - 1)
+    before = compute_selection_features(_frame([])).filter(pl.col("date") <= decision)
+    after = compute_selection_features(_frame([5200.0, 5300.0, 5400.0])).filter(pl.col("date") <= decision)
+
+    assert before["close_max_60"].to_list() == after["close_max_60"].to_list()

@@ -140,3 +140,82 @@ def test_candidate_snapshot_rejects_naive_timestamp(tmp_path) -> None:
 
     with pytest.raises(CandidateFileError):
         read_candidate_snapshot(path, expected_session_date=stamp.date(), expected_session="aftermarket", max_candidates=40)
+
+
+def _snapshot_with_symbols(symbols: tuple[str, ...]):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.universe.ipc import CandidateSnapshot
+
+    generated = dt.datetime(2026, 9, 16, 15, 31, tzinfo=ZoneInfo('Asia/Seoul'))
+    return CandidateSnapshot(
+        schema_version=1, rev=20260916, session_date=generated.date(), session='aftermarket',
+        generated_at=generated, source_asof=generated, effective_from=generated, policy_version='aftermarket_v1',
+        capacity=40, eligible_count=len(symbols), selected_count=len(symbols),
+        candidates=tuple(
+            {'symbol': symbol, 'rank': index + 1, 'source_ranks': {'trade_amount': index + 1},
+             'metrics': {'trade_value_krw': 1, 'change_pct': 1.0}, 'selection_reasons': ['trade_amount']}
+            for index, symbol in enumerate(symbols)
+        ),
+    )
+
+
+def test_read_candidate_snapshot_reports_missing_file_as_missing(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.universe.ipc import CandidateFileError, read_candidate_snapshot
+
+    with pytest.raises(CandidateFileError, match=r"^missing candidate snapshot"):
+        read_candidate_snapshot(
+            tmp_path / 'absent.json', expected_session_date=dt.date(2026, 9, 16),
+            expected_session='aftermarket', max_candidates=40,
+        )
+
+
+def test_read_candidate_snapshot_reports_malformed_file_as_corrupt(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.universe.ipc import CandidateFileError, read_candidate_snapshot
+
+    path = tmp_path / 'aftermarket.json'
+    path.write_text('{"rev": 1, "candidates": [', encoding='utf-8')
+    with pytest.raises(CandidateFileError, match=r"^corrupt candidate snapshot"):
+        read_candidate_snapshot(
+            path, expected_session_date=dt.date(2026, 9, 16),
+            expected_session='aftermarket', max_candidates=40,
+        )
+
+
+def test_read_candidate_snapshot_accepts_alphanumeric_symbols(tmp_path) -> None:
+    from src.universe.ipc import read_candidate_snapshot, write_candidate_snapshot
+
+    snapshot = _snapshot_with_symbols(('0155E0',))
+    path = tmp_path / 'aftermarket.json'
+    write_candidate_snapshot(path, snapshot)
+
+    assert read_candidate_snapshot(
+        path, expected_session_date=snapshot.session_date,
+        expected_session='aftermarket', max_candidates=40,
+    ) == snapshot
+
+
+def test_read_candidate_snapshot_reports_unreadable_file_as_corrupt(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.universe.ipc import CandidateFileError, read_candidate_snapshot
+
+    path = tmp_path / 'aftermarket.json'
+    path.mkdir()
+
+    with pytest.raises(CandidateFileError, match=r"^corrupt candidate snapshot"):
+        read_candidate_snapshot(
+            path, expected_session_date=dt.date(2026, 9, 16),
+            expected_session='aftermarket', max_candidates=40,
+        )

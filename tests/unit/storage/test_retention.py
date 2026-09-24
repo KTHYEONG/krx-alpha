@@ -50,7 +50,7 @@ def test_normalize_l0_partition_writes_dedup_sorted_parquet(tmp_path) -> None:
     df = pl.read_parquet(out_path)
     assert df.height == 2
     assert df['recv_wall_ns'].to_list() == [90, 100]
-    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id', 'venue', 'session', 'stream', 'symbol', 'exchange_event_time'}
+    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id', 'venue', 'session', 'stream', 'symbol', 'exchange_event_time', 'market_phase'}
     assert set(df['venue']) == {'krx'}
     assert set(df['session']) == {'regular'}
 
@@ -333,7 +333,7 @@ def test_normalize_l0_partition_logs_tick_quality_summary(tmp_path, caplog) -> N
     # Then: 정상 처리 + 기존 컬럼 스키마 불변 + [DATA] quality 요약 로그
     assert rows == 1
     df = pl.read_parquet(out_path)
-    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id', 'venue', 'session', 'stream', 'symbol', 'exchange_event_time'}
+    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id', 'venue', 'session', 'stream', 'symbol', 'exchange_event_time', 'market_phase'}
     assert 'stage=quality' in caplog.text
     assert 'decode_fail=0' in caplog.text
     assert 'status=PASS' in caplog.text
@@ -376,7 +376,7 @@ def test_normalize_l0_partition_logs_quote_quality_summary(tmp_path, caplog) -> 
     # Then: 정상 처리 + 기존 컬럼 스키마 불변 + 호가 전용 [DATA] quality 요약 로그
     assert rows == 1
     df = pl.read_parquet(out_path)
-    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id', 'venue', 'session', 'stream', 'symbol', 'exchange_event_time'}
+    assert set(df.columns) == {'raw', 'recv_mono_ns', 'recv_wall_ns', 'conn_id', 'conn_seq', 'vendor', 'tr_id', 'venue', 'session', 'stream', 'symbol', 'exchange_event_time', 'market_phase'}
     assert 'stage=quality' in caplog.text
     assert 'tr_id=H0STASP0' in caplog.text
     assert 'ladder_disorder=0' in caplog.text
@@ -650,6 +650,7 @@ def test_normalize_l0_partition_bounded_matches_reference_semantics_across_batch
         'raw': pl.String, 'recv_mono_ns': pl.Int64, 'recv_wall_ns': pl.Int64, 'conn_id': pl.String,
         'conn_seq': pl.Int64, 'vendor': pl.String, 'tr_id': pl.String, 'venue': pl.String,
         'session': pl.String, 'stream': pl.String, 'symbol': pl.String, 'exchange_event_time': pl.String,
+        'market_phase': pl.String,
     }
     assert 'raw_records=5' in caplog.text
     assert 'l1_rows=4' in caplog.text
@@ -1128,3 +1129,99 @@ def test_partition_without_tick_or_quote_writes_no_dq_metadata(tmp_path, caplog)
     meta = pq.read_metadata(out_path).metadata
     assert meta is None or b'krx_alpha.dq' not in (meta or {})
     assert 'stage=quality' not in caplog.text
+
+
+def _write_ls_trade_partition(tmp_path, event_times: list[str]):
+    import json
+    import zstandard as zstd
+
+    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    recs = []
+    for seq, event_time in enumerate(event_times, start=1):
+        body = {
+            'shcode': '005930', 'price': '70000', 'cvolume': '10', 'volume': '100',
+            'change': '0', 'sign': '3', 'chetime': event_time,
+        }
+        raw = json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': body}, ensure_ascii=False)
+        recs.append({
+            'raw': raw, 'recv_mono_ns': seq, 'recv_wall_ns': seq, 'conn_id': 'c1',
+            'conn_seq': seq, 'vendor': 'ls', 'tr_id': 'H0STCNT0',
+        })
+    payload = ''.join(json.dumps(rec) + '\n' for rec in recs).encode('utf-8')
+    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    return part
+
+
+def test_normalized_l1_carries_market_phase_per_row(tmp_path) -> None:
+    import polars as pl
+    from src.storage.retention import normalize_l0_partition
+
+    part = _write_ls_trade_partition(tmp_path, ['083000', '100000', '154500', '163000'])
+    out_path = tmp_path / 'l1' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    assert normalize_l0_partition(part, out_path) == 4
+
+    df = pl.read_parquet(out_path)
+    assert df['market_phase'].to_list() == ['pre_closing_price', 'regular', 'post_closing_price', 'aftermarket']
+    assert df['exchange_event_time'].to_list() == ['083000', '100000', '154500', '163000']
+
+
+def test_normalized_l1_phase_footer_counts_sum_to_rows(tmp_path) -> None:
+    import json
+    import pyarrow.parquet as pq
+    from src.storage.retention import normalize_l0_partition
+
+    part = _write_ls_trade_partition(tmp_path, ['083000', '100000', '154500', '163000'])
+    out_path = tmp_path / 'l1' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    rows = normalize_l0_partition(part, out_path)
+    meta = pq.read_metadata(out_path).metadata
+    assert meta is not None
+    assert b'krx_alpha.dq' in meta
+    assert b'krx_alpha.market_phase' in meta
+    counts = json.loads(meta[b'krx_alpha.market_phase'].decode())
+    assert counts == {'aftermarket': 1, 'post_closing_price': 1, 'pre_closing_price': 1, 'regular': 1}
+    assert sum(counts.values()) == rows
+
+
+def test_normalized_kis_partition_uses_stamped_event_time(tmp_path) -> None:
+    import json
+    import polars as pl
+    import zstandard as zstd
+    from src.storage.retention import normalize_l0_partition
+
+    fields = _kis_tick_raw_for_l1().split('^')
+    fields[1] = '163000'
+    raw = '^'.join(fields)
+    part = tmp_path / 'l0' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
+    part.mkdir(parents=True, exist_ok=True)
+    rec = {
+        'raw': raw, 'recv_mono_ns': 1, 'recv_wall_ns': 100, 'conn_id': 'c1',
+        'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0', 'exchange_event_time': '163000',
+    }
+    (part / '16.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress((json.dumps(rec) + '\n').encode()))
+    out_path = tmp_path / 'l1' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet'
+
+    assert normalize_l0_partition(part, out_path) == 1
+
+    df = pl.read_parquet(out_path)
+    assert df['exchange_event_time'].to_list() == ['163000']
+    assert df['market_phase'].to_list() == ['aftermarket']
+    assert df['raw'].to_list() == [raw]
+
+
+def test_partition_without_tick_or_quote_still_carries_phase_footer(tmp_path) -> None:
+    import json
+    import pyarrow.parquet as pq
+    from src.storage.retention import normalize_l0_partition
+
+    part = _write_l0_partition(tmp_path, 'x', tr_id='H0XXYYY', vendor='ls')
+    out_path = tmp_path / 'l1' / 'kis' / 'H0XXYYY' / 'dt=2026-09-01.parquet'
+
+    assert normalize_l0_partition(part, out_path) == 1
+
+    meta = pq.read_metadata(out_path).metadata
+    assert meta is not None
+    counts = json.loads(meta[b'krx_alpha.market_phase'].decode())
+    assert sum(counts.values()) == 1

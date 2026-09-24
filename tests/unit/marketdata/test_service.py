@@ -294,7 +294,7 @@ def test_backfill_program_trades_rejects_invalid_symbol_before_any_call(monkeypa
             raise AssertionError("no vendor call allowed before symbol validation")
 
     # When / Then
-    with pytest.raises(ValueError, match="6-digit"):
+    with pytest.raises(ValueError, match="KRX short codes"):
         service.backfill_program_trades(
             store_path="x.parquet",
             symbols=("12345",),
@@ -462,9 +462,10 @@ def test_backfill_universe_program_trades_returns_zero_result_for_empty_symbols(
     assert (result.symbols_ok, result.symbols_failed, result.appended_rows) == (0, 0, 0)
 
 
-def test_backfill_universe_program_trades_skips_non_digit_symbols_gracefully(tmp_path, monkeypatch) -> None:
-    """실측 회귀: 유니버스 후보에 우선주/특수증권(예: 0004V0, 0015S0)이 포함되어도 에러 없이 보통주만 백필한다."""
+def test_backfill_universe_program_trades_keeps_alphanumeric_and_skips_malformed(tmp_path, monkeypatch, caplog) -> None:
+    """형태가 올바른 alphanumeric 단축코드는 백필 대상에 유지하고, 깨진 코드만 건너뛴다."""
     import datetime as dt
+    import logging
 
     from src.marketdata import service
 
@@ -478,24 +479,102 @@ def test_backfill_universe_program_trades_skips_non_digit_symbols_gracefully(tmp
 
     monkeypatch.setattr(service, "backfill_program_trades", _fake_backfill)
 
-    # When: 비정형 심볼이 포함된 유니버스 전달
-    result = service.backfill_universe_program_trades(
-        store_path=store,
-        symbols=("005930", "0004V0", "0015S0"),
-        lookback_days=120,
-        reference_date=reference_date,
+    # When: alphanumeric 신규상장과 깨진 코드가 포함된 유니버스 전달
+    with caplog.at_level(logging.WARNING):
+        result = service.backfill_universe_program_trades(
+            store_path=store,
+            symbols=("005930", "0004V0", "12"),
+            lookback_days=120,
+            reference_date=reference_date,
+            app_key="k",
+            app_secret="s",
+            rate_per_s=8.0,
+        )
+
+    # Then: alphanumeric 코드는 유지되고 깨진 코드만 건너뛴다
+    assert seen["symbols"] == ("005930", "0004V0")
+    assert (result.symbols_ok, result.symbols_failed, result.appended_rows) == (1, 0, 10)
+    assert "status=SKIP_INVALID_CODE" in caplog.text
+
+
+def test_backfill_program_trades_accepts_alphanumeric_codes(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    from src.marketdata import service
+
+    attempted: list[str] = []
+
+    def _fake_history(symbol, **kwargs):
+        attempted.append(symbol)
+        return (_program_trade_row(symbol, dt.date(2026, 9, 17)),)
+
+    monkeypatch.setattr(service, "backfill_program_trades_history", _fake_history)
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: "tok")
+
+    result = service.backfill_program_trades(
+        store_path=tmp_path / "bars" / "program_trades.parquet",
+        symbols=("005930", "0004V0"),
+        min_date=dt.date(2026, 9, 1),
         app_key="k",
         app_secret="s",
-        rate_per_s=8.0,
+        rate_per_s=1000.0,
     )
 
-    # Then: 유효한 보통주 005930만 전달되고 비정형 심볼로 인한 예외가 발생하지 않는다
-    assert seen["symbols"] == ("005930",)
-    assert (result.symbols_ok, result.symbols_failed, result.appended_rows) == (1, 0, 10)
+    assert sorted(attempted) == ["0004V0", "005930"]
+    assert (result.symbols_ok, result.symbols_failed) == (2, 0)
 
 
-def _kis_row(bsop_date="20260910", close="70000", vol="1000", value="70000000", vrss="700", oprc="69500", hgpr="70500", lwpr="69000"):
-    return {
+def test_backfill_program_trades_rejects_malformed_code(monkeypatch) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.marketdata import service
+
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: "tok")
+
+    with pytest.raises(ValueError, match="KRX short codes"):
+        service.backfill_program_trades(
+            store_path="x.parquet",
+            symbols=("5930",),
+            min_date=dt.date(2026, 9, 1),
+            app_key="k",
+            app_secret="s",
+            rate_per_s=8.0,
+        )
+
+
+def test_backfill_program_trades_isolates_single_vendor_rejection(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    import polars as pl
+
+    from src.marketdata import service
+    from src.marketdata.toss_program_trades import TossProgramTradesError
+
+    def _fake_history(symbol, **kwargs):
+        if symbol == "0004V0":
+            raise TossProgramTradesError("rejected")
+        return (_program_trade_row(symbol, dt.date(2026, 9, 17)),)
+
+    monkeypatch.setattr(service, "backfill_program_trades_history", _fake_history)
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: "tok")
+
+    store = tmp_path / "bars" / "program_trades.parquet"
+    result = service.backfill_program_trades(
+        store_path=store,
+        symbols=("005930", "0004V0"),
+        min_date=dt.date(2026, 9, 1),
+        app_key="k",
+        app_secret="s",
+        rate_per_s=1000.0,
+    )
+
+    assert (result.symbols_ok, result.symbols_failed) == (1, 1)
+    assert pl.read_parquet(store)["symbol"].unique().to_list() == ["005930"]
+
+
+def _kis_row(bsop_date="20260910", close="70000", vol="1000", value="70000000", vrss="700", oprc="69500", hgpr="70500", lwpr="69000"):    return {
         "stck_bsop_date": bsop_date, "stck_clpr": close, "acml_vol": vol, "acml_tr_pbmn": value,
         "prdy_vrss": vrss, "stck_oprc": oprc, "stck_hgpr": hgpr, "stck_lwpr": lwpr,
     }

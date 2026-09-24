@@ -56,7 +56,10 @@ def validate_daily_bars(bars: pl.DataFrame) -> None:
 
     Only identities that must hold for every genuine KRX session row are
     checked, so legitimate extremes (liquidation trading, new listings,
-    after-hours value outside the regular range) never trip the gate. A single
+    volume/value that exceed what the regular session alone explains because
+    since 2026-09-14 KRX daily volume/value accumulate through the 16:00~20:00
+    aftermarket while ``close`` remains the 15:30 regular close) never trip
+    the gate. A single
     violating row rejects the whole batch: storing a partially-trusted day would
     let a vendor defect silently bias cross-sectional features, while a raised
     ``KrxBarsError`` lets the caller fall back to another source.

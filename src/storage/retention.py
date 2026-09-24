@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import json
 import logging
 import os
 import pathlib
@@ -22,6 +23,7 @@ import zstandard as zstd
 
 from src.core.config import DataQualitySettings
 from src.core.errors import KrxAlphaError
+from src.storage.market_phase import MARKET_PHASE_METADATA_KEY, annotate_market_phase
 from src.storage.quality import (
     DqStatus,
     QuoteQualitySummary,
@@ -151,7 +153,9 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path, *, wo
 
     The partition's DQ verdict is embedded in the output parquet footer under
     ``krx_alpha.dq``; a FAIL verdict is logged at CRITICAL but does not block the write because L1 retains every raw
-    frame.
+    frame. Per-phase row counts from ``market_phase`` are embedded under
+    ``krx_alpha.market_phase`` as a JSON object mapping each phase value to
+    its row count.
 
     Args:
         part_dir: L0 partition directory holding hourly .jsonl.zst files.
@@ -246,9 +250,13 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path, *, wo
         quote_parts: list[QuoteQualitySummary] = []
         tick_rows = 0
         vendors: set[str] = set()
+        phase_counts: dict[str, int] = {}
         settings = dq_settings if dq_settings is not None else DataQualitySettings()
         for ci, lo in enumerate(range(0, order.size, _GATHER_ROWS)):
             chunk = reader.take(order[lo : lo + _GATHER_ROWS])
+            chunk = annotate_market_phase(chunk)
+            for phase, count in chunk["market_phase"].value_counts().iter_rows():
+                phase_counts[str(phase)] = phase_counts.get(str(phase), 0) + int(count)
             vendors.update(v for v in chunk["vendor"].unique().to_list() if v is not None)
             qs = decode_and_flag_quotes(chunk)
             if qs is not None:
@@ -273,9 +281,10 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path, *, wo
         )
         quote_summary: QuoteQualitySummary | None = sum_quote_summaries(quote_parts) if quote_parts else None
         vendor_label = ",".join(sorted(vendors)) if vendors else ""
+        phases_json = json.dumps(phase_counts, sort_keys=True, separators=(",", ":"))
         if tick_summary is not None or quote_summary is not None:
             verdict = evaluate_stream_quality(tick_summary, quote_summary, settings=settings)
-            writer.add_key_value_metadata(verdict.to_metadata())
+            writer.add_key_value_metadata({**verdict.to_metadata(), MARKET_PHASE_METADATA_KEY: phases_json})
             writer.close()
             writer = None
             if verdict.status is DqStatus.FAIL:
@@ -318,16 +327,18 @@ def normalize_l0_partition(part_dir: pathlib.Path, out_path: pathlib.Path, *, wo
                     reasons,
                 )
         else:
+            writer.add_key_value_metadata({MARKET_PHASE_METADATA_KEY: phases_json})
             writer.close()
             writer = None
         os.replace(tmp_path, out)
         logger.info(
-            "[DATA] stage=normalize part=%s raw_records=%d l1_rows=%d dedup_dropped=%d conn_seq_conflict=%d status=OK",
+            "[DATA] stage=normalize part=%s raw_records=%d l1_rows=%d dedup_dropped=%d conn_seq_conflict=%d phases=%s status=OK",
             str(part),
             raw_records,
             int(order.size),
             raw_records - int(order.size),
             conflict,
+            phases_json,
         )
         succeeded = True
         return int(order.size)

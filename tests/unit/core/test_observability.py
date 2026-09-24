@@ -435,3 +435,15 @@ def test_gmail_sender_sends_multipart_when_html_body_provided(monkeypatch) -> No
     assert "<b>html-body</b>" in msg.get_body(preferencelist=("html",)).get_content()
 
 
+def test_aftermarket_alert_labels_use_canonical_term() -> None:
+    from src.core.observability import _REASON_LABELS, _STAGE_LABELS
+
+    for key in ("aftermarket_reselection", "aftermarket_plan"):
+        label = _STAGE_LABELS[key]
+        assert "애프터마켓" in label
+        assert "시간외" not in label
+    reason = _REASON_LABELS["aftermarket_not_ready"]
+    assert "애프터마켓" in reason
+    assert "시간외" not in reason
+
+

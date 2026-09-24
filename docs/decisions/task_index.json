@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_COLLECTION_INTEGRITY",
+      "date": "2026-09-24",
+      "adr_id": "ADR_20260924_COLLECTION_INTEGRITY",
+      "domain": "data",
+      "title": "수집 데이터 무결성 개선: 세션 용어·market_phase·종목코드·기업이벤트 보정",
+      "why": "16~20시 KRX 체결이 LS 정규장 파티션에 섞여 세션 오해가 발생했고, 영문 신규상장 코드 누락·우선주 혼입·base_price 부재 구간의 신고가 왜곡이 실측으로 확인됐다.",
+      "resolution": "애프터마켓 용어와 금지어 가드, 거래소 시각 기반 market_phase L1 부여, 종목코드 형식 통합과 우선주 제외, base_price 없는 구간의 역산 기준가 보정을 도입했다.",
+      "impact": "백테스트가 파티션명이 아닌 거래소 세션으로 필터링하고, 신규상장 급등주가 유니버스에 포함되며 60일 신고가 판정 왜곡이 사라진다.",
+      "caveat": "NXT 거래 가능 종목 판정과 NXT 정규장 비중 실측은 미해결이며, 09-28 EOD가 market_phase 정규화 경로의 첫 실운영이다."
+    },
+    {
       "task_id": "TASK_20260924_DEPLOY_CONTINUITY",
       "date": "2026-09-24",
       "adr_id": "ADR_20260924_20260924_DEPLOY_CONTINUITY",
@@ -27,10 +38,10 @@
       "date": "2026-09-22",
       "adr_id": "ADR_20260922_STREAM_DQ_COVERAGE",
       "domain": "data-infra",
-      "title": "수집 데이터 무결성(DQ) 검사 보완: KIS 장후 스트림·일봉·스냅샷",
-      "why": "장후 KIS 틱/호가는 LS 전용 DQ 디코더가 100% decode_fail로 오판(실측 9/21 107005/107005, 379978/379978)해 사실상 검사가 이뤄지지 않았고, DQ 위반은 로그만 남고 저장을 막지 못했으며, 일봉/스냅샷은 값 수준 검증이 전무했다.",
+      "title": "수집 데이터 무결성(DQ) 검사 보완: KIS 애프터마켓 스트림·일봉·스냅샷",
+      "why": "애프터마켓 KIS 틱/호가는 LS 전용 DQ 디코더가 100% decode_fail로 오판(실측 9/21 107005/107005, 379978/379978)해 사실상 검사가 이뤄지지 않았고, DQ 위반은 로그만 남고 저장을 막지 못했으며, 일봉/스냅샷은 값 수준 검증이 전무했다.",
       "resolution": "KIS 캐럿 포맷 디코더와 비율기반 PASS/WARN/FAIL 판정을 추가해 L1 parquet 푸터에 기록하고 FAIL은 CRITICAL 알림으로 연결했으며, 일봉엔 OHLC/거래대금 정합성 게이트(위반시 KIS 폴백 자동 전환 + 폴백 응답일자 검증)를, 스냅샷엔 행 단위 값 검증(위반 행만 드롭)을 추가했다.",
-      "impact": "장후 KRX/NXT 스트림 DQ 커버리지가 0%에서 100%로 확대되고 실데이터 재검증시 위반 0건, 정규장 LS 일일 노이즈(호가 total_remain_short~2%)는 오탐 없이 WARN에 머문다.",
+      "impact": "애프터마켓 KRX/NXT 스트림 DQ 커버리지가 0%에서 100%로 확대되고 실데이터 재검증시 위반 0건, 정규장 LS 일일 노이즈(호가 total_remain_short~2%)는 오탐 없이 WARN에 머문다.",
       "caveat": "KIS 호가 디코더가 행 단위 파이썬 루프라 38만행에 약 2.9초 소요(EOD 1회성이라 허용범위); DQ 임계값은 KRX_ALPHA_DQ_* 환경변수로 조정 가능."
     },
     {
