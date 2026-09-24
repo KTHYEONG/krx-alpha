@@ -199,3 +199,58 @@ def test_append_fully_rejected_batch_writes_nothing_and_alerts(tmp_path: pathlib
     assert added == 0
     assert not (tmp_path / "l1" / "snapshot" / "program_trade" / "dt=2026-09-17.parquet").exists()
     assert any(r.levelno == logging.CRITICAL and "status=FAIL" in r.getMessage() for r in caplog.records)
+
+
+def _security_status_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "session_date": _SESSION_DATE,
+        "observed_at_ns": 1_000,
+        "source_tr": "FHKST01010100",
+        "market_div_code": "J",
+        "symbol": "005930",
+        "status_code": "00",
+        "managed": False,
+        "market_warning_code": "00",
+        "short_overheated": False,
+        "investment_caution": False,
+        "liquidation_trading": False,
+        "trading_halted": False,
+        "vi_code": "00",
+        "ovtm_vi_cls_code": "01",
+        "credit_available": True,
+        "last_price": 70000,
+        "base_price": 69500,
+        "upper_limit": 90350,
+        "lower_limit": 48650,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_legacy_partition_loads_and_appends_with_current_column(tmp_path: pathlib.Path) -> None:
+    part = tmp_path / "l1" / "snapshot" / "security_status" / "dt=2026-09-17.parquet"
+    part.parent.mkdir(parents=True, exist_ok=True)
+    legacy = _security_status_row()
+    legacy["overtime_vi_code"] = legacy.pop("ovtm_vi_cls_code")
+    pl.DataFrame([legacy]).write_parquet(part, compression="zstd")
+
+    store = _store(tmp_path)
+    assert store.append(SnapshotDataset.SECURITY_STATUS, [_security_status_row(observed_at_ns=2_000)]) == 1
+
+    frame = store.frame(SnapshotDataset.SECURITY_STATUS)
+    assert frame.columns == list(SNAPSHOT_SCHEMAS[SnapshotDataset.SECURITY_STATUS])
+    assert frame.sort("observed_at_ns")["ovtm_vi_cls_code"].to_list() == ["01", "01"]
+    assert pl.read_parquet(part).columns == list(SNAPSHOT_SCHEMAS[SnapshotDataset.SECURITY_STATUS])
+
+
+def test_conflicting_legacy_and_current_columns_fail_closed(tmp_path: pathlib.Path) -> None:
+    import pytest
+
+    part = tmp_path / "l1" / "snapshot" / "security_status" / "dt=2026-09-17.parquet"
+    part.parent.mkdir(parents=True, exist_ok=True)
+    row = _security_status_row()
+    row["overtime_vi_code"] = "01"
+    pl.DataFrame([row]).write_parquet(part, compression="zstd")
+
+    with pytest.raises(SnapshotStoreError):
+        _store(tmp_path).append(SnapshotDataset.SECURITY_STATUS, [_security_status_row(observed_at_ns=2_000)])

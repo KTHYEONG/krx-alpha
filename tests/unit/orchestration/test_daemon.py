@@ -2305,6 +2305,168 @@ def test_daemon_retries_aftermarket_reselection_on_failure(monkeypatch, tmp_path
     assert len(aftermarket) == 1
 
 
+def test_daemon_reselection_passes_classification_exclusions(monkeypatch, tmp_path) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    import polars as pl
+
+    from src.core.config import CollectorSettings
+    from src.execution.kis_client import KisRankingRow
+    from src.orchestration import daemon
+    from src.universe.ipc import read_candidate_snapshot
+
+    settings = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
+    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "date": [dt.date(2026, 9, 16)],
+        "symbol": ["005935"],
+        "stock_cert_kind": ["구형우선주"],
+        "section": [None],
+    }).write_parquet(settings.paths.bars_store)
+
+    class FakeClient:
+        def get_trade_amount_ranking(self):
+            return (
+                KisRankingRow(symbol='005935', rank=1, change_pct=1.0, trade_value_krw=100),
+                KisRankingRow(symbol='005930', rank=2, change_pct=1.0, trade_value_krw=90),
+            )
+
+        def get_fluctuation_ranking(self):
+            return (
+                KisRankingRow(symbol='005935', rank=1, change_pct=1.0, trade_value_krw=100),
+                KisRankingRow(symbol='005930', rank=2, change_pct=1.0, trade_value_krw=90),
+            )
+
+    class Supervisor:
+        def __init__(self, *, cmd, breaker):
+            pass
+        def ensure_running(self):
+            return 'running'
+        def stop(self, *, timeout_s=15.0):
+            return 'stopped'
+
+    monkeypatch.setattr(daemon, '_build_kis_client', lambda _: FakeClient())
+    monkeypatch.setattr(daemon, 'run_session_orchestration', lambda **_: True)
+    monkeypatch.setattr(daemon, '_resolve_trading_day_with_cache', lambda *_: None)
+    monkeypatch.setattr(daemon, 'ProcessSupervisor', Supervisor)
+    kst = ZoneInfo('Asia/Seoul')
+    times = iter([dt.datetime(2026, 9, 16, 15, 31, tzinfo=kst)])
+
+    daemon.run_collector_daemon(settings=settings, now_fn=lambda: next(times), sleep_fn=MagicMock(), max_cycles=1)
+
+    snapshot = read_candidate_snapshot(
+        settings.paths.aftermarket_candidates(dt.date(2026, 9, 16)),
+        expected_session_date=dt.date(2026, 9, 16), expected_session='aftermarket', max_candidates=40,
+    )
+    assert [row['symbol'] for row in snapshot.candidates] == ['005930']
+
+
+def test_daemon_reselection_degrades_once_without_bar_store(monkeypatch, tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.execution.contracts import KisApiError
+    from src.execution.kis_client import KisRankingRow
+    from src.orchestration import daemon
+
+    settings = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
+
+    class FakeClient:
+        def get_trade_amount_ranking(self):
+            return (KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=100),)
+
+        def get_fluctuation_ranking(self):
+            return (KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=100),)
+
+    attempts = 0
+
+    def fail_once(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise KisApiError('SCHEMA', 'temporary failure')
+        from src.universe import aftermarket as aftermarket_mod
+        return aftermarket_mod.refresh_aftermarket_candidates(**kwargs)
+
+    class Supervisor:
+        def __init__(self, *, cmd, breaker):
+            pass
+        def ensure_running(self):
+            return 'running'
+        def stop(self, *, timeout_s=15.0):
+            return 'stopped'
+
+    monkeypatch.setattr(daemon, '_build_kis_client', lambda _: FakeClient())
+    monkeypatch.setattr(daemon, 'refresh_aftermarket_candidates', fail_once)
+    monkeypatch.setattr(daemon, 'run_session_orchestration', lambda **_: True)
+    monkeypatch.setattr(daemon, '_resolve_trading_day_with_cache', lambda *_: None)
+    monkeypatch.setattr(daemon, 'ProcessSupervisor', Supervisor)
+    kst = ZoneInfo('Asia/Seoul')
+    times = iter([
+        dt.datetime(2026, 9, 16, 15, 31, 0, tzinfo=kst),
+        dt.datetime(2026, 9, 16, 15, 32, 5, tzinfo=kst),
+    ])
+
+    with caplog.at_level(logging.WARNING):
+        daemon.run_collector_daemon(settings=settings, now_fn=lambda: next(times), sleep_fn=MagicMock(), max_cycles=2)
+
+    assert attempts == 2
+    assert settings.paths.aftermarket_candidates(dt.date(2026, 9, 16)).exists()
+    degraded = [record for record in caplog.records if 'stage=aftermarket_eligibility' in record.getMessage()]
+    assert len(degraded) == 1
+    assert 'reason=no_bars_store' in degraded[0].getMessage()
+
+
+def test_daemon_reselection_degrades_on_unreadable_bar_store(monkeypatch, tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.execution.kis_client import KisRankingRow
+    from src.orchestration import daemon
+
+    settings = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
+    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_store.write_bytes(b'\x00\x01broken-parquet')
+
+    class FakeClient:
+        def get_trade_amount_ranking(self):
+            return (KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=100),)
+
+        def get_fluctuation_ranking(self):
+            return (KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=100),)
+
+    class Supervisor:
+        def __init__(self, *, cmd, breaker):
+            pass
+        def ensure_running(self):
+            return 'running'
+        def stop(self, *, timeout_s=15.0):
+            return 'stopped'
+
+    monkeypatch.setattr(daemon, '_build_kis_client', lambda _: FakeClient())
+    monkeypatch.setattr(daemon, 'run_session_orchestration', lambda **_: True)
+    monkeypatch.setattr(daemon, '_resolve_trading_day_with_cache', lambda *_: None)
+    monkeypatch.setattr(daemon, 'ProcessSupervisor', Supervisor)
+    kst = ZoneInfo('Asia/Seoul')
+    times = iter([dt.datetime(2026, 9, 16, 15, 31, tzinfo=kst)])
+
+    with caplog.at_level(logging.WARNING):
+        daemon.run_collector_daemon(settings=settings, now_fn=lambda: next(times), sleep_fn=MagicMock(), max_cycles=1)
+
+    assert settings.paths.aftermarket_candidates(dt.date(2026, 9, 16)).exists()
+    degraded = [record for record in caplog.records if 'stage=aftermarket_eligibility' in record.getMessage()]
+    assert len(degraded) == 1
+    assert 'reason=bars_unreadable' in degraded[0].getMessage()
+
+
 
 def test_run_session_orchestration_passes_status_source_and_store(tmp_path, monkeypatch) -> None:
     # Given: KIS 자격증명 없이 plan_universe를 가짜로 둔 오케스트레이션

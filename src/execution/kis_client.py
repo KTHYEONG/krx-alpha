@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from src.core.config import KisCredentials
+from src.core.symbols import is_krx_short_code
 from src.execution.contracts import (
     BrokerOrderStatus,
     BrokerOutcome,
@@ -104,8 +105,9 @@ def _parse_ranking_rows(rows: list[dict[str, Any]]) -> tuple[KisRankingRow, ...]
         seen: set[str] = set()
         for row in rows:
             symbol = str(row.get("stck_shrn_iscd", ""))
-            # 6자리 숫자 보통주 코드가 아니거나 중복 종목이면 건너뛴다
-            if not (symbol.isdigit() and len(symbol) == 6) or symbol in seen:
+            # 형태가 깨진 코드는 건너뛴다. 종목 구분(보통주 여부)은 바 분류
+            # 메타데이터로 하류에서 걸러내므로 여기서 판단하지 않는다.
+            if not is_krx_short_code(symbol) or symbol in seen:
                 continue
             change_raw = str(row.get("prdy_ctrt", ""))
             try:
@@ -747,7 +749,7 @@ class KisRestClient:
             "liquidation_trading": _snapshot_yn(output, "sltr_yn"),
             "trading_halted": _snapshot_yn(output, "temp_stop_yn"),
             "vi_code": _snapshot_code(output, "vi_cls_code"),
-            "overtime_vi_code": _snapshot_code(output, "ovtm_vi_cls_code"),
+            "ovtm_vi_cls_code": _snapshot_code(output, "ovtm_vi_cls_code"),
             "credit_available": _snapshot_yn(output, "crdt_able_yn"),
             "last_price": _snapshot_int(output, "stck_prpr"),
             "base_price": _snapshot_int(output, "stck_sdpr"),

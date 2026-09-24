@@ -15,6 +15,7 @@ from src.marketdata.snapshot_contracts import (
     SNAPSHOT_DEDUP_KEYS,
     SNAPSHOT_SCHEMAS,
     SnapshotDataset,
+    normalize_legacy_snapshot_columns,
     snapshot_row_violations,
 )
 
@@ -59,6 +60,10 @@ class SnapshotStore:
                 loaded = pl.read_parquet(path)
             except Exception as exc:
                 raise SnapshotStoreError(f"unreadable snapshot partition: {path} ({exc})") from exc
+            try:
+                loaded = normalize_legacy_snapshot_columns(dataset, loaded)
+            except ValueError as exc:
+                raise SnapshotStoreError(f"schema mismatch in snapshot partition: {path} ({exc})") from exc
             if set(loaded.columns) != set(schema):
                 raise SnapshotStoreError(f"schema mismatch in snapshot partition: {path}")
             try:

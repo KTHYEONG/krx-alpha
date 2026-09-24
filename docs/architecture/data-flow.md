@@ -135,6 +135,10 @@ EOD 배치 단계에서 동일 `(conn_id, conn_seq)`로 중복을 제거하고 �
 | `conn_id` | `pl.String` | 웹소켓 연결 고유 식별자 |
 | `vendor` | `pl.String` | 벤더명 (`"ls"`) |
 | `tr_id` | `pl.String` | 스트림 식별자 (`"H0STCNT0"`, `"H0STASP0"`) |
+| `exchange_event_time` | `pl.String` | 거래소 이벤트 시각 (`HHMMSS`, KST; 수집 시 비어 있으면 LS 본문에서 채움) |
+| `market_phase` | `pl.String` | `MarketPhase` 값 (거래소 이벤트 시각 기준 세션 구간) |
+
+세션 소속은 파티션 이름이 아니라 `market_phase`로 필터링해야 하며, venue 라우팅 이전에 기록된 레거시 L1 파일은 `annotate_market_phase`로 읽는 시점에 주석이 부여된다.
 
 ---
 
@@ -161,3 +165,20 @@ EOD 배치 단계에서 동일 `(conn_id, conn_seq)`로 중복을 제거하고 �
    * 매도호가 10단계: $offerho_1 < offerho_2 < \dots < offerho_{10}$
    * 매수호가 10단계: $bidho_1 > bidho_2 > \dots > bidho_{10}$
    * 각 호가 잔량이 음수이거나($rem < 0$), 동시호가 시간대(08:30~09:00, 15:20~15:30) 외에서 최우선 매수호가가 최우선 매도호가 이상인 크로스북($bidho_1 \ge offerho_1$) 발생 시 품질 경고를 기록합니다.
+
+### 4.4 Market Session Taxonomy
+세션 명칭과 시간대(KST)는 2026-09-14 개편 확정값이다.
+
+| Venue | Canonical name (KO) | Window (KST) | Nature |
+|---|---|---|---|
+| KRX | 장전 시간외종가 | 08:30~08:40 | single price (previous close) |
+| KRX | 시가 동시호가 | 08:30~09:00 (quotes) | opening auction |
+| KRX | 정규장 | 09:00~15:20 | continuous |
+| KRX | 종가 동시호가 | 15:20~15:30 | closing auction |
+| KRX | 장후 시간외종가 | 15:40~16:00 | single price (same-day 15:30 close) |
+| KRX | 애프터마켓 | 16:00~20:00 | continuous |
+| NXT | 애프터마켓 | 15:40~20:00 | continuous |
+
+어휘 규칙: 기존 KRX 16:00~18:00 단일가 세션은 폐지되어 해당 명칭을 사용하지 않는다. 위 표의 두 종가 토큰에 포함된 형태가 아닌 단독 사용은 금지되며, 영어 표기는 `aftermarket`으로 통일한다.
+
+KRX 일봉은 2026-09-14 이후 `close`가 15:30 정규장 종가인 반면 `volume`·`trade_value_100m`은 20:00까지의 애프터마켓을 포함한다(2026-09-22 54/54 종목 실측 확인).

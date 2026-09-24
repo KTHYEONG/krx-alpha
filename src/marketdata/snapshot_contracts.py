@@ -50,7 +50,9 @@ SNAPSHOT_SCHEMAS: dict[SnapshotDataset, dict[str, Any]] = {
         "liquidation_trading": pl.Boolean,
         "trading_halted": pl.Boolean,
         "vi_code": pl.String,
-        "overtime_vi_code": pl.String,
+        # KIS 필드 `ovtm_vi_cls_code`를 그대로 전달하는 값이다. 2026-09-14 개편 이후
+        # 어느 세션을 가리키는지는 미확인이므로 애프터마켓 VI 플래그로 해석해서는 안 된다.
+        "ovtm_vi_cls_code": pl.String,
         "credit_available": pl.Boolean,
         "last_price": pl.Int64,
         "base_price": pl.Int64,
@@ -156,6 +158,11 @@ SNAPSHOT_DEDUP_KEYS: dict[SnapshotDataset, tuple[str, ...]] = {
     SnapshotDataset.INDEX_MINUTE_BAR: ("index_code", "bar_time"),
     SnapshotDataset.NEWS_TITLE: ("news_id",),
     SnapshotDataset.STOCK_MINUTE_BAR: ("symbol", "bar_time"),
+}
+
+
+SNAPSHOT_LEGACY_COLUMN_RENAMES: dict[SnapshotDataset, dict[str, str]] = {
+    SnapshotDataset.SECURITY_STATUS: {"overtime_vi_code": "ovtm_vi_cls_code"},
 }
 
 
@@ -323,6 +330,40 @@ def partition_due_jobs(
         elif now >= job.not_after:
             expired.append(job)
     return tuple(due), tuple(expired)
+
+
+def normalize_legacy_snapshot_columns(dataset: SnapshotDataset, frame: pl.DataFrame) -> pl.DataFrame:
+    """Rename legacy snapshot columns to their current contract names.
+
+    Partitions written before a column rename stay byte-identical on local
+    disk and on the remote archive (their size-verified copies remain valid),
+    so compatibility is provided at the read boundary instead of rewriting
+    history. Readers of historical partitions must call this before applying
+    ``SNAPSHOT_SCHEMAS``.
+
+    Args:
+        dataset: Snapshot dataset the frame belongs to.
+        frame: Frame as read from a stored partition.
+
+    Returns:
+        Frame whose legacy column names are replaced by current names; all
+        other columns, their order and values are untouched.
+
+    Raises:
+        ValueError: If a legacy column and its current name coexist, because
+            choosing one would silently discard observed values.
+    """
+    renames = SNAPSHOT_LEGACY_COLUMN_RENAMES.get(dataset)
+    if not renames:
+        return frame
+    columns = frame.columns
+    for legacy, current in renames.items():
+        if legacy in columns and current in columns:
+            raise ValueError(f"legacy and current columns coexist: {legacy} and {current}")
+    active = {legacy: current for legacy, current in renames.items() if legacy in columns}
+    if not active:
+        return frame
+    return frame.rename(active)
 
 
 def snapshot_row_violations(dataset: SnapshotDataset, frame: pl.DataFrame) -> pl.Series:

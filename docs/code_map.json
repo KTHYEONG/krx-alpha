@@ -945,5 +945,8 @@
   },
   "src/orchestration/deploy_gate.py": {
     "testing": "tests/unit/orchestration/test_deploy_gate.py"
+  },
+  "src/storage/market_phase.py": {
+    "testing": "tests/unit/storage/test_market_phase.py"
   }
 }

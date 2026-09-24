@@ -543,8 +543,8 @@ def test_kis_rankings_use_correct_trs_and_reject_schema(tmp_path) -> None:
     assert excinfo.value.msg_cd == 'SCHEMA'
 
 
-def test_ranking_parser_skips_non_digit_symbol_and_retains_valid_rows(tmp_path) -> None:
-    """실측 회귀: 거래대금 랭킹에 우선주/특수증권(예: 0161M0)이 유입되어도 해당 종목만 건너뛰고 정상 종목으로 랭킹을 구성한다."""
+def test_ranking_parser_keeps_alphanumeric_new_listing_in_input_order(tmp_path) -> None:
+    """신규 상장 alphanumeric 단축코드(예: 0007J0)도 형태가 올바르면 랭킹에 유지하고 순위를 연속 부여한다."""
     from tests.unit.execution.fakes import FakeResponse, make_client
 
     mixed = FakeResponse({
@@ -553,17 +553,32 @@ def test_ranking_parser_skips_non_digit_symbol_and_retains_valid_rows(tmp_path) 
         'msg1': 'ok',
         'output': [
             {'mksc_shrn_iscd': '005930', 'prdy_ctrt': '1.25', 'acml_tr_pbmn': '100000'},
-            {'mksc_shrn_iscd': '0161M0', 'prdy_ctrt': '29.50', 'acml_tr_pbmn': '50000'},  # 비정형 종목코드
+            {'mksc_shrn_iscd': '0007J0', 'prdy_ctrt': '29.50', 'acml_tr_pbmn': '50000'},
             {'mksc_shrn_iscd': '000660', 'prdy_ctrt': '3.40', 'acml_tr_pbmn': '80000'},
         ],
     })
     client, _, _ = make_client(tmp_path, [mixed])
     ranking = client.get_trade_amount_ranking()
-    assert len(ranking) == 2
-    assert ranking[0].symbol == '005930'
+    assert [row.symbol for row in ranking] == ['005930', '0007J0', '000660']
+    assert [row.rank for row in ranking] == [1, 2, 3]
+
+
+def test_ranking_parser_skips_malformed_code_without_voiding_list(tmp_path) -> None:
+    from tests.unit.execution.fakes import FakeResponse, make_client
+
+    mixed = FakeResponse({
+        'rt_cd': '0',
+        'msg_cd': '0',
+        'msg1': 'ok',
+        'output': [
+            {'mksc_shrn_iscd': '00593', 'prdy_ctrt': '1.25', 'acml_tr_pbmn': '100000'},
+            {'mksc_shrn_iscd': '005930', 'prdy_ctrt': '1.25', 'acml_tr_pbmn': '100000'},
+        ],
+    })
+    client, _, _ = make_client(tmp_path, [mixed])
+    ranking = client.get_trade_amount_ranking()
+    assert [row.symbol for row in ranking] == ['005930']
     assert ranking[0].rank == 1
-    assert ranking[1].symbol == '000660'
-    assert ranking[1].rank == 2
 
 
 def test_fluctuation_ranking_defaults_missing_trade_value_to_zero(tmp_path) -> None:
@@ -629,7 +644,7 @@ def test_get_security_status_maps_flags_and_limits(tmp_path) -> None:
         'liquidation_trading': False,
         'trading_halted': False,
         'vi_code': '',
-        'overtime_vi_code': '',
+        'ovtm_vi_cls_code': '',
         'credit_available': True,
         'last_price': 70000,
         'base_price': 69500,
@@ -637,6 +652,17 @@ def test_get_security_status_maps_flags_and_limits(tmp_path) -> None:
         'lower_limit': 48650,
     }
     assert session.calls[0]['params'] == {'FID_COND_MRKT_DIV_CODE': 'J', 'FID_INPUT_ISCD': '005930'}
+
+
+def test_get_security_status_emits_vendor_verbatim_vi_key(tmp_path) -> None:
+    from tests.unit.execution.fakes import make_client
+
+    client, _, _ = make_client(tmp_path, [_ok({'output': _status_output(ovtm_vi_cls_code='2')})])
+
+    row = client.get_security_status('005930')
+
+    assert row['ovtm_vi_cls_code'] == '2'
+    assert 'overtime_vi_code' not in row
 
 
 def test_get_security_status_rejects_unknown_flag_value(tmp_path) -> None:

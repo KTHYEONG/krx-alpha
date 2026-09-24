@@ -37,7 +37,7 @@ _KST = ZoneInfo("Asia/Seoul")
 
 def regular_session_silence_limit_s(now: dt.datetime, *, limit_s: float = SILENCE_LIMIT_S) -> float | None:
     # 2026-09-14 L0 실측: 장중(09:00-15:30) 프레임 간격 최대 0.4s에 불과해 30s 침묵은 장애다.
-    # 반면 장전/장후 침묵은 22-450s까지 정상이므로 정규 세션 시간대에만 침묵 감시를 켠다.
+    # 반면 정규장 밖 구간(장전 시간외종가·동시호가·장후 시간외종가·애프터마켓) 침묵은 22-450s까지 정상이므로 정규 세션 시간대에만 침묵 감시를 켠다.
     if _REGULAR_OPEN <= now.astimezone(_KST).time() < _REGULAR_CLOSE:
         return limit_s
     return None

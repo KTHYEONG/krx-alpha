@@ -383,6 +383,17 @@ def _seed_ranking(store, rows: list) -> None:
     store.append(SnapshotDataset.RANKING, rows)
 
 
+def test_eod_targets_include_alphanumeric_movers(tmp_path) -> None:
+    from src.core.config import DataPaths, SnapshotSettings
+    from src.marketdata.snapshot_service import _eod_targets
+    from src.storage.snapshot_store import SnapshotStore
+
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    _seed_ranking(store, [_ranking_row("0161M0", 1, 50)])
+
+    assert "0161M0" in _eod_targets(store, SnapshotSettings(), ("005930",))
+
+
 def test_eod_minute_bars_selects_first_seen_non_universe_symbols(tmp_path) -> None:
     from src.core.config import DataPaths
     from src.storage.snapshot_store import SnapshotStore

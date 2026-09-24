@@ -186,7 +186,7 @@ def test_snapshot_row_violations_accepts_clean_security_status_row() -> None:
     row = _common(
         symbol="005930", status_code="00", managed=False, market_warning_code="00",
         short_overheated=False, investment_caution=False, liquidation_trading=False,
-        trading_halted=False, vi_code="00", overtime_vi_code="00", credit_available=True,
+        trading_halted=False, vi_code="00", ovtm_vi_cls_code="00", credit_available=True,
         last_price=70000, base_price=69300, upper_limit=80000, lower_limit=60000,
     )
     mask = snapshot_row_violations(SnapshotDataset.SECURITY_STATUS, _frame(SnapshotDataset.SECURITY_STATUS, [row]))
@@ -199,7 +199,7 @@ def test_snapshot_row_violations_flags_price_outside_limit_band() -> None:
     row = _common(
         symbol="005930", status_code="00", managed=False, market_warning_code="00",
         short_overheated=False, investment_caution=False, liquidation_trading=False,
-        trading_halted=False, vi_code="00", overtime_vi_code="00", credit_available=True,
+        trading_halted=False, vi_code="00", ovtm_vi_cls_code="00", credit_available=True,
         last_price=90000, base_price=69300, upper_limit=80000, lower_limit=60000,
     )
     mask = snapshot_row_violations(SnapshotDataset.SECURITY_STATUS, _frame(SnapshotDataset.SECURITY_STATUS, [row]))
@@ -252,3 +252,66 @@ def test_snapshot_row_violations_returns_empty_mask_for_empty_frame() -> None:
     frame = pl.DataFrame(schema=SNAPSHOT_SCHEMAS[SnapshotDataset.RANKING], strict=True)
     mask = snapshot_row_violations(SnapshotDataset.RANKING, frame)
     assert len(mask) == 0
+
+
+def _security_status_frame(columns: list[str], values: list[object]):
+    import polars as pl
+
+    return pl.DataFrame([values], schema=columns, orient="row")
+
+
+def test_normalize_legacy_snapshot_columns_renames_legacy_column() -> None:
+    from src.marketdata.snapshot_contracts import (
+        SNAPSHOT_SCHEMAS,
+        SnapshotDataset,
+        normalize_legacy_snapshot_columns,
+    )
+
+    current = list(SNAPSHOT_SCHEMAS[SnapshotDataset.SECURITY_STATUS])
+    legacy = [c if c != "ovtm_vi_cls_code" else "overtime_vi_code" for c in current]
+    idx = legacy.index("overtime_vi_code")
+    values: list[object] = [f"v{i}" for i in range(len(legacy))]
+    values[idx] = "01"
+    frame = _security_status_frame(legacy, values)
+
+    out = normalize_legacy_snapshot_columns(SnapshotDataset.SECURITY_STATUS, frame)
+
+    assert out.columns == current
+    assert out["ovtm_vi_cls_code"].to_list() == ["01"]
+    assert "overtime_vi_code" not in out.columns
+
+
+def test_normalize_legacy_snapshot_columns_leaves_current_frame_untouched() -> None:
+    from src.marketdata.snapshot_contracts import (
+        SNAPSHOT_SCHEMAS,
+        SnapshotDataset,
+        normalize_legacy_snapshot_columns,
+    )
+
+    columns = list(SNAPSHOT_SCHEMAS[SnapshotDataset.SECURITY_STATUS])
+    frame = _security_status_frame(columns, [f"v{i}" for i in range(len(columns))])
+
+    out = normalize_legacy_snapshot_columns(SnapshotDataset.SECURITY_STATUS, frame)
+
+    assert out.equals(frame)
+
+
+def test_normalize_legacy_snapshot_columns_rejects_coexisting_names() -> None:
+    import pytest
+
+    from src.marketdata.snapshot_contracts import SnapshotDataset, normalize_legacy_snapshot_columns
+
+    frame = _security_status_frame(["overtime_vi_code", "ovtm_vi_cls_code"], ["a", "b"])
+
+    with pytest.raises(ValueError, match="coexist"):
+        normalize_legacy_snapshot_columns(SnapshotDataset.SECURITY_STATUS, frame)
+
+
+def test_normalize_legacy_snapshot_columns_passes_through_dataset_without_aliases() -> None:
+    from src.marketdata.snapshot_contracts import SnapshotDataset, normalize_legacy_snapshot_columns
+
+    frame = _security_status_frame(["list_kind", "rank"], ["fluctuation", 1])
+
+    out = normalize_legacy_snapshot_columns(SnapshotDataset.RANKING, frame)
+
+    assert out.equals(frame)

@@ -13,6 +13,7 @@ from typing import Any
 import polars as pl
 
 from src.core.errors import KrxAlphaError
+from src.core.symbols import is_krx_short_code
 from src.execution.contracts import KisApiError
 from src.execution.kis_client import KisRestClient, RateLimiter
 from src.marketdata.krx_bars import (
@@ -68,12 +69,12 @@ def backfill_program_trades(
     problem symbol can be corrected by re-running the tool, but losing every
     already-fetched symbol's history to one bad response would waste the
     Raises:
-        ValueError: If ``symbols`` is empty or contains a non-6-digit code.
+        ValueError: If ``symbols`` is empty or contains a malformed KRX short code.
         TossProgramTradesError: If the initial token issuance fails.
     """
     unique = list(dict.fromkeys(symbols))
-    if not unique or any(len(code) != 6 or not code.isdigit() for code in unique):
-        raise ValueError(f"symbols must be non-empty 6-digit codes: {list(symbols)!r}")
+    if not unique or any(not is_krx_short_code(code) for code in unique):
+        raise ValueError(f"symbols must be non-empty KRX short codes: {list(symbols)!r}")
     try:
         token = issue_access_token(app_key=app_key, app_secret=app_secret, session=session)
     except TossCalendarError as exc:
@@ -125,11 +126,11 @@ def backfill_universe_program_trades(
     """
     if not symbols:
         return ProgramTradesBackfillResult(symbols_ok=0, symbols_failed=0, appended_rows=0)
-    clean_symbols = tuple(code for code in symbols if len(code) == 6 and code.isdigit())
+    clean_symbols = tuple(code for code in symbols if is_krx_short_code(code))
     skipped = set(symbols) - set(clean_symbols)
     if skipped:
         logger.warning(
-            "[DATA] stage=toss_program_backfill status=SKIP_NON_DIGIT symbols=%s", sorted(skipped)
+            "[DATA] stage=toss_program_backfill status=SKIP_INVALID_CODE symbols=%s", sorted(skipped)
         )
     if not clean_symbols:
         return ProgramTradesBackfillResult(symbols_ok=0, symbols_failed=0, appended_rows=0)

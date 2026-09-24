@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.core.errors import KrxAlphaError
+from src.core.symbols import is_krx_short_code
 
 
 class CandidateFileError(KrxAlphaError):
@@ -68,7 +69,13 @@ def read_candidate_snapshot(
     max_candidates: int,
 ) -> CandidateSnapshot:
     try:
-        data: dict[str, Any] = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        text = pathlib.Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise CandidateFileError(f"missing candidate snapshot: {path}") from exc
+    except OSError as exc:
+        raise CandidateFileError(f"corrupt candidate snapshot: {path}") from exc
+    try:
+        data: dict[str, Any] = json.loads(text)
         schema_version = data["schema_version"]
         rev = data["rev"]
         session_date = dt.date.fromisoformat(str(data["session_date"]))
@@ -97,7 +104,7 @@ def read_candidate_snapshot(
             or max_candidates < 1
             or len(rows) > max_candidates
             or len(set(symbols)) != len(symbols)
-            or any(not (symbol.isdigit() and len(symbol) == 6) for symbol in symbols)
+            or any(not is_krx_short_code(symbol) for symbol in symbols)
             or sorted(ranks) != list(range(1, len(rows) + 1))
         ):
             raise ValueError(f"invalid candidate snapshot: {path}")

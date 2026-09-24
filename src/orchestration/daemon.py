@@ -63,6 +63,7 @@ from src.storage.remote import RemoteArchiveError
 from src.storage.snapshot_store import SnapshotStore
 from src.universe.aftermarket import AftermarketUniverseError, refresh_aftermarket_candidates
 from src.universe.ipc import CandidateFileError, read_candidate_snapshot, read_candidates
+from src.universe.policy import ineligible_security_symbols
 from src.universe.service import UniversePlanResult as UniversePlanResult
 from src.universe.service import plan_universe
 
@@ -373,6 +374,7 @@ def run_collector_daemon(
     aftermarket_plan: tuple[AftermarketShard, ...] = ()
     aftermarket_plan_day: dt.date | None = None
     aftermarket_refresh_day: dt.date | None = None
+    aftermarket_eligibility_day: dt.date | None = None
     next_aftermarket_refresh_at: dt.datetime | None = None
     snapshot_cfg = SnapshotSettings()
     snapshot_supervisor: ProcessSupervisor | None = None
@@ -582,6 +584,30 @@ def run_collector_daemon(
                         and aftermarket_refresh_day != today
                         and (next_aftermarket_refresh_at is None or now >= next_aftermarket_refresh_at)
                     ):
+                        excluded_symbols: frozenset[str]
+                        if paths.bars_store.exists():
+                            try:
+                                eligibility_bars = (
+                                    pl.scan_parquet(paths.bars_store)
+                                    .select(["date", "symbol", "stock_cert_kind", "section"])
+                                    .collect()
+                                )
+                            except (OSError, pl.exceptions.PolarsError):
+                                excluded_symbols = frozenset()
+                                if aftermarket_eligibility_day != today:
+                                    aftermarket_eligibility_day = today
+                                    logger.warning(
+                                        "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=bars_unreadable"
+                                    )
+                            else:
+                                excluded_symbols = ineligible_security_symbols(eligibility_bars)
+                        else:
+                            excluded_symbols = frozenset()
+                            if aftermarket_eligibility_day != today:
+                                aftermarket_eligibility_day = today
+                                logger.warning(
+                                    "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=no_bars_store"
+                                )
                         try:
                             refresh_aftermarket_candidates(
                                 session_date=today,
@@ -589,6 +615,7 @@ def run_collector_daemon(
                                 client=_build_kis_client(paths),
                                 out_path=paths.aftermarket_candidates(today),
                                 capacity=after_cfg.max_symbols,
+                                excluded_symbols=excluded_symbols,
                             )
                             aftermarket_refresh_day = today
                             next_aftermarket_refresh_at = None
