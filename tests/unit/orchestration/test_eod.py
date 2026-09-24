@@ -157,81 +157,187 @@ def test_run_eod_offload_uses_rclone_archiver_by_default(tmp_path, caplog, monke
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
 
 
-def test_check_session_reconciliation_true_when_bars_store_missing(tmp_path) -> None:
+def _write_routed_journal(journal_root, *, vendor="ls", venue="krx", session="regular", stream, date) -> None:
+    part = journal_root / vendor / venue / session / stream / f"dt={date.isoformat()}"
+    part.mkdir(parents=True, exist_ok=True)
+    (part / "10.jsonl.zst").write_bytes(b"x")
+
+
+def _write_session_manifest(path, day, gaps=()) -> None:
+    from src.realtime.manifest import SessionManifest
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = SessionManifest(session_date=day, clock_offset_ns=0, started_at_ns=0)
+    for symbol, start, end in gaps:
+        manifest.record_gap(symbol=symbol, gap_start_ns=start, gap_end_ns=end, reason="disconnect")
+    manifest.save(path)
+
+
+def test_check_session_reconciliation_passes_for_complete_routed_session(tmp_path, caplog) -> None:
     import datetime as dt
+    import logging
 
     from src.orchestration.eod import check_session_reconciliation
 
-    ok = check_session_reconciliation(
-        bars_store=tmp_path / "bars" / "daily.parquet",
-        manifest_path=tmp_path / "manifest" / "2026-09-10.json",
-        date=dt.date(2026, 9, 10),
-    )
+    day = dt.date(2026, 9, 14)
+    journal_root = tmp_path / "l0"
+    _write_routed_journal(journal_root, stream="H0STCNT0", date=day)
+    _write_routed_journal(journal_root, stream="H0STASP0", date=day)
+    manifest_path = tmp_path / "manifest" / "2026-09-14.json"
+    _write_session_manifest(manifest_path, day)
+
+    with caplog.at_level(logging.CRITICAL):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+        )
 
     assert ok is True
+    assert not [r for r in caplog.records if r.levelno == logging.CRITICAL]
 
 
-def test_check_session_reconciliation_true_when_no_bars_rows_for_date(tmp_path) -> None:
+def test_check_session_reconciliation_fails_for_missing_stream_journal(tmp_path, caplog) -> None:
     import datetime as dt
-
-    import polars as pl
+    import logging
 
     from src.orchestration.eod import check_session_reconciliation
 
-    store = tmp_path / "bars" / "daily.parquet"
-    store.parent.mkdir(parents=True)
-    pl.DataFrame({
-        "date": [dt.date(2026, 9, 9)], "symbol": ["000001"], "close": [1000.0],
-        "volume": [1000], "trade_value_100m": [1.0], "daily_change_pct": [0.0],
-    }).write_parquet(store)
+    day = dt.date(2026, 9, 14)
+    journal_root = tmp_path / "l0"
+    _write_routed_journal(journal_root, stream="H0STCNT0", date=day)
+    manifest_path = tmp_path / "manifest" / "2026-09-14.json"
+    _write_session_manifest(manifest_path, day)
 
-    ok = check_session_reconciliation(
-        bars_store=store, manifest_path=tmp_path / "manifest" / "2026-09-10.json", date=dt.date(2026, 9, 10)
-    )
-
-    assert ok is True
-
-
-def test_check_session_reconciliation_false_when_bars_exist_without_manifest(tmp_path) -> None:
-    import datetime as dt
-
-    import polars as pl
-
-    from src.orchestration.eod import check_session_reconciliation
-
-    store = tmp_path / "bars" / "daily.parquet"
-    store.parent.mkdir(parents=True)
-    pl.DataFrame({
-        "date": [dt.date(2026, 9, 10)], "symbol": ["000001"], "close": [1000.0],
-        "volume": [1000], "trade_value_100m": [1.0], "daily_change_pct": [0.0],
-    }).write_parquet(store)
-
-    ok = check_session_reconciliation(
-        bars_store=store, manifest_path=tmp_path / "manifest" / "2026-09-10.json", date=dt.date(2026, 9, 10)
-    )
+    with caplog.at_level(logging.CRITICAL):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+        )
 
     assert ok is False
+    assert "reasons=journal_missing:H0STASP0" in caplog.text
 
 
-def test_check_session_reconciliation_true_when_manifest_present(tmp_path) -> None:
+def test_check_session_reconciliation_rejects_legacy_layout(tmp_path, caplog) -> None:
     import datetime as dt
-
-    import polars as pl
+    import logging
 
     from src.orchestration.eod import check_session_reconciliation
 
-    store = tmp_path / "bars" / "daily.parquet"
-    store.parent.mkdir(parents=True)
-    pl.DataFrame({
-        "date": [dt.date(2026, 9, 10)], "symbol": ["000001"], "close": [1000.0],
-        "volume": [1000], "trade_value_100m": [1.0], "daily_change_pct": [0.0],
-    }).write_parquet(store)
-    manifest_path = tmp_path / "manifest" / "2026-09-10.json"
-    manifest_path.parent.mkdir(parents=True)
-    manifest_path.write_text("{}", encoding="utf-8")
+    day = dt.date(2026, 9, 14)
+    journal_root = tmp_path / "l0"
+    for stream in ("H0STCNT0", "H0STASP0"):
+        part = journal_root / "ls" / stream / "dt=2026-09-14"
+        part.mkdir(parents=True, exist_ok=True)
+        (part / "10.jsonl.zst").write_bytes(b"x")
+    manifest_path = tmp_path / "manifest" / "2026-09-14.json"
+    _write_session_manifest(manifest_path, day)
 
-    ok = check_session_reconciliation(bars_store=store, manifest_path=manifest_path, date=dt.date(2026, 9, 10))
+    with caplog.at_level(logging.CRITICAL):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+        )
 
+    assert ok is False
+    assert "journal_missing:H0STCNT0" in caplog.text
+
+
+def test_check_session_reconciliation_fails_for_missing_manifest(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    day = dt.date(2026, 9, 14)
+    journal_root = tmp_path / "l0"
+    _write_routed_journal(journal_root, stream="H0STCNT0", date=day)
+    _write_routed_journal(journal_root, stream="H0STASP0", date=day)
+
+    with caplog.at_level(logging.CRITICAL):
+        ok = check_session_reconciliation(
+            manifest_path=tmp_path / "manifest" / "2026-09-14.json",
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+        )
+
+    assert ok is False
+    assert "reasons=manifest_missing" in caplog.text
+
+
+def test_check_session_reconciliation_fails_for_gap_over_limit(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    kst = ZoneInfo("Asia/Seoul")
+    day = dt.date(2026, 9, 14)
+    journal_root = tmp_path / "l0"
+    _write_routed_journal(journal_root, stream="H0STCNT0", date=day)
+    _write_routed_journal(journal_root, stream="H0STASP0", date=day)
+    start_ns = int(dt.datetime(2026, 9, 14, 9, 10, tzinfo=kst).timestamp()) * 1_000_000_000
+    manifest_path = tmp_path / "manifest" / "2026-09-14.json"
+    _write_session_manifest(manifest_path, day, gaps=[("005930", start_ns, start_ns + 700_000_000_000)])
+
+    with caplog.at_level(logging.CRITICAL):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+        )
+
+    assert ok is False
+    assert "reasons=gap_exceeded:700s" in caplog.text
+
+
+def test_check_session_reconciliation_ignores_bars_store(tmp_path) -> None:
+    import datetime as dt
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    day = dt.date(2026, 9, 14)
+    journal_root = tmp_path / "l0"
+    _write_routed_journal(journal_root, stream="H0STCNT0", date=day)
+    _write_routed_journal(journal_root, stream="H0STASP0", date=day)
+    manifest_path = tmp_path / "manifest" / "2026-09-14.json"
+    _write_session_manifest(manifest_path, day)
+
+    ok = check_session_reconciliation(
+        manifest_path=manifest_path,
+        date=day,
+        journal_root=journal_root,
+        streams=("H0STCNT0", "H0STASP0"),
+        vendor="ls",
+        venue="krx",
+        session="regular",
+    )
+
+    assert (tmp_path / "bars" / "daily.parquet").exists() is False
     assert ok is True
 
 def test_run_eod_maintenance_retains_partition_when_isolated_worker_is_killed(tmp_path, monkeypatch, caplog) -> None:
@@ -275,23 +381,18 @@ def test_check_session_reconciliation_flags_gap_union_over_limit_in_regular_sess
     import logging
     from zoneinfo import ZoneInfo
 
-    import polars as pl
-
     from src.orchestration.eod import check_session_reconciliation
     from src.realtime.manifest import SessionManifest
 
     kst = ZoneInfo("Asia/Seoul")
     day = dt.date(2026, 9, 14)
-    store = tmp_path / "bars" / "daily.parquet"
-    store.parent.mkdir(parents=True)
-    pl.DataFrame({"date": [day], "symbol": ["000001"], "close": [1000.0], "volume": [1], "trade_value_100m": [1.0], "daily_change_pct": [0.0]}).write_parquet(store)
     journal_root = tmp_path / "l0"
 
     def ns(h, m):
         return int(dt.datetime(2026, 9, 14, h, m, tzinfo=kst).timestamp()) * 1_000_000_000
 
     def journal(stream):
-        part = journal_root / "ls" / stream / "dt=2026-09-14"
+        part = journal_root / "ls" / "krx" / "regular" / stream / "dt=2026-09-14"
         part.mkdir(parents=True, exist_ok=True)
         (part / "10.jsonl.zst").write_bytes(b"x")
 
@@ -308,8 +409,9 @@ def test_check_session_reconciliation_flags_gap_union_over_limit_in_regular_sess
     path = manifest_with([("005930", ns(9, 10), ns(9, 25)), ("000660", ns(9, 10), ns(9, 25))])
 
     with caplog.at_level(logging.CRITICAL):
-        ok = check_session_reconciliation(bars_store=store, manifest_path=path, date=day, journal_root=journal_root,
-                                          streams=("H0STCNT0", "H0STASP0"), vendor="ls")
+        ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
+                                          streams=("H0STCNT0", "H0STASP0"), vendor="ls",
+                                          venue="krx", session="regular")
 
     assert ok is False
     assert "[DATA] stage=session_reconciliation status=FAIL date=2026-09-14 reasons=gap_exceeded:900s" in caplog.text
@@ -319,23 +421,18 @@ def test_check_session_reconciliation_clips_gaps_outside_regular_session(tmp_pat
     import datetime as dt
     from zoneinfo import ZoneInfo
 
-    import polars as pl
-
     from src.orchestration.eod import check_session_reconciliation
     from src.realtime.manifest import SessionManifest
 
     kst = ZoneInfo("Asia/Seoul")
     day = dt.date(2026, 9, 14)
-    store = tmp_path / "bars" / "daily.parquet"
-    store.parent.mkdir(parents=True)
-    pl.DataFrame({"date": [day], "symbol": ["000001"], "close": [1000.0], "volume": [1], "trade_value_100m": [1.0], "daily_change_pct": [0.0]}).write_parquet(store)
     journal_root = tmp_path / "l0"
 
     def ns(h, m):
         return int(dt.datetime(2026, 9, 14, h, m, tzinfo=kst).timestamp()) * 1_000_000_000
 
     def journal(stream):
-        part = journal_root / "ls" / stream / "dt=2026-09-14"
+        part = journal_root / "ls" / "krx" / "regular" / stream / "dt=2026-09-14"
         part.mkdir(parents=True, exist_ok=True)
         (part / "10.jsonl.zst").write_bytes(b"x")
 
@@ -351,8 +448,9 @@ def test_check_session_reconciliation_clips_gaps_outside_regular_session(tmp_pat
     journal("H0STASP0")
     path = manifest_with([("005930", ns(8, 20), ns(8, 59)), ("005930", ns(15, 31), ns(15, 40)), ("005930", ns(9, 0), ns(9, 5))])
 
-    ok = check_session_reconciliation(bars_store=store, manifest_path=path, date=day, journal_root=journal_root,
-                                      streams=("H0STCNT0", "H0STASP0"), vendor="ls")
+    ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
+                                      streams=("H0STCNT0", "H0STASP0"), vendor="ls",
+                                      venue="krx", session="regular")
 
     assert ok is True
 
@@ -362,23 +460,15 @@ def test_check_session_reconciliation_flags_missing_stream_journal(tmp_path, cap
     import logging
     from zoneinfo import ZoneInfo
 
-    import polars as pl
-
     from src.orchestration.eod import check_session_reconciliation
     from src.realtime.manifest import SessionManifest
 
     kst = ZoneInfo("Asia/Seoul")
     day = dt.date(2026, 9, 14)
-    store = tmp_path / "bars" / "daily.parquet"
-    store.parent.mkdir(parents=True)
-    pl.DataFrame({"date": [day], "symbol": ["000001"], "close": [1000.0], "volume": [1], "trade_value_100m": [1.0], "daily_change_pct": [0.0]}).write_parquet(store)
     journal_root = tmp_path / "l0"
 
-    def ns(h, m):
-        return int(dt.datetime(2026, 9, 14, h, m, tzinfo=kst).timestamp()) * 1_000_000_000
-
     def journal(stream):
-        part = journal_root / "ls" / stream / "dt=2026-09-14"
+        part = journal_root / "ls" / "krx" / "regular" / stream / "dt=2026-09-14"
         part.mkdir(parents=True, exist_ok=True)
         (part / "10.jsonl.zst").write_bytes(b"x")
 
@@ -394,8 +484,9 @@ def test_check_session_reconciliation_flags_missing_stream_journal(tmp_path, cap
     path = manifest_with([])
 
     with caplog.at_level(logging.CRITICAL):
-        ok = check_session_reconciliation(bars_store=store, manifest_path=path, date=day, journal_root=journal_root,
-                                          streams=("H0STCNT0", "H0STASP0"), vendor="ls")
+        ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
+                                          streams=("H0STCNT0", "H0STASP0"), vendor="ls",
+                                          venue="krx", session="regular")
 
     assert ok is False
     assert "reasons=journal_missing:H0STASP0" in caplog.text
@@ -404,35 +495,16 @@ def test_check_session_reconciliation_flags_unreadable_manifest_in_substantive_m
 
     import datetime as dt
     import logging
-    from zoneinfo import ZoneInfo
-
-    import polars as pl
 
     from src.orchestration.eod import check_session_reconciliation
-    from src.realtime.manifest import SessionManifest
 
-    kst = ZoneInfo("Asia/Seoul")
     day = dt.date(2026, 9, 14)
-    store = tmp_path / "bars" / "daily.parquet"
-    store.parent.mkdir(parents=True)
-    pl.DataFrame({"date": [day], "symbol": ["000001"], "close": [1000.0], "volume": [1], "trade_value_100m": [1.0], "daily_change_pct": [0.0]}).write_parquet(store)
     journal_root = tmp_path / "l0"
 
-    def ns(h, m):
-        return int(dt.datetime(2026, 9, 14, h, m, tzinfo=kst).timestamp()) * 1_000_000_000
-
     def journal(stream):
-        part = journal_root / "ls" / stream / "dt=2026-09-14"
+        part = journal_root / "ls" / "krx" / "regular" / stream / "dt=2026-09-14"
         part.mkdir(parents=True, exist_ok=True)
         (part / "10.jsonl.zst").write_bytes(b"x")
-
-    def manifest_with(gaps):
-        path = tmp_path / "manifest" / "2026-09-14.json"
-        m = SessionManifest(session_date=day, clock_offset_ns=0, started_at_ns=0)
-        for symbol, start, end in gaps:
-            m.record_gap(symbol=symbol, gap_start_ns=start, gap_end_ns=end, reason="disconnect")
-        m.save(path)
-        return path
 
     journal("H0STCNT0")
     path = tmp_path / "manifest" / "2026-09-14.json"
@@ -440,13 +512,12 @@ def test_check_session_reconciliation_flags_unreadable_manifest_in_substantive_m
     path.write_text("{}", encoding="utf-8")
 
     with caplog.at_level(logging.CRITICAL):
-        substantive = check_session_reconciliation(bars_store=store, manifest_path=path, date=day, journal_root=journal_root,
-                                                   streams=("H0STCNT0",), vendor="ls")
-    legacy = check_session_reconciliation(bars_store=store, manifest_path=path, date=day)
+        ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
+                                          streams=("H0STCNT0",), vendor="ls",
+                                          venue="krx", session="regular")
 
-    assert substantive is False
+    assert ok is False
     assert "reasons=manifest_unreadable" in caplog.text
-    assert legacy is True
 
 def test_classify_remote_failure_detects_auth_expiry() -> None:
     from src.orchestration.eod import classify_remote_failure

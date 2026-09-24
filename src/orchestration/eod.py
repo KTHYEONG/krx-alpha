@@ -11,8 +11,6 @@ from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import polars as pl
-
 from src.realtime.kis_sharding import AftermarketShard
 from src.realtime.manifest import SessionManifest
 from src.storage.normalize_worker import run_isolated_normalize
@@ -244,38 +242,61 @@ def check_backup_freshness(
 
 def check_session_reconciliation(
     *,
-    bars_store: pathlib.Path,
     manifest_path: pathlib.Path,
     date: dt.date,
-    journal_root: pathlib.Path | None = None,
-    streams: tuple[str, ...] = (),
-    vendor: str = "ls",
+    journal_root: pathlib.Path,
+    streams: tuple[str, ...],
+    vendor: str,
+    venue: str,
+    session: str,
     max_gap_s: float = MAX_SESSION_GAP_S,
 ) -> bool:
-    store = pathlib.Path(bars_store)
+    """Verify that a business-day regular session left a complete collection trail.
+
+    The caller must invoke this only for dates the trading-day gate confirmed
+    as business days. The bars store cannot answer that question at EOD
+    because the day's bars are published the next morning.
+
+    Checks, all of which must hold:
+    - the session manifest exists and is readable;
+    - every stream in ``streams`` has at least one ``*.jsonl.zst`` journal
+      under ``journal_root/vendor/venue/session/stream/dt=<date>``;
+    - the regular-session gap recorded in the manifest does not exceed
+      ``max_gap_s``.
+
+    Args:
+        manifest_path: Session manifest for ``date``.
+        date: Business date being reconciled (KST).
+        journal_root: L0 journal root.
+        streams: Stream identifiers expected for the regular session.
+        vendor: Journal vendor directory (e.g. ``"ls"``).
+        venue: Routed venue directory (e.g. ``"krx"``).
+        session: Routed session directory (e.g. ``"regular"``).
+        max_gap_s: Maximum tolerated regular-session gap in seconds.
+
+    Returns:
+        True when every check holds; otherwise False, after one CRITICAL
+        ``[DATA] stage=session_reconciliation status=FAIL`` log listing the
+        failed checks.
+    """
     manifest = pathlib.Path(manifest_path)
-    if not store.exists():
-        return True
-    rows = pl.scan_parquet(store).filter(pl.col("date") == date).collect().height
-    if rows == 0:
-        return True
-    if not manifest.exists():
-        return False
-    if journal_root is None:
-        return True
+    root = pathlib.Path(journal_root)
     issues: list[str] = []
+    if not manifest.exists():
+        issues.append("manifest_missing")
     issues.extend(
         f"journal_missing:{stream}"
         for stream in streams
-        if not list((pathlib.Path(journal_root) / vendor / stream / f"dt={date.isoformat()}").glob("*.jsonl.zst"))
+        if not list((root / vendor / venue / session / stream / f"dt={date.isoformat()}").glob("*.jsonl.zst"))
     )
-    try:
-        loaded = SessionManifest.load(manifest)
-        gap_s = _regular_session_gap_s(loaded.gaps, date)
-        if gap_s > max_gap_s:
-            issues.append(f"gap_exceeded:{int(gap_s)}s")
-    except (ValueError, KeyError, TypeError):
-        issues.append("manifest_unreadable")
+    if manifest.exists():
+        try:
+            loaded = SessionManifest.load(manifest)
+            gap_s = _regular_session_gap_s(loaded.gaps, date)
+            if gap_s > max_gap_s:
+                issues.append(f"gap_exceeded:{int(gap_s)}s")
+        except (ValueError, KeyError, TypeError):
+            issues.append("manifest_unreadable")
     if issues:
         logger.critical(
             "[DATA] stage=session_reconciliation status=FAIL date=%s reasons=%s",
