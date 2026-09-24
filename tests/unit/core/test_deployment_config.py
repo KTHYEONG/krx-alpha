@@ -59,6 +59,22 @@ def test_compose_enables_aftermarket_with_verified_kis_pair_capacity() -> None:
     assert "KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION=41" in compose
 
 
+def test_compose_pins_snapshot_rest_to_data_slot_not_shared_with_kca_decision() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    from src.core.config import SnapshotSettings
+
+    raw = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    env = dict(item.split("=", 1) for item in raw["services"]["krx-collector"]["environment"])
+
+    # k-closing-alpha가 결정 역할(DATA_1)과 결정창 샤드(DATA_5)로 15:20~15:35를 점유한다.
+    assert env["KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT"] == "2"
+    assert env["KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT"] not in {"1", "5"}
+    assert SnapshotSettings(kis_data_slot=env["KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT"]).kis_data_slot == "2"
+
+
 def test_compose_uses_absolute_secret_paths_without_shell_interpolation() -> None:
     from pathlib import Path
 

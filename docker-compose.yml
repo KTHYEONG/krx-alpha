@@ -16,6 +16,9 @@ services:
       - KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE=false
       - KRX_ALPHA_AFTER_MARKET_ENABLED=true
       - KRX_ALPHA_SNAPSHOT_ENABLED=true
+      # 스냅샷 REST(08:00~15:39, 18TPS)는 DATA_2 전용. DATA_1은 k-closing-alpha 15:20 결정창·
+      # 15:30 종가확정 전용이라 공유 시 앱키당 20TPS를 넘어 EGW00201이 난다(실측 09-23 77건).
+      - KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT=2
       # KIS 리테일 웹소켓 커넥션당 41스트림쌍 하드캡(docs/architecture/design-decisions.md 검증치)
       - KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION=41
     volumes:
