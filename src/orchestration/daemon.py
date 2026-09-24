@@ -5,7 +5,9 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import pathlib
+import signal
 import sys
+import threading
 from dataclasses import replace
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -54,7 +56,7 @@ from src.orchestration.eod import (
     run_eod_offload,
     run_eod_remote_l0_purge,
 )
-from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker
+from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker, stop_supervisors
 from src.realtime.contracts import MarketVenue
 from src.realtime.kis_sharding import AftermarketShard, load_kis_data_credentials, plan_aftermarket_shards
 from src.storage.remote import RemoteArchiveError
@@ -71,6 +73,8 @@ INGEST_STALE_S: float = 300.0
 INGEST_CHECK_S: float = 60.0
 INGEST_WATCH_START: dt.time = dt.time(9, 5)
 INGEST_WATCH_END: dt.time = dt.time(15, 25)
+# 컴포즈 stop_grace_period(30s) 안에 자식 정상종료 + 로그 flush 를 끝내기 위한 공유 데드라인.
+SHUTDOWN_CHILD_DEADLINE_S: float = 20.0
 
 
 def _journal_age_s(journal_root: pathlib.Path, vendor: str, day: dt.date, now: dt.datetime) -> float | None:
@@ -330,7 +334,15 @@ def run_collector_daemon(
     sleep_fn: Any = None,
     max_cycles: int | None = None,
     now_fn: Any = None,
+    shutdown: threading.Event | None = None,
 ) -> None:
+    """Collector daemon main loop.
+
+    Shutdown: when ``shutdown`` is set the loop stops starting work,
+    stops all supervised children via ``stop_supervisors`` within ``SHUTDOWN_CHILD_DEADLINE_S`` and
+    returns. A cycle already inside EOD finishes that call first; the deploy session gate keeps
+    deploys out of the EOD window.
+    """
     import time
 
     sleeper = sleep_fn if sleep_fn is not None else time.sleep
@@ -366,7 +378,29 @@ def run_collector_daemon(
     snapshot_supervisor: ProcessSupervisor | None = None
     last_snapshot_result: str | None = None
 
+    def _shutdown_children() -> None:
+        targets: list[ProcessSupervisor] = []
+        if supervisor is not None:
+            targets.append(supervisor)
+        targets.extend(aftermarket_supervisors.values())
+        if snapshot_supervisor is not None:
+            targets.append(snapshot_supervisor)
+        counts = stop_supervisors(targets, deadline_s=SHUTDOWN_CHILD_DEADLINE_S)
+        raw = getattr(shutdown, "signal_name", "UNKNOWN") if shutdown is not None else "UNKNOWN"
+        sig = str(raw) if raw else "UNKNOWN"
+        logger.info(
+            "[DAEMON] stage=shutdown status=STOPPED signal=%s graceful=%d killed=%d not_running=%d",
+            sig,
+            counts["graceful"],
+            counts["killed"],
+            counts["not_running"],
+            extra=EVENT,
+        )
+
     while True:
+        if shutdown is not None and shutdown.is_set():
+            _shutdown_children()
+            return
         cycle += 1
         now = clock()
         state = get_target_state(now, sched)
@@ -757,7 +791,16 @@ def run_collector_daemon(
             sleep_sec = min(calc_sleep_seconds(now, sched.streamer_start), 1800.0)
 
         logger.debug("[DAEMON] sleeping for %.1f seconds...", sleep_sec)
-        sleeper(sleep_sec)
+        if shutdown is not None:
+            if sleep_fn is not None:
+                sleeper(sleep_sec)
+            else:
+                shutdown.wait(sleep_sec)
+            if shutdown.is_set():
+                _shutdown_children()
+                return
+        else:
+            sleeper(sleep_sec)
 
         if max_cycles is not None and cycle >= max_cycles:
             logger.info("[DAEMON] reached max_cycles=%d, exiting gracefully.", max_cycles)
@@ -765,7 +808,19 @@ def run_collector_daemon(
 
 
 def main() -> None:
-    run_collector_daemon()
+    """Install SIGTERM/SIGINT handlers that set a shutdown event, then run the daemon."""
+    shutdown = threading.Event()
+
+    def _handle(signum: int, _frame: Any) -> None:
+        try:
+            shutdown.signal_name = signal.Signals(signum).name  # type: ignore[attr-defined]
+        except Exception:
+            shutdown.signal_name = str(signum)  # type: ignore[attr-defined]
+        shutdown.set()
+
+    signal.signal(signal.SIGTERM, _handle)
+    signal.signal(signal.SIGINT, _handle)
+    run_collector_daemon(shutdown=shutdown)
 
 
 if __name__ == "__main__":  # pragma: no cover

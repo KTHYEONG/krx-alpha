@@ -1,0 +1,10 @@
+[Unit]
+Description=krx-alpha deferred collector recreate after session
+
+[Timer]
+OnCalendar=Mon..Fri 22:00:00 Asia/Seoul
+Persistent=false
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

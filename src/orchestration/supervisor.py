@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from collections.abc import Iterable
 from typing import Any
 
 
@@ -62,14 +63,63 @@ class ProcessSupervisor:
         self._proc = self._popen(self._cmd)
         return "restarted" if was_started_before else "started"
 
-    def stop(self, *, timeout_s: float = 15.0) -> str:
-        if self._proc is None or self._proc.poll() is not None:
+    def request_stop(self) -> bool:
+        """Send SIGTERM to the child if it is running. Non-blocking.
+
+        Returns:
+            True when a signal was sent, False when no child was running.
+        """
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return False
+        proc.terminate()
+        return True
+
+    def wait_stopped(self, timeout_s: float) -> str:
+        """Wait up to ``timeout_s`` for the child to exit, SIGKILL it on expiry.
+
+        Returns:
+            ``"graceful"``, ``"killed"`` or ``"not_running"``.
+        """
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
             return "not_running"
-        self._proc.terminate()
         try:
-            self._proc.wait(timeout=timeout_s)
+            ret = proc.wait(timeout=timeout_s)
+            code = proc.poll()
+            self._last_exit_code = code if code is not None else ret
             return "graceful"
         except subprocess.TimeoutExpired:
-            self._proc.kill()
-            self._proc.wait()
+            proc.kill()
+            ret = proc.wait()
+            code = proc.poll()
+            self._last_exit_code = code if code is not None else ret
             return "killed"
+
+    def stop(self, *, timeout_s: float = 15.0) -> str:
+        if not self.request_stop():
+            return "not_running"
+        return self.wait_stopped(timeout_s)
+
+
+def stop_supervisors(supervisors: Iterable[ProcessSupervisor], *, deadline_s: float) -> dict[str, int]:
+    """Stop all supervised children concurrently under one shared deadline.
+
+    Children are signalled first and awaited afterwards, so N children cost one grace window rather
+    than N sequential ones — required to finish inside the container ``stop_grace_period``.
+
+    Returns:
+        Counts keyed ``graceful``, ``killed``, ``not_running``.
+    """
+    sups = list(supervisors)
+    counts = {"graceful": 0, "killed": 0, "not_running": 0}
+    deadline = time.monotonic() + deadline_s
+    for sup in sups:
+        sup.request_stop()
+    for sup in sups:
+        remaining = deadline - time.monotonic()
+        if remaining < 0.0:
+            remaining = 0.0
+        result = sup.wait_stopped(remaining)
+        counts[result] += 1
+    return counts

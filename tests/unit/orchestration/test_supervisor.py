@@ -194,3 +194,189 @@ def test_process_supervisor_records_last_exit_code_on_restart() -> None:
     assert sup.last_exit_code is None
     assert sup.ensure_running() == "restarted"
     assert sup.last_exit_code == -9
+
+
+def test_stop_supervisors_signals_all_before_waiting() -> None:
+    from src.orchestration.supervisor import ProcessSupervisor, stop_supervisors
+
+    order: list[str] = []
+
+    class _Proc:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            order.append(f"terminate-{self.name}")
+
+        def wait(self, timeout=None):
+            order.append(f"wait-{self.name}")
+            return 0
+
+        def kill(self):
+            order.append(f"kill-{self.name}")
+
+    sups = []
+    for name in ("a", "b", "c"):
+        proc = _Proc(name)
+        sup = ProcessSupervisor(cmd=["x"], popen=lambda cmd, _p=proc: _p)
+        sup.ensure_running()
+        sups.append(sup)
+
+    counts = stop_supervisors(sups, deadline_s=5.0)
+
+    assert counts == {"graceful": 3, "killed": 0, "not_running": 0}
+    first_wait = min(order.index(f"wait-{n}") for n in ("a", "b", "c"))
+    last_terminate = max(order.index(f"terminate-{n}") for n in ("a", "b", "c"))
+    assert last_terminate < first_wait
+
+
+def test_stop_supervisors_shared_deadline_kills_straggler(monkeypatch) -> None:
+    import subprocess
+
+    import src.orchestration.supervisor as sup_mod
+    from src.orchestration.supervisor import ProcessSupervisor, stop_supervisors
+
+    class _QuickProc:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            raise AssertionError("quick child must not be killed")
+
+    class _StuckProc:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            return None
+
+        def wait(self, timeout=None):
+            self.calls += 1
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
+            return -9
+
+        def kill(self):
+            return None
+
+    now = {"t": 100.0}
+    timeouts: list[float] = []
+    real_wait = ProcessSupervisor.wait_stopped
+
+    def _tracking_wait(self, timeout_s: float = 0.0):
+        timeouts.append(timeout_s)
+        out = real_wait(self, timeout_s)
+        now["t"] += 1.0
+        return out
+
+    monkeypatch.setattr(ProcessSupervisor, "wait_stopped", _tracking_wait)
+    monkeypatch.setattr(sup_mod.time, "monotonic", lambda: now["t"])
+
+    sups = [
+        ProcessSupervisor(cmd=["x"], popen=lambda cmd: _QuickProc()),
+        ProcessSupervisor(cmd=["x"], popen=lambda cmd: _QuickProc()),
+        ProcessSupervisor(cmd=["x"], popen=lambda cmd: _StuckProc()),
+    ]
+    for sup in sups:
+        sup.ensure_running()
+
+    counts = stop_supervisors(sups, deadline_s=5.0)
+
+    assert counts == {"graceful": 2, "killed": 1, "not_running": 0}
+    assert timeouts == [5.0, 4.0, 3.0]
+    assert all(t <= 5.0 for t in timeouts)
+
+
+def test_stop_supervisors_counts_not_running_without_signal() -> None:
+    from src.orchestration.supervisor import ProcessSupervisor, stop_supervisors
+
+    sup = ProcessSupervisor(cmd=["x"], popen=lambda cmd: None)
+
+    counts = stop_supervisors([sup], deadline_s=5.0)
+
+    assert counts == {"graceful": 0, "killed": 0, "not_running": 1}
+
+
+def test_wait_stopped_records_last_exit_code() -> None:
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.code = None
+
+        def poll(self):
+            return self.code
+
+        def terminate(self):
+            return None
+
+        def wait(self, timeout=None):
+            self.code = 3
+            return 3
+
+    proc = _Proc()
+    sup = ProcessSupervisor(cmd=["x"], popen=lambda cmd: proc)
+    sup.ensure_running()
+
+    assert sup.wait_stopped(5.0) == "graceful"
+    assert sup.last_exit_code == 3
+
+
+def test_stop_supervisors_clamps_negative_remaining_to_immediate_kill(monkeypatch) -> None:
+    import subprocess
+
+    import src.orchestration.supervisor as sup_mod
+    from src.orchestration.supervisor import ProcessSupervisor, stop_supervisors
+
+    class _StuckProc:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            return None
+
+        def wait(self, timeout=None):
+            self.calls += 1
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
+            return -9
+
+        def kill(self):
+            return None
+
+    now = {"t": 50.0}
+    timeouts: list[float] = []
+    real_wait = ProcessSupervisor.wait_stopped
+
+    def _tracking_wait(self, timeout_s: float = 0.0):
+        timeouts.append(timeout_s)
+        out = real_wait(self, timeout_s)
+        now["t"] += 10.0
+        return out
+
+    monkeypatch.setattr(ProcessSupervisor, "wait_stopped", _tracking_wait)
+    monkeypatch.setattr(sup_mod.time, "monotonic", lambda: now["t"])
+    sups = [ProcessSupervisor(cmd=["x"], popen=lambda cmd: _StuckProc()) for _ in range(2)]
+    for sup in sups:
+        sup.ensure_running()
+
+    counts = stop_supervisors(sups, deadline_s=5.0)
+
+    assert counts == {"graceful": 0, "killed": 2, "not_running": 0}
+    assert timeouts[0] == 5.0
+    assert timeouts[1] == 0.0

@@ -82,6 +82,18 @@ jobs:
           scp $SSH_OPTS deploy/host/krx-host-backup.sh "$REMOTE_USER@$HOST:~/krx-alpha/deploy/host/"
           scp $SSH_OPTS deploy/host/krx-alpha.rclone-filter "$REMOTE_USER@$HOST:~/krx-alpha/deploy/host/"
           scp $SSH_OPTS deploy/host/krx-host-backup.service deploy/host/krx-host-backup.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
+          scp $SSH_OPTS deploy/host/krx-deferred-recreate.service deploy/host/krx-deferred-recreate.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
+
+          # Deploy session gate: defer in-session recreate to the 22:00 KST timer.
+          set +e
+          python3 -m src.orchestration.deploy_gate
+          GATE_RC=$?
+          set -e
+          if [ "$GATE_RC" -ne 0 ] && [ "$GATE_RC" -ne 10 ]; then
+            echo "deploy gate failed with rc=$GATE_RC" >&2
+            exit 1
+          fi
+          if [ "$GATE_RC" -eq 0 ]; then RECREATE_NOW=1; else RECREATE_NOW=0; fi
 
           # 원격 컨테이너 최신 이미지 pull 및 재기동
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" bash -s <<EOF
@@ -205,6 +217,7 @@ jobs:
           systemctl --user enable --now kca-kis-token-warmup.timer
           chmod +x ~/krx-alpha/deploy/host/krx-host-backup.sh
           systemctl --user enable --now krx-host-backup.timer
+          systemctl --user enable --now krx-deferred-recreate.timer
           # 공용 quant-lake 타이머 폐기 가드: PROJECTS 항목이 krx-alpha뿐일 때만 폐기한다.
           # 원격 셸에서 평가되도록 \$ 이스케이프(비인용 heredoc은 러너에서 먼저 확장된다).
           # QUANT_LAKE_RETIRE_GUARD_BEGIN
@@ -230,6 +243,10 @@ jobs:
           echo '$GHCR_PAT' | docker login ghcr.io -u '$GHCR_USER' --password-stdin
           if docker compose version >/dev/null 2>&1; then C="docker compose"; else C="docker-compose"; fi
           \$C pull
-          \$C up -d --force-recreate --remove-orphans
+          if [ "$RECREATE_NOW" = "1" ]; then
+            \$C up -d --force-recreate --remove-orphans
+          else
+            echo "DEFERRED: krx-collector recreate scheduled by krx-deferred-recreate.timer (22:00 KST)"
+          fi
           docker image prune -f
           EOF

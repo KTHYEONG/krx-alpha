@@ -192,3 +192,54 @@ def test_timer_keeps_nightly_kst_slot() -> None:
 
     assert "OnCalendar=*-*-* 23:30:00 Asia/Seoul" in timer
     assert "Persistent=true" in timer
+
+
+def test_deferred_timer_matches_gate_constant() -> None:
+    from pathlib import Path
+
+    from src.orchestration.deploy_gate import DEFERRED_RECREATE_KST
+
+    timer = Path("deploy/host/krx-deferred-recreate.timer").read_text(encoding="utf-8")
+
+    assert "OnCalendar=Mon..Fri 22:00:00 Asia/Seoul" in timer
+    assert "Persistent=false" in timer
+    assert f"{DEFERRED_RECREATE_KST.hour:02d}:{DEFERRED_RECREATE_KST.minute:02d}" in timer
+
+
+def test_deferred_service_never_force_recreates() -> None:
+    from pathlib import Path
+
+    service = Path("deploy/host/krx-deferred-recreate.service").read_text(encoding="utf-8")
+
+    assert "Type=oneshot" in service
+    assert "WorkingDirectory=%h/krx-alpha" in service
+    assert "docker compose up -d" in service
+    assert "--force-recreate" not in service
+    assert "OnFailure=kca-alert@%n.service" in service
+    assert "TimeoutStartSec=10min" in service
+
+
+def test_deploy_workflow_gates_recreate_behind_session_gate() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert "python3 -m src.orchestration.deploy_gate" in workflow
+    assert workflow.index("deploy_gate") < workflow.index("up -d --force-recreate")
+    assert "RECREATE_NOW" in workflow
+    assert "\\$C pull" in workflow
+    pull_line = next(line for line in workflow.splitlines() if "\\$C pull" in line)
+    assert "RECREATE_NOW" not in pull_line
+    assert "krx-deferred-recreate.service" in workflow
+    assert "krx-deferred-recreate.timer" in workflow
+    assert "enable --now krx-deferred-recreate.timer" in workflow
+
+
+def test_deferred_slot_precedes_nightly_backup_and_follows_eod() -> None:
+    import datetime as dt
+
+    from src.core.calendar import SessionSchedule
+    from src.orchestration.deploy_gate import DEFERRED_RECREATE_KST
+
+    backup_slot = dt.time(23, 30)
+    assert SessionSchedule().after_market_eod_done < DEFERRED_RECREATE_KST < backup_slot
