@@ -942,5 +942,8 @@
       "tests/unit/orchestration/test_daemon.py",
       "tests/unit/universe/test_service.py"
     ]
+  },
+  "src/orchestration/deploy_gate.py": {
+    "testing": "tests/unit/orchestration/test_deploy_gate.py"
   }
 }

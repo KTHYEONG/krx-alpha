@@ -1,0 +1,12 @@
+[Unit]
+Description=krx-alpha deferred collector recreate after session
+OnFailure=kca-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/krx-alpha
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+TimeoutStartSec=10min
+
+[Install]
+WantedBy=default.target

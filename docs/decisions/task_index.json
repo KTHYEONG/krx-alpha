@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_20260924_DEPLOY_CONTINUITY",
+      "date": "2026-09-24",
+      "adr_id": "ADR_20260924_20260924_DEPLOY_CONTINUITY",
+      "domain": "ops",
+      "title": "수집기 배포 연속성: 정상 종료 전파와 장중 배포 유예",
+      "why": "krx 데몬이 PID 1인데 SIGTERM 처리기가 없어 9월 이후 정지 23회 모두 30초 뒤 SIGKILL됐고, 장중 푸시는 재생성으로 실시간 틱 공백을 만들었다.",
+      "resolution": "SIGTERM/SIGINT 처리기와 공유 20초 데드라인의 stop_supervisors로 모든 자식을 정상 종료하고, 평일 08:10~22:00 KST 푸시는 CI가 재생성을 건너뛰어 22:00 호스트 타이머(docker compose up -d)가 처리한다.",
+      "impact": "강제 종료가 사라지고 장중 배포로 인한 틱 공백이 없어진다.",
+      "caveat": "EOD 같은 긴 호출 도중 종료 신호는 그 호출 뒤에 처리되며, 휴장 평일도 유예로 취급한다."
+    },
+    {
       "task_id": "TASK_20260923_GDRIVE_BACKUP_HARDENING",
       "date": "2026-09-23",
       "adr_id": "ADR_20260923_20260923_GDRIVE_BACKUP_HARDENING",
