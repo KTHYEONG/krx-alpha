@@ -8,7 +8,7 @@ import pathlib
 import signal
 import sys
 import threading
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -57,7 +57,8 @@ from src.orchestration.eod import (
     run_eod_remote_l0_purge,
 )
 from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker, stop_supervisors
-from src.realtime.contracts import MarketVenue
+from src.orchestration.trading_day_gate import TradingDayGate, TradingDayStatus
+from src.realtime.contracts import MarketSession, MarketVenue
 from src.realtime.kis_sharding import AftermarketShard, load_kis_data_credentials, plan_aftermarket_shards
 from src.storage.remote import RemoteArchiveError
 from src.storage.snapshot_store import SnapshotStore
@@ -76,6 +77,7 @@ INGEST_WATCH_START: dt.time = dt.time(9, 5)
 INGEST_WATCH_END: dt.time = dt.time(15, 25)
 # 컴포즈 stop_grace_period(30s) 안에 자식 정상종료 + 로그 flush 를 끝내기 위한 공유 데드라인.
 SHUTDOWN_CHILD_DEADLINE_S: float = 20.0
+HOLIDAY_SLEEP_CAP_S: float = 3600.0
 
 
 def _journal_age_s(journal_root: pathlib.Path, vendor: str, day: dt.date, now: dt.datetime) -> float | None:
@@ -250,6 +252,105 @@ def _degraded_candidates_rev(path: pathlib.Path, today: dt.date, *, max_age_days
     return None
 
 
+@dataclass(frozen=True)
+class _EodHousekeeping:
+    deleted: int
+    uploaded: int
+    purged: int
+    maintenance_ok: bool
+    offload_ok: bool
+
+
+def _run_eod_housekeeping(cfg: CollectorSettings, paths: DataPaths, ref_day: dt.date) -> _EodHousekeeping:
+    """Run the date-agnostic EOD storage sequence shared by business days and holidays.
+
+    Order matters: L0 is only deleted after the offload has verified its L1 copy
+    remotely, so maintenance runs once unverified (normalize only), then again
+    with the verified set, followed by the remote L0 purge.
+    """
+    deleted = 0
+    maintenance_ok = True
+    try:
+        deleted = run_eod_maintenance(
+            paths.journal_root,
+            retain_days=cfg.journal_retain_days,
+            today=ref_day,
+            archive_root=paths.archive_root,
+            quarantine_root=paths.quarantine_root,
+            work_root=paths.work_root,
+            verified_remote_l1=None,
+        )
+    except (KrxAlphaError, OSError) as e:
+        maintenance_ok = False
+        logger.critical("[DAEMON] stage=eod_maintenance status=FAIL reason=maintenance_error error=%s", str(e))
+    offload: Any = {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
+    offload_ok = True
+    try:
+        offload = run_eod_offload(
+            paths.archive_root,
+            paths.manifest_dir,
+            retain_days=cfg.archive_retain_days,
+            reference_date=ref_day,
+        )
+    except RemoteArchiveError as e:
+        offload_ok = False
+        reason = classify_remote_failure(str(e))
+        logger.critical(
+            "[DAEMON] stage=eod_offload status=FAIL reason=%s hint=%s error=%s",
+            reason,
+            "rclone_config_reconnect_gdrive" if reason == "auth_expired" else "check_remote",
+            str(e),
+        )
+    except Exception as e:  # noqa: BLE001
+        offload_ok = False
+        logger.error("[DAEMON] stage=eod_maintenance error=%s", str(e), exc_info=True)
+    if offload_ok:
+        try:
+            verified = offload.verified_remote_l1 if hasattr(offload, "verified_remote_l1") else frozenset()
+            post_deleted = run_eod_maintenance(
+                paths.journal_root,
+                retain_days=cfg.journal_retain_days,
+                today=ref_day,
+                archive_root=paths.archive_root,
+                quarantine_root=paths.quarantine_root,
+                work_root=paths.work_root,
+                verified_remote_l1=verified,
+            )
+            deleted = int(deleted) + int(post_deleted)
+            try:
+                run_eod_remote_l0_purge(paths.journal_root, verified)
+            except Exception as exc:  # noqa: BLE001 - purge failure never fails EOD
+                logger.error("[DAEMON] stage=eod_l0_remote_purge status=FAIL error=%s", str(exc), exc_info=True)
+        except (KrxAlphaError, OSError) as e:
+            maintenance_ok = False
+            logger.critical("[DAEMON] stage=eod_maintenance status=FAIL reason=maintenance_error error=%s", str(e))
+    uploaded = offload.l1.uploaded if hasattr(offload, "l1") else offload["uploaded"]
+    purged = offload.purged if hasattr(offload, "purged") else offload["purged"]
+    return _EodHousekeeping(
+        deleted=int(deleted),
+        uploaded=int(uploaded),
+        purged=int(purged),
+        maintenance_ok=maintenance_ok,
+        offload_ok=offload_ok,
+    )
+
+
+def _check_backup(paths: DataPaths, ref_day: dt.date) -> tuple[list[str], bool]:
+    try:
+        missing = check_backup_freshness(manifest_dir=paths.manifest_dir, today=ref_day)
+    except RemoteArchiveError as e:
+        logger.critical(
+            "[DAEMON] stage=backup_freshness status=FAIL reason=%s error=%s",
+            classify_remote_failure(str(e)),
+            str(e),
+        )
+        return [], False
+    if missing:
+        logger.critical("[DAEMON] stage=backup_freshness status=STALE missing=%d oldest=%s", len(missing), missing[0])
+        return missing, False
+    return [], True
+
+
 def _stream_cmd(today: dt.date, paths: DataPaths, *, degraded_reason: str | None) -> list[str]:
     cmd = [
         sys.executable,
@@ -357,8 +458,10 @@ def run_collector_daemon(
 
     clock = now_fn if now_fn is not None else (lambda: dt.datetime.now(_KST))
     orchestrated_for: dt.date | None = None
-    holiday_for: dt.date | None = None
+    holiday_skip_logged_for: dt.date | None = None
+    possible_holiday_warned_for: dt.date | None = None
     eod_attempted_for: dt.date | None = None
+    gate = TradingDayGate(resolver=lambda d: _resolve_trading_day_with_cache(d, paths.calendar_cache))
     supervisor: ProcessSupervisor | None = None
     prev_state: SessionState | None = None
     last_summary: dt.datetime | None = None
@@ -406,6 +509,21 @@ def run_collector_daemon(
         cycle += 1
         now = clock()
         state = get_target_state(now, sched)
+        day = None
+        if state in (
+            SessionState.STREAMER_ACTIVE,
+            SessionState.FULL_ACTIVE,
+            SessionState.AFTER_MARKET_ACTIVE,
+            SessionState.POST_MARKET_EOD,
+        ):
+            day = gate.view(now.astimezone(_KST).date(), now)
+            if day.status is TradingDayStatus.HOLIDAY and holiday_skip_logged_for != day.date:
+                logger.info(
+                    "[DAEMON] stage=session status=SKIP reason=market_holiday date=%s",
+                    day.date.isoformat(),
+                    extra=EVENT,
+                )
+                holiday_skip_logged_for = day.date
         logger.debug("[DAEMON] cycle=%d now=%s state=%s", cycle, now.strftime("%Y-%m-%d %H:%M:%S"), state)
         if state != prev_state:
             logger.info(
@@ -428,42 +546,53 @@ def run_collector_daemon(
         elif state == SessionState.PRE_MARKET_SLEEP:
             sleep_sec = min(calc_sleep_seconds(now, sched.streamer_start), 300.0)
         elif state in (SessionState.STREAMER_ACTIVE, SessionState.FULL_ACTIVE, SessionState.AFTER_MARKET_ACTIVE):
-            today = now.date()
-            if state is not SessionState.AFTER_MARKET_ACTIVE and today != orchestration_day:
-                # EOD를 거치지 못한 전일 스트리머가 남아 있으면 전일 session-date로 재기동되므로 먼저 정리한다
+            assert day is not None
+            today = day.date
+            if day.status is TradingDayStatus.HOLIDAY:
                 if supervisor is not None:
-                    stale_stop = supervisor.stop(timeout_s=15.0)
-                    logger.warning("[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s", stale_stop)
+                    supervisor.stop(timeout_s=15.0)
                     supervisor = None
                     last_supervisor_result = None
+                    degraded_active = False
                 if snapshot_supervisor is not None:
                     snapshot_supervisor.stop(timeout_s=15.0)
                     snapshot_supervisor = None
                     last_snapshot_result = None
-                orchestration_day = today
-                next_orchestration_at = None
-                orchestration_attempts = 0
-                degraded_active = False
-                last_ingest_check = None
-                ingest_stale = False
-                next_aftermarket_refresh_at = None
-            if (
-                state is not SessionState.AFTER_MARKET_ACTIVE
-                and orchestrated_for != today
-                and holiday_for != today
-                and (next_orchestration_at is None or now >= next_orchestration_at)
-            ):
-                trading_day = _resolve_trading_day_with_cache(today, paths.calendar_cache)
-                if trading_day is not None and not trading_day.is_business_day:
-                    logger.info(
-                        "[DAEMON] stage=session status=SKIP reason=market_holiday date=%s",
-                        today.isoformat(),
-                        extra=EVENT,
-                    )
-                    holiday_for = today
-                    supervisor = None
-                    last_supervisor_result = None
+                for _sup in aftermarket_supervisors.values():
+                    _sup.stop(timeout_s=15.0)
+                aftermarket_supervisors.clear()
+                if state is SessionState.STREAMER_ACTIVE:
+                    _holiday_target = sched.scanner_start
+                elif state is SessionState.FULL_ACTIVE:
+                    _holiday_target = sched.market_close
                 else:
+                    _holiday_target = sched.after_market_close
+                sleep_sec = min(calc_sleep_seconds(now, _holiday_target), HOLIDAY_SLEEP_CAP_S)
+            else:
+                if state is not SessionState.AFTER_MARKET_ACTIVE and today != orchestration_day:
+                    # EOD를 거치지 못한 전일 스트리머가 남아 있으면 전일 session-date로 재기동되므로 먼저 정리한다
+                    if supervisor is not None:
+                        stale_stop = supervisor.stop(timeout_s=15.0)
+                        logger.warning("[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s", stale_stop)
+                        supervisor = None
+                        last_supervisor_result = None
+                    if snapshot_supervisor is not None:
+                        snapshot_supervisor.stop(timeout_s=15.0)
+                        snapshot_supervisor = None
+                        last_snapshot_result = None
+                    orchestration_day = today
+                    next_orchestration_at = None
+                    orchestration_attempts = 0
+                    degraded_active = False
+                    last_ingest_check = None
+                    ingest_stale = False
+                    next_aftermarket_refresh_at = None
+                if (
+                    state is not SessionState.AFTER_MARKET_ACTIVE
+                    and orchestrated_for != today
+                    and (next_orchestration_at is None or now >= next_orchestration_at)
+                ):
+                    trading_day = day.trading_day
                     orchestration_attempts += 1
                     try:
                         ready = run_session_orchestration(today=today, settings=cfg, trading_day=trading_day)
@@ -528,9 +657,6 @@ def run_collector_daemon(
                                     "[DAEMON] stage=streamer status=DEGRADED reason=orchestration_failed candidates_rev=%d",
                                     rev,
                                 )
-            if holiday_for == today:
-                sleep_sec = 3600.0
-            else:
                 if supervisor is not None:
                     result = supervisor.ensure_running()
                     if result == "started":
@@ -557,14 +683,20 @@ def run_collector_daemon(
                     last_snapshot_result = snapshot_result
                 if (
                     state == SessionState.FULL_ACTIVE
-                    and holiday_for != today
                     and INGEST_WATCH_START <= now.astimezone(_KST).time() < INGEST_WATCH_END
                     and (last_ingest_check is None or (now - last_ingest_check).total_seconds() >= INGEST_CHECK_S)
                 ):
                     last_ingest_check = now
                     age = _journal_age_s(paths.journal_root, cfg.vendor, today, now)
                     stale = age is None or age > INGEST_STALE_S
-                    if stale and not ingest_stale:
+                    if stale and not ingest_stale and age is None and day.status is TradingDayStatus.UNKNOWN:
+                        if possible_holiday_warned_for != today:
+                            logger.warning(
+                                "[DAEMON] stage=ingest_watchdog status=POSSIBLE_HOLIDAY date=%s",
+                                today.isoformat(),
+                            )
+                            possible_holiday_warned_for = today
+                    elif stale and not ingest_stale:
                         logger.critical(
                             "[DAEMON] stage=ingest_watchdog status=STALE date=%s age_s=%s",
                             today.isoformat(),
@@ -576,7 +708,9 @@ def run_collector_daemon(
                             today.isoformat(),
                             int(age),
                         )
-                    ingest_stale = stale
+                    ingest_stale = stale and not (
+                        age is None and day.status is TradingDayStatus.UNKNOWN
+                    )
                 if state == SessionState.FULL_ACTIVE and cfg.after_market_enabled:
                     after_cfg = AftermarketSettings()
                     if (
@@ -671,131 +805,79 @@ def run_collector_daemon(
                 eod_attempted_for = ref_day
                 for sup in aftermarket_supervisors.values(): sup.stop(timeout_s=15.0)  # noqa: E701 - 20:00 KIS 수집기 종료
                 aftermarket_supervisors.clear()
-                aftermarket_manifests = (
-                    [
-                        paths.aftermarket_manifest_path(ref_day, shard.venue, shard.shard_index)
-                        for shard in aftermarket_plan
-                    ]
-                    if cfg.after_market_enabled
-                    else []
-                )
-                aftermarket_blocked = cfg.after_market_enabled and not aftermarket_eod_ready(
-                    manifests=aftermarket_manifests,
-                    date=ref_day,
-                    now=now,
-                    expected_shards=tuple(aftermarket_plan),
-                )
-                if aftermarket_blocked: logger.critical("[DAEMON] stage=eod_maintenance status=DEGRADED reason=aftermarket_not_ready date=%s", ref_day.isoformat())  # noqa: E701
-                if not aftermarket_blocked:
-                    deleted = 0
-                    maintenance_ok = True
-                    try:
-                        deleted = run_eod_maintenance(
-                            paths.journal_root,
-                            retain_days=cfg.journal_retain_days,
-                            today=ref_day,
-                            archive_root=paths.archive_root,
-                            quarantine_root=paths.quarantine_root,
-                            work_root=paths.work_root,
-                            verified_remote_l1=None,
-                        )
-                    except (KrxAlphaError, OSError) as e:
-                        maintenance_ok = False
-                        logger.critical("[DAEMON] stage=eod_maintenance status=FAIL reason=maintenance_error error=%s", str(e))
-                    offload: Any = {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
-                    offload_ok = True
-                    try:
-                        offload = run_eod_offload(
-                            paths.archive_root,
-                            paths.manifest_dir,
-                            retain_days=cfg.archive_retain_days,
-                            reference_date=ref_day,
-                        )
-                    except RemoteArchiveError as e:
-                        offload_ok = False
-                        reason = classify_remote_failure(str(e))
-                        logger.critical(
-                            "[DAEMON] stage=eod_offload status=FAIL reason=%s hint=%s error=%s",
-                            reason,
-                            "rclone_config_reconnect_gdrive" if reason == "auth_expired" else "check_remote",
-                            str(e),
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        offload_ok = False
-                        logger.error("[DAEMON] stage=eod_maintenance error=%s", str(e), exc_info=True)
-                    if offload_ok:
-                        try:
-                            verified = offload.verified_remote_l1 if hasattr(offload, "verified_remote_l1") else frozenset()
-                            post_deleted = run_eod_maintenance(
-                                paths.journal_root,
-                                retain_days=cfg.journal_retain_days,
-                                today=ref_day,
-                                archive_root=paths.archive_root,
-                                quarantine_root=paths.quarantine_root,
-                                work_root=paths.work_root,
-                                verified_remote_l1=verified,
-                            )
-                            deleted = int(deleted) + int(post_deleted)
-                            try:
-                                run_eod_remote_l0_purge(paths.journal_root, verified)
-                            except Exception as exc:  # noqa: BLE001 - purge failure never fails EOD
-                                logger.error(
-                                    "[DAEMON] stage=eod_l0_remote_purge status=FAIL error=%s",
-                                    str(exc),
-                                    exc_info=True,
-                                )
-                        except (KrxAlphaError, OSError) as e:
-                            maintenance_ok = False
-                            logger.critical("[DAEMON] stage=eod_maintenance status=FAIL reason=maintenance_error error=%s", str(e))
+                assert day is not None
+                if day.status is TradingDayStatus.HOLIDAY:
+                    housekeeping = _run_eod_housekeeping(cfg, paths, ref_day)
+                    _check_backup(paths, ref_day)
+                    logger.info(
+                        "[DAEMON] stage=eod_maintenance status=HOLIDAY deleted_partitions=%d uploaded=%d purged=%d date=%s",
+                        housekeeping.deleted,
+                        housekeeping.uploaded,
+                        housekeeping.purged,
+                        ref_day.isoformat(),
+                        extra=EVENT,
+                    )
+                else:
+                    aftermarket_manifests = (
+                        [
+                            paths.aftermarket_manifest_path(ref_day, shard.venue, shard.shard_index)
+                            for shard in aftermarket_plan
+                        ]
+                        if cfg.after_market_enabled
+                        else []
+                    )
+                    aftermarket_blocked = cfg.after_market_enabled and not aftermarket_eod_ready(
+                        manifests=aftermarket_manifests,
+                        date=ref_day,
+                        now=now,
+                        expected_shards=tuple(aftermarket_plan),
+                    )
+                    if aftermarket_blocked: logger.critical("[DAEMON] stage=eod_maintenance status=DEGRADED reason=aftermarket_not_ready date=%s", ref_day.isoformat())  # noqa: E701
+                    housekeeping = _run_eod_housekeeping(cfg, paths, ref_day)
                     reconcile_ok = True
                     reconciled = False
-                    try:
-                        reconciled = check_session_reconciliation(
-                            bars_store=paths.bars_store,
-                            manifest_path=paths.manifest_path(ref_day),
-                            date=ref_day,
-                            journal_root=paths.journal_root,
-                            streams=cfg.streams,
-                            vendor=cfg.vendor,
-                        )
-                        if not reconciled:
+                    if day.status is TradingDayStatus.BUSINESS:
+                        try:
+                            reconciled = check_session_reconciliation(
+                                manifest_path=paths.manifest_path(ref_day),
+                                date=ref_day,
+                                journal_root=paths.journal_root,
+                                streams=cfg.streams,
+                                vendor=cfg.vendor,
+                                venue=MarketVenue.KRX.value,
+                                session=MarketSession.REGULAR.value,
+                            )
+                            if not reconciled:
+                                reconcile_ok = False
+                                logger.critical(
+                                    "[DAEMON] stage=eod_maintenance status=FAIL reason=session_data_gap date=%s",
+                                    ref_day.isoformat(),
+                                )
+                        except OSError as e:
                             reconcile_ok = False
+                            reconciled = False
                             logger.critical(
-                                "[DAEMON] stage=eod_maintenance status=FAIL reason=session_data_gap date=%s",
-                                ref_day.isoformat(),
+                                "[DAEMON] stage=eod_reconciliation status=FAIL error=%s", str(e), exc_info=True
                             )
-                    except (OSError, pl.exceptions.PolarsError) as e:
-                        reconcile_ok = False
-                        reconciled = False
-                        logger.critical(
-                            "[DAEMON] stage=eod_reconciliation status=FAIL error=%s", str(e), exc_info=True
+                    else:
+                        logger.warning("[DAEMON] stage=eod_reconciliation status=SKIP reason=calendar_unknown")
+                    backup_missing, backup_ok = _check_backup(paths, ref_day)
+                    eod_status = (
+                        "OK"
+                        if (
+                            housekeeping.maintenance_ok
+                            and housekeeping.offload_ok
+                            and reconcile_ok
+                            and backup_ok
+                            and not aftermarket_blocked
                         )
-                    backup_missing: list[str] = []
-                    backup_ok = True
-                    try:
-                        backup_missing = check_backup_freshness(manifest_dir=paths.manifest_dir, today=ref_day)
-                        if backup_missing:
-                            backup_ok = False
-                            logger.critical(
-                                "[DAEMON] stage=backup_freshness status=STALE missing=%d oldest=%s",
-                                len(backup_missing),
-                                backup_missing[0],
-                            )
-                    except RemoteArchiveError as e:
-                        backup_ok = False
-                        logger.critical(
-                            "[DAEMON] stage=backup_freshness status=FAIL reason=%s error=%s",
-                            classify_remote_failure(str(e)),
-                            str(e),
-                        )
-                    eod_status = "OK" if (maintenance_ok and offload_ok and reconcile_ok and backup_ok) else "DEGRADED"
-                    uploaded = offload.l1.uploaded if hasattr(offload, "l1") else offload["uploaded"]
-                    purged = offload.purged if hasattr(offload, "purged") else offload["purged"]
+                        else "DEGRADED"
+                    )
                     logger.info(
                         "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=%s",
-                        deleted,
-                        uploaded,
-                        purged,
+                        housekeeping.deleted,
+                        housekeeping.uploaded,
+                        housekeeping.purged,
                         eod_status,
                         extra=EVENT,
                     )
@@ -803,10 +885,11 @@ def run_collector_daemon(
                         [
                             f"run_id={run_id}",
                             f"status={eod_status}",
-                            f"deleted_partitions={deleted}",
-                            f"uploaded={uploaded}",
-                            f"purged={purged}",
+                            f"deleted_partitions={housekeeping.deleted}",
+                            f"uploaded={housekeeping.uploaded}",
+                            f"purged={housekeeping.purged}",
                             f"reconciled={reconciled}",
+                            f"aftermarket_ready={not aftermarket_blocked}",
                             f"backup_missing={len(backup_missing)}",
                             f"streamer_restarts={streamer_restarts}",
                             f"orchestration_attempts={orchestration_attempts}",

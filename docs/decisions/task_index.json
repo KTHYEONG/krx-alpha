@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_HOLIDAY_RESILIENCE",
+      "date": "2026-09-24",
+      "adr_id": "ADR_20260924_HOLIDAY_RESILIENCE",
+      "domain": "orchestration",
+      "title": "휴장일 인식 일원화와 EOD 게이트 분리",
+      "why": "휴장일 판정이 오케스트레이션 시점 한 곳에만 있어 재기동·EOD·애프터마켓 경로에서 오경보와 불필요 가동이 발생했고, 애프터마켓 실패가 정규장 정규화까지 막았다.",
+      "resolution": "TradingDayGate로 전 평일 상태의 거래일을 날짜당 1회 판정하고, 휴장일 EOD는 저장소 정리만 수행하며 애프터마켓 준비 실패는 EOD 상태만 DEGRADED로 표시하도록 분리했다.",
+      "impact": "휴장일 CRITICAL 오경보가 사라지고 애프터마켓 장애와 무관하게 정규장 L0 정규화·오프로드가 매일 진행되며 세션 대사가 실제 L0 경로를 검사한다.",
+      "caveat": "배포 게이트의 휴장일 인식은 CI 변경으로 제외됐고, 캘린더 미확정일은 수집을 계속하되 대사를 건너뛴다."
+    },
+    {
       "task_id": "TASK_COLLECTION_INTEGRITY",
       "date": "2026-09-24",
       "adr_id": "ADR_20260924_COLLECTION_INTEGRITY",

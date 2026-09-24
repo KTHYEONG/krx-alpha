@@ -948,5 +948,8 @@
   },
   "src/storage/market_phase.py": {
     "testing": "tests/unit/storage/test_market_phase.py"
+  },
+  "src/orchestration/trading_day_gate.py": {
+    "testing": "tests/unit/orchestration/test_trading_day_gate.py"
   }
 }
