@@ -3,7 +3,6 @@
 > **The primary directive is engineering rigorous, reproducible quantitative systems that guarantee financial correctness, temporal causality, and execution realism without phantom alpha. For alpha strategy and portfolio optimization layers, maximize net risk-adjusted compounding growth ($g = \mathbb{E}[\ln(1 + r_{\text{net}})]$) within five non-negotiable constitutional pillars.**
 
 ## 1. Temporal Causality (The Arrow of Time)
-- **Session Taxonomy:** Session names and windows follow `docs/architecture/data-flow.md` §4.4; KRX 16:00~20:00 and NXT 15:40~20:00 are 애프터마켓, and session membership is decided by exchange event time, never by stream or partition name.
 - **Point-in-Time Availability:** Every signal, feature, universe selection, and portfolio decision at time $T$ must consume strictly data observable prior to or at time $T$.
 - **Zero Lookahead:** Executing on bar close $T$ using signals derived from the same bar's close, or referencing unreleased future data, is a fatal causality violation.
 - **Perturbation Invariance:** Verification must prove that corrupting or randomizing future data ($t > T$) alters historical decisions at or before time $T$ by zero.

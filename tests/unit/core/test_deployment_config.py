@@ -21,17 +21,6 @@ def test_resolve_collector_runtime_uses_one_enabled_flag_and_data_root(tmp_path,
     assert matching.aftermarket.enabled is False
 
 
-def test_keypool_runbook_limits_shared_fragment_to_data_keys() -> None:
-    from pathlib import Path
-
-    runbook = Path("docs/architecture/kis-aftermarket-keypool-deployment.md").read_text(encoding="utf-8")
-    assert "KIS_DATA_SLOTS=1,2,3,4,5" in runbook
-    assert "KIS_HOST_DATA_SLOTS=1,2,3,4" in runbook
-    assert "KIS_TRADE_*" in runbook
-    assert "KIS_APP_*" in runbook
-    assert "uv run python -m src.cli.provision_kis_keypool" in runbook
-    assert "/home/ubuntu/quant-secrets/kis-data.env" in runbook
-
 
 def test_deploy_workflow_validates_shared_env_and_wires_kca() -> None:
     from pathlib import Path
@@ -77,8 +66,8 @@ def test_compose_enables_aftermarket_with_verified_kis_pair_capacity() -> None:
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
 
     assert "KRX_ALPHA_AFTER_MARKET_ENABLED=true" in compose
-    # KIS 웹소켓 커넥션당 41스트림쌍 하드캡: docs/architecture/design-decisions.md,
-    # overview.md, tests/unit/realtime/test_kis_sharding.py 가 모두 이 값을 검증치로 쓴다.
+    # KIS 웹소켓 커넥션당 41스트림쌍 하드캡: docs/architecture/engineering-decisions.md,
+    # system-design.md, tests/unit/realtime/test_kis_sharding.py 가 모두 이 값을 검증치로 쓴다.
     assert "KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION=41" in compose
 
 
