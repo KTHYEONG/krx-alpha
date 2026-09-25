@@ -222,3 +222,6 @@ scratch/
 tm/
 tmp/
 
+
+# Serena AI Assistant
+.serena/
