@@ -75,6 +75,10 @@ class DataPaths:
         return self.root / "work"
 
     @property
+    def host_backup_status(self) -> pathlib.Path:
+        return self.work_root / "host_backup_status.json"
+
+    @property
     def kis_ws_lease_dir(self) -> pathlib.Path:
         return self.work_root / "kis_ws_leases"
 
@@ -144,6 +148,9 @@ class CollectorSettings(BaseSettings):
     min_free_disk_gb: float = 3.0
     orchestration_retry_s: float = 300.0
     degraded_candidates_max_age_days: int = 7
+    # 야간 23:30 KST 백업은 20:00 EOD 점검 시점에 보통 20.5시간 전 성공이다.
+    # 36시간이면 하룻밤 누락을 감지하면서 다음날 아침까지 끝나는 재시도는 허용한다.
+    host_backup_max_age_h: float = 36.0
     stale_bars_max_calendar_days: int = 4
     schedule: SessionSchedule = SessionSchedule()
     after_market_enabled: bool = False

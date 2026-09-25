@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import functools
+import json
 import logging
 import pathlib
 from collections.abc import Set as AbstractSet
@@ -238,6 +239,56 @@ def check_backup_freshness(
             local.append(rel)
     remote = {p.removeprefix("manifests/") for p in arc.remote_files("manifests/")}
     return sorted(n for n in local if n not in remote)
+
+
+def check_host_backup_freshness(
+    *, status_path: pathlib.Path, now: dt.datetime, max_age: dt.timedelta
+) -> str | None:
+    """Return a staleness reason when the host Drive backup has not succeeded recently.
+
+    The host backup runs outside the container under a lock shared with other
+    tenants, and its failure alert depends on another project's unit. The
+    daemon therefore reads the status file the backup script writes after
+    every attempt and raises its own alarm when success is overdue.
+
+    Args:
+        status_path: Status JSON written by ``deploy/host/krx-host-backup.sh``.
+        now: Timezone-aware current time.
+        max_age: Maximum tolerated age of ``last_ok_at``.
+
+    Returns:
+        ``None`` when ``last_ok_at`` is within ``max_age``; otherwise one of
+        ``"missing"``, ``"unreadable"``, ``"never_succeeded"`` or
+        ``"stale:<age_hours rounded to 1 decimal>h"``.
+
+    Raises:
+        ValueError: If ``now`` is naive.
+    """
+    if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
+        raise ValueError("now must be timezone-aware")
+    try:
+        raw = pathlib.Path(status_path).read_text(encoding="utf-8")
+    except OSError:
+        return "missing"
+    try:
+        body = json.loads(raw)
+        last_ok_raw = body.get("last_ok_at")
+    except (ValueError, AttributeError):
+        return "unreadable"
+    if last_ok_raw is None:
+        return "never_succeeded"
+    if not isinstance(last_ok_raw, str):
+        return "unreadable"
+    try:
+        last_ok = dt.datetime.fromisoformat(last_ok_raw)
+    except ValueError:
+        return "unreadable"
+    if last_ok.tzinfo is None or last_ok.tzinfo.utcoffset(last_ok) is None:
+        return "unreadable"
+    age = now - last_ok
+    if age.total_seconds() < 0 or age <= max_age:
+        return None
+    return f"stale:{age.total_seconds() / 3600:.1f}h"
 
 
 def check_session_reconciliation(

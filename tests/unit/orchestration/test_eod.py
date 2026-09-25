@@ -796,3 +796,113 @@ def test_run_eod_remote_l0_purge_returns_zero_stats_without_archiver(tmp_path, c
     assert out.skipped_absent == 0
     assert out.failed == 0
     assert "rclone_settings_missing" in caplog.text
+
+
+def _write_host_status(path, last_ok_at) -> None:
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"last_ok_at": last_ok_at}), encoding="utf-8")
+
+
+def test_check_host_backup_freshness_passes_when_fresh(tmp_path) -> None:
+    import datetime as dt
+
+    from src.orchestration.eod import check_host_backup_freshness
+
+    now = dt.datetime(2026, 9, 24, 20, 0, tzinfo=dt.UTC)
+    status = tmp_path / "host_backup_status.json"
+    _write_host_status(status, (now - dt.timedelta(hours=20)).isoformat())
+    assert (
+        check_host_backup_freshness(status_path=status, now=now, max_age=dt.timedelta(hours=36)) is None
+    )
+
+
+def test_check_host_backup_freshness_reports_stale_with_age(tmp_path) -> None:
+    import datetime as dt
+
+    from src.orchestration.eod import check_host_backup_freshness
+
+    now = dt.datetime(2026, 9, 24, 20, 0, tzinfo=dt.UTC)
+    status = tmp_path / "host_backup_status.json"
+    _write_host_status(status, (now - dt.timedelta(hours=40)).isoformat())
+
+    assert check_host_backup_freshness(status_path=status, now=now, max_age=dt.timedelta(hours=36)) == "stale:40.0h"
+
+
+def test_check_host_backup_freshness_reports_missing(tmp_path) -> None:
+    import datetime as dt
+
+    from src.orchestration.eod import check_host_backup_freshness
+
+    now = dt.datetime(2026, 9, 24, 20, 0, tzinfo=dt.UTC)
+
+    assert (
+        check_host_backup_freshness(
+            status_path=tmp_path / "host_backup_status.json", now=now, max_age=dt.timedelta(hours=36)
+        )
+        == "missing"
+    )
+
+
+def test_check_host_backup_freshness_reports_unreadable(tmp_path) -> None:
+    import datetime as dt
+
+    from src.orchestration.eod import check_host_backup_freshness
+
+    now = dt.datetime(2026, 9, 24, 20, 0, tzinfo=dt.UTC)
+    status = tmp_path / "host_backup_status.json"
+    status.write_text("not-json{", encoding="utf-8")
+
+    assert check_host_backup_freshness(status_path=status, now=now, max_age=dt.timedelta(hours=36)) == "unreadable"
+
+    _write_host_status(status, "tomorrow-ish")
+    assert check_host_backup_freshness(status_path=status, now=now, max_age=dt.timedelta(hours=36)) == "unreadable"
+
+    _write_host_status(status, 12345)
+    assert check_host_backup_freshness(status_path=status, now=now, max_age=dt.timedelta(hours=36)) == "unreadable"
+
+    _write_host_status(status, "2026-09-24T20:00:00")
+    assert check_host_backup_freshness(status_path=status, now=now, max_age=dt.timedelta(hours=36)) == "unreadable"
+
+
+def test_check_host_backup_freshness_reports_never_succeeded(tmp_path) -> None:
+    import datetime as dt
+
+    from src.orchestration.eod import check_host_backup_freshness
+
+    now = dt.datetime(2026, 9, 24, 20, 0, tzinfo=dt.UTC)
+    status = tmp_path / "host_backup_status.json"
+    _write_host_status(status, None)
+
+    assert (
+        check_host_backup_freshness(status_path=status, now=now, max_age=dt.timedelta(hours=36))
+        == "never_succeeded"
+    )
+
+
+def test_check_host_backup_freshness_rejects_naive_now(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.orchestration.eod import check_host_backup_freshness
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        check_host_backup_freshness(
+            status_path=tmp_path / "host_backup_status.json",
+            now=dt.datetime(2026, 9, 24, 20, 0),
+            max_age=dt.timedelta(hours=36),
+        )
+
+
+def test_check_host_backup_freshness_treats_future_last_ok_as_fresh(tmp_path) -> None:
+    import datetime as dt
+
+    from src.orchestration.eod import check_host_backup_freshness
+
+    now = dt.datetime(2026, 9, 24, 20, 0, tzinfo=dt.UTC)
+    status = tmp_path / "host_backup_status.json"
+    _write_host_status(status, (now + dt.timedelta(hours=1)).isoformat())
+
+    assert check_host_backup_freshness(status_path=status, now=now, max_age=dt.timedelta(hours=36)) is None

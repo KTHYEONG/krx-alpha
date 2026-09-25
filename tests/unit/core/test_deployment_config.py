@@ -87,9 +87,10 @@ def test_compose_uses_absolute_secret_paths_without_shell_interpolation() -> Non
     )
     assert "${" not in compose
     assert "- .env" not in compose
-    assert "- /home/ubuntu/.cache/kis:/run/kis-token-cache:ro" in compose
+    assert "- /home/ubuntu/.cache/kis:/run/kis-token-cache" in compose
+    assert ":/run/kis-token-cache:ro" not in compose
     assert "- /home/ubuntu/.config/rclone:/root/.config/rclone:ro" in compose
-    assert "KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE=false" in compose
+    assert "KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE=true" in compose
     assert "KRX_ALPHA_KIS_TOKEN_CACHE_DIR=/run/kis-token-cache" in compose
     assert '["/app/.venv/bin/python", "-m", "src.orchestration.daemon"]' in compose
 
@@ -259,3 +260,18 @@ def test_deferred_slot_precedes_nightly_backup_and_follows_eod() -> None:
 
     backup_slot = dt.time(23, 30)
     assert SessionSchedule().after_market_eod_done < DEFERRED_RECREATE_KST < backup_slot
+
+
+def test_host_backup_unit_retries_with_direct_restart_mode() -> None:
+    from pathlib import Path
+
+    unit = Path("deploy/host/krx-host-backup.service").read_text(encoding="utf-8")
+
+    assert "Restart=on-failure" in unit
+    assert "RestartMode=direct" in unit
+    assert "RestartSec=30min" in unit
+    assert "StartLimitBurst=3" in unit
+    assert "StartLimitIntervalSec=10h" in unit
+    assert "OnFailure=kca-alert@%n.service" in unit
+    assert "Type=oneshot" in unit
+    assert "TimeoutStartSec=4h" in unit

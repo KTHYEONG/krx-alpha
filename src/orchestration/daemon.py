@@ -33,7 +33,7 @@ from src.core.config import (
 from src.core.errors import KrxAlphaError, MissingCredentialsError
 from src.core.observability import EVENT, configure_logging, send_digest
 from src.execution.contracts import KisApiError
-from src.execution.kis_client import KisRestClient, RateLimiter, kis_token_cache_path
+from src.execution.kis_client import KisRestClient, RateLimiter, kis_app_key_fingerprint, kis_token_cache_path
 from src.marketdata.krx_bars import KrxBarsError
 from src.marketdata.service import BarsRefreshResult as BarsRefreshResult
 from src.marketdata.service import KisFallbackError as KisFallbackError
@@ -50,6 +50,7 @@ from src.marketdata.toss_program_trades import TossProgramTradesError
 from src.orchestration.eod import (
     aftermarket_eod_ready,
     check_backup_freshness,
+    check_host_backup_freshness,
     check_session_reconciliation,
     classify_remote_failure,
     run_eod_maintenance,
@@ -110,6 +111,114 @@ def _build_kis_client(paths: DataPaths) -> KisRestClient:
         timeout_s=execution.request_timeout_s,
         allow_token_issue=token_settings.allow_issue,
     )
+
+
+def _build_snapshot_preflight_client(paths: DataPaths) -> tuple[KisRestClient, str]:
+    """collect-snapshots와 동일한 규칙으로 데이터 슬롯 KIS 클라이언트를 생성한다."""
+    snapshot_settings = SnapshotSettings()
+    credentials = load_kis_data_credentials()
+    cred = next((c for c in credentials if c.slot == snapshot_settings.kis_data_slot), None)
+    if cred is None:
+        raise MissingCredentialsError(f"no data credential for slot {snapshot_settings.kis_data_slot}")
+    token_settings = KisTokenSettings()
+    client = KisRestClient(
+        creds=KisCredentials(
+            kis_app_key=cred.app_key,
+            kis_app_secret=cred.app_secret,
+            kis_account_no="",
+            kis_account_product_code="",
+        ),
+        session=requests,
+        token_cache_path=kis_token_cache_path(token_settings.token_cache_dir, cred.app_key),
+        limiter=RateLimiter(snapshot_settings.rest_rate_per_s),
+        now=lambda: dt.datetime.now(_KST),
+        timeout_s=snapshot_settings.request_timeout_s,
+        allow_token_issue=token_settings.allow_issue,
+    )
+    return client, cred.key_id
+
+
+def _kis_token_preflight(paths: DataPaths, today: dt.date) -> dict[str, str]:
+    """Ensure krx's KIS REST keys hold a token before the session starts.
+
+    Covers the primary key (security status, aftermarket reselection, daily
+    bar fallback) and the snapshot data slot. The aftermarket WebSocket uses
+    per-connection approval keys and is intentionally not covered. Failures
+    never block orchestration: LS tick collection does not depend on KIS.
+
+    Returns:
+        Mapping of key fingerprint to outcome (``"cache"``, ``"issued"`` or
+        ``"fail:<msg_cd>"``), for logging and tests.
+    """
+    del today
+    outcomes: dict[str, str] = {}
+    try:
+        primary = _build_kis_client(paths)
+    except MissingCredentialsError:
+        logger.critical("[SYS] stage=kis_token_preflight key_id=unknown result=fail reason=missing_credentials")
+        outcomes["unknown"] = "fail:missing_credentials"
+        primary = None
+    if primary is not None:
+        creds = getattr(primary, "_creds", None)
+        app_key = getattr(creds, "kis_app_key", "") if creds is not None else ""
+        fingerprint = kis_app_key_fingerprint(app_key) if app_key else "unknown"
+        try:
+            source = primary.ensure_token()
+        except KisApiError as exc:
+            logger.critical(
+                "[SYS] stage=kis_token_preflight key_id=%s result=fail reason=%s",
+                fingerprint,
+                exc.msg_cd,
+            )
+            outcomes[fingerprint] = f"fail:{exc.msg_cd}"
+        except Exception as exc:  # noqa: BLE001 - 프리플라이트 실패가 오케스트레이션을 막지 않도록 격리
+            logger.critical(
+                "[SYS] stage=kis_token_preflight key_id=%s result=fail reason=%s",
+                fingerprint,
+                type(exc).__name__,
+            )
+            outcomes[fingerprint] = f"fail:{type(exc).__name__}"
+        else:
+            logger.info(
+                "[SYS] stage=kis_token_preflight key_id=%s result=%s reason=-",
+                fingerprint,
+                source.value,
+            )
+            outcomes[fingerprint] = source.value
+    try:
+        snapshot_client, snapshot_fp = _build_snapshot_preflight_client(paths)
+    except MissingCredentialsError:
+        fallback_key = "unknown-data"
+        logger.critical(
+            "[SYS] stage=kis_token_preflight key_id=%s result=fail reason=missing_credentials",
+            fallback_key,
+        )
+        outcomes[fallback_key] = "fail:missing_credentials"
+    else:
+        try:
+            source = snapshot_client.ensure_token()
+        except KisApiError as exc:
+            logger.critical(
+                "[SYS] stage=kis_token_preflight key_id=%s result=fail reason=%s",
+                snapshot_fp,
+                exc.msg_cd,
+            )
+            outcomes[snapshot_fp] = f"fail:{exc.msg_cd}"
+        except Exception as exc:  # noqa: BLE001 - 프리플라이트 실패가 오케스트레이션을 막지 않도록 격리
+            logger.critical(
+                "[SYS] stage=kis_token_preflight key_id=%s result=fail reason=%s",
+                snapshot_fp,
+                type(exc).__name__,
+            )
+            outcomes[snapshot_fp] = f"fail:{type(exc).__name__}"
+        else:
+            logger.info(
+                "[SYS] stage=kis_token_preflight key_id=%s result=%s reason=-",
+                snapshot_fp,
+                source.value,
+            )
+            outcomes[snapshot_fp] = source.value
+    return outcomes
 
 
 def _run_program_trades_auto_backfill(paths: DataPaths, today: dt.date) -> None:
@@ -335,7 +444,15 @@ def _run_eod_housekeeping(cfg: CollectorSettings, paths: DataPaths, ref_day: dt.
     )
 
 
-def _check_backup(paths: DataPaths, ref_day: dt.date) -> tuple[list[str], bool]:
+def _check_backup(
+    paths: DataPaths, ref_day: dt.date, *, now: dt.datetime, max_age: dt.timedelta
+) -> tuple[list[str], bool, str]:
+    host_reason = check_host_backup_freshness(
+        status_path=paths.host_backup_status, now=now, max_age=max_age
+    )
+    host_label = "ok" if host_reason is None else host_reason
+    if host_reason is not None:
+        logger.critical("[SYS] stage=host_backup_freshness status=STALE reason=%s", host_reason)
     try:
         missing = check_backup_freshness(manifest_dir=paths.manifest_dir, today=ref_day)
     except RemoteArchiveError as e:
@@ -344,11 +461,13 @@ def _check_backup(paths: DataPaths, ref_day: dt.date) -> tuple[list[str], bool]:
             classify_remote_failure(str(e)),
             str(e),
         )
-        return [], False
+        return [], False, host_label
     if missing:
         logger.critical("[DAEMON] stage=backup_freshness status=STALE missing=%d oldest=%s", len(missing), missing[0])
-        return missing, False
-    return [], True
+        return missing, False, host_label
+    if host_reason is not None:
+        return [], False, host_label
+    return [], True, host_label
 
 
 def _stream_cmd(today: dt.date, paths: DataPaths, *, degraded_reason: str | None) -> list[str]:
@@ -458,6 +577,7 @@ def run_collector_daemon(
 
     clock = now_fn if now_fn is not None else (lambda: dt.datetime.now(_KST))
     orchestrated_for: dt.date | None = None
+    preflight_day: dt.date | None = None
     holiday_skip_logged_for: dt.date | None = None
     possible_holiday_warned_for: dt.date | None = None
     eod_attempted_for: dt.date | None = None
@@ -593,6 +713,9 @@ def run_collector_daemon(
                     and (next_orchestration_at is None or now >= next_orchestration_at)
                 ):
                     trading_day = day.trading_day
+                    if preflight_day != today:
+                        preflight_day = today
+                        _kis_token_preflight(paths, today)
                     orchestration_attempts += 1
                     try:
                         ready = run_session_orchestration(today=today, settings=cfg, trading_day=trading_day)
@@ -808,7 +931,12 @@ def run_collector_daemon(
                 assert day is not None
                 if day.status is TradingDayStatus.HOLIDAY:
                     housekeeping = _run_eod_housekeeping(cfg, paths, ref_day)
-                    _check_backup(paths, ref_day)
+                    _check_backup(
+                        paths,
+                        ref_day,
+                        now=now,
+                        max_age=dt.timedelta(hours=cfg.host_backup_max_age_h),
+                    )
                     logger.info(
                         "[DAEMON] stage=eod_maintenance status=HOLIDAY deleted_partitions=%d uploaded=%d purged=%d date=%s",
                         housekeeping.deleted,
@@ -861,7 +989,12 @@ def run_collector_daemon(
                             )
                     else:
                         logger.warning("[DAEMON] stage=eod_reconciliation status=SKIP reason=calendar_unknown")
-                    backup_missing, backup_ok = _check_backup(paths, ref_day)
+                    backup_missing, backup_ok, host_backup = _check_backup(
+                        paths,
+                        ref_day,
+                        now=now,
+                        max_age=dt.timedelta(hours=cfg.host_backup_max_age_h),
+                    )
                     eod_status = (
                         "OK"
                         if (
@@ -891,6 +1024,7 @@ def run_collector_daemon(
                             f"reconciled={reconciled}",
                             f"aftermarket_ready={not aftermarket_blocked}",
                             f"backup_missing={len(backup_missing)}",
+                            f"host_backup={host_backup}",
                             f"streamer_restarts={streamer_restarts}",
                             f"orchestration_attempts={orchestration_attempts}",
                         ]

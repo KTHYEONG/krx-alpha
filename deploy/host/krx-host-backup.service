@@ -1,11 +1,19 @@
 [Unit]
 Description=krx-alpha host Drive backup
+StartLimitIntervalSec=10h
+StartLimitBurst=3
 OnFailure=kca-alert@%n.service
 
 [Service]
 Type=oneshot
 ExecStart=%h/krx-alpha/deploy/host/krx-host-backup.sh
 TimeoutStartSec=4h
+Restart=on-failure
+RestartMode=direct
+RestartSec=30min
+# 락 경합·일시적 네트워크 실패는 최대 3회까지 30분 간격으로 재시도한다.
+# RestartMode=direct 로 최종 실패 때만 OnFailure 알림이 나간다.
+# rclone copy 는 멱등해서 재시도가 같은 UTC _versions 날짜 안에 머문다.
 
 [Install]
 WantedBy=default.target
