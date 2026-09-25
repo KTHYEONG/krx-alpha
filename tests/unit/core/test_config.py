@@ -20,6 +20,36 @@ def test_data_paths_derive_from_single_root() -> None:
     assert paths.manifest_path(dt.date(2026, 9, 10)) == pathlib.Path("var/krx/manifest/2026-09-10.json")
 
 
+def test_host_backup_status_path_default_is_independent_of_data_root(
+    tmp_path, monkeypatch
+) -> None:
+    import pathlib
+
+    from src.core.config import CollectorSettings
+    from src.core.paths import DEFAULT_HOST_BACKUP_STATUS_PATH
+
+    monkeypatch.delenv("KRX_ALPHA_HOST_BACKUP_STATUS_PATH", raising=False)
+    data_root = tmp_path / "container-data"
+    settings = CollectorSettings(data_root=data_root)
+
+    expected = pathlib.Path("/run/host-backup/host_backup_status.json")
+    assert expected == DEFAULT_HOST_BACKUP_STATUS_PATH
+    assert expected == settings.host_backup_status_path
+    assert expected.is_absolute()
+    assert not expected.is_relative_to(data_root)
+
+
+def test_host_backup_status_path_env_override(tmp_path, monkeypatch) -> None:
+    import pathlib
+
+    from src.core.config import CollectorSettings
+
+    override = tmp_path / "host-state" / "status.json"
+    monkeypatch.setenv("KRX_ALPHA_HOST_BACKUP_STATUS_PATH", str(override))
+
+    assert CollectorSettings().host_backup_status_path == pathlib.Path(override)
+
+
 import pytest
 
 

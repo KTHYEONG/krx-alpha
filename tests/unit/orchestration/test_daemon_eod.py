@@ -573,7 +573,10 @@ def test_run_collector_daemon_eod_sends_daily_digest_once_per_date(tmp_path, mon
     from src.orchestration import daemon as daemon_mod
 
     monkeypatch.chdir(tmp_path)
-    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings = CollectorSettings(
+        data_root=pathlib.Path(tmp_path) / "data",
+        host_backup_status_path=_host_status_path(tmp_path),
+    )
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     digests: list[tuple[str, str]] = []
@@ -658,7 +661,10 @@ def test_eod_remote_l0_purge_runs_after_pruning_and_cannot_fail_eod(tmp_path, mo
     from src.orchestration import daemon as daemon_mod
 
     monkeypatch.chdir(tmp_path)
-    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings = CollectorSettings(
+        data_root=pathlib.Path(tmp_path) / "data",
+        host_backup_status_path=_host_status_path(tmp_path),
+    )
     order: list[str] = []
 
     def _maintenance(journal_root, **kw):
@@ -704,7 +710,11 @@ def test_daemon_holiday_eod_runs_housekeeping_without_alerts(tmp_path, monkeypat
     from src.orchestration import daemon as daemon_mod
 
     monkeypatch.chdir(tmp_path)
-    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
+    settings = CollectorSettings(
+        data_root=pathlib.Path(tmp_path) / "data",
+        after_market_enabled=True,
+        host_backup_status_path=_host_status_path(tmp_path),
+    )
     kst = ZoneInfo("Asia/Seoul")
     holiday = _holiday_trading_day(dt.date(2026, 9, 24))
     monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: holiday)
@@ -848,7 +858,11 @@ def test_daemon_ready_aftermarket_and_clean_checks_report_ok(tmp_path, monkeypat
     from src.orchestration import daemon as daemon_mod
 
     monkeypatch.chdir(tmp_path)
-    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
+    settings = CollectorSettings(
+        data_root=pathlib.Path(tmp_path) / "data",
+        after_market_enabled=True,
+        host_backup_status_path=_host_status_path(tmp_path),
+    )
     monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(d))
     monkeypatch.setattr(daemon_mod, "aftermarket_eod_ready", lambda **kw: True)
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
@@ -1048,11 +1062,15 @@ def test_daemon_holiday_eod_backup_remote_failure_is_critical(tmp_path, monkeypa
     assert "status=HOLIDAY" in caplog.text
 
 
+def _host_status_path(tmp_path):
+    return tmp_path / "host-state" / "host_backup_status.json"
+
+
 def _write_eod_host_status(settings, now, age_h) -> None:
     import datetime as dt
     import json
 
-    status_path = settings.paths.host_backup_status
+    status_path = settings.host_backup_status_path
     status_path.parent.mkdir(parents=True, exist_ok=True)
     last_ok = now - dt.timedelta(hours=age_h)
     status_path.write_text(json.dumps({"last_ok_at": last_ok.isoformat()}), encoding="utf-8")
@@ -1068,7 +1086,10 @@ def test_stale_host_backup_degrades_business_day_eod(tmp_path, monkeypatch, capl
     from src.orchestration import daemon as daemon_mod
 
     monkeypatch.chdir(tmp_path)
-    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings = CollectorSettings(
+        data_root=pathlib.Path(tmp_path) / "data",
+        host_backup_status_path=_host_status_path(tmp_path),
+    )
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     digests: list[tuple[str, str]] = []
@@ -1076,7 +1097,7 @@ def test_stale_host_backup_degrades_business_day_eod(tmp_path, monkeypatch, capl
     monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 2, "skipped": 0, "failed": 0, "purged": 1})
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
-    _write_eod_host_status(settings, eod_time, 48)
+    _write_eod_host_status(settings, eod_time, 40)
     monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
 
     with caplog.at_level(logging.CRITICAL):
@@ -1084,10 +1105,58 @@ def test_stale_host_backup_degrades_business_day_eod(tmp_path, monkeypatch, capl
 
     stale = [r for r in caplog.records if "stage=host_backup_freshness" in r.getMessage()]
     assert len(stale) == 1
-    assert "reason=stale:48.0h" in stale[0].getMessage()
+    assert "reason=stale:40.0h" in stale[0].getMessage()
     assert len(digests) == 1
     assert digests[0][0] == "[krx-alpha] EOD 2026-09-14 DEGRADED"
-    assert "host_backup=stale:48.0h" in digests[0][1].splitlines()
+    assert "host_backup=stale:40.0h" in digests[0][1].splitlines()
+
+
+def test_business_eod_ignores_data_root_work_status_and_reports_missing(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    import datetime as dt
+    import json
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(
+        data_root=pathlib.Path(tmp_path) / "data",
+        host_backup_status_path=_host_status_path(tmp_path),
+    )
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    old_status_path = settings.paths.work_root / "host_backup_status.json"
+    old_status_path.parent.mkdir(parents=True, exist_ok=True)
+    old_status_path.write_text(
+        json.dumps({"last_ok_at": eod_time.isoformat()}), encoding="utf-8"
+    )
+    assert not settings.host_backup_status_path.exists()
+
+    digests: list[tuple[str, str]] = []
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
+    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+
+    with caplog.at_level(logging.CRITICAL):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    missing = [
+        record
+        for record in caplog.records
+        if "stage=host_backup_freshness" in record.getMessage()
+    ]
+    assert len(missing) == 1
+    assert missing[0].levelno == logging.CRITICAL
+    assert "reason=missing" in missing[0].getMessage()
+    assert digests[0][0] == "[krx-alpha] EOD 2026-09-14 DEGRADED"
+    assert "host_backup=missing" in digests[0][1].splitlines()
 
 
 def test_fresh_host_backup_keeps_business_day_eod_ok(tmp_path, monkeypatch) -> None:
@@ -1099,7 +1168,10 @@ def test_fresh_host_backup_keeps_business_day_eod_ok(tmp_path, monkeypatch) -> N
     from src.orchestration import daemon as daemon_mod
 
     monkeypatch.chdir(tmp_path)
-    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings = CollectorSettings(
+        data_root=pathlib.Path(tmp_path) / "data",
+        host_backup_status_path=_host_status_path(tmp_path),
+    )
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     digests: list[tuple[str, str]] = []
@@ -1127,7 +1199,11 @@ def test_holiday_eod_checks_host_backup_freshness_without_digest(tmp_path, monke
     from src.orchestration import daemon as daemon_mod
 
     monkeypatch.chdir(tmp_path)
-    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
+    settings = CollectorSettings(
+        data_root=pathlib.Path(tmp_path) / "data",
+        after_market_enabled=True,
+        host_backup_status_path=_host_status_path(tmp_path),
+    )
     holiday = _holiday_trading_day(dt.date(2026, 9, 24))
     monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: holiday)
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
@@ -1143,6 +1219,13 @@ def test_holiday_eod_checks_host_backup_freshness_without_digest(tmp_path, monke
     with caplog.at_level(logging.CRITICAL):
         daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
 
-    assert "stage=host_backup_freshness status=STALE reason=missing" in caplog.text
+    missing = [
+        record
+        for record in caplog.records
+        if "stage=host_backup_freshness" in record.getMessage()
+    ]
+    assert len(missing) == 1
+    assert missing[0].levelno == logging.CRITICAL
+    assert "reason=missing" in missing[0].getMessage()
 
 

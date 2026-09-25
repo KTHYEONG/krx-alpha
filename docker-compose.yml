@@ -27,6 +27,8 @@ services:
       - ./logs:/app/logs
       - /home/ubuntu/.config/rclone:/root/.config/rclone:ro
       - /home/ubuntu/.cache/kis:/run/kis-token-cache
+      # 호스트 백업 스크립트만 쓰는 상태 디렉터리(컨테이너는 읽기 전용). 컨테이너 시작 전에 ubuntu 소유로 존재해야 하며, 없으면 Docker가 root 소유로 만든다.
+      - /home/ubuntu/.local/state/krx-alpha:/run/host-backup:ro
     # 장중 수집(daemon ~95MB) + EOD 정규화 자식(cgroup 실측 ≤500MB) 동시 상주 여유, swap 스래싱 방지
     mem_limit: 1g
     memswap_limit: 1g

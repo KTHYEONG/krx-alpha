@@ -10,13 +10,13 @@ VERSION_RETENTION_DAYS="${VERSION_RETENTION_DAYS:-30}"
 BACKUP_TODAY_UTC="${BACKUP_TODAY_UTC:-$(date -u +%F)}"
 LOG_DIR="${LOG_DIR:-$HOME/logs}"
 LOG_FILE="$LOG_DIR/krx-host-backup-$BACKUP_TODAY_UTC.log"
-STATUS_FILE="$KRX_ROOT/data/work/host_backup_status.json"
-HOLDERS_TMP="$KRX_ROOT/data/work/.host_backup_holders.tmp"
+KRX_HOST_STATE_DIR="${KRX_HOST_STATE_DIR:-$HOME/.local/state/krx-alpha}"
+STATUS_FILE="$KRX_HOST_STATE_DIR/host_backup_status.json"
+HOLDERS_TMP="$KRX_HOST_STATE_DIR/.host_backup_holders.tmp"
 ATTEMPT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
 
 mkdir -p "$LOG_DIR"
 mkdir -p "$(dirname "$QUANT_GDRIVE_LOCK")"
-mkdir -p "$KRX_ROOT/data/work"
 
 log() {
   printf '%s\n' "$*" | tee -a "$LOG_FILE"
@@ -93,6 +93,11 @@ os.replace(tmp_path, status_file)
 PYEOF
 }
 
+if ! mkdir -p "$KRX_HOST_STATE_DIR"; then
+  log "[SYS] stage=gdrive_backup project=krx-alpha step=status status=failed"
+  exit 74
+fi
+
 exec 9>"$QUANT_GDRIVE_LOCK"
 SECONDS=0
 if ! flock -w "$LOCK_WAIT_SEC" 9; then
@@ -107,7 +112,9 @@ if ! flock -w "$LOCK_WAIT_SEC" 9; then
   for holder in "${LOCK_HOLDERS[@]}"; do
     printf '%s\n' "$holder" >> "$HOLDERS_TMP"
   done
-  write_status 75 null null "$lock_wait_s"
+  if ! write_status 75 null null "$lock_wait_s"; then
+    log "[SYS] stage=gdrive_backup project=krx-alpha step=status status=failed"
+  fi
   rm -f "$HOLDERS_TMP"
   exit 75
 fi
@@ -162,7 +169,12 @@ else
 fi
 
 rm -f "$HOLDERS_TMP"
-write_status "$overall_rc" "$data_rc" "$prune_rc" "$lock_wait_s"
+if ! write_status "$overall_rc" "$data_rc" "$prune_rc" "$lock_wait_s"; then
+  log "[SYS] stage=gdrive_backup project=krx-alpha step=status status=failed"
+  if [ "$overall_rc" -eq 0 ]; then
+    overall_rc=74
+  fi
+fi
 rm -f "$HOLDERS_TMP"
 
 exit "$overall_rc"

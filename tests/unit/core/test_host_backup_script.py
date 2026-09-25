@@ -45,6 +45,7 @@ def _base_env(tmp_path: Path, argv_log: Path) -> dict[str, str]:
             "VERSION_RETENTION_DAYS": "30",
             "BACKUP_TODAY_UTC": "2026-09-23",
             "LOG_DIR": str(tmp_path / "logs"),
+            "KRX_HOST_STATE_DIR": str(tmp_path / "host-state"),
             "FAKE_COPY_RC": "0",
             "FAKE_LSF_RC": "3",
             "FAKE_LSF_OUTPUT": "",
@@ -178,7 +179,7 @@ def test_no_destructive_sync_semantics(tmp_path) -> None:
 
 
 def _status_path(tmp_path: Path) -> Path:
-    return Path(tmp_path / "krx" / "data" / "work" / "host_backup_status.json")
+    return Path(tmp_path / "host-state" / "host_backup_status.json")
 
 
 def _read_status(tmp_path: Path) -> dict:
@@ -187,7 +188,7 @@ def _read_status(tmp_path: Path) -> dict:
     return json.loads(_status_path(tmp_path).read_text(encoding="utf-8"))
 
 
-def test_successful_run_writes_status_with_last_ok(tmp_path) -> None:
+def test_successful_run_writes_status_to_host_state_dir(tmp_path) -> None:
     argv_log = tmp_path / "argv.log"
     env = _base_env(tmp_path, argv_log)
 
@@ -210,6 +211,106 @@ def test_successful_run_writes_status_with_last_ok(tmp_path) -> None:
     assert isinstance(body["lock_wait_s"], int)
     leftovers = list((_status_path(tmp_path).parent).glob("*.tmp"))
     assert leftovers == []
+    assert not (tmp_path / "krx" / "data" / "work").exists()
+
+
+def test_status_dir_is_created_when_absent(tmp_path) -> None:
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+    state_dir = tmp_path / "nested" / "host-state"
+    env["KRX_HOST_STATE_DIR"] = str(state_dir)
+
+    result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    assert state_dir.is_dir()
+    assert (state_dir / "host_backup_status.json").is_file()
+
+
+def test_state_dir_creation_failure_stops_before_backup(tmp_path) -> None:
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+    state_path = Path(env["KRX_HOST_STATE_DIR"])
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.touch()
+
+    result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 74
+    assert _read_argv(argv_log) == []
+    assert "step=status status=failed" in result.stdout
+
+
+def test_status_write_failure_after_successful_backup_fails_closed(tmp_path) -> None:
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+    _status_path(tmp_path).mkdir(parents=True)
+
+    result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 74
+    assert any(line.startswith("copy ") for line in _read_argv(argv_log))
+    assert "step=status status=failed" in result.stdout
+
+
+def test_status_write_failure_does_not_mask_backup_failure(tmp_path) -> None:
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+    env["FAKE_COPY_RC"] = "1"
+    _status_path(tmp_path).mkdir(parents=True)
+
+    result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 1
+    assert "step=status status=failed" in result.stdout
+
+
+def test_lock_timeout_status_write_failure_keeps_exit_75(tmp_path) -> None:
+    import fcntl
+
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+    env["LOCK_WAIT_SEC"] = "1"
+    _status_path(tmp_path).mkdir(parents=True)
+    lock_path = Path(env["QUANT_GDRIVE_LOCK"])
+    lock_path.touch()
+    with open(lock_path, "w", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+            ["bash", str(SCRIPT)],  # noqa: S607
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    assert result.returncode == 75
+    assert _read_argv(argv_log) == []
+    assert "step=status status=failed" in result.stdout
 
 
 def test_lock_timeout_records_holders_and_keeps_previous_last_ok(tmp_path) -> None:
@@ -219,8 +320,8 @@ def test_lock_timeout_records_holders_and_keeps_previous_last_ok(tmp_path) -> No
     argv_log = tmp_path / "argv.log"
     env = _base_env(tmp_path, argv_log)
     env["LOCK_WAIT_SEC"] = "1"
-    work = tmp_path / "krx" / "data" / "work"
-    work.mkdir(parents=True, exist_ok=True)
+    state_dir = Path(env["KRX_HOST_STATE_DIR"])
+    state_dir.mkdir(parents=True, exist_ok=True)
     _status_path(tmp_path).write_text(
         json.dumps({"last_ok_at": "2026-09-22T14:30:00+00:00"}), encoding="utf-8"
     )
@@ -271,8 +372,8 @@ def test_copy_failure_keeps_previous_last_ok(tmp_path) -> None:
     argv_log = tmp_path / "argv.log"
     env = _base_env(tmp_path, argv_log)
     env["FAKE_COPY_RC"] = "1"
-    work = tmp_path / "krx" / "data" / "work"
-    work.mkdir(parents=True, exist_ok=True)
+    state_dir = Path(env["KRX_HOST_STATE_DIR"])
+    state_dir.mkdir(parents=True, exist_ok=True)
     _status_path(tmp_path).write_text(
         json.dumps({"last_ok_at": "2026-09-22T14:30:00+00:00"}), encoding="utf-8"
     )
@@ -295,8 +396,8 @@ def test_copy_failure_keeps_previous_last_ok(tmp_path) -> None:
 def test_corrupt_previous_status_tolerated(tmp_path) -> None:
     argv_log = tmp_path / "argv.log"
     env = _base_env(tmp_path, argv_log)
-    work = tmp_path / "krx" / "data" / "work"
-    work.mkdir(parents=True, exist_ok=True)
+    state_dir = Path(env["KRX_HOST_STATE_DIR"])
+    state_dir.mkdir(parents=True, exist_ok=True)
     _status_path(tmp_path).write_text("not-json{", encoding="utf-8")
 
     result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
