@@ -1152,3 +1152,387 @@ def test_get_index_minute_bars_deduplicates_and_sorts_ascending(tmp_path) -> Non
     bars = client.get_index_minute_bars('1001', session_date=dt.date(2026, 9, 17))
 
     assert [b['bar_time'] for b in bars] == ['090100', '090200']
+
+
+def test_ensure_token_reports_cache_hit_without_network(tmp_path) -> None:
+    from src.execution.kis_client import TokenSource
+    from tests.unit.execution.fakes import make_client
+
+    client, session, _ = make_client(tmp_path, [])
+
+    assert client.ensure_token() is TokenSource.CACHE
+    assert session.calls == []
+
+
+def test_ensure_token_issues_when_cache_expired(tmp_path) -> None:
+    import datetime as dt
+    import json
+    import stat
+    from zoneinfo import ZoneInfo
+
+    from src.execution.kis_client import TokenSource
+    from tests.unit.execution.fakes import FixedClock, FakeSession, make_creds, token_response
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    kst = ZoneInfo("Asia/Seoul")
+    now = dt.datetime(2026, 9, 12, 9, 0, tzinfo=kst)
+    clock = FixedClock(now)
+    cache = tmp_path / "kis_token.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({
+        "access_token": "old",
+        "expired_at": (now - dt.timedelta(hours=1)).isoformat(),
+        "app_key": "app-key",
+        "issued_at": (now - dt.timedelta(days=1)).isoformat(),
+    }), encoding="utf-8")
+    session = FakeSession([token_response("2026-09-13 09:00:00", token="tok-new")])
+    client = KisRestClient(
+        creds=make_creds(), session=session, token_cache_path=cache,
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=clock, timeout_s=5.0,
+    )
+
+    assert client.ensure_token() is TokenSource.ISSUED
+    assert len(session.calls) == 1
+    body = json.loads(cache.read_text(encoding="utf-8"))
+    assert dt.datetime.fromisoformat(body["issued_at"]).date() == now.astimezone(kst).date()
+    assert stat.S_IMODE(cache.stat().st_mode) == 0o600
+
+
+def test_failed_issuance_enters_backoff(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import FakeResponse, FakeSession, FixedClock, T0, make_creds
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    clock = FixedClock(T0)
+    session = FakeSession([FakeResponse({"error_code": "EGW00103", "error_description": "bad"}, status=500)])
+    client = KisRestClient(
+        creds=make_creds(), session=session, token_cache_path=tmp_path / "t.json",
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=clock, timeout_s=5.0,
+    )
+
+    with pytest.raises(KisApiError) as excinfo:
+        client.access_token()
+    assert excinfo.value.msg_cd == "EGW00103"
+    clock.advance(64)
+    with pytest.raises(KisApiError) as excinfo2:
+        client.access_token()
+    assert excinfo2.value.msg_cd == "TOKEN_BACKOFF"
+    assert len(session.calls) == 1
+
+
+def test_backoff_expires_after_window(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import FakeResponse, FakeSession, FixedClock, T0, make_creds, token_response
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    clock = FixedClock(T0)
+    session = FakeSession([
+        FakeResponse({"error_code": "EGW00103", "error_description": "bad"}, status=500),
+        token_response("2026-09-12 09:00:00", token="tok-2"),
+    ])
+    client = KisRestClient(
+        creds=make_creds(), session=session, token_cache_path=tmp_path / "t.json",
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=clock, timeout_s=5.0,
+    )
+
+    with pytest.raises(KisApiError, match="EGW00103"):
+        client.access_token()
+    clock.advance(65)
+
+    assert client.access_token() == "tok-2"
+    assert len(session.calls) == 2
+
+
+def test_cache_written_externally_is_used_during_backoff(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import FakeResponse, FakeSession, FixedClock, T0, make_creds, write_token_cache
+
+    clock = FixedClock(T0)
+    cache = tmp_path / "t.json"
+    session = FakeSession([FakeResponse({"error_code": "EGW00103", "error_description": "bad"}, status=500)])
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    client = KisRestClient(
+        creds=make_creds(), session=session, token_cache_path=cache,
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=clock, timeout_s=5.0,
+    )
+    with pytest.raises(KisApiError):
+        client.access_token()
+    assert len(session.calls) == 1
+
+    import datetime as dt
+
+    write_token_cache(cache, token="external-tok", expires_at=clock.current + dt.timedelta(hours=20))
+
+    assert client.access_token() == "external-tok"
+    assert len(session.calls) == 1
+
+
+def test_same_day_issuance_refused_by_guard(tmp_path) -> None:
+    import datetime as dt
+    import json
+
+    import pytest
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import KisCredentials
+    from src.execution.contracts import KisApiError
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    now = dt.datetime(2026, 9, 15, 9, tzinfo=ZoneInfo("Asia/Seoul"))
+    cache = tmp_path / "today.json"
+    cache.write_text(json.dumps({
+        "access_token": "old",
+        "expired_at": "2026-09-15T08:00:00+09:00",
+        "app_key": "key",
+        "issued_at": "2026-09-15T07:00:00+09:00",
+    }), encoding="utf-8")
+
+    class Session:
+        def post(self, *args, **kwargs):
+            raise AssertionError("must not POST")
+
+    client = KisRestClient(
+        creds=KisCredentials(kis_app_key="key", kis_app_secret="secret", kis_account_no="12345678", kis_account_product_code="01"),
+        session=Session(), token_cache_path=cache,
+        limiter=RateLimiter(1000.0, sleep=lambda _: None), now=lambda: now, timeout_s=1.0,
+    )
+    with pytest.raises(KisApiError, match="TOKEN_DAILY_LIMIT"):
+        client.access_token()
+
+
+def test_root_written_files_inherit_directory_owner(tmp_path, monkeypatch) -> None:
+    import os
+    import stat
+
+    from tests.unit.execution.fakes import FakeSession, FixedClock, T0, make_creds, token_response
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    cache = tmp_path / "sub" / "kis_token.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    session = FakeSession([token_response("2026-09-12 09:00:00", token="tok-1")])
+    client = KisRestClient(
+        creds=make_creds(), session=session, token_cache_path=cache,
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=FixedClock(T0), timeout_s=5.0,
+    )
+    chowned: list[tuple[str, int, int]] = []
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(os, "chown", lambda p, u, g: chowned.append((p, u, g)))
+
+    assert client.access_token() == "tok-1"
+
+    owner = cache.parent.stat()
+    tmp_name = str(cache.parent / (cache.name + ".tmp"))
+    lock_name = str(cache) + ".lock"
+    assert (tmp_name, owner.st_uid, owner.st_gid) in chowned
+    assert (lock_name, owner.st_uid, owner.st_gid) in chowned
+    assert stat.S_IMODE(cache.stat().st_mode) == 0o600
+
+
+def test_non_root_writes_do_not_chown(tmp_path, monkeypatch) -> None:
+    import os
+
+    from tests.unit.execution.fakes import FakeSession, FixedClock, T0, make_creds, token_response
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    cache = tmp_path / "kis_token.json"
+    session = FakeSession([token_response("2026-09-12 09:00:00", token="tok-1")])
+    client = KisRestClient(
+        creds=make_creds(), session=session, token_cache_path=cache,
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=FixedClock(T0), timeout_s=5.0,
+    )
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    called: list[str] = []
+    monkeypatch.setattr(os, "chown", lambda *a: called.append("chown"))
+
+    assert client.access_token() == "tok-1"
+    assert called == []
+
+
+def test_issuance_disabled_still_raises_token_cache(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import KisCredentials
+    from src.execution.contracts import KisApiError
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    class Session:
+        def post(self, *args, **kwargs):
+            raise AssertionError("must not issue token")
+
+    client = KisRestClient(
+        creds=KisCredentials(kis_app_key="key", kis_app_secret="secret", kis_account_no="12345678", kis_account_product_code="01"),
+        session=Session(), token_cache_path=tmp_path / "missing.json",
+        limiter=RateLimiter(1.0, sleep=lambda _: None),
+        now=lambda: dt.datetime(2026, 9, 15, 9, tzinfo=ZoneInfo("Asia/Seoul")),
+        timeout_s=1.0, allow_token_issue=False,
+    )
+    with pytest.raises(KisApiError, match="TOKEN_CACHE"):
+        client.access_token()
+
+
+def test_ensure_token_returns_cache_for_in_memory_token(tmp_path) -> None:
+    from src.execution.kis_client import TokenSource
+    from tests.unit.execution.fakes import make_client
+
+    client, session, _ = make_client(tmp_path, [])
+
+    assert client.access_token() == "tok-1"
+    assert client.ensure_token() is TokenSource.CACHE
+    assert session.calls == []
+
+
+def test_ensure_token_raises_token_cache_when_issuance_disabled(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import KisCredentials
+    from src.execution.contracts import KisApiError
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    class Session:
+        def post(self, *args, **kwargs):
+            raise AssertionError("must not issue token")
+
+    client = KisRestClient(
+        creds=KisCredentials(kis_app_key="key", kis_app_secret="secret", kis_account_no="12345678", kis_account_product_code="01"),
+        session=Session(), token_cache_path=tmp_path / "missing.json",
+        limiter=RateLimiter(1.0, sleep=lambda _: None),
+        now=lambda: dt.datetime(2026, 9, 15, 9, tzinfo=ZoneInfo("Asia/Seoul")),
+        timeout_s=1.0, allow_token_issue=False,
+    )
+    with pytest.raises(KisApiError, match="TOKEN_CACHE"):
+        client.ensure_token()
+
+
+def test_ensure_token_enters_backoff_after_failure(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import FakeResponse, FakeSession, FixedClock, T0, make_creds
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    clock = FixedClock(T0)
+    session = FakeSession([FakeResponse({"error_code": "EGW00103", "error_description": "bad"}, status=500)])
+    client = KisRestClient(
+        creds=make_creds(), session=session, token_cache_path=tmp_path / "t.json",
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=clock, timeout_s=5.0,
+    )
+    with pytest.raises(KisApiError, match="EGW00103"):
+        client.ensure_token()
+    clock.advance(10)
+    with pytest.raises(KisApiError, match="TOKEN_BACKOFF"):
+        client.ensure_token()
+    assert len(session.calls) == 1
+
+
+def test_ensure_token_uses_external_cache_during_backoff(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from src.execution.kis_client import TokenSource
+    from tests.unit.execution.fakes import FakeResponse, FakeSession, FixedClock, T0, make_creds, write_token_cache
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    clock = FixedClock(T0)
+    cache = tmp_path / "t.json"
+    session = FakeSession([FakeResponse({"error_code": "EGW00103", "error_description": "bad"}, status=500)])
+    client = KisRestClient(
+        creds=make_creds(), session=session, token_cache_path=cache,
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=clock, timeout_s=5.0,
+    )
+    with pytest.raises(KisApiError):
+        client.ensure_token()
+    write_token_cache(cache, token="external-tok", expires_at=clock.current + dt.timedelta(hours=20))
+
+    assert client.ensure_token() is TokenSource.CACHE
+    assert len(session.calls) == 1
+
+
+def test_force_access_token_uses_external_cache_during_backoff(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import FakeResponse, FakeSession, FixedClock, T0, make_creds, write_token_cache
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    clock = FixedClock(T0)
+    cache = tmp_path / "t.json"
+    session = FakeSession([FakeResponse({"error_code": "EGW00103", "error_description": "bad"}, status=500)])
+    client = KisRestClient(
+        creds=make_creds(), session=session, token_cache_path=cache,
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=clock, timeout_s=5.0,
+    )
+    with pytest.raises(KisApiError):
+        client.access_token()
+    write_token_cache(cache, token="external-tok", expires_at=clock.current + dt.timedelta(hours=20))
+
+    assert client.access_token(force=True) == "external-tok"
+    assert len(session.calls) == 1
+
+
+def test_issuance_transport_failure_enters_backoff(tmp_path) -> None:
+    import pytest
+    import requests
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import FakeSession, FixedClock, T0, make_creds
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    clock = FixedClock(T0)
+    session = FakeSession([requests.ConnectionError("down")])
+    client = KisRestClient(
+        creds=make_creds(), session=session, token_cache_path=tmp_path / "t.json",
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=clock, timeout_s=5.0,
+    )
+    with pytest.raises(KisApiError, match="TRANSPORT"):
+        client.access_token()
+    with pytest.raises(KisApiError, match="TOKEN_BACKOFF"):
+        client.access_token()
+    assert len(session.calls) == 1
+
+
+def test_issuance_non_json_response_enters_backoff(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import FakeResponse, FakeSession, FixedClock, T0, make_creds
+    from src.execution.kis_client import KisRestClient, RateLimiter
+
+    clock = FixedClock(T0)
+    session = FakeSession([FakeResponse(None, status=502, raw_text=True)])
+    client = KisRestClient(
+        creds=make_creds(), session=session, token_cache_path=tmp_path / "t.json",
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=clock, timeout_s=5.0,
+    )
+    with pytest.raises(KisApiError, match="TOKEN"):
+        client.access_token()
+    with pytest.raises(KisApiError, match="TOKEN_BACKOFF"):
+        client.access_token()
+    assert len(session.calls) == 1

@@ -13,7 +13,8 @@ services:
       - OMP_NUM_THREADS=2
       - KRX_ALPHA_PERSISTENT_LOGS=true
       - KRX_ALPHA_KIS_TOKEN_CACHE_DIR=/run/kis-token-cache
-      - KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE=false
+      # kca 07:05 웜업이 1차 발급자. 캐시에 유효 토큰이 없을 때만 krx가 공유 락·당일 가드 하에 발급한다.
+      - KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE=true
       - KRX_ALPHA_AFTER_MARKET_ENABLED=true
       - KRX_ALPHA_SNAPSHOT_ENABLED=true
       # 스냅샷 REST(08:00~15:39, 18TPS)는 DATA_2 전용. DATA_1은 k-closing-alpha 15:20 결정창·
@@ -25,7 +26,7 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - /home/ubuntu/.config/rclone:/root/.config/rclone:ro
-      - /home/ubuntu/.cache/kis:/run/kis-token-cache:ro
+      - /home/ubuntu/.cache/kis:/run/kis-token-cache
     # 장중 수집(daemon ~95MB) + EOD 정규화 자식(cgroup 실측 ≤500MB) 동시 상주 여유, swap 스래싱 방지
     mem_limit: 1g
     memswap_limit: 1g

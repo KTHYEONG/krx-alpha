@@ -874,9 +874,10 @@ def test_run_collector_daemon_eod_attempts_maintenance_once_per_date(tmp_path, m
     monkeypatch.setattr(daemon_mod, 'check_session_reconciliation', _reconcile)
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo('Asia/Seoul'))
 
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+
     # When
     daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=3, now_fn=lambda: eod_time)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
 
     # Then: 거래일당 1회만 시도 (정규화 2회: offload 전 None + offload 후 verified)
     assert counts == {'maintenance': 2, 'offload': 1, 'reconcile': 1}
@@ -945,9 +946,9 @@ def test_run_collector_daemon_eod_runs_offload_and_reconciliation_when_maintenan
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo('Asia/Seoul'))
 
     # When
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
     with caplog.at_level(logging.INFO):
         daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
 
     # Then: 오프로드/정합성 검사는 계속되고 요약은 DEGRADED
     assert counts == {'offload': 1, 'reconcile': 1}
@@ -985,9 +986,9 @@ def test_run_collector_daemon_eod_logs_error_when_offload_raises_and_does_not_re
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo('Asia/Seoul'))
 
     # When
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
     with caplog.at_level(logging.INFO):
         daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: eod_time)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
 
     # Then: 오프로드 실패와 무관하게 정합성 검사는 수행되고 같은 날 재시도하지 않는다
     assert counts == {'maintenance': 1, 'offload': 1, 'reconcile': 1}
@@ -1991,6 +1992,7 @@ def test_run_collector_daemon_eod_passes_substantive_reconciliation_inputs(tmp_p
         return True
 
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", _reconcile)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
 
     daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
 
@@ -2021,9 +2023,10 @@ def test_run_collector_daemon_eod_sends_daily_digest_once_per_date(tmp_path, mon
 
     monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 2, "skipped": 0, "failed": 0, "purged": 1})
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
-
-    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: eod_time)
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    _write_eod_host_status(settings, eod_time, 20)
     monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: eod_time)
 
     assert len(digests) == 1
     subject, body = digests[0]
@@ -3064,7 +3067,7 @@ def test_eod_remote_l0_purge_runs_after_pruning_and_cannot_fail_eod(tmp_path, mo
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
-
+    _write_eod_host_status(settings, eod_time, 20)
     with caplog.at_level(logging.INFO):
         daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
 
@@ -3400,6 +3403,7 @@ def test_daemon_holiday_eod_runs_housekeeping_without_alerts(tmp_path, monkeypat
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", _must_not_call)
     monkeypatch.setattr(daemon_mod, "send_digest", _must_not_call)
     now = dt.datetime(2026, 9, 24, 20, 5, tzinfo=kst)
+    _write_eod_host_status(settings, now, 20)
     with caplog.at_level(logging.INFO):
         daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: now)
     assert calls == {"maintenance": 2, "offload": 1, "purge": 1, "freshness": 1}
@@ -3774,7 +3778,7 @@ def test_daemon_ready_aftermarket_and_clean_checks_report_ok(tmp_path, monkeypat
     digests: list[tuple[str, str]] = []
     monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
     now = dt.datetime(2026, 9, 15, 20, 5, tzinfo=ZoneInfo("Asia/Seoul"))
-
+    _write_eod_host_status(settings, now, 20)
     with caplog.at_level(logging.INFO):
         daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: now)
 
@@ -3961,3 +3965,396 @@ def test_daemon_holiday_eod_backup_remote_failure_is_critical(tmp_path, monkeypa
 
     assert "stage=backup_freshness status=FAIL" in caplog.text
     assert "status=HOLIDAY" in caplog.text
+
+
+def test_kis_token_preflight_runs_once_before_orchestration_on_retry(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    import src.orchestration.daemon as daemon_mod
+    from src.marketdata.toss_calendar import TradingDay
+    from src.orchestration.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+    business = TradingDay(
+        date=dt.date(2026, 9, 14), is_business_day=True,
+        previous_business_day=dt.date(2026, 9, 11), next_business_day=dt.date(2026, 9, 15),
+    )
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: business)
+
+    order: list[str] = []
+    preflight_calls: list[object] = []
+
+    def _fake_preflight(paths, today):
+        preflight_calls.append(today)
+        order.append("preflight")
+        return {}
+
+    orch_calls: list[int] = []
+
+    def _fake_orchestration(**kwargs):
+        order.append("orchestration")
+        orch_calls.append(1)
+        return False
+
+    monkeypatch.setattr(daemon_mod, "_kis_token_preflight", _fake_preflight)
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", _fake_orchestration)
+
+    kst = ZoneInfo("Asia/Seoul")
+    times = iter([
+        dt.datetime(2026, 9, 14, 8, 30, 0, tzinfo=kst),
+        dt.datetime(2026, 9, 14, 8, 36, 0, tzinfo=kst),
+    ])
+
+    run_collector_daemon(sleep_fn=MagicMock(), max_cycles=2, now_fn=lambda: next(times))
+
+    assert len(preflight_calls) == 1
+    assert preflight_calls[0] == dt.date(2026, 9, 14)
+    assert order[0] == "preflight"
+    assert order.count("orchestration") == 2
+
+
+def test_kis_token_preflight_skipped_on_holiday(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    import src.orchestration.daemon as daemon_mod
+    from src.marketdata.toss_calendar import TradingDay
+    from src.orchestration.daemon import run_collector_daemon
+
+    monkeypatch.chdir(tmp_path)
+    holiday = TradingDay(
+        date=dt.date(2026, 9, 14), is_business_day=False,
+        previous_business_day=dt.date(2026, 9, 11), next_business_day=dt.date(2026, 9, 15),
+    )
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: holiday)
+    called: list[object] = []
+    monkeypatch.setattr(daemon_mod, "_kis_token_preflight", lambda paths, today: called.append(today) or {})
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: (_ for _ in ()).throw(AssertionError("must not orchestrate")))
+
+    morning = dt.datetime(2026, 9, 14, 8, 25, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    run_collector_daemon(sleep_fn=MagicMock(), max_cycles=1, now_fn=lambda: morning)
+
+    assert called == []
+
+
+def test_kis_token_preflight_failure_does_not_block_other_key(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    import pathlib
+    from types import SimpleNamespace
+
+    from src.core.config import CollectorSettings
+    from src.execution.contracts import KisApiError
+    from src.execution.kis_client import TokenSource
+    from src.orchestration import daemon as daemon_mod
+
+    import hashlib
+
+    primary_key = "primary-app-key-1"
+    snapshot_key = "snapshot-app-key-2"
+    primary_fp = hashlib.sha256(primary_key.encode()).hexdigest()[:12]
+    snapshot_fp = hashlib.sha256(snapshot_key.encode()).hexdigest()[:12]
+
+    def _raise_token():
+        raise KisApiError("EGW00103", "bad")
+
+    primary_client = SimpleNamespace(
+        _creds=SimpleNamespace(kis_app_key=primary_key), ensure_token=_raise_token,
+    )
+    snapshot_client = SimpleNamespace(
+        _creds=SimpleNamespace(kis_app_key=snapshot_key), ensure_token=lambda: TokenSource.CACHE,
+    )
+    monkeypatch.setattr(daemon_mod, "_build_kis_client", lambda paths: primary_client)
+    monkeypatch.setattr(
+        daemon_mod, "_build_snapshot_preflight_client", lambda paths: (snapshot_client, snapshot_fp)
+    )
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+
+    with caplog.at_level(logging.CRITICAL):
+        outcomes = daemon_mod._kis_token_preflight(settings.paths, dt.date(2026, 9, 14))
+
+    assert outcomes[primary_fp] == "fail:EGW00103"
+    assert outcomes[snapshot_fp] == "cache"
+    assert "result=fail reason=EGW00103" in caplog.text
+
+
+def test_kis_token_preflight_logs_fingerprints_only(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import hashlib
+    import logging
+    import pathlib
+    from types import SimpleNamespace
+
+    from src.core.config import CollectorSettings
+    from src.execution.kis_client import TokenSource
+    from src.orchestration import daemon as daemon_mod
+
+    primary_key = "primary-secret-key-abc"
+    snapshot_key = "snapshot-secret-key-xyz"
+    primary_fp = hashlib.sha256(primary_key.encode()).hexdigest()[:12]
+    snapshot_fp = hashlib.sha256(snapshot_key.encode()).hexdigest()[:12]
+    primary_client = SimpleNamespace(
+        _creds=SimpleNamespace(kis_app_key=primary_key), ensure_token=lambda: TokenSource.CACHE,
+    )
+    snapshot_client = SimpleNamespace(
+        _creds=SimpleNamespace(kis_app_key=snapshot_key), ensure_token=lambda: TokenSource.ISSUED,
+    )
+    monkeypatch.setattr(daemon_mod, "_build_kis_client", lambda paths: primary_client)
+    monkeypatch.setattr(
+        daemon_mod, "_build_snapshot_preflight_client", lambda paths: (snapshot_client, snapshot_fp)
+    )
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+
+    with caplog.at_level(logging.INFO):
+        outcomes = daemon_mod._kis_token_preflight(settings.paths, dt.date(2026, 9, 14))
+
+    assert primary_fp in caplog.text
+    assert snapshot_fp in caplog.text
+    assert primary_key not in caplog.text
+    assert snapshot_key not in caplog.text
+    assert outcomes[primary_fp] == "cache"
+    assert outcomes[snapshot_fp] == "issued"
+
+
+def test_kis_token_preflight_tolerates_unexpected_client_shape(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    import pathlib
+
+    from src.core.config import CollectorSettings
+    from src.core.errors import MissingCredentialsError
+    from src.orchestration import daemon as daemon_mod
+
+    def _missing_data(paths):
+        raise MissingCredentialsError("no data credential")
+
+    monkeypatch.setattr(daemon_mod, "_build_kis_client", lambda paths: object())
+    monkeypatch.setattr(daemon_mod, "_build_snapshot_preflight_client", _missing_data)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+
+    outcomes = daemon_mod._kis_token_preflight(settings.paths, dt.date(2026, 9, 14))
+
+    assert outcomes["unknown"] == "fail:AttributeError"
+    assert outcomes["unknown-data"] == "fail:missing_credentials"
+
+
+def _raise_missing():
+    from src.core.errors import MissingCredentialsError
+
+    raise MissingCredentialsError("no data credential")
+
+
+def test_kis_token_preflight_maps_unexpected_ensure_error(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    import hashlib
+    import pathlib
+    from types import SimpleNamespace
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    primary_key = "primary-key-unexpected"
+    primary_fp = hashlib.sha256(primary_key.encode()).hexdigest()[:12]
+
+    def _boom():
+        raise RuntimeError("boom")
+
+    primary_client = SimpleNamespace(
+        _creds=SimpleNamespace(kis_app_key=primary_key), ensure_token=_boom,
+    )
+    snapshot_client = SimpleNamespace(ensure_token=_boom)
+    monkeypatch.setattr(daemon_mod, "_build_kis_client", lambda paths: primary_client)
+    monkeypatch.setattr(
+        daemon_mod, "_build_snapshot_preflight_client", lambda paths: (snapshot_client, "snapfp123456")
+    )
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+
+    outcomes = daemon_mod._kis_token_preflight(settings.paths, dt.date(2026, 9, 14))
+
+    assert outcomes[primary_fp] == "fail:RuntimeError"
+    assert outcomes["snapfp123456"] == "fail:RuntimeError"
+
+
+def test_kis_token_preflight_maps_missing_credentials_for_both_keys(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    import pathlib
+
+    from src.core.config import CollectorSettings
+    from src.core.errors import MissingCredentialsError
+    from src.orchestration import daemon as daemon_mod
+
+    def _missing(paths):
+        raise MissingCredentialsError("no creds")
+
+    monkeypatch.setattr(daemon_mod, "_build_kis_client", _missing)
+    monkeypatch.setattr(daemon_mod, "_build_snapshot_preflight_client", _missing)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+
+    with caplog.at_level(logging.CRITICAL):
+        outcomes = daemon_mod._kis_token_preflight(settings.paths, dt.date(2026, 9, 14))
+
+    assert outcomes == {"unknown": "fail:missing_credentials", "unknown-data": "fail:missing_credentials"}
+    assert caplog.text.count("reason=missing_credentials") == 2
+
+
+def _write_eod_host_status(settings, now, age_h) -> None:
+    import datetime as dt
+    import json
+
+    status_path = settings.paths.host_backup_status
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    last_ok = now - dt.timedelta(hours=age_h)
+    status_path.write_text(json.dumps({"last_ok_at": last_ok.isoformat()}), encoding="utf-8")
+
+
+def test_stale_host_backup_degrades_business_day_eod(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    digests: list[tuple[str, str]] = []
+    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 2, "skipped": 0, "failed": 0, "purged": 1})
+    monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    _write_eod_host_status(settings, eod_time, 48)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+
+    with caplog.at_level(logging.CRITICAL):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    stale = [r for r in caplog.records if "stage=host_backup_freshness" in r.getMessage()]
+    assert len(stale) == 1
+    assert "reason=stale:48.0h" in stale[0].getMessage()
+    assert len(digests) == 1
+    assert digests[0][0] == "[krx-alpha] EOD 2026-09-14 DEGRADED"
+    assert "host_backup=stale:48.0h" in digests[0][1].splitlines()
+
+
+def test_fresh_host_backup_keeps_business_day_eod_ok(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    digests: list[tuple[str, str]] = []
+    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 2, "skipped": 0, "failed": 0, "purged": 1})
+    monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    _write_eod_host_status(settings, eod_time, 20)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    assert len(digests) == 1
+    assert digests[0][0] == "[krx-alpha] EOD 2026-09-14 OK"
+    assert "host_backup=ok" in digests[0][1].splitlines()
+
+
+def test_holiday_eod_checks_host_backup_freshness_without_digest(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
+    holiday = _holiday_trading_day(dt.date(2026, 9, 24))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: holiday)
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
+    monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
+
+    def _must_not_send(**kw):
+        raise AssertionError("holiday EOD must not send a digest")
+
+    monkeypatch.setattr(daemon_mod, "send_digest", _must_not_send)
+    eod_time = dt.datetime(2026, 9, 24, 20, 5, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    with caplog.at_level(logging.CRITICAL):
+        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    assert "stage=host_backup_freshness status=STALE reason=missing" in caplog.text
+
+
+def test_build_snapshot_preflight_client_uses_configured_data_slot_without_network(tmp_path, monkeypatch) -> None:
+    # Given: 가짜 데이터 슬롯 2개와 스냅샷 슬롯 2 지정 (실키·네트워크 없음)
+    import pathlib
+
+    from src.core.config import CollectorSettings
+    from src.execution.kis_client import kis_app_key_fingerprint
+    from src.orchestration import daemon as daemon_mod
+
+    for slot in ("1", "2"):
+        monkeypatch.setenv(f"KIS_DATA_{slot}_APP_KEY", f"fake-key-{slot}")
+        monkeypatch.setenv(f"KIS_DATA_{slot}_APP_SECRET", f"fake-secret-{slot}")
+        monkeypatch.setenv(f"KIS_DATA_{slot}_HTS_ID", f"hts{slot}")
+    monkeypatch.setenv("KIS_DATA_SLOTS", "1,2")
+    monkeypatch.setenv("KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT", "2")
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(tmp_path / "kis"))
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+
+    # When
+    client, key_id = daemon_mod._build_snapshot_preflight_client(settings.paths)
+
+    # Then: 슬롯 2 키로 구성되고 캐시 경로는 설정 디렉터리 아래 지문 파일이다
+    assert client._creds.kis_app_key == "fake-key-2"
+    assert key_id == kis_app_key_fingerprint("fake-key-2")
+    assert client._token_cache_path == tmp_path / "kis" / f"token_{kis_app_key_fingerprint('fake-key-2')}.json"
+
+
+def test_kis_token_preflight_records_snapshot_key_vendor_error(tmp_path, monkeypatch, caplog) -> None:
+    # Given: 메인 키는 캐시 적중, 스냅샷 키는 벤더 거부
+    import datetime as dt
+    import logging
+    import pathlib
+    from types import SimpleNamespace
+
+    from src.core.config import CollectorSettings
+    from src.execution.contracts import KisApiError
+    from src.execution.kis_client import TokenSource
+    from src.orchestration import daemon as daemon_mod
+
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    primary = SimpleNamespace(_creds=SimpleNamespace(kis_app_key="fake-primary"), ensure_token=lambda: TokenSource.CACHE)
+
+    def _reject() -> TokenSource:
+        raise KisApiError("EGW00103", "invalid appkey")
+
+    monkeypatch.setattr(daemon_mod, "_build_kis_client", lambda paths: primary)
+    monkeypatch.setattr(
+        daemon_mod, "_build_snapshot_preflight_client", lambda paths: (SimpleNamespace(ensure_token=_reject), "snapfp000001")
+    )
+
+    # When
+    with caplog.at_level(logging.INFO):
+        outcomes = daemon_mod._kis_token_preflight(settings.paths, dt.date(2026, 9, 14))
+
+    # Then: 스냅샷 키 실패만 CRITICAL로 기록되고 메인 키 결과는 유지된다
+    assert outcomes["snapfp000001"] == "fail:EGW00103"
+    assert "cache" in outcomes.values()
+    assert any(
+        r.levelno == logging.CRITICAL and "key_id=snapfp000001" in r.getMessage() and "reason=EGW00103" in r.getMessage()
+        for r in caplog.records
+    )

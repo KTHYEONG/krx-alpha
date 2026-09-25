@@ -10,19 +10,108 @@ VERSION_RETENTION_DAYS="${VERSION_RETENTION_DAYS:-30}"
 BACKUP_TODAY_UTC="${BACKUP_TODAY_UTC:-$(date -u +%F)}"
 LOG_DIR="${LOG_DIR:-$HOME/logs}"
 LOG_FILE="$LOG_DIR/krx-host-backup-$BACKUP_TODAY_UTC.log"
+STATUS_FILE="$KRX_ROOT/data/work/host_backup_status.json"
+HOLDERS_TMP="$KRX_ROOT/data/work/.host_backup_holders.tmp"
+ATTEMPT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
 
 mkdir -p "$LOG_DIR"
 mkdir -p "$(dirname "$QUANT_GDRIVE_LOCK")"
+mkdir -p "$KRX_ROOT/data/work"
 
 log() {
   printf '%s\n' "$*" | tee -a "$LOG_FILE"
 }
 
+collect_lock_holders() {
+  LOCK_HOLDERS=()
+  local lock_target="$1" fd rest pid cmdline cmd
+  for fd in /proc/[0-9]*/fd/*; do
+    cmdline=""
+    if ! cmdline="$(readlink "$fd" 2>/dev/null)"; then
+      continue
+    fi
+    [ "$cmdline" = "$lock_target" ] || continue
+    rest="${fd#/proc/}"
+    pid="${rest%%/*}"
+    [ "$pid" = "$$" ] && continue
+    if cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"; then
+      cmd="${cmd% }"
+      LOCK_HOLDERS+=("$pid ${cmd:0:200}")
+    fi
+  done
+}
+
+write_status() {
+  local rc="$1" data_rc="$2" prune_rc="$3" lock_wait_s="$4"
+  RC="$rc" DATA_RC="$data_rc" PRUNE_RC="$prune_rc" LOCK_WAIT_S="$lock_wait_s" \
+    STARTED_AT="$ATTEMPT_STARTED_AT" FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" \
+    STATUS_FILE="$STATUS_FILE" HOLDERS_FILE="$HOLDERS_TMP" \
+    python3 - <<'PYEOF'
+import json
+import os
+
+status_file = os.environ["STATUS_FILE"]
+rc = int(os.environ["RC"])
+data_rc = None if os.environ["DATA_RC"] == "null" else int(os.environ["DATA_RC"])
+prune_rc = None if os.environ["PRUNE_RC"] == "null" else int(os.environ["PRUNE_RC"])
+lock_wait_s = int(os.environ["LOCK_WAIT_S"])
+started_at = os.environ["STARTED_AT"]
+finished_at = os.environ["FINISHED_AT"]
+holders_file = os.environ.get("HOLDERS_FILE") or ""
+
+holders = []
+if holders_file and os.path.exists(holders_file):
+    with open(holders_file, encoding="utf-8") as handle:
+        holders = [line.rstrip("\n") for line in handle if line.strip() != ""]
+
+prev_last_ok = None
+try:
+    with open(status_file, encoding="utf-8") as handle:
+        prev = json.load(handle)
+    cand = prev.get("last_ok_at") if isinstance(prev, dict) else None
+    if cand is None or isinstance(cand, str):
+        prev_last_ok = cand
+except (OSError, ValueError):
+    prev_last_ok = None
+
+doc = {
+    "schema_version": 1,
+    "attempt_started_at": started_at,
+    "attempt_finished_at": finished_at,
+    "rc": rc,
+    "data_rc": data_rc,
+    "prune_rc": prune_rc,
+    "lock_wait_s": lock_wait_s,
+    "lock_holders": holders,
+    "last_ok_at": finished_at if rc == 0 else prev_last_ok,
+}
+tmp_path = status_file + ".tmp"
+with open(tmp_path, "w", encoding="utf-8") as handle:
+    json.dump(doc, handle)
+    handle.write("\n")
+os.replace(tmp_path, status_file)
+PYEOF
+}
+
 exec 9>"$QUANT_GDRIVE_LOCK"
+SECONDS=0
 if ! flock -w "$LOCK_WAIT_SEC" 9; then
-  log "[SYS] stage=gdrive_backup project=krx-alpha step=lock status=failed rc=75"
+  lock_wait_s="$SECONDS"
+  lock_target="$(readlink -f "$QUANT_GDRIVE_LOCK" 2>/dev/null || printf '%s' "$QUANT_GDRIVE_LOCK")"
+  collect_lock_holders "$lock_target"
+  log "[SYS] stage=gdrive_backup project=krx-alpha step=lock status=failed rc=75 holders=${#LOCK_HOLDERS[@]}"
+  for holder in "${LOCK_HOLDERS[@]}"; do
+    log "[SYS] stage=gdrive_backup project=krx-alpha step=lock holder=$holder"
+  done
+  rm -f "$HOLDERS_TMP"
+  for holder in "${LOCK_HOLDERS[@]}"; do
+    printf '%s\n' "$holder" >> "$HOLDERS_TMP"
+  done
+  write_status 75 null null "$lock_wait_s"
+  rm -f "$HOLDERS_TMP"
   exit 75
 fi
+lock_wait_s="$SECONDS"
 
 overall_rc=0
 
@@ -71,5 +160,9 @@ else
   log "[SYS] stage=gdrive_backup project=krx-alpha step=prune status=failed rc=$prune_rc"
   overall_rc=1
 fi
+
+rm -f "$HOLDERS_TMP"
+write_status "$overall_rc" "$data_rc" "$prune_rc" "$lock_wait_s"
+rm -f "$HOLDERS_TMP"
 
 exit "$overall_rc"

@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -86,7 +87,15 @@ _EXPIRED_TOKEN_CODES: frozenset[str] = frozenset({"EGW00121", "EGW00123"})
 _MAX_SAFE_RETRIES = 2
 _MAX_PAGES = 100
 _TOKEN_REFRESH_MARGIN: dt.timedelta = dt.timedelta(minutes=10)
+# KIS는 앱키당 1분 1회 초과 발급을 거부한다(EGW00133). 백오프를 해당 창보다
+# 약간 길게 잡아 거부된 키가 매 REST 호출마다 발급 시도로 번지지 않게 한다.
+TOKEN_ISSUE_RETRY_BACKOFF: dt.timedelta = dt.timedelta(seconds=65)
 _KST: dt.tzinfo = ZoneInfo("Asia/Seoul")
+
+
+class TokenSource(StrEnum):
+    CACHE = "cache"
+    ISSUED = "issued"
 
 
 @dataclass(frozen=True)
@@ -334,6 +343,7 @@ class KisRestClient:
         self._allow_token_issue = allow_token_issue
         self._token: str | None = None
         self._token_expires_at: dt.datetime | None = None
+        self._token_issue_failed_at: dt.datetime | None = None
 
     def _read_valid_token(self, now: dt.datetime) -> tuple[str, dt.datetime] | None:
         """유효한 캐시 토큰을 반환하고 무효·만료 임박분은 None으로 fail-closed 처리한다."""
@@ -361,6 +371,55 @@ class KisRestClient:
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return None
 
+    def _backoff_active(self, now: dt.datetime) -> bool:
+        failed_at = self._token_issue_failed_at
+        return failed_at is not None and now < failed_at + TOKEN_ISSUE_RETRY_BACKOFF
+
+    def _inherit_cache_dir_owner(self, *targets: pathlib.Path) -> None:
+        if os.geteuid() != 0:
+            return
+        owner = self._token_cache_path.parent.stat()
+        for target in targets:
+            os.chown(str(target), owner.st_uid, owner.st_gid)
+
+    def ensure_token(self) -> TokenSource:
+        """Make a usable access token available and report where it came from.
+
+        Used by the pre-session preflight so a missing token is detected (and,
+        when issuance is allowed, repaired) before collection starts instead of
+        at the first data request.
+
+        Returns:
+            ``TokenSource.CACHE`` when a valid token (more than
+            ``_TOKEN_REFRESH_MARGIN`` of lifetime left) was already cached or held
+            in memory; ``TokenSource.ISSUED`` when this call issued a new one.
+
+        Raises:
+            KisApiError: ``TOKEN_CACHE`` when no valid token exists and issuance is
+                disabled; ``TOKEN_BACKOFF`` while a previous issuance failure for
+                this key is inside ``TOKEN_ISSUE_RETRY_BACKOFF``;
+                ``TOKEN_DAILY_LIMIT`` when the cache shows an issuance today but
+                the token is unusable; or the vendor error code when issuance is
+                rejected.
+        """
+        now = self._now()
+        if (
+            self._token is not None
+            and self._token_expires_at is not None
+            and self._token_expires_at - now > _TOKEN_REFRESH_MARGIN
+        ):
+            return TokenSource.CACHE
+        hit = self._read_valid_token(now)
+        if hit is not None:
+            self._token, self._token_expires_at = hit
+            return TokenSource.CACHE
+        if not self._allow_token_issue:
+            raise KisApiError("TOKEN_CACHE", "token cache missing/expired and issuance disabled")
+        if self._backoff_active(now):
+            raise KisApiError("TOKEN_BACKOFF", "token issuance failed recently; backing off")
+        _, source = self._issue_token_and_report(now, reuse_valid=True)
+        return source
+
     def access_token(self, *, force: bool = False) -> str:
         """캐시 토큰을 반환하고 만료 임박 시에만 재발급한다."""
         now = self._now()
@@ -378,33 +437,61 @@ class KisRestClient:
                 return self._token
         if not self._allow_token_issue:
             raise KisApiError("TOKEN_CACHE", "token cache missing/expired and issuance disabled")
+        if self._backoff_active(now):
+            hit = self._read_valid_token(now)
+            if hit is not None:
+                self._token, self._token_expires_at = hit
+                return self._token
+            raise KisApiError("TOKEN_BACKOFF", "token issuance failed recently; backing off")
         return self._issue_token(now, reuse_valid=not force)
 
     def _issue_token(self, now: dt.datetime, *, reuse_valid: bool) -> str:
         """per-key lock으로 캐시를 재검사한 뒤 atomic 0600 write로 발급한다 (당일 재발급은 force도 거부)."""
+        token, _ = self._issue_token_and_report(now, reuse_valid=reuse_valid)
+        return token
+
+    def _issue_token_and_report(self, now: dt.datetime, *, reuse_valid: bool) -> tuple[str, TokenSource]:
         with _token_file_lock(self._token_cache_path), _lock_for_token_cache(self._token_cache_path):
             cached = self._read_valid_token(now) if reuse_valid else None
             if cached is not None:
                 self._token, self._token_expires_at = cached
-                return self._token
+                return self._token, TokenSource.CACHE
             if self._cached_issue_day() == now.astimezone(_KST).date():
                 raise KisApiError("TOKEN_DAILY_LIMIT", "token already issued today (KST)")
-            return self._issue_token_unlocked(now)
+            return self._issue_token_unlocked(now), TokenSource.ISSUED
+
+    def _fail_issue(self, now: dt.datetime, reason: str) -> None:
+        self._token_issue_failed_at = now
+        logger.warning(
+            "[EXEC] stage=token_issue status=FAIL key_id=%s reason=%s",
+            kis_app_key_fingerprint(self._creds.kis_app_key),
+            reason,
+        )
 
     def _issue_token_unlocked(self, now: dt.datetime) -> str:
         self._limiter.acquire()
-        resp = self._session.post(
-            self._base_url + _PATH_TOKEN,
-            json={
-                "grant_type": "client_credentials",
-                "appkey": self._creds.kis_app_key,
-                "appsecret": self._creds.kis_app_secret,
-            },
-            timeout=self._timeout_s,
-        )
-        body = resp.json()
+        try:
+            resp = self._session.post(
+                self._base_url + _PATH_TOKEN,
+                json={
+                    "grant_type": "client_credentials",
+                    "appkey": self._creds.kis_app_key,
+                    "appsecret": self._creds.kis_app_secret,
+                },
+                timeout=self._timeout_s,
+            )
+        except Exception as exc:  # noqa: BLE001 - 전송 실패도 백오프 대상이다
+            self._fail_issue(now, type(exc).__name__)
+            raise KisApiError("TRANSPORT", type(exc).__name__) from exc
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            self._fail_issue(now, "TOKEN")
+            raise KisApiError("TOKEN", "non_json_token_response") from exc
         if "access_token" not in body:
-            raise KisApiError(str(body.get("error_code", "TOKEN")), str(body.get("error_description", "")))
+            code = str(body.get("error_code", "TOKEN"))
+            self._fail_issue(now, code)
+            raise KisApiError(code, str(body.get("error_description", "")))
         expires_at = dt.datetime.strptime(
             str(body["access_token_token_expired"]), "%Y-%m-%d %H:%M:%S"
         ).replace(tzinfo=_KST)
@@ -419,12 +506,20 @@ class KisRestClient:
             }
         )
         self._token_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = pathlib.Path(f"{self._token_cache_path}.lock")
         tmp_path = self._token_cache_path.parent / (self._token_cache_path.name + ".tmp")
         fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(payload)
+        os.chmod(str(tmp_path), 0o600)
+        self._inherit_cache_dir_owner(tmp_path, lock_path)
         os.replace(str(tmp_path), str(self._token_cache_path))
-        logger.debug("[EXEC] stage=token_issued expires_at=%s", expires_at.isoformat())
+        self._token_issue_failed_at = None
+        logger.info(
+            "[EXEC] stage=token_issued key_id=%s expires_at=%s",
+            kis_app_key_fingerprint(self._creds.kis_app_key),
+            expires_at.isoformat(),
+        )
         return self._token
 
     def _headers(self, tr_id: str, tr_cont: str) -> dict[str, str]:

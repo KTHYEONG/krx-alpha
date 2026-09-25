@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_KRX_OPS_HARDENING",
+      "date": "2026-09-25",
+      "adr_id": "ADR_20260925_KRX_OPS_HARDENING",
+      "domain": "operations",
+      "title": "krx 운영 견고화: KIS 토큰 자가복구와 호스트 백업 재시도·감시",
+      "why": "krx가 kca 07:05 토큰 사전발급 1회에만 의존해 실패 시 KIS REST가 하루 종일 멈췄고, 호스트 백업은 잠금 경합 실패 후 재시도·자체 감시가 없었다.",
+      "resolution": "캐시에 유효 토큰이 없을 때만 공유 락·당일 가드 하에 발급하고 65초 실패 백오프와 08:20 사전점검을 두었으며, 백업은 systemd 3회 재시도·상태 파일·EOD 신선도 감시를 추가하고 테스트를 자격증명 격리·외부망 차단으로 하드닝했다.",
+      "impact": "kca 웜업 실패에도 krx가 장전에 스스로 복구하거나 조기 경보하고, 백업 누락은 최대 36시간 안에 krx 자체 경보로 드러나며 단위 테스트가 실계정 API를 호출하지 않는다.",
+      "caveat": "kca 웜업 재시도는 kca 저장소 몫이고 RestartMode=direct의 OnFailure 1회 동작은 VPS 일회용 유닛으로 확인이 필요하며 rclone.conf 옛 사본 삭제는 운영 조치로 남았다."
+    },
+    {
       "task_id": "TASK_HOLIDAY_RESILIENCE",
       "date": "2026-09-24",
       "adr_id": "ADR_20260924_HOLIDAY_RESILIENCE",
