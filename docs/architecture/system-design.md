@@ -162,15 +162,15 @@ flowchart TD
 
 #### L0 Raw Tick Frame (`L0Frame`)
 실시간 웹소켓 수신 시 파싱 부하를 배제하고 무손실 원형을 보존합니다:
-* `recv_mono_ns` (단조 시계), `recv_wall_ns` (벽시계 UTC), `conn_seq` (세션 단조 시퀀스), `conn_id` (연결 고유 식별자), `raw` (수신 원문 페이로드).
+* `recv_mono_ns` (단조 시각 - 시스템 경과 ns, 지연 계측용), `recv_wall_ns` (절대 시각 - UTC ns, 시계열 정렬용), `conn_seq` (세션 단조 시퀀스), `conn_id` (연결 고유 식별자), `raw` (수신 원문 페이로드).
 
 #### L1 Normalized Parquet (`data/l1/{vendor}/{stream}/dt=YYYY-MM-DD.parquet`)
 EOD 단계에서 동일 `(conn_id, conn_seq)` 중복을 제거하고 정규화한 데이터셋입니다:
 
 | 컬럼명 | Polars 타입 | 설명 및 무결성 제약 |
 | :--- | :--- | :--- |
-| `recv_mono_ns` | `pl.Int64` | 수신 단조 시계 타임스탬프 (레이턴시 계측) |
-| `recv_wall_ns` | `pl.Int64` | 수신 벽시계 타임스탬프 (시계열 정렬) |
+| `recv_mono_ns` | `pl.Int64` | 수신 단조 시각 타임스탬프 (레이턴시 계측용) |
+| `recv_wall_ns` | `pl.Int64` | 수신 절대 시각 타임스탬프 (UTC 기준 시계열 정렬용) |
 | `conn_seq` | `pl.Int64` | 세션별 단조 증가 시퀀스 번호 |
 | `raw` | `pl.String` | 원본 페이로드 문자열 |
 | `conn_id` | `pl.String` | 웹소켓 세션 식별자 |
@@ -191,18 +191,18 @@ EOD 단계에서 동일 `(conn_id, conn_seq)` 중복을 제거하고 정규화�
 | **KRX** | **애프터마켓** | `16:00 ~ 20:00` | 접속매매 (Continuous) |
 | **NXT** | **애프터마켓** | `15:40 ~ 20:00` | 대체거래소 접속매매 |
 
-> **용어 불변식 규칙:** 위 표의 두 정규 종가 토큰(`장전 시간외종가`, `장후 시간외종가`) 이외의 모호한 레거시 세션 어휘(단독 사용)는 저장소 전역 AST 검증([`test_terminology.py`](file:///home/kth/krx-alpha/tests/architecture/test_terminology.py))으로 금지되며, 영문 표기는 반드시 `aftermarket`으로 통일합니다.
+> **용어 불변식 규칙:** 위 표의 두 정규 종가 토큰(`장전 시간외종가`, `장후 시간외종가`) 이외의 모호한 레거시 세션 어휘(단독 사용)는 저장소 전역 AST 검증(`test_terminology.py`)으로 금지되며, 영문 표기는 반드시 `aftermarket`으로 통일합니다.
 
 ### 5.3 Microstructure Quality Barrier (금융 무결성 배리어)
 
-1. **체결량 보존법칙 (Tick Loss Detection)**:
+1. **체결량 보존법칙 (틱 누락 검출, Tick Loss Detection)**:
    누적체결건수 델타 $\Delta checnt \le 1$ 구간에서 누적 거래량 증가량($\Delta volume$)이 당일 틱 체결량($cvolume$)을 초과하는 틱 누락 발생 여부를 Polars 벡터 연산으로 검사.
-2. **호가 사다리 단조성 (Ladder Monotonicity)**:
-   - 매도 10단계: $offerho_1 < offerho_2 < \dots < offerho_{10}$
-   - 매수 10단계: $bidho_1 > bidho_2 > \dots > bidho_{10}$
-   - 잔량 음수($rem < 0$) 및 동시호가 외 최우선 호가 역전($bidho_1 \ge offerho_1$) 검출.
+2. **호가 사다리 단조성 (호가 순차 정렬 검증, Ladder Monotonicity)**:
+   - 매도 10단계: $offerho_1 < offerho_2 < \dots < offerho_{10}$ (오름차순 정렬)
+   - 매수 10단계: $bidho_1 > bidho_2 > \dots > bidho_{10}$ (내림차순 정렬)
+   - 잔량 음수($rem < 0$) 및 동시호가 외 최우선 호가 역전(Crossed Market, $bidho_1 \ge offerho_1$) 검출.
 3. **다중 벤더 디코더 격리**:
-   LS증권의 JSON 포맷 디코더([`quality_ls.py`](file:///home/kth/krx-alpha/src/storage/quality_ls.py))와 KIS의 캐럿(`^`) 텍스트 포맷 디코더([`quality_kis.py`](file:///home/kth/krx-alpha/src/storage/quality_kis.py))를 완전히 분리하여 상호 오염 및 디코딩 오탐을 방지.
+   LS증권의 JSON 포맷 디코더(`quality_ls.py`)와 KIS의 캐럿(`^`) 텍스트 포맷 디코더(`quality_kis.py`)를 완전히 분리하여 상호 오염 및 디코딩 오탐을 방지.
 
 ---
 
