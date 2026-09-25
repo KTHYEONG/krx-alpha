@@ -15,6 +15,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.core.calendar import SessionSchedule
 from src.core.errors import LiveNotArmedError, MissingCredentialsError, SlotBudgetExceededError
+from src.core.paths import (
+    DEFAULT_DATA_ROOT,
+    DEFAULT_KIS_TOKEN_CACHE_DIR,
+    DataPaths,
+)
+
+__all__ = ["DataPaths"]
 
 SettingsT = TypeVar("SettingsT", bound=BaseSettings)
 
@@ -28,113 +35,12 @@ class ExecutionMode(StrEnum):
     LIVE = "live"
 
 
-@dataclass(frozen=True)
-class DataPaths:
-    """data_root 하나에서 파생되는 전 파일시스템 경로."""
-
-    root: pathlib.Path
-
-    @property
-    def bars_store(self) -> pathlib.Path:
-        return self.root / "bars" / "daily.parquet"
-
-    @property
-    def market_map(self) -> pathlib.Path:
-        return self.root / "market_map.json"
-
-    @property
-    def program_trades_store(self) -> pathlib.Path:
-        return self.root / "bars" / "program_trades.parquet"
-
-    @property
-    def candidates(self) -> pathlib.Path:
-        return self.root / "candidates.json"
-
-    @property
-    def universe_dir(self) -> pathlib.Path:
-        return self.root / "universe"
-
-    @property
-    def manifest_dir(self) -> pathlib.Path:
-        return self.root / "manifest"
-
-    @property
-    def journal_root(self) -> pathlib.Path:
-        return self.root / "l0"
-
-    @property
-    def archive_root(self) -> pathlib.Path:
-        return self.root / "l1"
-
-    @property
-    def quarantine_root(self) -> pathlib.Path:
-        return self.root / "quarantine"
-
-    @property
-    def work_root(self) -> pathlib.Path:
-        return self.root / "work"
-
-    @property
-    def host_backup_status(self) -> pathlib.Path:
-        return self.work_root / "host_backup_status.json"
-
-    @property
-    def kis_ws_lease_dir(self) -> pathlib.Path:
-        return self.work_root / "kis_ws_leases"
-
-    @property
-    def logs_dir(self) -> pathlib.Path:
-        return self.root / "logs"
-
-    @property
-    def calendar_cache(self) -> pathlib.Path:
-        return self.root / "calendar_cache.json"
-
-    def universe_out(self, day: dt.date) -> pathlib.Path:
-        return self.universe_dir / f"{day.isoformat()}.parquet"
-
-    def snapshot_partition(self, dataset: str, day: dt.date) -> pathlib.Path:
-        """Return the L1 day partition for a REST snapshot dataset.
-
-        Snapshot partitions live under the L1 archive root so the existing remote
-        offload and verified local pruning apply unchanged; the file name must keep
-        the ``dt=YYYY-MM-DD`` form that retention parses.
-        """
-        return self.archive_root / "snapshot" / dataset / f"dt={day.isoformat()}.parquet"
-
-    def aftermarket_candidates(self, day: dt.date) -> pathlib.Path:
-        return self.universe_dir / "aftermarket" / f"{day.isoformat()}.json"
-
-    def manifest_path(self, day: dt.date) -> pathlib.Path:
-        return self.manifest_dir / f"{day.isoformat()}.json"
-
-    def aftermarket_manifest_path(self, day: dt.date, venue: object, shard_index: int) -> pathlib.Path:
-        venue_s = str(getattr(venue, "value", venue))
-        return self.manifest_dir / "aftermarket" / f"{day.isoformat()}.{venue_s}.shard-{shard_index:02d}.json"
-
-    @property
-    def execution_dir(self) -> pathlib.Path:
-        return self.root / "execution"
-
-    @property
-    def order_journal_dir(self) -> pathlib.Path:
-        return self.execution_dir / "journal"
-
-    @property
-    def kis_token_cache(self) -> pathlib.Path:
-        return self.execution_dir / "kis_token.json"
-
-    @property
-    def kill_switch_file(self) -> pathlib.Path:
-        return self.execution_dir / "KILL_SWITCH"
-
-
 class CollectorSettings(BaseSettings):
     """수집기 전역 설정 (env_prefix='KRX_ALPHA_')."""
 
     model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_", extra="ignore")
 
-    data_root: pathlib.Path = pathlib.Path("data")
+    data_root: pathlib.Path = DEFAULT_DATA_ROOT
     ntp_host: str = "kr.pool.ntp.org"
     ntp_fallback_hosts: tuple[str, ...] = ("time.google.com", "time.cloudflare.com")
     max_clock_offset_ns: int = 2_000_000_000
@@ -270,7 +176,7 @@ class KisTokenSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_KIS_TOKEN_", extra="ignore")
 
     token_cache_dir: pathlib.Path = Field(
-        default=pathlib.Path("data/execution/kis_tokens"),
+        default=DEFAULT_KIS_TOKEN_CACHE_DIR,
         validation_alias=AliasChoices("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", "token_cache_dir"),
     )
     allow_issue: bool = True
@@ -377,7 +283,7 @@ class ExecutionSettings(BaseSettings):
 
     mode: ExecutionMode = ExecutionMode.PAPER
     live_armed: bool = False
-    data_root: pathlib.Path = pathlib.Path("data")
+    data_root: pathlib.Path = DEFAULT_DATA_ROOT
     rest_rate_per_s: float = 18.0
     request_timeout_s: float = 5.0
     commission_bps: float = 0.36396
@@ -432,6 +338,51 @@ class AlertSettings(BaseSettings):
     @property
     def enabled(self) -> bool:
         return bool(self.alert_gmail_user and self.alert_gmail_app_password and self.alert_gmail_to)
+
+
+@dataclass(frozen=True)
+class CollectorRuntime:
+    collector: CollectorSettings
+    aftermarket: AftermarketSettings
+    snapshot: SnapshotSettings
+    paths: DataPaths
+
+
+def resolve_collector_runtime(
+    *,
+    collector: CollectorSettings | None = None,
+    aftermarket: AftermarketSettings | None = None,
+    snapshot: SnapshotSettings | None = None,
+) -> CollectorRuntime:
+    """Resolve one coherent collector configuration before child processes start.
+
+    Args:
+        collector: Optional prevalidated collector settings.
+        aftermarket: Optional prevalidated aftermarket settings.
+        snapshot: Optional prevalidated snapshot settings.
+
+    Returns:
+        Settings and data paths from one resolved process configuration.
+
+    Raises:
+        ValueError: Explicit aftermarket enablement conflicts with collector enablement.
+    """
+    resolved_collector = collector if collector is not None else CollectorSettings()
+    resolved_snapshot = snapshot if snapshot is not None else SnapshotSettings()
+    if aftermarket is None:
+        resolved_aftermarket = AftermarketSettings(enabled=resolved_collector.after_market_enabled)
+    else:
+        if aftermarket.enabled != resolved_collector.after_market_enabled:
+            raise ValueError(
+                "aftermarket enabled conflicts with collector after_market_enabled"
+            )
+        resolved_aftermarket = aftermarket
+    return CollectorRuntime(
+        collector=resolved_collector,
+        aftermarket=resolved_aftermarket,
+        snapshot=resolved_snapshot,
+        paths=DataPaths(resolved_collector.data_root),
+    )
 
 
 def child_process_env(overrides: Mapping[str, str]) -> dict[str, str]:

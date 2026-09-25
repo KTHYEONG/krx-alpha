@@ -447,3 +447,30 @@ def test_aftermarket_alert_labels_use_canonical_term() -> None:
     assert "시간외" not in reason
 
 
+def test_send_digest_uses_html_capable_sender_without_fallback(caplog) -> None:
+    import logging
+
+    from src.core.config import AlertSettings
+    from src.core.observability import send_digest
+
+    calls: list[tuple[str, str, str | None]] = []
+
+    def _html_sender(subject: str, body: str, html_body: str | None = None) -> None:
+        calls.append((subject, body, html_body))
+
+    settings = AlertSettings(alert_gmail_user="u@x", alert_gmail_app_password="pw", alert_gmail_to="t@x")
+    with caplog.at_level(logging.INFO):
+        ok = send_digest("s", "status=OK", settings=settings, sender=_html_sender)
+
+    assert ok is True
+    assert len(calls) == 1
+    assert calls[0][2] is not None
+    assert "마감" in calls[0][2]
+
+
+def test_format_digest_text_includes_run_id_when_present() -> None:
+    from src.core.observability import format_digest_text
+
+    text = format_digest_text("s", "status=OK\nuploaded=2\nrun_id=daemon-1")
+
+    assert "• Run ID: daemon-1" in text

@@ -30,33 +30,35 @@ def test_run_builds_account_free_data_slot_client(tmp_path, monkeypatch) -> None
     import src.cli.collect_snapshots as collect_mod
     from src.cli.collect_snapshots import run
     from src.core.config import KisTokenSettings
-    from src.execution.kis_client import RateLimiter
 
     (tmp_path / "candidates.json").write_text(
         json.dumps({"candidates": [{"symbol": "005930"}, {"symbol": "000660"}]}), encoding="utf-8"
     )
     monkeypatch.setattr(collect_mod, "load_kis_data_credentials", lambda: (_slot_credential("1"),))
     seen: dict = {}
+    real_data_client = collect_mod.KisDataClient
 
     class _FakeClient:
-        def __init__(self, **kwargs) -> None:
-            seen.update(kwargs)
+        def __init__(self, *, transport) -> None:
+            seen["transport"] = transport
+            seen["client"] = real_data_client(transport=transport)
 
-    monkeypatch.setattr(collect_mod, "KisRestClient", _FakeClient)
+    monkeypatch.setattr(collect_mod, "KisDataClient", _FakeClient)
     monkeypatch.setattr(collect_mod, "run_snapshot_session", lambda **kwargs: seen.setdefault("snapshot_call", kwargs))
 
     exit_code = run(_args(tmp_path))
 
     assert exit_code == 0
-    assert seen["creds"].kis_account_no == ""
-    assert seen["creds"].kis_account_product_code == ""
-    assert seen["creds"].kis_app_key == "data-key"
+    transport = seen["transport"]
+    assert transport._auth.app_key == "data-key"
+    assert transport._auth.app_secret == "data-secret"
+    assert not hasattr(seen["client"], "_creds")
     expected = f"token_{hashlib.sha256(b'data-key').hexdigest()[:12]}.json"
-    assert seen["token_cache_path"].name == expected
-    assert seen["timeout_s"] == 5.0
-    assert isinstance(seen["limiter"], RateLimiter)
-    assert seen["allow_token_issue"] is KisTokenSettings().allow_issue
+    assert transport._tokens._token_cache_path.name == expected
+    assert transport._timeout_s == 5.0
+    assert transport._tokens._allow_token_issue is KisTokenSettings().allow_issue
     assert seen["snapshot_call"]["symbols"] == ("005930", "000660")
+    assert isinstance(seen["snapshot_call"]["source"], _FakeClient)
 
 
 def test_run_raises_when_configured_slot_missing(tmp_path, monkeypatch) -> None:
@@ -79,7 +81,7 @@ def test_run_continues_with_empty_symbols_when_candidates_missing(tmp_path, monk
     from src.cli.collect_snapshots import run
 
     monkeypatch.setattr(collect_mod, "load_kis_data_credentials", lambda: (_slot_credential("1"),))
-    monkeypatch.setattr(collect_mod, "KisRestClient", lambda **kwargs: object())
+    monkeypatch.setattr(collect_mod, "KisDataClient", lambda **kwargs: object())
     seen: dict = {}
     monkeypatch.setattr(collect_mod, "run_snapshot_session", lambda **kwargs: seen.update(kwargs))
 
@@ -99,7 +101,7 @@ def test_run_continues_with_empty_symbols_when_candidates_corrupt(tmp_path, monk
 
     (tmp_path / "candidates.json").write_text("{broken", encoding="utf-8")
     monkeypatch.setattr(collect_mod, "load_kis_data_credentials", lambda: (_slot_credential("1"),))
-    monkeypatch.setattr(collect_mod, "KisRestClient", lambda **kwargs: object())
+    monkeypatch.setattr(collect_mod, "KisDataClient", lambda **kwargs: object())
     seen: dict = {}
     monkeypatch.setattr(collect_mod, "run_snapshot_session", lambda **kwargs: seen.update(kwargs))
 

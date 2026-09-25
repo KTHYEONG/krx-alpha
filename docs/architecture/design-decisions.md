@@ -78,7 +78,7 @@
 ## ADR-003: NTP 타임서버 오프셋 실측 기반 Fail-Closed 클럭 게이트
 
 ### Decision
-실시간 스트리밍 세션 기동(`bootstrap_session`) 시 외부 표준 타임서버(`kr.pool.ntp.org`)와의 클럭 오프셋을 실측하고, 2초를 초과하거나 측정 실패 시 세션을 즉시 거부(`ClockUnsyncedError`)한다.
+실시간 스트리밍 세션 기동(`bootstrap_session`) 시 외부 표준 타임서버(`kr.pool.ntp.org`)와의 클럭 오프셋을 기본 호스트 뒤 폴백 호스트 순서대로 실측하고, 측정된 오프셋이 2초를 초과하거나 모든 호스트 측정에 실패하면 부수효과 전에 새 세션을 즉시 거부(`ClockUnsyncedError`)한다. 과거 매니페스트의 clock_status=unmeasured 값은 읽기 호환용으로만 유지된다.
 
 ### Context
 * WSL2 환경이나 클라우드 가상머신은 호스트 슬립/웨이크업 또는 하이퍼바이저 타임슬라이싱으로 인해 시스템 벽시계가 실제 시각과 수 초 이상 틀어지는 현상이 빈번히 발생 (실측 결과 WSL2에서 +1089ms 편차 관측).
@@ -90,7 +90,7 @@
 3. **클럭 오프셋 측정 후 2초 초과 시 Fail-Closed 거부**: 임계값 초과 시 기동 중단.
 
 ### Selected Approach
-대안 3 채택. 세션 시작 시 ntplib을 통해 5개 샘플을 추출하여 중간값(median) 오프셋을 산출하고, 세션 매니페스트(`SessionManifest`)에 `clock_offset_ns`를 기록하며 허용 오차 초과 시 즉시 프로세스를 중단.
+대안 3 채택. 세션 시작 시 ntplib을 통해 5개 샘플을 추출하여 중간값(median) 오프셋을 기본 호스트 뒤 폴백 호스트 순서대로 산출하고, 모든 호스트 실패 또는 허용 오차 초과 시 매니페스트·저널·프루닝 등 어떤 부수효과보다 먼저 프로세스를 중단한다. 새 매니페스트는 항상 clock_status=measured로 기록한다.
 
 ### Rationale
 * 오염된 타임스탬프를 가진 틱 데이터가 수집되어 파이프라인 전체를 오염시키는 사태를 입구에서 원천 차단.
@@ -156,6 +156,10 @@
 
 ### Trade-offs
 * 새로운 모듈을 추가할 때 반드시 `tests/architecture/layers.py`의 `LAYER_RANK` 계약 테이블에 등재해야 함.
+
+### Runtime Resolution
+* 타입드 설정의 유일한 런타임 해석 지점은 `resolve_collector_runtime()`이며, 데몬 진입점(`run_collector_daemon`)과 수집 CLI가 해석된 `CollectorRuntime`을 자식 프로세스·러너에 명시적으로 주입한다.
+* 호스트 백업 스크립트와 Compose는 Python 설정을 내부에서 로드하지 않는다. 호스트 스크립트는 자체 `REMOTE_ROOT`/보존/락 환경변수를 소유하고, Compose는 `environment` 오버라이드와 두 호스트 프래그먼트(`krx-alpha.env`, `kis-data.env`)를 `env_file`로 전달하는 역할에 한정된다. 상세 인벤토리는 [`docs/architecture/configuration.md`](configuration.md)을 참조한다.
 
 ---
 

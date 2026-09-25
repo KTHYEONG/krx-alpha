@@ -8,11 +8,15 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from src.brokers.kis.auth import KisAppAuth, KisTokenProvider, kis_token_cache_path
+from src.brokers.kis.data import KisDataClient
+from src.brokers.kis.http import KisGetTransport
+from src.brokers.kis.rate import RateLimiter
+from src.brokers.kis.trading import KIS_LIVE_BASE_URL, KisTradingClient
 from src.core.config import ExecutionMode, ExecutionSettings, KisCredentials, KisTokenSettings
 from src.execution.contracts import AccountCheckError, KisApiError, OrderGateway
 from src.execution.gateways import LiveGateway, PaperGateway
 from src.execution.journal import OrderJournal
-from src.execution.kis_client import KisRestClient, RateLimiter, kis_token_cache_path
 from src.execution.ledger import CostModel, Ledger, Position
 from src.execution.oms import OrderManager
 from src.execution.risk import RiskLimits
@@ -34,17 +38,36 @@ def build_order_manager(
     journal = OrderJournal(root=paths.order_journal_dir, mode=settings.mode, now=now)
     limiter = RateLimiter(settings.rest_rate_per_s, clock=clock, sleep=sleep)
     token_settings = KisTokenSettings()
-    client = KisRestClient(
-        creds=creds,
+    auth = KisAppAuth(app_key=creds.kis_app_key, app_secret=creds.kis_app_secret)
+    tokens = KisTokenProvider(
+        auth=auth,
         session=session,
-        token_cache_path=kis_token_cache_path(token_settings.token_cache_dir, creds.kis_app_key),
+        cache_path=kis_token_cache_path(token_settings.token_cache_dir, creds.kis_app_key),
         limiter=limiter,
         now=now,
         timeout_s=settings.request_timeout_s,
-        allow_token_issue=token_settings.allow_issue,
+        base_url=KIS_LIVE_BASE_URL,
+        allow_issue=token_settings.allow_issue,
+    )
+    transport = KisGetTransport(
+        auth=auth,
+        tokens=tokens,
+        session=session,
+        limiter=limiter,
+        timeout_s=settings.request_timeout_s,
+        base_url=KIS_LIVE_BASE_URL,
+    )
+    quotes = KisDataClient(transport=transport)
+    trading = KisTradingClient(
+        transport=transport,
+        session=session,
+        credentials=creds,
+        limiter=limiter,
+        timeout_s=settings.request_timeout_s,
+        base_url=KIS_LIVE_BASE_URL,
     )
     try:
-        holdings = client.get_holdings()
+        holdings = trading.get_holdings()
     except KisApiError as exc:
         raise AccountCheckError(f"account self-check failed: {exc.msg_cd}") from exc
     costs = CostModel(commission_bps=settings.commission_bps, sell_tax_bps=settings.sell_tax_bps)
@@ -57,7 +80,7 @@ def build_order_manager(
             costs=costs,
             positions={h.symbol: Position(qty=h.qty, cost_krw=h.cost_krw) for h in holdings},
         )
-        gateway = LiveGateway(client=client, creds=creds, journal=journal, today=lambda: now().date())
+        gateway = LiveGateway(client=trading, creds=creds, journal=journal, today=lambda: now().date())
     limits = RiskLimits(
         max_order_notional_krw=settings.max_order_notional_krw,
         max_position_notional_krw=settings.max_position_notional_krw,
@@ -69,7 +92,7 @@ def build_order_manager(
     logger.info("[EXEC] stage=session_start mode=%s holdings=%d", settings.mode.value, len(holdings))
     return OrderManager(
         gateway=gateway,
-        quotes=client,
+        quotes=quotes,
         ledger=ledger,
         limits=limits,
         costs=costs,

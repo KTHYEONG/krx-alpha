@@ -59,6 +59,8 @@ flowchart TD
 | **`TossCalendarGate`** | • 토스증권 캘린더 조회로 한국 시장 영업일 판정 | **In**: 기준 일자 (`dt.date`)<br>**Out**: `TradingDay` 메타데이터 | • **영업일 게이트**: 휴장일 시 당일 스트리머 세션 오기동 선제 차단 |
 | **`KrxBarsIngestor`** | • KRX 공식 일봉 수집 및 증분 적재<br>• 장애 시 KIS REST 1회 폴백 | **In**: 거래 일자, API 인증키<br>**Out**: `data/bars/daily.parquet` upsert | • **90% 행수 절단 가드**: 직전 거래일 대비 90% 미만 수집 시 `ImplausibleRowCountError` 발생 |
 | **`UniversePolicy & IPC`** | • 롤링 20일 거래대금 및 60일 최고가 계산<br>• 4대 모멘텀 + 50억 유동성 필터로 최대 90종목 선정 | **In**: 일봉 패널, 결정 일자<br>**Out**: `data/candidates.json` (원자적 교체) | • **Look-Ahead 차단**: $T-1$ 거래일 종가만 참조, 미래 데이터 유입 시 `ValueError`<br>• **슬롯 예산 하드캡**: 최대 90종목 강제 (`SlotBudgetExceededError`) |
+| **`SnapshotSchema & Plan`** | • REST 스냅샷 영속 데이터셋 스키마 정의<br>• KST 세션 기준 결정론적 수집 작업 계획 수립 | **In**: 세션 시각, 스냅샷 계약 정의<br>**Out**: 스키마 검증된 작업 플랜 | • **계약 우선 검증**: 스키마·플랜 불일치 시 수집 실행 전 차단<br>• **세션 단일 소스**: 작업 시각은 플랜이 소유하고 디스패치는 소비만 수행 |
+| **`SnapshotService (Dispatch)`** | • 작업 플랜을 시세 조회 원천에 대해 실행하는 세션 러너<br>• 수집 결과를 스냅샷 스토어에 영속화 | **In**: 작업 플랜, 시세 조회 원천<br>**Out**: 영속화된 스냅샷 데이터셋 | • **원천 교체 가능**: 조회 원천 인터페이스 뒤에 KIS/LS 구현 교환<br>• **스토어 경유 영속화**: 직접 파일 쓰기 대신 스토어 모듈에 위임 |
 
 ---
 
@@ -77,6 +79,8 @@ flowchart TD
 | 컴포넌트 | 핵심 책임 | 핵심 인터페이스 (Input / Output) | 장애 방어 및 불변식 (Fail-Closed) |
 | :--- | :--- | :--- | :--- |
 | **`L0JournalWriter`** | • 장중 원문 그대로 시간대별 압축 JSONL 적재 | **In**: `L0Frame` DTO<br>**Out**: `data/l0/.../HH.jsonl.zst` | • **Append-Only 불변성**: 장중 파싱 배제로 이벤트 루프 블로킹 0% 보장 |
+| **`Normalization`** | • L0 파티션 역압축 후 중복 제거 및 품질 어노테이션 부여<br>• L1 Parquet 변환의 단일 진입점 | **In**: L0 JSONL.zst 파티션<br>**Out**: 정규화된 L1 Parquet 후보 | • **멱등 재실행**: 동일 파티션 재처리가 동일 산출물을 보장<br>• **어노테이션 선행**: 품질 판정은 후단 배리어가 소비하는 필드로 먼저 기록 |
+| **`VendorQualityDecode (LS/KIS)`** | • LS/KIS 벤더 원문 프레임을 공유 품질 필드 스키마로 디코딩 | **In**: 벤더별 틱/호가 원문<br>**Out**: 공유 스키마의 검증 가능 행 | • **벤더 분리**: LS 디코더와 KIS 디코더는 서로를 참조하지 않음<br>• **공유 판정**: 디코딩 이후의 보존법칙·단조성 판정은 단일 배리어가 수행 |
 | **`DataQualityBarrier`** | • EOD 배치 정규화 및 틱/호가 정합성 검증<br>• 정상 파티션 L1 Parquet 변환 | **In**: L0 JSONL.zst 파일들<br>**Out**: `data/l1/.../*.parquet` | • **누적체결량 보존법칙**: 틱 손실 및 역행 검출<br>• **호가 사다리 단조성**: 매수/매도 10단계 역전 및 음수 잔량 검출<br>• **비파괴 격리**: 검증 실패 파티션은 삭제하지 않고 `quarantine/`으로 이동 |
 | **`RcloneArchiver & Retention`** | • L1 Parquet Google Drive 백업<br>• 바이트 대사 후 로컬 L0/L1 순환 Prune | **In**: 로컬 L1 트리<br>**Out**: 원격 백업 및 로컬 디스크 회수 | • **Offload-before-Delete**: `rclone lsjson`으로 바이트 단위 일치 확인 시에만 로컬 삭제<br>• **디스크 워터마크**: 잔여 용량 3.0GB 미만 시 `StorageExhaustedError` |
 
@@ -89,4 +93,20 @@ flowchart TD
 | **`PreTradeRiskGate`** | • 주문 전송 전 킬스위치, 호가단위, 한도 검증 | **In**: `OrderIntent`<br>**Out**: 검증 통과 여부 | • **KRX 호가단위 래더**: 유효 호가단위 불일치 시 거부<br>• **1회/누적 손실한도**: 한도 초과 시 킬스위치 즉시 발동 |
 | **`PaperGateway`** | • 실계좌 잔고 조회 + 10단계 호가 모의체결<br>• 전송 전문 저널링 (`paper_would_send`) | **In**: 검증 통과 주문<br>**Out**: 가상 체결 결과, 저널 아티팩트 | • **주문 누출 0%**: 실전 거래소 네트워크 소켓 연결 원천 배제<br>• **10호가 잔량 소진**: 실시간 호가 깊이를 반영한 현실적 체결 모델 |
 | **`LiveGateway`** | • 한국투자증권 실계좌 OpenAPI REST 주문 전송 | **In**: 검증 통과 주문<br>**Out**: 브로커 주문 접수 응답 | • **이중 무장 확인**: `KRX_ALPHA_EXEC_LIVE_ARMED=true` 미충족 시 전송 거부 |
+| **`KisBrokerBoundaries`** | • KIS 전송 책임 분리: 인증(auth)·시세조회(data)·주문(trading)<br>• 공통 전송(http: 재시도·토큰갱신·페이지네이션)과 간격제한(rate) 공유 | **In**: 호출자별 요청 DTO<br>**Out**: 벤더 응답 페이로드 | • **거래 자격증명 격리**: 주문 경로는 명시적 거래 자격증명 없이는 구성 불가<br>• **안전 GET 우선**: 시세조회는 부작용 없는 GET 전송으로 한정<br>• **요청 간격 강제**: 키별 속도제한으로 429·밴드 차단 선제 방지 |
 | **`OMSLedger`** | • 주문 상태머신 및 실행 원장 영속화 | **In**: 체결 보고, 취소 응답<br>**Out**: 확정 주문 상태, 트랜잭션 로그 | • **결정론적 상태 전이**: 브로커 누적 체결 수량 기반으로 불법 전이(`IllegalTransitionError`) 방어 |
+
+---
+
+## 6. Orchestration, EOD & Observability Subsystem
+
+| 컴포넌트 | 핵심 책임 | 핵심 인터페이스 (Input / Output) | 장애 방어 및 불변식 (Fail-Closed) |
+| :--- | :--- | :--- | :--- |
+| **`Daemon (State Owner)`** | • `SessionState` 전이의 유일한 소유자<br>• 장전 오케스트레이션, 스트리머 감독, EOD·애프터마켓 분기 실행 | **In**: `SessionSchedule`, 거래일 판정<br>**Out**: 프로세스 기동/종료, EOD 산출물 | • **단일 상태 소스**: 전이 판정은 캘린더 모듈의 `get_target_state()`에만 위임<br>• **실패 시 세션 중단**: 바·유니버스 준비 실패 시 stale 스트리밍 차단 |
+| **`EODMaintenance`** | • 정규화·품질배리어·원격 오프로드·정합성 검증의 마감 순서 보장<br>• 20:00 이전 실행 차단 게이트 | **In**: 당일 매니페스트, L0/L1 트리<br>**Out**: L1 산출물, 다이제스트 리포트 | • **시각 게이트**: 마감 시각 이전 EOD 실행 거부<br>• **검증 후 삭제**: 원격 바이트 일치 없이는 로컬 원본 보존 |
+| **`LogFormat`** | • 스트림 한 줄 key-value 포맷과 JSONL 이벤트 포맷<br>• WARNING 이상·마킹 이벤트만 파일 영속 | **In**: `LogRecord`, 컴포넌트·run 식별자<br>**Out**: 포맷 문자열 | • **민감정보 배제**: 자격증명·계좌식별자·원시 프레임을 로그에 기록하지 않음<br>• **전체 트레이스백 보존**: 예외 텍스트 절단 금지 |
+| **`Alerts`** | • CRITICAL 이메일 알림(쿨다운·일일 상한)과 일일 다이제스트 렌더링 | **In**: `LogRecord`, 단계·원인 필드<br>**Out**: 이메일 제목·본문(텍스트/HTML) | • **발송 상한**: 동일 키 쿨다운과 일일 전송 한도 초과 시 발송 생략<br>• **실패 격리**: 발송 예외는 경고 1건으로 기록하고 재귀 알림 금지 |
+
+---
+
+파일 단위 탐색은 생성 산출물 [`docs/code_map.json`](../code_map.json)을 사용합니다. 본 문서는 책임 경계와 불변식을 서술로 유지하며, 모듈별 레이어·의존성·테스트 매핑은 코드맵에 위임합니다.

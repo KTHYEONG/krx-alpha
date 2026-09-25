@@ -6,31 +6,26 @@ import datetime as dt
 import json
 import logging
 import pathlib
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import polars as pl
 
+from src.brokers.kis.data import KisDataClient
 from src.core.errors import KrxAlphaError
-from src.core.symbols import is_krx_short_code
 from src.execution.contracts import KisApiError
-from src.execution.kis_client import KisRestClient, RateLimiter
+from src.marketdata.bar_store import append_daily_bars, write_market_map
 from src.marketdata.krx_bars import (
-    append_daily_bars,
     backfill_bars,
     derive_market_map,
     latest_trading_day,
-    write_market_map,
+)
+from src.marketdata.program_trade_service import (
+    ProgramTradesBackfillResult,
+    backfill_program_trades,
+    backfill_universe_program_trades,
 )
 from src.marketdata.schema import BAR_SCHEMA
-from src.marketdata.toss_calendar import TossCalendarError, issue_access_token
-from src.marketdata.toss_program_trades import (
-    TossProgramTradesError,
-    append_program_trades,
-    backfill_program_trades_history,
-    symbols_needing_backfill,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -46,107 +41,11 @@ class KisFallbackError(KrxAlphaError):
     """KIS 일봉 폴백 fail-closed 신호 (market_map 부재/전량 실패)."""
 
 
-@dataclass(frozen=True)
-class ProgramTradesBackfillResult:
-    symbols_ok: int
-    symbols_failed: int
-    appended_rows: int
-
-
-def backfill_program_trades(
-    *,
-    store_path: pathlib.Path,
-    symbols: Sequence[str],
-    min_date: dt.date,
-    app_key: str,
-    app_secret: str,
-    rate_per_s: float,
-    session: Any | None = None,
-) -> ProgramTradesBackfillResult:
-    """Backfill and persist Toss program-trade history for a fixed symbol set.
-
-    One symbol's fetch failure does not abort the run: over-skipping a
-    problem symbol can be corrected by re-running the tool, but losing every
-    already-fetched symbol's history to one bad response would waste the
-    Raises:
-        ValueError: If ``symbols`` is empty or contains a malformed KRX short code.
-        TossProgramTradesError: If the initial token issuance fails.
-    """
-    unique = list(dict.fromkeys(symbols))
-    if not unique or any(not is_krx_short_code(code) for code in unique):
-        raise ValueError(f"symbols must be non-empty KRX short codes: {list(symbols)!r}")
-    try:
-        token = issue_access_token(app_key=app_key, app_secret=app_secret, session=session)
-    except TossCalendarError as exc:
-        raise TossProgramTradesError(f"toss program-trades token issuance failed: {exc}") from exc
-    limiter = RateLimiter(rate_per_s)
-    symbols_ok = 0
-    symbols_failed = 0
-    appended_rows = 0
-    for code in unique:
-        try:
-            rows = backfill_program_trades_history(
-                code, access_token=token, min_date=min_date, session=session, throttle=limiter.acquire
-            )
-        except TossProgramTradesError as exc:
-            logger.warning("[DATA] stage=toss_program_backfill status=SKIP symbol=%s reason=%s", code, str(exc))
-            symbols_failed += 1
-            continue
-        appended_rows += append_program_trades(store_path, rows)
-        symbols_ok += 1
-    logger.info(
-        "[DATA] stage=toss_program_backfill status=OK symbols_ok=%d symbols_failed=%d appended_rows=%d",
-        symbols_ok,
-        symbols_failed,
-        appended_rows,
-    )
-    return ProgramTradesBackfillResult(symbols_ok=symbols_ok, symbols_failed=symbols_failed, appended_rows=appended_rows)
-
-def backfill_universe_program_trades(
-    *,
-    store_path: pathlib.Path,
-    symbols: Sequence[str],
-    lookback_days: int,
-    reference_date: dt.date,
-    app_key: str,
-    app_secret: str,
-    rate_per_s: float,
-    session: Any | None = None,
-) -> ProgramTradesBackfillResult:
-    """Backfill only universe symbols whose stored history misses the lookback window.
-
-    Runs once per session as part of pre-market orchestration so a symbol
-    newly entering the universe carries enough program-trade history for
-    rolling-window features from its first session, without re-fetching
-    symbols a prior day's run already covered.
-
-    Raises:
-        TossProgramTradesError: If the coverage check cannot read an existing
-            but corrupted store, or if token issuance for the backfill fails.
-    """
-    if not symbols:
-        return ProgramTradesBackfillResult(symbols_ok=0, symbols_failed=0, appended_rows=0)
-    clean_symbols = tuple(code for code in symbols if is_krx_short_code(code))
-    skipped = set(symbols) - set(clean_symbols)
-    if skipped:
-        logger.warning(
-            "[DATA] stage=toss_program_backfill status=SKIP_INVALID_CODE symbols=%s", sorted(skipped)
-        )
-    if not clean_symbols:
-        return ProgramTradesBackfillResult(symbols_ok=0, symbols_failed=0, appended_rows=0)
-    min_date = reference_date - dt.timedelta(days=lookback_days)
-    targets = symbols_needing_backfill(store_path, clean_symbols, min_date)
-    if not targets:
-        return ProgramTradesBackfillResult(symbols_ok=0, symbols_failed=0, appended_rows=0)
-    return backfill_program_trades(
-        store_path=store_path,
-        symbols=targets,
-        min_date=min_date,
-        app_key=app_key,
-        app_secret=app_secret,
-        rate_per_s=rate_per_s,
-        session=session,
-    )
+__all__ = [
+    "ProgramTradesBackfillResult",
+    "backfill_program_trades",
+    "backfill_universe_program_trades",
+]
 
 
 def refresh_bars(
@@ -183,7 +82,7 @@ def refresh_bars_via_kis_fallback(
     store_path: pathlib.Path,
     market_map_path: pathlib.Path,
     target_date: dt.date,
-    kis_client: KisRestClient,
+    kis_client: KisDataClient,
 ) -> BarsRefreshResult:
     """직전 성공 market_map.json 유니버스를 KIS 일봉으로 적재한다 (KRX 장애시 1회성 폴백).
 

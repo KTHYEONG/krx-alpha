@@ -1,26 +1,49 @@
+def test_resolve_collector_runtime_uses_one_enabled_flag_and_data_root(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    from src.core.config import AftermarketSettings, CollectorSettings, SnapshotSettings, resolve_collector_runtime
+
+    monkeypatch.delenv("KRX_ALPHA_AFTERMARKET_ENABLED", raising=False)
+    collector = CollectorSettings(data_root=tmp_path, after_market_enabled=False)
+    snapshot = SnapshotSettings(enabled=False)
+
+    default = resolve_collector_runtime(collector=collector, snapshot=snapshot)
+    assert default.aftermarket.enabled is False
+    assert default.paths.root == tmp_path
+
+    explicit = AftermarketSettings(enabled=True, pair_capacity_per_connection=4)
+    with pytest.raises(ValueError, match="aftermarket enabled conflicts"):
+        resolve_collector_runtime(collector=collector, aftermarket=explicit, snapshot=snapshot)
+
+    matching = resolve_collector_runtime(
+        collector=collector, aftermarket=AftermarketSettings(enabled=False), snapshot=snapshot
+    )
+    assert matching.aftermarket.enabled is False
+
+
 def test_keypool_runbook_limits_shared_fragment_to_data_keys() -> None:
     from pathlib import Path
 
-    runbook = Path('docs/architecture/kis-aftermarket-keypool-deployment.md').read_text(encoding='utf-8')
-    assert 'KIS_DATA_SLOTS=1,2,3,4,5' in runbook
-    assert 'KIS_HOST_DATA_SLOTS=1,2,3,4' in runbook
-    assert 'KIS_TRADE_*' in runbook
-    assert 'KIS_APP_*' in runbook
-    assert 'uv run python -m src.cli.provision_kis_keypool' in runbook
-    assert '/home/ubuntu/quant-secrets/kis-data.env' in runbook
+    runbook = Path("docs/architecture/kis-aftermarket-keypool-deployment.md").read_text(encoding="utf-8")
+    assert "KIS_DATA_SLOTS=1,2,3,4,5" in runbook
+    assert "KIS_HOST_DATA_SLOTS=1,2,3,4" in runbook
+    assert "KIS_TRADE_*" in runbook
+    assert "KIS_APP_*" in runbook
+    assert "uv run python -m src.cli.provision_kis_keypool" in runbook
+    assert "/home/ubuntu/quant-secrets/kis-data.env" in runbook
 
 
 def test_deploy_workflow_validates_shared_env_and_wires_kca() -> None:
     from pathlib import Path
 
-    workflow = Path('.github/workflows/deploy.yml').read_text(encoding='utf-8')
-    assert 'KIS_DATA_ENV_CONTENT' not in workflow
-    assert 'kca-kis-token-warmup.service.d' in workflow
-    assert 'validate_shared_keypool' in workflow
-    assert 'HOST_DATA_SLOTS=1,2,3,4' in workflow
-    assert 'systemctl --user daemon-reload' in workflow
-    assert 'kca-kis-token-warmup.timer' in workflow
-    assert 'systemctl --user restart kca-kis-token-warmup.service' not in workflow
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    assert "KIS_DATA_ENV_CONTENT" not in workflow
+    assert "kca-kis-token-warmup.service.d" in workflow
+    assert "validate_shared_keypool" in workflow
+    assert "HOST_DATA_SLOTS=1,2,3,4" in workflow
+    assert "systemctl --user daemon-reload" in workflow
+    assert "kca-kis-token-warmup.timer" in workflow
+    assert "systemctl --user restart kca-kis-token-warmup.service" not in workflow
 
 
 def test_deploy_workflow_validates_existing_vps_keypool_without_github_secret() -> None:
@@ -260,6 +283,142 @@ def test_deferred_slot_precedes_nightly_backup_and_follows_eod() -> None:
 
     backup_slot = dt.time(23, 30)
     assert SessionSchedule().after_market_eod_done < DEFERRED_RECREATE_KST < backup_slot
+
+
+def _workflow_function_body(workflow: str, name: str) -> str:
+    """Extract a shell validator body from the deploy workflow without executing it."""
+    start = workflow.index(f"{name}() {{")
+    end = workflow.index("\n          }\n", start)
+    return workflow[start:end]
+
+
+def _shell_word_list(body: str, loop_head: str) -> list[str]:
+    """Collect the word list of a `for <var> in ... ; do` loop as literal tokens."""
+    section = body.split(loop_head, 1)[1].split("; do", 1)[0]
+    return [token for token in section.replace("\\", " ").split() if token]
+
+
+def test_runtime_fragment_keys_match_ci_allowlist_without_values() -> None:
+    import re
+    from pathlib import Path
+
+    from src.core.runtime_env_provisioning import RUNTIME_ENV_SPEC
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    body = _workflow_function_body(workflow, "validate_runtime_env")
+    targets = [key.target for key in RUNTIME_ENV_SPEC]
+
+    allowlist = re.search(r"\$1 !~ /\^\(([^)]+)\)\$/", body)
+    assert allowlist is not None
+    assert sorted(allowlist.group(1).split("|")) == sorted(targets)
+
+    required = _shell_word_list(body, "for required_key in")
+    assert sorted(required) == sorted(targets)
+    assert len(set(required)) == len(targets)
+
+    echo_lines = [line for line in body.splitlines() if "echo" in line]
+    assert echo_lines
+    assert not any("credential_value" in line for line in echo_lines)
+    assert 'cat "$file"' not in body
+    assert "cat $file" not in body
+
+
+def test_keypool_slot_keys_match_ci_validation_exactly_once() -> None:
+    import re
+    from pathlib import Path
+
+    from src.core.kis_keypool_provisioning import (
+        ACCEPTED_KEYS,
+        CANONICAL_HOST_SLOTS_LINE,
+        CANONICAL_SLOTS_LINE,
+    )
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    body = _workflow_function_body(workflow, "validate_shared_keypool")
+
+    required = _shell_word_list(body, "for required_key in")
+    assert sorted(required) == sorted(ACCEPTED_KEYS)
+    for key in ACCEPTED_KEYS:
+        assert body.count(key) == 1
+
+    slot_pattern = re.compile(r"KIS_DATA_[1-5]_(APP_KEY|APP_SECRET|HTS_ID)")
+    assert all(slot_pattern.fullmatch(key) for key in ACCEPTED_KEYS)
+    assert f'expected_slots_line="{CANONICAL_SLOTS_LINE}"' in body
+    assert f'expected_host_slots_line="{CANONICAL_HOST_SLOTS_LINE}"' in body
+    assert len(ACCEPTED_KEYS) + 2 == 17
+
+    echo_lines = [line for line in body.splitlines() if "echo" in line]
+    assert not any("credential_value" in line for line in echo_lines)
+
+
+def _accepted_typed_env_names() -> set[str]:
+    from src.core import config as config_module
+
+    families = [
+        config_module.CollectorSettings,
+        config_module.AftermarketSettings,
+        config_module.SnapshotSettings,
+        config_module.ExecutionSettings,
+        config_module.DataQualitySettings,
+        config_module.KisTokenSettings,
+        config_module.RcloneArchiveSettings,
+        config_module.ObservabilitySettings,
+        config_module.AlertSettings,
+        config_module.TossProgramTradesSettings,
+        config_module.KrxCredentials,
+        config_module.TossCredentials,
+        config_module.LsCredentials,
+        config_module.KisCredentials,
+    ]
+    names: set[str] = set()
+    for family in families:
+        prefix = str(family.model_config.get("env_prefix") or "").upper()
+        for field_name, field in family.model_fields.items():
+            names.add(f"{prefix}{field_name}".upper())
+            alias = field.validation_alias
+            choices = alias.choices if hasattr(alias, "choices") else [alias]
+            for choice in choices:
+                if isinstance(choice, str):
+                    names.add(choice.upper())
+    return names
+
+
+def test_compose_overrides_are_all_recognized_typed_settings() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    raw = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    entries = raw["services"]["krx-collector"]["environment"]
+    overrides = sorted(item.split("=", 1)[0] for item in entries if item.startswith("KRX_ALPHA_"))
+
+    assert overrides
+    accepted = _accepted_typed_env_names()
+    assert [name for name in overrides if name not in accepted] == []
+
+
+def test_host_and_container_remote_roots_share_one_data_subtree() -> None:
+    import re
+    from pathlib import Path
+
+    from src.core.config import CollectorSettings, RcloneArchiveSettings
+
+    script = Path("deploy/host/krx-host-backup.sh").read_text(encoding="utf-8")
+    archiver = RcloneArchiveSettings()
+
+    host_default = re.search(r'REMOTE_ROOT="\$\{REMOTE_ROOT:-([^}]+)\}"', script)
+    assert host_default is not None
+    host_root = host_default.group(1)
+    assert f"{archiver.remote_name}:{archiver.remote_path}" == f"{host_root}/data"
+    assert host_root.endswith("/krx-alpha")
+
+    assert "--filter-from" in script
+    assert "krx-alpha.rclone-filter" in script
+    assert '--exclude ".env*"' in script
+    assert "flock -w" in script
+    assert "QUANT_GDRIVE_LOCK" in script
+    assert "VERSION_RETENTION_DAYS" in script
+    assert CollectorSettings().archive_retain_days == 30
 
 
 def test_host_backup_unit_retries_with_direct_restart_mode() -> None:

@@ -8,16 +8,22 @@ import pathlib
 import signal
 import sys
 import threading
-from dataclasses import dataclass, replace
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import polars as pl
 import requests
 
+from src.brokers.kis.auth import KisAppAuth, KisTokenProvider, kis_app_key_fingerprint, kis_token_cache_path
+from src.brokers.kis.data import KisDataClient
+from src.brokers.kis.http import KisGetTransport
+from src.brokers.kis.rate import RateLimiter
+from src.brokers.kis.trading import KIS_LIVE_BASE_URL
 from src.core.calendar import SessionState, calc_sleep_seconds, get_target_state
 from src.core.config import (
-    AftermarketSettings,
+    CollectorRuntime,
     CollectorSettings,
     DataPaths,
     ExecutionSettings,
@@ -29,15 +35,16 @@ from src.core.config import (
     TossCredentials,
     TossProgramTradesSettings,
     load_credentials,
+    resolve_collector_runtime,
 )
 from src.core.errors import KrxAlphaError, MissingCredentialsError
 from src.core.observability import EVENT, configure_logging, send_digest
 from src.execution.contracts import KisApiError
-from src.execution.kis_client import KisRestClient, RateLimiter, kis_app_key_fingerprint, kis_token_cache_path
 from src.marketdata.krx_bars import KrxBarsError
+from src.marketdata.program_trade_service import backfill_universe_program_trades
 from src.marketdata.service import BarsRefreshResult as BarsRefreshResult
 from src.marketdata.service import KisFallbackError as KisFallbackError
-from src.marketdata.service import backfill_universe_program_trades, refresh_bars, refresh_bars_via_kis_fallback
+from src.marketdata.service import refresh_bars, refresh_bars_via_kis_fallback
 from src.marketdata.toss_calendar import (
     TossCalendarError,
     TradingDay,
@@ -97,48 +104,85 @@ def resolve_trading_day(ref_date: dt.date) -> TradingDay | None:
         return None
 
 
-def _build_kis_client(paths: DataPaths) -> KisRestClient:
-    """execution 모듈과 동일한 토큰 캐시를 공유하는 KIS 클라이언트를 생성한다."""
+def _build_data_client(
+    *,
+    app_key: str,
+    app_secret: str,
+    rate_per_s: float,
+    timeout_s: float,
+    allow_issue: bool,
+) -> tuple[KisTokenProvider, KisDataClient]:
+    """Build a data-only KIS stack from an app key pair (no account fields)."""
+    token_settings = KisTokenSettings()
+    auth = KisAppAuth(app_key=app_key, app_secret=app_secret)
+    limiter = RateLimiter(rate_per_s)
+    tokens = KisTokenProvider(
+        auth=auth,
+        session=requests,
+        cache_path=kis_token_cache_path(token_settings.token_cache_dir, app_key),
+        limiter=limiter,
+        now=lambda: dt.datetime.now(_KST),
+        timeout_s=timeout_s,
+        base_url=KIS_LIVE_BASE_URL,
+        allow_issue=allow_issue,
+    )
+    transport = KisGetTransport(
+        auth=auth,
+        tokens=tokens,
+        session=requests,
+        limiter=limiter,
+        timeout_s=timeout_s,
+        base_url=KIS_LIVE_BASE_URL,
+    )
+    return tokens, KisDataClient(transport=transport)
+
+
+def _build_kis_client(paths: DataPaths) -> KisDataClient:
+    """execution 모듈과 동일한 토큰 캐시를 공유하는 KIS 데이터 클라이언트를 생성한다."""
     creds = load_credentials(KisCredentials)
     execution = ExecutionSettings(data_root=paths.root)
     token_settings = KisTokenSettings()
-    return KisRestClient(
-        creds=creds,
-        session=requests,
-        token_cache_path=kis_token_cache_path(token_settings.token_cache_dir, creds.kis_app_key),
-        limiter=RateLimiter(execution.rest_rate_per_s),
-        now=lambda: dt.datetime.now(_KST),
+    _, client = _build_data_client(
+        app_key=creds.kis_app_key,
+        app_secret=creds.kis_app_secret,
+        rate_per_s=execution.rest_rate_per_s,
         timeout_s=execution.request_timeout_s,
-        allow_token_issue=token_settings.allow_issue,
+        allow_issue=token_settings.allow_issue,
     )
+    return client
 
 
-def _build_snapshot_preflight_client(paths: DataPaths) -> tuple[KisRestClient, str]:
+def _build_snapshot_preflight_client(paths: DataPaths, snapshot_settings: SnapshotSettings | None = None) -> tuple[KisDataClient, str]:
     """collect-snapshots와 동일한 규칙으로 데이터 슬롯 KIS 클라이언트를 생성한다."""
-    snapshot_settings = SnapshotSettings()
+    snapshot_cfg = snapshot_settings if snapshot_settings is not None else SnapshotSettings()
     credentials = load_kis_data_credentials()
-    cred = next((c for c in credentials if c.slot == snapshot_settings.kis_data_slot), None)
+    cred = next((c for c in credentials if c.slot == snapshot_cfg.kis_data_slot), None)
     if cred is None:
-        raise MissingCredentialsError(f"no data credential for slot {snapshot_settings.kis_data_slot}")
+        raise MissingCredentialsError(f"no data credential for slot {snapshot_cfg.kis_data_slot}")
     token_settings = KisTokenSettings()
-    client = KisRestClient(
-        creds=KisCredentials(
-            kis_app_key=cred.app_key,
-            kis_app_secret=cred.app_secret,
-            kis_account_no="",
-            kis_account_product_code="",
-        ),
-        session=requests,
-        token_cache_path=kis_token_cache_path(token_settings.token_cache_dir, cred.app_key),
-        limiter=RateLimiter(snapshot_settings.rest_rate_per_s),
-        now=lambda: dt.datetime.now(_KST),
-        timeout_s=snapshot_settings.request_timeout_s,
-        allow_token_issue=token_settings.allow_issue,
+    _, client = _build_data_client(
+        app_key=cred.app_key,
+        app_secret=cred.app_secret,
+        rate_per_s=snapshot_cfg.rest_rate_per_s,
+        timeout_s=snapshot_cfg.request_timeout_s,
+        allow_issue=token_settings.allow_issue,
     )
     return client, cred.key_id
 
 
-def _kis_token_preflight(paths: DataPaths, today: dt.date) -> dict[str, str]:
+def _client_app_key(client: object) -> str:
+    creds = getattr(client, "_creds", None)
+    if creds is not None:
+        key = getattr(creds, "kis_app_key", "")
+        if key:
+            return str(key)
+    transport = getattr(client, "_transport", None)
+    auth = getattr(transport, "_auth", None)
+    key = getattr(auth, "app_key", "")
+    return str(key) if key else ""
+
+
+def _kis_token_preflight(paths: DataPaths, today: dt.date, snapshot_settings: SnapshotSettings | None = None) -> dict[str, str]:
     """Ensure krx's KIS REST keys hold a token before the session starts.
 
     Covers the primary key (security status, aftermarket reselection, daily
@@ -159,8 +203,7 @@ def _kis_token_preflight(paths: DataPaths, today: dt.date) -> dict[str, str]:
         outcomes["unknown"] = "fail:missing_credentials"
         primary = None
     if primary is not None:
-        creds = getattr(primary, "_creds", None)
-        app_key = getattr(creds, "kis_app_key", "") if creds is not None else ""
+        app_key = _client_app_key(primary)
         fingerprint = kis_app_key_fingerprint(app_key) if app_key else "unknown"
         try:
             source = primary.ensure_token()
@@ -186,7 +229,7 @@ def _kis_token_preflight(paths: DataPaths, today: dt.date) -> dict[str, str]:
             )
             outcomes[fingerprint] = source.value
     try:
-        snapshot_client, snapshot_fp = _build_snapshot_preflight_client(paths)
+        snapshot_client, snapshot_fp = _build_snapshot_preflight_client(paths, snapshot_settings)
     except MissingCredentialsError:
         fallback_key = "unknown-data"
         logger.critical(
@@ -310,7 +353,7 @@ def run_session_orchestration(
         )
     # 선정 실패는 흡수하지 않는다: 직전 세션의 stale candidates 로 스트리밍하는 fail-open 을 차단.
     try:
-        status_source: KisRestClient | None = _build_kis_client(paths)
+        status_source: KisDataClient | None = _build_kis_client(paths)
     except MissingCredentialsError as exc:
         logger.warning("[DAEMON] stage=orchestration status=DEGRADED step=security_status reason=%s", str(exc))
         status_source = None
@@ -549,69 +592,91 @@ def _resolve_trading_day_with_cache(today: dt.date, cache_path: pathlib.Path) ->
     return None
 
 
-def run_collector_daemon(
-    *,
-    settings: CollectorSettings | None = None,
-    sleep_fn: Any = None,
-    max_cycles: int | None = None,
-    now_fn: Any = None,
-    shutdown: threading.Event | None = None,
-) -> None:
-    """Collector daemon main loop.
-
-    Shutdown: when ``shutdown`` is set the loop stops starting work,
-    stops all supervised children via ``stop_supervisors`` within ``SHUTDOWN_CHILD_DEADLINE_S`` and
-    returns. A cycle already inside EOD finishes that call first; the deploy session gate keeps
-    deploys out of the EOD window.
-    """
-    import time
-
-    sleeper = sleep_fn if sleep_fn is not None else time.sleep
-    cfg = settings if settings is not None else CollectorSettings()
-    sched = replace(cfg.schedule, after_market_enabled=cfg.after_market_enabled)
-    paths = cfg.paths
-    cycle = 0
-
-    run_id = configure_logging("daemon", log_dir=paths.logs_dir if ObservabilitySettings().persistent_logs else None)
-    logger.info("[DAEMON] stage=start status=ONLINE timezone=Asia/Seoul run_id=%s", run_id, extra=EVENT)
-
-    clock = now_fn if now_fn is not None else (lambda: dt.datetime.now(_KST))
+@dataclass
+class DaemonState:
+    cycle: int = 0
+    prev_state: SessionState | None = None
+    last_summary: dt.datetime | None = None
     orchestrated_for: dt.date | None = None
     preflight_day: dt.date | None = None
     holiday_skip_logged_for: dt.date | None = None
     possible_holiday_warned_for: dt.date | None = None
     eod_attempted_for: dt.date | None = None
-    gate = TradingDayGate(resolver=lambda d: _resolve_trading_day_with_cache(d, paths.calendar_cache))
-    supervisor: ProcessSupervisor | None = None
-    prev_state: SessionState | None = None
-    last_summary: dt.datetime | None = None
-    streamer_restarts = 0
-    last_supervisor_result: str | None = None
     orchestration_day: dt.date | None = None
     next_orchestration_at: dt.datetime | None = None
-    orchestration_attempts = 0
-    degraded_active = False
+    orchestration_attempts: int = 0
+    degraded_active: bool = False
     last_ingest_check: dt.datetime | None = None
-    ingest_stale = False
-    aftermarket_supervisors: dict[str, ProcessSupervisor] = {}
+    ingest_stale: bool = False
+    streamer_restarts: int = 0
+    last_supervisor_result: str | None = None
+    last_snapshot_result: str | None = None
     aftermarket_plan: tuple[AftermarketShard, ...] = ()
     aftermarket_plan_day: dt.date | None = None
     aftermarket_refresh_day: dt.date | None = None
     aftermarket_eligibility_day: dt.date | None = None
     next_aftermarket_refresh_at: dt.datetime | None = None
-    snapshot_cfg = SnapshotSettings()
-    snapshot_supervisor: ProcessSupervisor | None = None
-    last_snapshot_result: str | None = None
 
-    def _shutdown_children() -> None:
+
+@dataclass
+class DaemonChildren:
+    regular: ProcessSupervisor | None = None
+    snapshot: ProcessSupervisor | None = None
+    aftermarket: dict[str, ProcessSupervisor] = field(default_factory=dict)
+
+
+class DaemonRunner:
+    """Own one daemon process's date-scoped state and supervised children.
+
+    The runner keeps state transitions explicit so a retry, holiday, shutdown, and
+    EOD cycle cannot accidentally reuse a prior day's process or status.
+    """
+
+    def __init__(
+        self,
+        *,
+        runtime: CollectorRuntime,
+        shutdown: threading.Event | None,
+        now: Callable[[], dt.datetime],
+        sleep: Callable[[float], None],
+    ) -> None:
+        self._runtime = runtime
+        self._shutdown = shutdown
+        self._now = now
+        self._sleep = sleep
+        self._cfg = runtime.collector
+        self._paths = runtime.paths
+        self._after_cfg = runtime.aftermarket
+        self._snapshot_cfg = runtime.snapshot
+        self._sched = replace(
+            runtime.collector.schedule,
+            after_market_enabled=runtime.collector.after_market_enabled,
+        )
+        self._state = DaemonState()
+        self._children = DaemonChildren()
+        self._gate = TradingDayGate(
+            resolver=lambda d: _resolve_trading_day_with_cache(d, runtime.paths.calendar_cache)
+        )
+        self._run_id: str | None = None
+
+    @property
+    def state(self) -> DaemonState:
+        return self._state
+
+    @property
+    def children(self) -> DaemonChildren:
+        return self._children
+
+    def stop_children(self) -> None:
+        """Stop all owned child processes within the existing shutdown deadline."""
         targets: list[ProcessSupervisor] = []
-        if supervisor is not None:
-            targets.append(supervisor)
-        targets.extend(aftermarket_supervisors.values())
-        if snapshot_supervisor is not None:
-            targets.append(snapshot_supervisor)
+        if self._children.regular is not None:
+            targets.append(self._children.regular)
+        targets.extend(self._children.aftermarket.values())
+        if self._children.snapshot is not None:
+            targets.append(self._children.snapshot)
         counts = stop_supervisors(targets, deadline_s=SHUTDOWN_CHILD_DEADLINE_S)
-        raw = getattr(shutdown, "signal_name", "UNKNOWN") if shutdown is not None else "UNKNOWN"
+        raw = getattr(self._shutdown, "signal_name", "UNKNOWN") if self._shutdown is not None else "UNKNOWN"
         sig = str(raw) if raw else "UNKNOWN"
         logger.info(
             "[DAEMON] stage=shutdown status=STOPPED signal=%s graceful=%d killed=%d not_running=%d",
@@ -622,12 +687,26 @@ def run_collector_daemon(
             extra=EVENT,
         )
 
-    while True:
-        if shutdown is not None and shutdown.is_set():
-            _shutdown_children()
-            return
-        cycle += 1
-        now = clock()
+    def step(self, now: dt.datetime) -> float:
+        """Advance one scheduled daemon cycle and return the next delay.
+
+        Args:
+            now: Current timezone-aware instant.
+
+        Returns:
+            Seconds to wait before the next cycle.
+
+        Raises:
+            KrxAlphaError: For failures already propagated by the current loop.
+        """
+        st = self._state
+        ch = self._children
+        cfg = self._cfg
+        paths = self._paths
+        after_cfg = self._after_cfg
+        snapshot_cfg = self._snapshot_cfg
+        sched = self._sched
+        st.cycle += 1
         state = get_target_state(now, sched)
         day = None
         if state in (
@@ -636,30 +715,30 @@ def run_collector_daemon(
             SessionState.AFTER_MARKET_ACTIVE,
             SessionState.POST_MARKET_EOD,
         ):
-            day = gate.view(now.astimezone(_KST).date(), now)
-            if day.status is TradingDayStatus.HOLIDAY and holiday_skip_logged_for != day.date:
+            day = self._gate.view(now.astimezone(_KST).date(), now)
+            if day.status is TradingDayStatus.HOLIDAY and st.holiday_skip_logged_for != day.date:
                 logger.info(
                     "[DAEMON] stage=session status=SKIP reason=market_holiday date=%s",
                     day.date.isoformat(),
                     extra=EVENT,
                 )
-                holiday_skip_logged_for = day.date
-        logger.debug("[DAEMON] cycle=%d now=%s state=%s", cycle, now.strftime("%Y-%m-%d %H:%M:%S"), state)
-        if state != prev_state:
+                st.holiday_skip_logged_for = day.date
+        logger.debug("[DAEMON] cycle=%d now=%s state=%s", st.cycle, now.strftime("%Y-%m-%d %H:%M:%S"), state)
+        if state != st.prev_state:
             logger.info(
-                "[DAEMON] stage=state_change from=%s to=%s cycle=%d", prev_state, state, cycle, extra=EVENT
+                "[DAEMON] stage=state_change from=%s to=%s cycle=%d", st.prev_state, state, st.cycle, extra=EVENT
             )
-            prev_state = state
-        streamer_alive = last_supervisor_result in ("started", "running", "restarted")
-        if last_summary is None or (now - last_summary).total_seconds() >= HEARTBEAT_SUMMARY_S:
+            st.prev_state = state
+        streamer_alive = st.last_supervisor_result in ("started", "running", "restarted")
+        if st.last_summary is None or (now - st.last_summary).total_seconds() >= HEARTBEAT_SUMMARY_S:
             logger.info(
                 "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
                 state,
-                cycle,
+                st.cycle,
                 streamer_alive,
-                streamer_restarts,
+                st.streamer_restarts,
             )
-            last_summary = now
+            st.last_summary = now
 
         if state == SessionState.WEEKEND_SLEEP:
             sleep_sec = 3600.0  # 주말엔 1시간씩 대기
@@ -669,18 +748,18 @@ def run_collector_daemon(
             assert day is not None
             today = day.date
             if day.status is TradingDayStatus.HOLIDAY:
-                if supervisor is not None:
-                    supervisor.stop(timeout_s=15.0)
-                    supervisor = None
-                    last_supervisor_result = None
-                    degraded_active = False
-                if snapshot_supervisor is not None:
-                    snapshot_supervisor.stop(timeout_s=15.0)
-                    snapshot_supervisor = None
-                    last_snapshot_result = None
-                for _sup in aftermarket_supervisors.values():
+                if ch.regular is not None:
+                    ch.regular.stop(timeout_s=15.0)
+                    ch.regular = None
+                    st.last_supervisor_result = None
+                    st.degraded_active = False
+                if ch.snapshot is not None:
+                    ch.snapshot.stop(timeout_s=15.0)
+                    ch.snapshot = None
+                    st.last_snapshot_result = None
+                for _sup in ch.aftermarket.values():
                     _sup.stop(timeout_s=15.0)
-                aftermarket_supervisors.clear()
+                ch.aftermarket.clear()
                 if state is SessionState.STREAMER_ACTIVE:
                     _holiday_target = sched.scanner_start
                 elif state is SessionState.FULL_ACTIVE:
@@ -689,34 +768,34 @@ def run_collector_daemon(
                     _holiday_target = sched.after_market_close
                 sleep_sec = min(calc_sleep_seconds(now, _holiday_target), HOLIDAY_SLEEP_CAP_S)
             else:
-                if state is not SessionState.AFTER_MARKET_ACTIVE and today != orchestration_day:
+                if state is not SessionState.AFTER_MARKET_ACTIVE and today != st.orchestration_day:
                     # EOD를 거치지 못한 전일 스트리머가 남아 있으면 전일 session-date로 재기동되므로 먼저 정리한다
-                    if supervisor is not None:
-                        stale_stop = supervisor.stop(timeout_s=15.0)
+                    if ch.regular is not None:
+                        stale_stop = ch.regular.stop(timeout_s=15.0)
                         logger.warning("[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s", stale_stop)
-                        supervisor = None
-                        last_supervisor_result = None
-                    if snapshot_supervisor is not None:
-                        snapshot_supervisor.stop(timeout_s=15.0)
-                        snapshot_supervisor = None
-                        last_snapshot_result = None
-                    orchestration_day = today
-                    next_orchestration_at = None
-                    orchestration_attempts = 0
-                    degraded_active = False
-                    last_ingest_check = None
-                    ingest_stale = False
-                    next_aftermarket_refresh_at = None
+                        ch.regular = None
+                        st.last_supervisor_result = None
+                    if ch.snapshot is not None:
+                        ch.snapshot.stop(timeout_s=15.0)
+                        ch.snapshot = None
+                        st.last_snapshot_result = None
+                    st.orchestration_day = today
+                    st.next_orchestration_at = None
+                    st.orchestration_attempts = 0
+                    st.degraded_active = False
+                    st.last_ingest_check = None
+                    st.ingest_stale = False
+                    st.next_aftermarket_refresh_at = None
                 if (
                     state is not SessionState.AFTER_MARKET_ACTIVE
-                    and orchestrated_for != today
-                    and (next_orchestration_at is None or now >= next_orchestration_at)
+                    and st.orchestrated_for != today
+                    and (st.next_orchestration_at is None or now >= st.next_orchestration_at)
                 ):
                     trading_day = day.trading_day
-                    if preflight_day != today:
-                        preflight_day = today
-                        _kis_token_preflight(paths, today)
-                    orchestration_attempts += 1
+                    if st.preflight_day != today:
+                        st.preflight_day = today
+                        _kis_token_preflight(paths, today, snapshot_cfg)
+                    st.orchestration_attempts += 1
                     try:
                         ready = run_session_orchestration(today=today, settings=cfg, trading_day=trading_day)
                     except Exception as e:  # noqa: BLE001 - 오케스트레이션 실패가 데몬 전체를 죽이지 않도록 격리
@@ -727,207 +806,206 @@ def run_collector_daemon(
                         )
                         ready = False
                     if ready:
-                        orchestrated_for = today
-                        next_orchestration_at = None
-                        if supervisor is not None and degraded_active:
-                            stop_result = supervisor.stop(timeout_s=15.0)
+                        st.orchestrated_for = today
+                        st.next_orchestration_at = None
+                        if ch.regular is not None and st.degraded_active:
+                            stop_result = ch.regular.stop(timeout_s=15.0)
                             logger.info(
                                 "[DAEMON] stage=streamer status=REPLACE_DEGRADED stop_result=%s",
                                 stop_result,
                                 extra=EVENT,
                             )
-                        supervisor = ProcessSupervisor(
+                        ch.regular = ProcessSupervisor(
                             cmd=_stream_cmd(today, paths, degraded_reason=None),
                             breaker=RestartCircuitBreaker(),
                         )
-                        degraded_active = False
-                        last_supervisor_result = None
+                        st.degraded_active = False
+                        st.last_supervisor_result = None
                         if snapshot_cfg.enabled:
-                            if snapshot_supervisor is not None:
-                                snapshot_supervisor.stop(timeout_s=15.0)
-                            snapshot_supervisor = ProcessSupervisor(
+                            if ch.snapshot is not None:
+                                ch.snapshot.stop(timeout_s=15.0)
+                            ch.snapshot = ProcessSupervisor(
                                 cmd=_snapshot_cmd(today, paths),
                                 breaker=RestartCircuitBreaker(),
                             )
-                            last_snapshot_result = None
+                            st.last_snapshot_result = None
                     else:
-                        next_orchestration_at = now + dt.timedelta(seconds=cfg.orchestration_retry_s)
-                        log_fn = logger.critical if orchestration_attempts == 1 else logger.warning
+                        st.next_orchestration_at = now + dt.timedelta(seconds=cfg.orchestration_retry_s)
+                        log_fn = logger.critical if st.orchestration_attempts == 1 else logger.warning
                         log_fn(
                             "[DAEMON] stage=session status=FAIL reason=candidates_not_ready date=%s attempt=%d next_retry=%s",
                             today.isoformat(),
-                            orchestration_attempts,
-                            next_orchestration_at.isoformat(),
+                            st.orchestration_attempts,
+                            st.next_orchestration_at.isoformat(),
                         )
-                        if supervisor is None:
+                        if ch.regular is None:
                             rev = _degraded_candidates_rev(
                                 paths.candidates, today, max_age_days=cfg.degraded_candidates_max_age_days
                             )
                             if rev is not None:
-                                supervisor = ProcessSupervisor(
+                                ch.regular = ProcessSupervisor(
                                     cmd=_stream_cmd(today, paths, degraded_reason="orchestration_failed"),
                                     breaker=RestartCircuitBreaker(),
                                 )
-                                if snapshot_cfg.enabled and snapshot_supervisor is None:
-                                    snapshot_supervisor = ProcessSupervisor(
+                                if snapshot_cfg.enabled and ch.snapshot is None:
+                                    ch.snapshot = ProcessSupervisor(
                                         cmd=_snapshot_cmd(today, paths),
                                         breaker=RestartCircuitBreaker(),
                                     )
-                                    last_snapshot_result = None
-                                degraded_active = True
-                                last_supervisor_result = None
+                                    st.last_snapshot_result = None
+                                st.degraded_active = True
+                                st.last_supervisor_result = None
                                 logger.critical(
                                     "[DAEMON] stage=streamer status=DEGRADED reason=orchestration_failed candidates_rev=%d",
                                     rev,
                                 )
-                if supervisor is not None:
-                    result = supervisor.ensure_running()
+                if ch.regular is not None:
+                    result = ch.regular.ensure_running()
                     if result == "started":
                         logger.info("[DAEMON] stage=streamer status=STARTED", extra=EVENT)
                     elif result == "restarted":
-                        streamer_restarts += 1
+                        st.streamer_restarts += 1
                         logger.warning(
                             "[DAEMON] stage=streamer status=RESTARTED exit_code=%s restarts=%d",
-                            supervisor.last_exit_code,
-                            streamer_restarts,
+                            ch.regular.last_exit_code,
+                            st.streamer_restarts,
                         )
-                    elif result == "circuit_open" and last_supervisor_result != "circuit_open":
+                    elif result == "circuit_open" and st.last_supervisor_result != "circuit_open":
                         logger.critical("[DAEMON] stage=streamer status=FAIL reason=circuit_open")
-                    last_supervisor_result = result
-                if snapshot_supervisor is not None and now.astimezone(_KST).time() < snapshot_cfg.run_end:
-                    snapshot_result = snapshot_supervisor.ensure_running()
+                    st.last_supervisor_result = result
+                if ch.snapshot is not None and now.astimezone(_KST).time() < snapshot_cfg.run_end:
+                    snapshot_result = ch.snapshot.ensure_running()
                     if snapshot_result == "restarted":
                         logger.warning(
                             "[DAEMON] stage=snapshots status=RESTARTED exit_code=%s",
-                            snapshot_supervisor.last_exit_code,
+                            ch.snapshot.last_exit_code,
                         )
-                    elif snapshot_result == "circuit_open" and last_snapshot_result != "circuit_open":
+                    elif snapshot_result == "circuit_open" and st.last_snapshot_result != "circuit_open":
                         logger.critical("[DAEMON] stage=snapshots status=FAIL reason=circuit_open")
-                    last_snapshot_result = snapshot_result
+                    st.last_snapshot_result = snapshot_result
                 if (
                     state == SessionState.FULL_ACTIVE
                     and INGEST_WATCH_START <= now.astimezone(_KST).time() < INGEST_WATCH_END
-                    and (last_ingest_check is None or (now - last_ingest_check).total_seconds() >= INGEST_CHECK_S)
+                    and (st.last_ingest_check is None or (now - st.last_ingest_check).total_seconds() >= INGEST_CHECK_S)
                 ):
-                    last_ingest_check = now
+                    st.last_ingest_check = now
                     age = _journal_age_s(paths.journal_root, cfg.vendor, today, now)
                     stale = age is None or age > INGEST_STALE_S
-                    if stale and not ingest_stale and age is None and day.status is TradingDayStatus.UNKNOWN:
-                        if possible_holiday_warned_for != today:
+                    if stale and not st.ingest_stale and age is None and day.status is TradingDayStatus.UNKNOWN:
+                        if st.possible_holiday_warned_for != today:
                             logger.warning(
                                 "[DAEMON] stage=ingest_watchdog status=POSSIBLE_HOLIDAY date=%s",
                                 today.isoformat(),
                             )
-                            possible_holiday_warned_for = today
-                    elif stale and not ingest_stale:
+                            st.possible_holiday_warned_for = today
+                    elif stale and not st.ingest_stale:
                         logger.critical(
                             "[DAEMON] stage=ingest_watchdog status=STALE date=%s age_s=%s",
                             today.isoformat(),
                             "none" if age is None else str(int(age)),
                         )
-                    elif not stale and ingest_stale and age is not None:
+                    elif not stale and st.ingest_stale and age is not None:
                         logger.warning(
                             "[DAEMON] stage=ingest_watchdog status=RECOVERED date=%s age_s=%d",
                             today.isoformat(),
                             int(age),
                         )
-                    ingest_stale = stale and not (
+                    st.ingest_stale = stale and not (
                         age is None and day.status is TradingDayStatus.UNKNOWN
                     )
-                if state == SessionState.FULL_ACTIVE and cfg.after_market_enabled:
-                    after_cfg = AftermarketSettings()
-                    if (
-                        now.astimezone(_KST).time() >= after_cfg.selection_time
-                        and aftermarket_refresh_day != today
-                        and (next_aftermarket_refresh_at is None or now >= next_aftermarket_refresh_at)
-                    ):
-                        excluded_symbols: frozenset[str]
-                        if paths.bars_store.exists():
-                            try:
-                                eligibility_bars = (
-                                    pl.scan_parquet(paths.bars_store)
-                                    .select(["date", "symbol", "stock_cert_kind", "section"])
-                                    .collect()
-                                )
-                            except (OSError, pl.exceptions.PolarsError):
-                                excluded_symbols = frozenset()
-                                if aftermarket_eligibility_day != today:
-                                    aftermarket_eligibility_day = today
-                                    logger.warning(
-                                        "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=bars_unreadable"
-                                    )
-                            else:
-                                excluded_symbols = ineligible_security_symbols(eligibility_bars)
-                        else:
+                if (
+                    state == SessionState.FULL_ACTIVE
+                    and cfg.after_market_enabled
+                    and now.astimezone(_KST).time() >= after_cfg.selection_time
+                    and st.aftermarket_refresh_day != today
+                    and (st.next_aftermarket_refresh_at is None or now >= st.next_aftermarket_refresh_at)
+                ):
+                    excluded_symbols: frozenset[str]
+                    if paths.bars_store.exists():
+                        try:
+                            eligibility_bars = (
+                                pl.scan_parquet(paths.bars_store)
+                                .select(["date", "symbol", "stock_cert_kind", "section"])
+                                .collect()
+                            )
+                        except (OSError, pl.exceptions.PolarsError):
                             excluded_symbols = frozenset()
-                            if aftermarket_eligibility_day != today:
-                                aftermarket_eligibility_day = today
+                            if st.aftermarket_eligibility_day != today:
+                                st.aftermarket_eligibility_day = today
                                 logger.warning(
-                                    "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=no_bars_store"
+                                    "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=bars_unreadable"
                                 )
-                        try:
-                            refresh_aftermarket_candidates(
-                                session_date=today,
-                                generated_at=now,
-                                client=_build_kis_client(paths),
-                                out_path=paths.aftermarket_candidates(today),
-                                capacity=after_cfg.max_symbols,
-                                excluded_symbols=excluded_symbols,
+                        else:
+                            excluded_symbols = ineligible_security_symbols(eligibility_bars)
+                    else:
+                        excluded_symbols = frozenset()
+                        if st.aftermarket_eligibility_day != today:
+                            st.aftermarket_eligibility_day = today
+                            logger.warning(
+                                "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=no_bars_store"
                             )
-                            aftermarket_refresh_day = today
-                            next_aftermarket_refresh_at = None
-                        except (MissingCredentialsError, KisApiError, AftermarketUniverseError, CandidateFileError) as exc:
-                            next_aftermarket_refresh_at = now + dt.timedelta(seconds=60.0)
-                            logger.critical(
-                                "[DAEMON] stage=aftermarket_reselection status=FAIL reason=%s next_retry=%s",
-                                str(exc),
-                                next_aftermarket_refresh_at.isoformat(),
-                            )
+                    try:
+                        refresh_aftermarket_candidates(
+                            session_date=today,
+                            generated_at=now,
+                            client=_build_kis_client(paths),
+                            out_path=paths.aftermarket_candidates(today),
+                            capacity=after_cfg.max_symbols,
+                            excluded_symbols=excluded_symbols,
+                        )
+                        st.aftermarket_refresh_day = today
+                        st.next_aftermarket_refresh_at = None
+                    except (MissingCredentialsError, KisApiError, AftermarketUniverseError, CandidateFileError) as exc:
+                        st.next_aftermarket_refresh_at = now + dt.timedelta(seconds=60.0)
+                        logger.critical(
+                            "[DAEMON] stage=aftermarket_reselection status=FAIL reason=%s next_retry=%s",
+                            str(exc),
+                            st.next_aftermarket_refresh_at.isoformat(),
+                        )
                 if state == SessionState.AFTER_MARKET_ACTIVE and cfg.after_market_enabled:
-                    if aftermarket_plan_day != today:
+                    if st.aftermarket_plan_day != today:
                         try:
-                            after = AftermarketSettings()
-                            snapshot = read_candidate_snapshot(paths.aftermarket_candidates(today), expected_session_date=today, expected_session="aftermarket", max_candidates=after.max_symbols)
-                            aftermarket_plan = plan_aftermarket_shards(symbols=tuple(str(row["symbol"]) for row in snapshot.candidates), credentials=load_kis_data_credentials(), pair_capacity_per_connection=int(after.pair_capacity_per_connection or 0), krx_streams=after.krx_streams, nxt_streams=after.nxt_streams)
+                            snapshot = read_candidate_snapshot(paths.aftermarket_candidates(today), expected_session_date=today, expected_session="aftermarket", max_candidates=after_cfg.max_symbols)
+                            st.aftermarket_plan = plan_aftermarket_shards(symbols=tuple(str(row["symbol"]) for row in snapshot.candidates), credentials=load_kis_data_credentials(), pair_capacity_per_connection=int(after_cfg.pair_capacity_per_connection or 0), krx_streams=after_cfg.krx_streams, nxt_streams=after_cfg.nxt_streams)
                         except (CandidateFileError, KrxAlphaError) as exc:
                             logger.critical("[DAEMON] stage=aftermarket_plan status=FAIL reason=%s", str(exc))
-                            aftermarket_plan = ()
-                        aftermarket_plan_day = today
+                            st.aftermarket_plan = ()
+                        st.aftermarket_plan_day = today
                     kst_time = now.astimezone(_KST).time()
                     due: list[MarketVenue] = []
                     if kst_time >= dt.time(15, 40):
                         due.append(MarketVenue.NXT)
                     if kst_time >= dt.time(16, 0):
                         due.append(MarketVenue.KRX)
-                    for shard in aftermarket_plan:
+                    for shard in st.aftermarket_plan:
                         if shard.venue in due:
                             supervisor_key = f"{shard.venue.value}:{shard.shard_index}"
-                            if supervisor_key not in aftermarket_supervisors:
-                                aftermarket_supervisors[supervisor_key] = ProcessSupervisor(
+                            if supervisor_key not in ch.aftermarket:
+                                ch.aftermarket[supervisor_key] = ProcessSupervisor(
                                     cmd=_aftermarket_stream_cmd(today, paths, shard=shard),
                                     breaker=RestartCircuitBreaker(),
                                 )
-                    for sup in aftermarket_supervisors.values():
+                    for sup in ch.aftermarket.values():
                         sup.ensure_running()
                 sleep_sec = 10.0
         elif state == SessionState.POST_MARKET_EOD:
-            if supervisor is not None:
-                stop_result = supervisor.stop(timeout_s=15.0)
+            if ch.regular is not None:
+                stop_result = ch.regular.stop(timeout_s=15.0)
                 logger.info("[DAEMON] stage=streamer_stop result=%s", stop_result, extra=EVENT)
-                supervisor = None
-                last_supervisor_result = None
-                degraded_active = False
-            if snapshot_supervisor is not None:
-                snapshot_supervisor.stop(timeout_s=15.0)
-                snapshot_supervisor = None
-                last_snapshot_result = None
+                ch.regular = None
+                st.last_supervisor_result = None
+                st.degraded_active = False
+            if ch.snapshot is not None:
+                ch.snapshot.stop(timeout_s=15.0)
+                ch.snapshot = None
+                st.last_snapshot_result = None
             # 15:40 EOD 유지보수 (정규화 및 오래된 저널 prune + L1 오프로드)
             # 같은 거래일에 60초마다 재실행하지 않도록 날짜당 1회만 시도한다
             ref_day = now.astimezone(_KST).date()
-            if eod_attempted_for != ref_day:
-                eod_attempted_for = ref_day
-                for sup in aftermarket_supervisors.values(): sup.stop(timeout_s=15.0)  # noqa: E701 - 20:00 KIS 수집기 종료
-                aftermarket_supervisors.clear()
+            if st.eod_attempted_for != ref_day:
+                st.eod_attempted_for = ref_day
+                for sup in ch.aftermarket.values(): sup.stop(timeout_s=15.0)  # noqa: E701 - 20:00 KIS 수집기 종료
+                ch.aftermarket.clear()
                 assert day is not None
                 if day.status is TradingDayStatus.HOLIDAY:
                     housekeeping = _run_eod_housekeeping(cfg, paths, ref_day)
@@ -949,7 +1027,7 @@ def run_collector_daemon(
                     aftermarket_manifests = (
                         [
                             paths.aftermarket_manifest_path(ref_day, shard.venue, shard.shard_index)
-                            for shard in aftermarket_plan
+                            for shard in st.aftermarket_plan
                         ]
                         if cfg.after_market_enabled
                         else []
@@ -958,7 +1036,7 @@ def run_collector_daemon(
                         manifests=aftermarket_manifests,
                         date=ref_day,
                         now=now,
-                        expected_shards=tuple(aftermarket_plan),
+                        expected_shards=tuple(st.aftermarket_plan),
                     )
                     if aftermarket_blocked: logger.critical("[DAEMON] stage=eod_maintenance status=DEGRADED reason=aftermarket_not_ready date=%s", ref_day.isoformat())  # noqa: E701
                     housekeeping = _run_eod_housekeeping(cfg, paths, ref_day)
@@ -1016,7 +1094,7 @@ def run_collector_daemon(
                     )
                     digest_body = "\n".join(
                         [
-                            f"run_id={run_id}",
+                            f"run_id={self._run_id}",
                             f"status={eod_status}",
                             f"deleted_partitions={housekeeping.deleted}",
                             f"uploaded={housekeeping.uploaded}",
@@ -1025,30 +1103,65 @@ def run_collector_daemon(
                             f"aftermarket_ready={not aftermarket_blocked}",
                             f"backup_missing={len(backup_missing)}",
                             f"host_backup={host_backup}",
-                            f"streamer_restarts={streamer_restarts}",
-                            f"orchestration_attempts={orchestration_attempts}",
+                            f"streamer_restarts={st.streamer_restarts}",
+                            f"orchestration_attempts={st.orchestration_attempts}",
                         ]
                     )
                     send_digest(f"[krx-alpha] EOD {ref_day.isoformat()} {eod_status}", digest_body)
             sleep_sec = 60.0
         else:  # NIGHT_SLEEP
             sleep_sec = min(calc_sleep_seconds(now, sched.streamer_start), 1800.0)
+        return sleep_sec
 
-        logger.debug("[DAEMON] sleeping for %.1f seconds...", sleep_sec)
+
+def run_collector_daemon(
+    *,
+    settings: CollectorSettings | None = None,
+    sleep_fn: Callable[[float], None] | None = None,
+    max_cycles: int | None = None,
+    now_fn: Callable[[], dt.datetime] | None = None,
+    shutdown: threading.Event | None = None,
+) -> None:
+    """Collector daemon main loop.
+
+    Shutdown: when ``shutdown`` is set the loop stops starting work,
+    stops all supervised children via ``stop_supervisors`` within ``SHUTDOWN_CHILD_DEADLINE_S`` and
+    returns. A cycle already inside EOD finishes that call first; the deploy session gate keeps
+    deploys out of the EOD window.
+    """
+    import time
+
+    sleeper = sleep_fn if sleep_fn is not None else time.sleep
+    runtime = resolve_collector_runtime(collector=settings)
+
+    run_id = configure_logging("daemon", log_dir=runtime.paths.logs_dir if ObservabilitySettings().persistent_logs else None)
+    logger.info("[DAEMON] stage=start status=ONLINE timezone=Asia/Seoul run_id=%s", run_id, extra=EVENT)
+
+    clock = now_fn if now_fn is not None else (lambda: dt.datetime.now(_KST))
+    runner = DaemonRunner(runtime=runtime, shutdown=shutdown, now=clock, sleep=sleeper)
+    runner._run_id = run_id
+
+    while True:
+        if shutdown is not None and shutdown.is_set():
+            runner.stop_children()
+            return
+        delay = runner.step(clock())
+        logger.debug("[DAEMON] sleeping for %.1f seconds...", delay)
         if shutdown is not None:
             if sleep_fn is not None:
-                sleeper(sleep_sec)
+                sleeper(delay)
             else:
-                shutdown.wait(sleep_sec)
+                shutdown.wait(delay)
             if shutdown.is_set():
-                _shutdown_children()
+                runner.stop_children()
                 return
         else:
-            sleeper(sleep_sec)
+            sleeper(delay)
 
-        if max_cycles is not None and cycle >= max_cycles:
+        if max_cycles is not None and runner.state.cycle >= max_cycles:
             logger.info("[DAEMON] reached max_cycles=%d, exiting gracefully.", max_cycles)
             break
+
 
 
 def main() -> None:

@@ -813,3 +813,42 @@ def test_index_minute_bar_job_stops_after_window_closes(tmp_path) -> None:
 
     assert [c for _, c, _ in source.calls] == [codes[0]]
     assert result.truncated is True
+
+
+def test_investor_job_with_empty_estimates_persists_nothing(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    source = _FakeSource()
+    source.investor = {"A": ()}
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    job = _job(SnapshotJobKind.INVESTOR_ESTIMATE, _t(9, 35), _t(10, 5))
+
+    result = run_snapshot_job(
+        job, source=source, store=store, settings=SnapshotSettings(), symbols=("A",),
+        news_seen=set(), now_fn=lambda: _t(9, 35, 5), wall_ns=_counter(),
+    )
+
+    assert (result.attempted, result.succeeded, result.failed) == (1, 1, 0)
+    assert result.rows_added == 0
+    assert result.truncated is False
+
+
+def test_index_minute_bar_job_with_empty_bars_persists_nothing(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    settings = SnapshotSettings()
+    source = _FakeSource()
+    source.index_minute = dict.fromkeys(settings.index_codes, ())
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    job = _job(SnapshotJobKind.INDEX_MINUTE_BAR, _t(10, 20), _t(11, 40))
+
+    result = run_snapshot_job(
+        job, source=source, store=store, settings=settings, symbols=(),
+        news_seen=set(), now_fn=lambda: _t(10, 20, 5), wall_ns=_counter(),
+    )
+
+    assert result.attempted == len(settings.index_codes)
+    assert result.rows_added == 0
+    assert result.truncated is False

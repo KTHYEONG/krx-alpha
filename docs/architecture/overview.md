@@ -58,7 +58,7 @@ flowchart TB
 | **토스증권 OpenAPI** | HTTPS REST | 거래일 캘린더(`/market-calendar/KR`) 메타데이터 조회 | 인증/네트워크 장애 시 None으로 안전 열화(Soft Degradation) |
 | **LS증권 OpenAPI** | WSS / HTTPS | 실시간 체결(`H0STCNT0`), 10단계 호가(`H0STASP0`) 스트리밍 | 프레임 재분류기 + 지연 ACK 큐, 서킷브레이커 기반 재기동 |
 | **한국투자증권 OpenAPI** | HTTPS REST | 일봉 수집 폴백(`FHKST03010100`), 실계좌 잔고 조회, 주문집행 | Shared Token Bucket(18 req/s) 레이트리미터, 0600 토큰 원자 파일 캐시 |
-| **NTP 타임서버** | NTP (UDP 123) | 세션 부트스트랩 시 로컬 클럭 드리프트 측정 | 오프셋 2초 초과 또는 미응답 시 `ClockUnsyncedError` Fail-Closed |
+| **NTP 타임서버** | NTP (UDP 123) | 세션 부트스트랩 시 로컬 클럭 드리프트 측정 | 기본 호스트 뒤 폴백 호스트 순서대로 시도하며 모든 호스트 측정 실패 또는 오프셋 2초 초과 시 `ClockUnsyncedError` Fail-Closed(신규 세션 거부, 과거 unmeasured 기록은 읽기 호환만 유지) |
 | **Google Drive** | rclone CLI | 정규화된 L1 Parquet 데이터 영구 오프로드 | 업로드 후 `rclone lsjson` 바이트 크기 일치 확인 전까지 로컬 파일 보존 |
 
 ---
@@ -115,7 +115,7 @@ flowchart TD
 
 ## 4. 24/7 Daemon Lifecycle State Machine
 
-`src/orchestration/daemon.py`는 `src/core/calendar.py`의 `SessionSchedule` 단일 소스를 공유하며 다음 6개 상태를 KST 기준으로 순환 전이합니다.
+`src/orchestration/daemon.py`는 `src/core/calendar.py`의 `SessionSchedule` 단일 소스를 `get_target_state()`로 공유하며, KST 기준으로 다음 `SessionState` 값을 순환 전이합니다. 상태 전이의 유일한 소유자는 데몬이며, 스케줄 시각표와 전이 함수는 캘린더 모듈 단일 진실천(SSOT)에 둡니다.
 
 ```mermaid
 stateDiagram-v2
@@ -125,8 +125,11 @@ stateDiagram-v2
     WEEKEND_SLEEP --> PRE_MARKET_SLEEP: 월요일 00:00 (1시간 폴링)
     PRE_MARKET_SLEEP --> STREAMER_ACTIVE: 08:20 KST
     STREAMER_ACTIVE --> FULL_ACTIVE: 08:50 KST
-    FULL_ACTIVE --> POST_MARKET_EOD: 15:40 KST
-    POST_MARKET_EOD --> NIGHT_SLEEP: 16:00 KST
+    FULL_ACTIVE --> POST_MARKET_EOD: 15:40 KST (애프터마켓 미사용 시)
+    FULL_ACTIVE --> AFTER_MARKET_ACTIVE: 15:40 KST (애프터마켓 사용 시)
+    AFTER_MARKET_ACTIVE --> POST_MARKET_EOD: 20:00 KST
+    POST_MARKET_EOD --> NIGHT_SLEEP: 16:00 KST (애프터마켓 미사용 시)
+    POST_MARKET_EOD --> NIGHT_IDLE: 20:30 KST (애프터마켓 사용 시, NIGHT_SLEEP 별칭)
     NIGHT_SLEEP --> PRE_MARKET_SLEEP: 익일 00:00
     NIGHT_SLEEP --> WEEKEND_SLEEP: 금요일 16:00 이후
 
@@ -152,6 +155,8 @@ stateDiagram-v2
     }
 ```
 
+`SessionState` 열거값은 `WEEKEND_SLEEP`, `PRE_MARKET_SLEEP`, `STREAMER_ACTIVE`, `FULL_ACTIVE`, `AFTER_MARKET_ACTIVE`, `POST_MARKET_EOD`, `NIGHT_SLEEP`이며, `NIGHT_IDLE`은 `NIGHT_SLEEP`의 별칭입니다. `after_market_enabled=true`인 스케줄에서만 15:40 이후 `AFTER_MARKET_ACTIVE` 분기가 열리며, 20:00 애프터마켓 종료 후 20:30까지 `POST_MARKET_EOD`를 거쳐 야간 대기로 전이합니다. 미사용 스케줄에서는 15:40~16:00 구간에 동일한 `POST_MARKET_EOD`가 직접 이어집니다.
+
 ---
 
 ## 5. Architectural Layer Contracts (0 to 7)
@@ -159,22 +164,24 @@ stateDiagram-v2
 본 저장소의 모든 모듈은 엄격한 계층 랭크(`LAYER_RANK`)를 부여받으며, 하위 레이어는 상위 레이어를 임포트할 수 없습니다 (`tests/architecture/test_layering.py`에 의해 강제).
 
 ```text
-Layer 7: CLI Entrypoints (bars_refresh, collect_init, collect_status, collect_stream, universe_plan, order, main)
+Layer 7: CLI Entrypoints (collect_* 오케스트레이션/수집 진입점, bars_refresh, universe_plan, order, main)
    ↓
-Layer 6: System Orchestration & Execution Service (daemon.py, execution/service.py)
+Layer 6: System Orchestration & Execution Service (daemon 상태 소유자, execution service)
    ↓
-Layer 5: Supervision & Core Workflow Engines (supervisor.py, eod.py, execution/oms.py)
+Layer 5: Supervision & Core Workflow Engines (supervisor, eod, execution/oms, deploy/trading-day gates)
    ↓
-Layer 4: Domain Use Case Services & Gateways (marketdata/service.py, universe/service.py, realtime/session.py, realtime/streamer.py, execution/gateways.py)
+Layer 4: Domain Use Case Services & Gateways (marketdata/universe 서비스, session/streamer, execution gateways, snapshot dispatcher)
    ↓
-Layer 3: Vendor Raw Clients & Adapters (realtime/adapters/ls.py, execution/kis_client.py)
+Layer 3: Vendor Raw Clients & Adapters (LS 어댑터, KIS 클라이언트, normalize worker)
    ↓
-Layer 2: Storage Persistence, Quality Barriers & Invariants (storage/journal.py, retention.py, remote.py, quality.py, universe/ipc.py, realtime/manifest.py, execution/risk.py, ledger.py, journal.py)
+Layer 2: Storage Persistence, Quality Barriers & Invariants (journal/normalization/quality/retention/remote, universe IPC, manifest, risk/ledger/journal, brokers/kis 하위 전송)
    ↓
-Layer 1: Domain Contracts, Rules, Clock & Tick Definitions (marketdata/krx_bars.py, toss_calendar.py, universe/policy.py, realtime/contracts.py, subscription.py, clock.py, execution/contracts.py, ticks.py)
+Layer 1: Domain Contracts, Rules, Clock & Tick Definitions (bars/캘린더/universe 정책, realtime 계약/구독/클럭/샤딩/리스, execution 계약/틱, snapshot 계약/스키마/플랜/검증, bar store/검증)
    ↓
-Layer 0: Core Foundation & Schemas (core/config.py, core/calendar.py, core/errors.py, marketdata/schema.py)
+Layer 0: Core Foundation & Schemas (config/calendar/errors/symbols/paths, observability/log_format/alerts, marketdata schema, KIS 키풀·런타임 프로비저닝)
 ```
+
+파일 단위 탐색은 생성 산출물 [`docs/code_map.json`](../code_map.json)을 사용합니다. 각 항목은 `LAYER_RANK` 레이어, 내부 의존성, 관련 테스트를 기계 판독 형태로 담고 있으며, 본 문서는 아키텍처 불변식과 데이터 흐름을 서술로만 유지합니다.
 
 ### Invariant Enforcements
 1. **Zero Upward Layer Dependency**: AST 분석을 통해 상위 레이어로의 직접 임포트 및 함수 내 지연 임포트 전면 차단.
@@ -187,6 +194,7 @@ Layer 0: Core Foundation & Schemas (core/config.py, core/calendar.py, core/error
 
 * **데이터 흐름 및 스키마 상세:** [`docs/architecture/data-flow.md`](data-flow.md)
 * **서브시스템별 핵심 컴포넌트:** [`docs/architecture/components.md`](components.md)
+* **런타임 설정 인벤토리:** [`docs/architecture/configuration.md`](configuration.md)
 * **아키텍처 결정 기록 (ADR):** [`docs/architecture/design-decisions.md`](design-decisions.md)
 * **멀티 브로커 OpenAPI 역설계 명세:** [`docs/architecture/brokers/api_master.md`](brokers/api_master.md)
 

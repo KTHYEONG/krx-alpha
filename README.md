@@ -30,7 +30,7 @@ KRX(KOSPI/KOSDAQ) 고빈도 틱(체결·10단계 호가) 데이터 수집·정�
 * **장중 무손실 L0 저널링**: 이벤트 루프 블로킹을 방지하기 위해 장중에는 원문 그대로를 나노초 시각(단조시계 + 벽시계) 및 연결 시퀀스와 함께 시간대별 zstd 압축 JSONL(`L0`)에 append-only로 적재합니다.
 * **EOD 사후 무결성 배리어 & 비파괴 격리**: 장마감 후 Polars 벡터 연산으로 누적체결량 보존법칙($\Delta checnt \le 1$ 구간의 $\Delta volume > cvolume$ 틱 손실 검출), 가격제한폭($\pm 30\%$), 10단계 호가 사다리 단조성을 검증하고, 실패한 파티션은 삭제하지 않고 `quarantine/`으로 이동 보존합니다.
 * **Offload-before-Delete 원격 이중화**: 정규화된 L1 Parquet를 rclone CLI로 Google Drive에 업로드한 뒤, `rclone lsjson`으로 원격 파일 크기가 로컬과 일치함을 확인한 경우에만 로컬 L0/L1을 순환 삭제하여 무인 디스크 캡(~1GB 내외)을 유지합니다.
-* **NTP 실측 기반 Fail-Closed 클럭 게이트**: 세션 부트스트랩 시 `kr.pool.ntp.org`의 중간값 오프셋을 실측하여 2초 초과 또는 통신 불가 시 프로세스 시작을 즉시 거부(`ClockUnsyncedError`)합니다.
+* **NTP 실측 기반 Fail-Closed 클럭 게이트**: 세션 부트스트랩 시 `kr.pool.ntp.org`의 중간값 오프셋을 실측하여 2초 초과 또는 통신 불가 시 프로세스 시작을 즉시 거부(`ClockUnsyncedError`)합니다. 기본 호스트 뒤에 폴백 호스트를 순서대로 시도하며, 모든 호스트 측정 실패와 허용 오차 초과 모두 새 세션을 거부합니다. 과거 매니페스트의 `clock_status=unmeasured` 값은 읽기 호환용으로만 유지됩니다.
 * **Dual Order Gateway (Paper 섀도 vs Armed Live)**: KIS 실계좌 잔고를 조회하되 거래소 전송 없이 10단계 호가창 잔량을 소진하는 모의체결(`paper_l10_sweep_v1`)과 전송 전문 저널링을 제공하며, 실전 주문은 `KRX_ALPHA_EXEC_LIVE_ARMED=true` 환경변수가 없으면 초기화 단계에서 차단됩니다.
 * **정적 AST 분석 기반 아키텍처 불변식 가드**: 계층 순환 0건, 상위 레이어 역참조 0건, 설정 파일(`src/core/config.py`) 외부의 파일시스템 경로 리터럴 및 `os.environ` 직접 접근 0건을 pytest 단계에서 정적으로 강제합니다.
 
@@ -89,7 +89,7 @@ flowchart TD
 | **1. 영업일 검증** | `08:20:00` | 토스 마켓 캘린더 조회로 휴장일 여부 선제 판정 | 휴장일 판정 시 당일 오케스트레이션 안전 대기 |
 | **2. 일봉 데이터 갱신** | `08:20:05` | KRX 공식 API 일봉 수집 (장애 시 KIS REST 1회 폴백) | 직전일 대비 90% 미만 행수 절단 시 Fail-Closed 거부 |
 | **3. 유니버스 선정** | `08:21:00` | 롤링 피처 계산, 4대 모멘텀 + 50억 유동성 필터 적용 | 최대 90종목 슬롯 예산 강제, 원자적 IPC (`candidates.json`) |
-| **4. 세션 부트스트랩** | `08:50:00` | NTP 타임서버 오프셋 검증, 세션 매니페스트 초기화 | 클럭 드리프트 2.0초 초과 시 거부, 잔여 디스크 3GB 확인 |
+| **4. 세션 부트스트랩** | `08:50:00` | NTP 타임서버 오프셋 검증, 세션 매니페스트 초기화 | 모든 NTP 호스트 측정 실패 또는 클럭 드리프트 2.0초 초과 시 거부(폴백 호스트 순서대로 시도), 잔여 디스크 3GB 확인 |
 | **5. 실시간 스트리밍** | `08:50 ~ 15:40` | LS 웹소켓 수신, 180스트림 쌍 구독, 시간대별 zstd 압축 | 비동기 이벤트 루프 무블로킹, L0 저널 append-only 기록 |
 | **6. 스트리머 정상종료** | `15:40:00` | 데몬 감독기가 스트리머에 SIGTERM 전송 및 버퍼 플러시 | 15초 타임아웃 초과 시 SIGKILL 강제 종료 |
 | **7. L1 정규화 & DQ** | `15:40:30` | L0 역압축, 틱 보존법칙/호가 단조성 검증, L1 Parquet 생성 | 검증 실패 파티션은 `quarantine/` 비파괴 격리 |
@@ -102,22 +102,24 @@ flowchart TD
 
 ```text
 src/
-├── core/              # 시스템 기반: 설정/경로 단일소스, 정규장 세션 캘린더, 공용 예외
-├── marketdata/        # 배치 수집: KRX 공식 일봉, 토스 캘린더 게이트, KIS 일봉 폴백
-├── universe/          # 유니버스 정책: 롤링 피처 생성, 모멘텀/유동성 필터, 원자적 IPC
-├── realtime/          # 실시간 수집: NTP 클럭 게이트, LS 웹소켓 어댑터, 스트리머 루프
-├── storage/           # 저장소 계층: L0 저널 쓰기, 데이터 품질 배리어, 보존/격리, rclone 백업
-├── orchestration/     # 데몬 오케스트레이션: 24/7 상태머신, 프로세스 감독 및 서킷브레이커, EOD 유지보수
+├── core/              # 시스템 기반: 설정/경로 단일소스, 정규장 세션 캘린더, 공용 예외, 로깅·알림
+├── brokers/kis/       # KIS 전송 경계: 인증/토큰, 시세조회, 주문, 공용 HTTP, 속도제한
+├── marketdata/        # 배치 수집: KRX 공식 일봉, 토스 캘린더 게이트, KIS 일봉 폴백, 스냅샷 스키마·플랜·디스패치
+├── universe/          # 유니버스 정책: 롤링 피처 생성, 모멘텀/유동성 필터, 원자적 IPC, 애프터마켓 선정
+├── realtime/          # 실시간 수집: NTP 클럭 게이트, LS/KIS 어댑터, 스트리머 루프, 세션·매니페스트
+├── storage/           # 저장소 계층: L0 저널 쓰기, 정규화, 벤더별 품질 디코딩·배리어, 보존/격리, rclone 백업
+├── orchestration/     # 데몬 오케스트레이션: SessionState 소유자, 프로세스 감독 및 서킷브레이커, EOD 유지보수
 ├── execution/         # 주문집행: 사전 리스크 게이트, Paper 10단계 호가 모의체결, Live KIS 게이트웨이, OMS 원장
 └── cli/               # CLI 진입점: 서브커맨드(bars-refresh, universe-plan, collect-stream, order 등)
 
-configs/               # 환경변수 템플릿 (.env)
 docs/
-├── architecture/      # 시스템 아키텍처 상세 (overview, data-flow, components, design-decisions)
-└── architecture/brokers/ # KIS, LS, 키움, 토스 OpenAPI 역설계 명세
+├── architecture/      # 시스템 아키텍처 상세 (overview, data-flow, components, configuration, design-decisions)
+├── architecture/brokers/ # KIS, LS, 키움, 토스 OpenAPI 역설계 명세
+└── code_map.json      # 생성된 모듈 탐색 지도 (레이어·의존성·테스트 매핑, tools/agent_skills/gen_code_map.py 산출물)
+deploy/host/            # 호스트 배포 산출물 (백업 스크립트·rclone 필터·systemd 유닛, CI가 원격에 전송)
 tests/
 ├── architecture/      # AST 기반 레이어 순환 및 파일 경로 리터럴 불변식 테스트
-└── unit/              # 컴포넌트별 단위 테스트 (총 278개 테스트)
+└── unit/              # 컴포넌트별 단위 테스트
 ```
 
 ---
@@ -143,7 +145,7 @@ tests/
 * **Trade-off**: EOD 시점에 L0 역압축, 데이터 품질 검증, Parquet 압축을 일괄 수행하기 위한 일시적 CPU 연산이 요구됩니다.
 
 ### Decision 3: NTP 실측 기반 Fail-Closed 클럭 게이트
-* **Why**: 클라우드 가상머신 및 WSL2 환경의 로컬 시스템 시계는 실제 시각과 +1000ms 이상 어긋날 수 있으며, 이는 고빈도 틱 시계열 역전 및 타임스탬프 왜곡을 야기합니다.
+* **Why**: 클라우드 가상머신 및 WSL2 환경의 로컬 시스템 시계는 실제 시각과 +1000ms 이상 어긋날 수 있으며, 이는 고빈도 틱 시계열 역전 및 타임스탬프 왜곡을 야기합니다. 기본 호스트 뒤에 폴백 호스트를 순서대로 시도하고, 모든 호스트 측정 실패와 2초 초과 오프셋 모두 새 세션을 거부합니다. 과거 매니페스트의 `clock_status=unmeasured` 값은 읽기 호환용으로만 유지되며 신규 부트를 허용하지 않습니다.
 * **Trade-off**: 세션 부트스트랩 시 외부 NTP 서버(UDP 123) 연결이 필수적이며, 네트워크 단절 시 수집이 시작되지 않습니다.
 
 ### Decision 4: 단일 OMS 위 Dual Gateway 분기 (Paper 섀도 vs Live 무장)
@@ -158,7 +160,7 @@ tests/
 
 ## 8. Validation / Reliability
 
-* **Unit & Architecture Tests**: 278개의 단위 및 아키텍처 검증 테스트가 8.2초 내에 통과합니다 (`tests/architecture/test_layering.py` 포함).
+* **Unit & Architecture Tests**: 단위 및 아키텍처 검증 테스트가 수 초 내에 통과합니다 (`tests/architecture/test_layering.py` 포함).
 * **Look-Ahead Bias 차단**: 유니버스 선정 함수(`select_universe`)는 인자로 전달된 `decision_date`를 초과하는 데이터가 1건이라도 발견되면 즉시 `ValueError`로 중단됩니다.
 * **Fail-Closed 방어벽**:
   * 슬롯 예산 초과 (`SlotBudgetExceededError`)
@@ -177,11 +179,11 @@ tests/
 
 | 검증 항목 | 검증 방식 | 실측 결과 / 계약 기준 |
 | :--- | :--- | :--- |
-| **테스트 슈트** | `uv run pytest` | **278 passed** (실행 소요시간 ~8.2s) |
+| **테스트 슈트** | `uv run pytest` | **전량 통과** (아키텍처 불변식 포함) |
 | **아키텍처 레이어 불변식** | AST 정적 파싱 (`test_layering.py`) | 상위 참조 **0건**, 경로 리터럴 위반 **0건**, 환경변수 직접호출 위반 **0건** |
 | **수집 유니버스 용량** | `policy.py` 슬롯 예산 가드 | 당일 3~20종목 (하드캡 90종목 $\le$ LS 기술용량 100종목) |
 | **스토리지 워터마크** | `shutil.disk_usage` 가드 | 잔여 디스크 **3.0 GB** 미만 시 즉시 쓰기 중단 |
-| **클럭 드리프트 허용치** | NTP 5회 샘플 중간값 측정 | 허용 오차 **2.0초** (`2_000_000_000 ns`) 이내 강제 |
+| **클럭 드리프트 허용치** | NTP 5회 샘플 중간값 측정 | 기본 호스트 뒤 폴백 호스트 순서대로 시도, 모든 호스트 실패 또는 허용 오차 **2.0초** (`2_000_000_000 ns`) 초과 시 거부 |
 | **원격 백업 정합성** | `rclone lsjson` 파일 크기 대사 | 로컬 바이트와 원격 바이트 **100% 일치** 시에만 prune |
 | **주문집행 리스크 커버리지** | 시나리오 기반 단위 테스트 | 호가단위 래더, 킬스위치, 손실한도, 호가스윕 등 **34개 시나리오 100% 통과** |
 
@@ -202,30 +204,19 @@ cd krx-alpha
 # uv 기반 의존성 설치
 uv sync
 
-# 전 테스트 슈트 (278개) 실행
+# 전 테스트 슈트 실행
 uv run pytest
 ```
 
 ### 2. Environment Configuration
-`.env` 파일에 필요한 증권사 OpenAPI 자격증명을 설정합니다:
+런타임 자격증명은 신뢰 워크스테이션에서 1회 프로비저닝되는 두 호스트 프래그먼트(`/home/ubuntu/quant-secrets/krx-alpha.env`, `/home/ubuntu/quant-secrets/kis-data.env`)로 공급되며, 일반 동작 설정은 `docker-compose.yml`의 `environment`로 오버라이드합니다. 저장소는 루트 `.env` 파일을 자동으로 로드하지 않으므로, 로컬 실행 시에는 저장소 바깥의 개인 파일에 둔 뒤 현재 셸에만 export합니다:
 ```bash
-# KRX 정보데이터시스템
-KRX_OPENAPI_KEY=your_krx_auth_key
-
-# LS증권 (실시간 틱/호가 스트리밍)
-LS_APP_KEY=your_ls_app_key
-LS_APP_SECRET=your_ls_app_secret
-
-# 토스증권 (영업일 캘린더 게이트)
-TOSS_APP_KEY=your_toss_app_key
-TOSS_APP_SECRET=your_toss_app_secret
-
-# 한국투자증권 (일봉 폴백 및 주문집행)
-KIS_APP_KEY=your_kis_app_key
-KIS_APP_SECRET=your_kis_app_secret
-KIS_ACCOUNT_NO=your_account_number
-KIS_ACCOUNT_PRODUCT_CODE=01
+set -a
+source ~/.config/krx-alpha/local.env   # 저장소 외부, 커밋 대상 아님
+set +a
+uv run pytest
 ```
+전체 설정군·프래그먼트·백업 소유권 인벤토리는 **[Runtime Configuration Inventory](docs/architecture/configuration.md)** 를 참조합니다.
 
 ### 3. CLI Subcommands Execution
 ```bash
@@ -258,6 +249,8 @@ docker compose up -d
 * **[Component Reference](docs/architecture/components.md)**: 레이어별 서브시스템 책임, 입력/출력, 핵심 클래스 및 함수 매핑
 * **[Architectural Decision Records (ADRs)](docs/architecture/design-decisions.md)**: 유니버스 선정, 3계층 스토리지, NTP 클럭 게이트, 듀얼 OMS 설계 배경 및 트레이드오프
 * **[Multi-Broker OpenAPI Specifications](docs/architecture/brokers/api_master.md)**: KIS, LS, 키움, 토스 OpenAPI 역설계 분석 및 한도 매트릭스
+* **[Runtime Configuration Inventory](docs/architecture/configuration.md)**: 설정군·호스트 프래그먼트·Compose 오버라이드·백업 소유권 인벤토리
+* **[Generated Code Map](docs/code_map.json)**: 전 src 모듈의 레이어·내부 의존성·관련 테스트 매핑 (기계 판독용 탐색 지도)
 
 ---
 

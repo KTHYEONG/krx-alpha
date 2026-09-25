@@ -214,3 +214,43 @@ def test_collect_stream_wires_watchdog_ntp_fallback_and_shutdown_event(tmp_path,
     assert captured["max_cycles"] == 1
     assert "[DATA] stage=stream_shutdown" in caplog.text
     assert (tmp_path / "s.json").exists()
+
+
+def test_collect_stream_aborts_before_connect_when_clock_unsynced(tmp_path, monkeypatch) -> None:
+    import argparse
+    import json
+
+    import pytest
+
+    from src.cli import collect_stream
+    from src.realtime.clock import ClockUnsyncedError
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setenv("LS_APP_KEY", "k")
+    monkeypatch.setenv("LS_APP_SECRET", "s")
+    monkeypatch.setattr("src.realtime.session.measure_ntp_offset_ns", lambda *a, **k: (_ for _ in ()).throw(ClockUnsyncedError("ntp unreachable: all 3 hosts failed")))
+
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
+    mm = tmp_path / "m.json"
+    mm.write_text(json.dumps({"005930": "KOSPI"}), encoding="utf-8")
+
+    connected: list[bool] = []
+
+    class _NeverAdapter:
+        def __init__(self, **kw):
+            connected.append(True)
+
+    monkeypatch.setattr(collect_stream, "LsRealtimeAdapter", _NeverAdapter)
+
+    args = argparse.Namespace(
+        session_date="2026-09-08", journal_root=str(tmp_path / "l0"),
+        manifest_path=str(tmp_path / "s.json"), candidates_path=str(cp),
+        market_map=str(mm), ntp_host="h", max_clock_offset_ns=2_000_000_000, max_cycles=1,
+    )
+
+    with pytest.raises(ClockUnsyncedError):
+        collect_stream.run(args)
+
+    assert connected == []
+    assert not (tmp_path / "s.json").exists()

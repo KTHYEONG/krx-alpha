@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 import logging
-import os
 import pathlib
 from typing import Any, cast
 
@@ -13,8 +11,19 @@ import polars as pl
 import requests
 from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_attempt
 
-from src.core.errors import KrxAlphaError
-from src.marketdata.schema import BAR_SCHEMA, STORED_BAR_COLUMNS
+from src.marketdata.bar_store import (
+    MIN_ROWCOUNT_RATIO,
+    ImplausibleRowCountError,
+    append_daily_bars,
+    write_market_map,
+)
+from src.marketdata.bar_validation import (
+    MAX_CHANGE_PCT_DISAGREEMENT_PP,
+    ImplausibleBarValuesError,
+    KrxBarsError,
+    validate_daily_bars,
+)
+from src.marketdata.schema import BAR_SCHEMA
 
 KOSPI_URL = "https://data-dbg.krx.co.kr/svc/apis/sto/stk_bydd_trd"
 KOSDAQ_URL = "https://data-dbg.krx.co.kr/svc/apis/sto/ksq_bydd_trd"
@@ -24,8 +33,23 @@ KOSDAQ_BASE_INFO_URL = "https://data-dbg.krx.co.kr/svc/apis/sto/ksq_isu_base_inf
 logger = logging.getLogger(__name__)
 
 
-class KrxBarsError(KrxAlphaError):
-    """KRX 요청 실패/빈 응답(비영업일)/거래일 미발견 fail-closed 신호."""
+__all__ = [
+    "MAX_CHANGE_PCT_DISAGREEMENT_PP",
+    "MIN_ROWCOUNT_RATIO",
+    "ImplausibleBarValuesError",
+    "ImplausibleRowCountError",
+    "IncompleteMarketError",
+    "KrxBarsError",
+    "KrxNoTradingDataError",
+    "KrxTransportError",
+    "append_daily_bars",
+    "validate_daily_bars",
+    "write_market_map",
+]
+
+
+RETRY_WAIT_BASE_S: float = 1.0
+RETRY_WAIT_MAX_S: float = 4.0
 
 
 class KrxTransportError(KrxBarsError):
@@ -40,115 +64,8 @@ class IncompleteMarketError(KrxBarsError):
     """KOSPI/KOSDAQ 중 일부 시장만 응답한 부분 수집 fail-closed 신호."""
 
 
-class ImplausibleRowCountError(KrxBarsError):
-    """직전 거래일 대비 행수 급감(절단 응답) fail-closed 신호."""
-
-
-class ImplausibleBarValuesError(KrxBarsError):
-    """Daily bars violate a structural price/volume identity (fail-closed, whole day rejected)."""
-
-
-MAX_CHANGE_PCT_DISAGREEMENT_PP: float = 0.1
-
-
-def validate_daily_bars(bars: pl.DataFrame) -> None:
-    """Reject a daily-bars batch that violates structural price/volume identities.
-
-    Only identities that must hold for every genuine KRX session row are
-    checked, so legitimate extremes (liquidation trading, new listings,
-    volume/value that exceed what the regular session alone explains because
-    since 2026-09-14 KRX daily volume/value accumulate through the 16:00~20:00
-    aftermarket while ``close`` remains the 15:30 regular close) never trip
-    the gate. A single
-    violating row rejects the whole batch: storing a partially-trusted day would
-    let a vendor defect silently bias cross-sectional features, while a raised
-    ``KrxBarsError`` lets the caller fall back to another source.
-
-    Args:
-        bars: Frame with at least ``STORED_BAR_COLUMNS`` cast to ``BAR_SCHEMA``.
-
-    Raises:
-        ImplausibleBarValuesError: When any identity fails; the message names
-            each violated rule with its row count and up to five sample
-            ``date:symbol`` keys.
-    """
-    violations: list[str] = []
-
-    def _samples(frame: pl.DataFrame) -> list[str]:
-        return [f"{row[0]}:{row[1]}" for row in frame.select(["date", "symbol"]).head(5).iter_rows()]
-
-    def _report(rule: str, frame: pl.DataFrame) -> None:
-        if frame.height > 0:
-            violations.append(f"{rule}={frame.height} rows {','.join(_samples(frame))}")
-
-    _report("duplicate_key", bars.filter(pl.struct(["date", "symbol"]).is_duplicated()))
-    if "close" in bars.columns:
-        _report("close_positive", bars.filter(pl.col("close").is_not_null() & (pl.col("close") <= 0)))
-    if "volume" in bars.columns:
-        _report("volume_non_negative", bars.filter(pl.col("volume").is_not_null() & (pl.col("volume") < 0)))
-    if "trade_value_100m" in bars.columns:
-        _report(
-            "trade_value_non_negative",
-            bars.filter(pl.col("trade_value_100m").is_not_null() & (pl.col("trade_value_100m") < 0)),
-        )
-    if "volume" in bars.columns and "trade_value_100m" in bars.columns:
-        _report(
-            "volume_trade_value_consistency",
-            bars.filter(
-                pl.col("volume").is_not_null()
-                & pl.col("trade_value_100m").is_not_null()
-                & ((pl.col("volume") == 0) != (pl.col("trade_value_100m") == 0))
-            ),
-        )
-    for rule, condition in (
-        ("low_positive", pl.col("low").is_not_null() & (pl.col("low") <= 0)),
-        (
-            "low_high_order",
-            pl.col("low").is_not_null() & pl.col("high").is_not_null() & (pl.col("low") > pl.col("high")),
-        ),
-        (
-            "open_in_range",
-            pl.col("low").is_not_null()
-            & pl.col("open").is_not_null()
-            & pl.col("high").is_not_null()
-            & ((pl.col("open") < pl.col("low")) | (pl.col("open") > pl.col("high"))),
-        ),
-        (
-            "close_in_range",
-            pl.col("low").is_not_null()
-            & pl.col("close").is_not_null()
-            & pl.col("high").is_not_null()
-            & ((pl.col("close") < pl.col("low")) | (pl.col("close") > pl.col("high"))),
-        ),
-    ):
-        _report(rule, bars.filter(pl.col("volume").is_not_null() & (pl.col("volume") > 0) & condition))
-    if all(c in bars.columns for c in ("close", "base_price", "daily_change_pct")):
-        _report(
-            "change_pct_agreement",
-            bars.filter(
-                pl.col("base_price").is_not_null()
-                & (pl.col("base_price") > 0)
-                & pl.col("close").is_not_null()
-                & pl.col("daily_change_pct").is_not_null()
-                & (
-                    ((pl.col("close") / pl.col("base_price") - 1) * 100 - pl.col("daily_change_pct")).abs()
-                    > MAX_CHANGE_PCT_DISAGREEMENT_PP
-                )
-            ),
-        )
-    if violations:
-        raise ImplausibleBarValuesError(f"implausible daily bars: {'; '.join(violations)}")
-
-
-RETRY_WAIT_BASE_S: float = 1.0
-RETRY_WAIT_MAX_S: float = 4.0
-
-
 def retry_wait_seconds(retry_state: RetryCallState) -> float:
     return float(min(RETRY_WAIT_BASE_S * 2 ** (retry_state.attempt_number - 1), RETRY_WAIT_MAX_S))
-
-
-MIN_ROWCOUNT_RATIO: float = 0.90
 
 
 @retry(
@@ -291,55 +208,6 @@ def derive_market_map(bars: pl.DataFrame) -> dict[str, str]:
     return dict(zip(bars["symbol"].to_list(), bars["market"].to_list(), strict=True))
 
 
-def append_daily_bars(store_path: pathlib.Path, bars: pl.DataFrame) -> int:
-    """Append one trading day of bars, filling missing columns and casting to the store schema.
-
-    Raises:
-        ImplausibleBarValuesError: When the incoming batch violates a structural identity.
-        ImplausibleRowCountError: When the incoming batch is implausibly small.
-    """
-    store = pathlib.Path(store_path)
-    present = [c for c in STORED_BAR_COLUMNS if c in bars.columns]
-    incoming = bars.select(present)
-    for column in STORED_BAR_COLUMNS:
-        if column not in incoming.columns:
-            incoming = incoming.with_columns(pl.lit(None).cast(BAR_SCHEMA[column]).alias(column))
-    incoming = incoming.select(STORED_BAR_COLUMNS).with_columns([
-        pl.col(column).cast(BAR_SCHEMA[column]) for column in STORED_BAR_COLUMNS
-    ])
-    validate_daily_bars(incoming)
-    if store.exists():
-        existing = pl.read_parquet(store)
-        for column in STORED_BAR_COLUMNS:
-            if column not in existing.columns:
-                existing = existing.with_columns(pl.lit(None).cast(BAR_SCHEMA[column]).alias(column))
-        existing = existing.select(STORED_BAR_COLUMNS)
-        incoming_dates = incoming["date"].unique().to_list()
-        prior = existing.filter(~pl.col("date").is_in(incoming_dates))
-        if prior.height > 0:
-            reference_date = prior["date"].max()
-            reference_height = prior.filter(pl.col("date") == reference_date).height
-            if incoming.height < reference_height * MIN_ROWCOUNT_RATIO:
-                raise ImplausibleRowCountError(
-                    f"implausible row count for {incoming_dates}: {incoming.height} < {reference_height} * {MIN_ROWCOUNT_RATIO}"
-                )
-        new_rows = incoming.join(
-            existing.select(["date", "symbol"]), on=["date", "symbol"], how="anti"
-        )
-        if new_rows.height == 0:
-            return 0
-        kept = existing.join(incoming.select(["date", "symbol"]), on=["date", "symbol"], how="anti")
-        combined = pl.concat([kept, incoming]).sort(["symbol", "date"])
-    else:
-        new_rows = incoming
-        combined = incoming.sort(["symbol", "date"])
-    store.parent.mkdir(parents=True, exist_ok=True)
-    tmp = store.parent / f".{store.name}.tmp"
-    combined.write_parquet(tmp, compression="zstd")
-    os.replace(tmp, store)
-    return new_rows.height
-
-
 def backfill_bars(
     store_path: pathlib.Path, *, auth_key: str, end_date: dt.date, window_days: int = 90, session: Any | None = None
 ) -> dict[str, int]:
@@ -362,11 +230,3 @@ def backfill_bars(
     if trading_days_found < window_days:
         raise KrxBarsError(f"only found {trading_days_found}/{window_days} trading days within {calendar_cap} calendar days")
     return {"trading_days": trading_days_found, "appended_rows": appended_total}
-
-
-def write_market_map(path: pathlib.Path, market_map: dict[str, str]) -> None:
-    target = pathlib.Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.parent / f".{target.name}.tmp"
-    tmp.write_text(json.dumps(market_map, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, target)

@@ -9,8 +9,8 @@ import pathlib
 
 from src.core.config import TossCredentials, TossProgramTradesSettings, load_credentials
 from src.core.errors import MissingCredentialsError
-from src.marketdata.service import ProgramTradesBackfillResult as ProgramTradesBackfillResult
-from src.marketdata.service import backfill_program_trades
+from src.marketdata.program_trade_service import ProgramTradesBackfillResult as ProgramTradesBackfillResult
+from src.marketdata.program_trade_service import backfill_program_trades
 from src.marketdata.toss_program_trades import TossProgramTradesError
 
 logger = logging.getLogger(__name__)

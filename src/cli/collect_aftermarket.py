@@ -13,7 +13,7 @@ from typing import Any
 
 import aiohttp
 
-from src.core.config import AftermarketSettings, CollectorSettings, DataPaths
+from src.core.config import DataPaths, resolve_collector_runtime
 from src.core.errors import MissingCredentialsError, SlotBudgetExceededError
 from src.core.observability import EVENT
 from src.realtime.adapters.kis import KisRealtimeAdapter
@@ -52,8 +52,9 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
 
 
 async def _run_stream(args: argparse.Namespace) -> int:
-    settings = CollectorSettings()
-    after = AftermarketSettings(enabled=settings.after_market_enabled)
+    runtime = resolve_collector_runtime()
+    settings = runtime.collector
+    after = runtime.aftermarket
     route = _route_for_venue(str(args.venue))
     streams: tuple[str, str] = after.nxt_streams if route.venue == MarketVenue.NXT else after.krx_streams
     credentials = load_kis_data_credentials()
@@ -86,6 +87,8 @@ async def _run_stream(args: argparse.Namespace) -> int:
         ntp_fallback_hosts=settings.ntp_fallback_hosts,
         route=route,
         shard=shard,
+        min_free_disk_gb=settings.min_free_disk_gb,
+        journal_retain_days=settings.journal_retain_days,
     )
     session = bootstrap_session(cfg)
     pairs = session.replay_pairs()

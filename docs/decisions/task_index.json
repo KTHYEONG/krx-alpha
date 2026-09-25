@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "TASK_REFACTOR_MAINTAINABILITY",
+      "date": "2026-09-25",
+      "adr_id": "ADR_20260925_REFACTOR_MAINTAINABILITY",
+      "domain": "architecture",
+      "title": "런타임·데이터 수집 구조 리팩토링",
+      "why": "설정과 책임이 여러 대형 모듈에 분산되어 유지보수와 확장, AI 기반 변경 탐색이 어려웠다.",
+      "resolution": "런타임 설정·KIS 경계·데몬·저장소·스냅샷·시세 검증·관측성 모듈을 분리하고 아키텍처 문서와 생성 코드맵을 동기화했다.",
+      "impact": "책임별 변경 위치와 테스트 경로가 명확해져 검토, 확장, 자동화된 코드 탐색 효율이 높아진다.",
+      "caveat": "기존 데이터·거래 계약을 유지하며 NTP 측정 실패 시 신규 세션을 fail-closed로 거부한다."
+    },
+    {
       "task_id": "TASK_KRX_OPS_HARDENING",
       "date": "2026-09-25",
       "adr_id": "ADR_20260925_KRX_OPS_HARDENING",

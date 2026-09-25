@@ -573,7 +573,7 @@ def test_normalize_l0_partition_uses_chunked_tick_quality_without_output_change(
 
     import polars as pl
     import zstandard as zstd
-    import src.storage.retention as retention_mod
+    import src.storage.normalization as retention_mod
 
     part = tmp_path / "l0" / "kis" / "H0STCNT0" / "dt=2026-09-01"
     part.mkdir(parents=True)
@@ -621,7 +621,7 @@ def test_normalize_l0_partition_bounded_matches_reference_semantics_across_batch
     import polars as pl
     import zstandard as zstd
 
-    import src.storage.retention as retention_mod
+    import src.storage.normalization as retention_mod
 
     monkeypatch.setattr(retention_mod, '_BATCH_BYTES', 64)
     monkeypatch.setattr(retention_mod, '_GATHER_ROWS', 2)
@@ -687,7 +687,7 @@ def test_normalize_l0_partition_raises_when_hash_equal_duplicate_payload_differs
     import pytest
     import zstandard as zstd
 
-    import src.storage.retention as retention_mod
+    import src.storage.normalization as retention_mod
     from src.storage.retention import L1NormalizationError
 
     part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
@@ -778,7 +778,7 @@ def test_normalize_l0_partition_default_work_dir_is_temporary_and_removed(tmp_pa
 
     import zstandard as zstd
 
-    import src.storage.retention as retention_mod
+    import src.storage.normalization as retention_mod
 
     created = tmp_path / 'sys-tmp'
     prefixes = []
@@ -931,7 +931,7 @@ def test_normalize_l0_partition_closes_writer_and_removes_tmp_when_failing_after
     import pytest
     import zstandard as zstd
 
-    import src.storage.retention as retention_mod
+    import src.storage.normalization as retention_mod
     from src.storage.retention import L1NormalizationError
 
     monkeypatch.setattr(retention_mod, '_GATHER_ROWS', 1)
@@ -1009,7 +1009,7 @@ def test_prune_old_journals_retains_l0_without_verified_remote_path(tmp_path):
     from src.storage.retention import prune_old_journals
 
     journal = _write_due_journal(tmp_path)
-    result = prune_old_journals(_policy(), _now(), tmp_path / 'l0', tmp_path / 'l1', verified_remote_l1=None)
+    result = prune_old_journals(tmp_path / 'l0', archive_root=tmp_path / 'l1', retain_days=3, reference_date=_now(), verified_remote_l1=None)
     assert result.normalized == 1
     assert result.deleted == 0
     assert journal.exists()
@@ -1020,7 +1020,7 @@ def test_prune_old_journals_deletes_only_verified_remote_path(tmp_path):
 
     journal = _write_due_journal(tmp_path)
     expected = _expected_l1_relative_path(journal)
-    result = prune_old_journals(_policy(), _now(), tmp_path / 'l0', tmp_path / 'l1', verified_remote_l1={expected})
+    result = prune_old_journals(tmp_path / 'l0', archive_root=tmp_path / 'l1', retain_days=3, reference_date=_now(), verified_remote_l1={expected})
     assert result.deleted == 1
     assert not journal.exists()
 

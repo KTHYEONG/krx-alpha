@@ -9,7 +9,9 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 _CANONICAL_TOKENS = ("장전 시간외종가", "장후 시간외종가")
 _LEGACY_TOKEN = "overtime_vi_code"
-_LEGACY_ALLOWLIST_PATH = "src/marketdata/snapshot_contracts.py"
+_LEGACY_ALLOWLIST_PATHS = frozenset(
+    {"src/marketdata/snapshot_contracts.py", "src/marketdata/snapshot_schema.py"}
+)
 
 _KO_PATTERNS = ("시간외", "장후")
 _EN_PATTERNS = (
@@ -29,7 +31,7 @@ def find_forbidden_terms(text: str, *, path: str) -> list[str]:
     cleaned = text
     for token in _CANONICAL_TOKENS:
         cleaned = cleaned.replace(token, "")
-    if path == _LEGACY_ALLOWLIST_PATH:
+    if path in _LEGACY_ALLOWLIST_PATHS:
         cleaned = cleaned.replace(_LEGACY_TOKEN, "")
     hits: list[str] = [pattern for pattern in _KO_PATTERNS if pattern in cleaned]
     for pattern in _EN_PATTERNS:
@@ -93,4 +95,5 @@ def test_english_after_hours_variants_flagged() -> None:
 
 def test_legacy_column_allowed_only_in_contract_module() -> None:
     assert find_forbidden_terms("overtime_vi_code", path="src/marketdata/snapshot_contracts.py") == []
+    assert find_forbidden_terms("overtime_vi_code", path="src/marketdata/snapshot_schema.py") == []
     assert len(find_forbidden_terms("overtime_vi_code", path="src/execution/kis_client.py")) == 1

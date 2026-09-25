@@ -7,9 +7,9 @@ import math
 import pathlib
 from typing import cast
 
+from src.brokers.kis.data import KisDataClient, KisRankingRow
 from src.core.errors import KrxAlphaError
 from src.core.symbols import is_krx_short_code
-from src.execution.kis_client import KisRankingRow, KisRestClient
 from src.universe.ipc import CandidateSnapshot, write_candidate_snapshot
 
 
@@ -92,7 +92,7 @@ def refresh_aftermarket_candidates(
     *,
     session_date: dt.date,
     generated_at: dt.datetime,
-    client: KisRestClient,
+    client: KisDataClient,
     out_path: pathlib.Path,
     capacity: int,
     excluded_symbols: frozenset[str] = frozenset(),

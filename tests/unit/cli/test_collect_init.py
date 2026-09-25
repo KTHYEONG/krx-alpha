@@ -72,6 +72,37 @@ def test_collect_init_run_rejects_unsynced_clock_returns_3(tmp_path, caplog, mon
     assert any("status=FAIL" in r.message for r in caplog.records)
 
 
+def test_collect_init_rejects_when_all_ntp_hosts_unreachable(tmp_path, caplog, monkeypatch):
+    import argparse
+    import logging
+
+    from src.cli.collect_init import run
+    from src.realtime.clock import ClockUnsyncedError
+    from src.universe.ipc import write_candidates
+
+    def _dead(host, *, samples=5, timeout_s=3.0, client=None):
+        raise ClockUnsyncedError(f"ntp unreachable: {host}")
+
+    monkeypatch.setattr("src.realtime.session.measure_ntp_offset_ns", _dead)
+
+    cp = tmp_path / "candidates.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
+    args = argparse.Namespace(
+        session_date="2026-09-08", journal_root=str(tmp_path / "l0"),
+        manifest_path=str(tmp_path / "session.json"), candidates_path=str(cp),
+        ntp_host="pool.ntp.org", slot_budget=41, max_clock_offset_ns=2_000_000_000,
+        streams="H0STCNT0", vendor="kis",
+    )
+
+    with caplog.at_level(logging.ERROR):
+        rc = run(args)
+
+    assert rc == 3
+    assert not (tmp_path / "session.json").exists()
+    assert not (tmp_path / "l0").exists()
+    assert any("status=FAIL" in r.message for r in caplog.records)
+
+
 def test_collect_init_accepts_archive_root_arg(tmp_path, caplog, monkeypatch) -> None:
     import argparse
     import logging
