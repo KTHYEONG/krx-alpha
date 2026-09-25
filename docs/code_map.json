@@ -416,7 +416,7 @@
       "tests/unit/universe/test_aftermarket.py",
       "tests/unit/universe/test_service.py"
     ],
-    "architecture": "docs/architecture/overview.md"
+    "architecture": "docs/architecture/system-design.md"
   },
   "src/core/errors.py": {
     "deps": [],
