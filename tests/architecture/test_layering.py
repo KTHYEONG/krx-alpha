@@ -57,7 +57,7 @@ def test_no_hardcoded_filesystem_paths_outside_config() -> None:
     import ast
     import pathlib
 
-    allowed = {"src/core/config.py"}
+    allowed = {"src/core/paths.py"}
     offenders: list[str] = []
 
     # When: Path("...") 리터럴 인자를 AST 로 수집한다

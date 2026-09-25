@@ -12,9 +12,12 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from src.core.config import CollectorSettings, KisCredentials, KisTokenSettings, SnapshotSettings
+from src.brokers.kis.auth import KisAppAuth, KisTokenProvider, kis_token_cache_path
+from src.brokers.kis.data import KisDataClient
+from src.brokers.kis.http import KisGetTransport
+from src.brokers.kis.rate import RateLimiter
+from src.core.config import KisTokenSettings, resolve_collector_runtime
 from src.core.errors import MissingCredentialsError
-from src.execution.kis_client import KisRestClient, RateLimiter, kis_token_cache_path
 from src.marketdata.snapshot_service import run_snapshot_session
 from src.realtime.kis_sharding import load_kis_data_credentials
 from src.storage.snapshot_store import SnapshotStore
@@ -37,26 +40,34 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
 def run(args: argparse.Namespace) -> int:
     """Build the data-slot KIS client and run the snapshot session to completion."""
     session_date = dt.date.fromisoformat(str(args.session_date))
-    settings = SnapshotSettings()
+    runtime = resolve_collector_runtime()
+    settings = runtime.snapshot
     credentials = load_kis_data_credentials()
     cred = next((c for c in credentials if c.slot == settings.kis_data_slot), None)
     if cred is None:
         raise MissingCredentialsError(f"no data credential for slot {settings.kis_data_slot}")
     token_settings = KisTokenSettings()
-    client = KisRestClient(
-        creds=KisCredentials(
-            kis_app_key=cred.app_key,
-            kis_app_secret=cred.app_secret,
-            kis_account_no="",
-            kis_account_product_code="",
-        ),
+    auth = KisAppAuth(app_key=cred.app_key, app_secret=cred.app_secret)
+    limiter = RateLimiter(settings.rest_rate_per_s)
+    tokens = KisTokenProvider(
+        auth=auth,
         session=requests,
-        token_cache_path=kis_token_cache_path(token_settings.token_cache_dir, cred.app_key),
-        limiter=RateLimiter(settings.rest_rate_per_s),
+        cache_path=kis_token_cache_path(token_settings.token_cache_dir, cred.app_key),
+        limiter=limiter,
         now=lambda: dt.datetime.now(_KST),
         timeout_s=settings.request_timeout_s,
-        allow_token_issue=token_settings.allow_issue,
+        base_url="https://openapi.koreainvestment.com:9443",
+        allow_issue=token_settings.allow_issue,
     )
+    transport = KisGetTransport(
+        auth=auth,
+        tokens=tokens,
+        session=requests,
+        limiter=limiter,
+        timeout_s=settings.request_timeout_s,
+        base_url="https://openapi.koreainvestment.com:9443",
+    )
+    client = KisDataClient(transport=transport)
     try:
         data = read_candidates(pathlib.Path(str(args.candidates_path)))
     except CandidateFileError as exc:
@@ -68,7 +79,7 @@ def run(args: argparse.Namespace) -> int:
     else:
         candidates = cast("list[dict[str, Any]]", data.get("candidates") or [])
         symbols = tuple(str(row["symbol"]) for row in candidates)
-    store = SnapshotStore(paths=CollectorSettings().paths, session_date=session_date)
+    store = SnapshotStore(paths=runtime.paths, session_date=session_date)
     run_snapshot_session(
         settings=settings,
         session_date=session_date,

@@ -13,21 +13,21 @@ from zoneinfo import ZoneInfo
 
 import polars as pl
 
-from src.core.config import SnapshotSettings
-from src.core.symbols import KRX_SHORT_CODE_PATTERN
-from src.execution.contracts import KisApiError
-from src.execution.kis_client import (
+from src.brokers.kis.data import (
     TR_FLUCTUATION,
     TR_TRADE_AMOUNT,
     KisRankingRow,
 )
-from src.marketdata.snapshot_contracts import (
-    SnapshotDataset,
+from src.core.config import SnapshotSettings
+from src.core.symbols import KRX_SHORT_CODE_PATTERN
+from src.execution.contracts import KisApiError
+from src.marketdata.snapshot_plan import (
     SnapshotJob,
     SnapshotJobKind,
     build_session_jobs,
     partition_due_jobs,
 )
+from src.marketdata.snapshot_schema import SnapshotDataset
 from src.storage.snapshot_store import SnapshotStore, SnapshotStoreError
 
 logger = logging.getLogger(__name__)
@@ -126,22 +126,9 @@ def run_snapshot_job(
     symbols: tuple[str, ...],
     news_seen: set[str],
     now_fn: Callable[[], dt.datetime],
-    wall_ns: Callable[[], int],
+    wall_ns: Callable[[], int] = time.time_ns,
 ) -> SnapshotJobResult:
-    """Execute one snapshot job and persist its observations.
-
-    Each vendor call is an independent observation: a failed call is counted
-    and skipped so one bad symbol never voids the rest of the window. Calls
-    stop once the job window closes, because later results would be stamped
-    into the wrong market phase.
-
-    Args:
-        news_seen: Session-lifetime set of persisted news ids, mutated in place
-            so paging decisions stay O(1) per headline.
-
-    Raises:
-        SnapshotStoreError: When persisting rows fails.
-    """
+    """Collect one bounded scheduled job and persist only validated rows."""
     session_date = store.session_date
     attempted = 0
     succeeded = 0
@@ -168,36 +155,38 @@ def run_snapshot_job(
             return None
         return (outcome[0], outcome[1])
 
-    if job.kind in (SnapshotJobKind.AUCTION_OPEN, SnapshotJobKind.AUCTION_CLOSE):
-        phase = "open" if job.kind is SnapshotJobKind.AUCTION_OPEN else "close"
-        auction_rows: list[dict[str, object]] = []
-        for symbol in symbols:
-            outcome = _guarded_call(partial(source.get_auction_book, symbol))
-            taken = _take(outcome)
-            if taken is None:
-                if truncated:
-                    break
-                continue
-            result, observed = taken
-            auction_rows.append({**result, "phase": phase, "session_date": session_date, "observed_at_ns": observed})
-        if auction_rows:
-            rows_added += store.append(SnapshotDataset.AUCTION_BOOK, auction_rows)
-    elif job.kind is SnapshotJobKind.INVESTOR_ESTIMATE:
-        investor_rows: list[dict[str, object]] = []
-        for symbol in symbols:
-            outcome = _guarded_call(partial(source.get_investor_estimate, symbol))
-            taken = _take(outcome)
-            if taken is None:
-                if truncated:
-                    break
-                continue
-            result, observed = taken
-            investor_rows.extend(
-                {**row, "session_date": session_date, "observed_at_ns": observed} for row in result
-            )
-        if investor_rows:
-            rows_added += store.append(SnapshotDataset.INVESTOR_ESTIMATE, investor_rows)
-    elif job.kind is SnapshotJobKind.PROGRAM_TRADE:
+    def _handle_auction_security() -> int:
+        if job.kind in (SnapshotJobKind.AUCTION_OPEN, SnapshotJobKind.AUCTION_CLOSE):
+            phase = "open" if job.kind is SnapshotJobKind.AUCTION_OPEN else "close"
+            auction_rows: list[dict[str, object]] = []
+            for symbol in symbols:
+                outcome = _guarded_call(partial(source.get_auction_book, symbol))
+                taken = _take(outcome)
+                if taken is None:
+                    if truncated:
+                        break
+                    continue
+                result, observed = taken
+                auction_rows.append({**result, "phase": phase, "session_date": session_date, "observed_at_ns": observed})
+            if auction_rows:
+                return store.append(SnapshotDataset.AUCTION_BOOK, auction_rows)
+            return 0
+        if job.kind is SnapshotJobKind.INVESTOR_ESTIMATE:
+            investor_rows: list[dict[str, object]] = []
+            for symbol in symbols:
+                outcome = _guarded_call(partial(source.get_investor_estimate, symbol))
+                taken = _take(outcome)
+                if taken is None:
+                    if truncated:
+                        break
+                    continue
+                result, observed = taken
+                investor_rows.extend(
+                    {**row, "session_date": session_date, "observed_at_ns": observed} for row in result
+                )
+            if investor_rows:
+                return store.append(SnapshotDataset.INVESTOR_ESTIMATE, investor_rows)
+            return 0
         program_rows: list[dict[str, object]] = []
         for symbol in symbols:
             outcome = _guarded_call(partial(source.get_program_trade_latest, symbol))
@@ -210,29 +199,13 @@ def run_snapshot_job(
             if result is not None:
                 program_rows.append({**result, "session_date": session_date, "observed_at_ns": observed})
         if program_rows:
-            rows_added += store.append(SnapshotDataset.PROGRAM_TRADE, program_rows)
-    elif job.kind is SnapshotJobKind.RANKING:
-        ranking_rows: list[dict[str, object]] = []
-        outcome = _guarded_call(source.get_trade_amount_ranking)
-        taken = _take(outcome)
-        if taken is not None:
-            result, observed = taken
-            ranking_rows.extend(
-                {
-                    "session_date": session_date,
-                    "observed_at_ns": observed,
-                    "source_tr": TR_TRADE_AMOUNT,
-                    "market_div_code": "J",
-                    "list_kind": "trade_amount",
-                    "rank": row.rank,
-                    "symbol": row.symbol,
-                    "change_pct": row.change_pct,
-                    "trade_value_krw": row.trade_value_krw,
-                }
-                for row in cast("tuple[KisRankingRow, ...]", result)
-            )
-        if not truncated:
-            outcome = _guarded_call(source.get_fluctuation_ranking)
+            return store.append(SnapshotDataset.PROGRAM_TRADE, program_rows)
+        return 0
+
+    def _handle_ranking_index() -> int:
+        if job.kind is SnapshotJobKind.RANKING:
+            ranking_rows: list[dict[str, object]] = []
+            outcome = _guarded_call(source.get_trade_amount_ranking)
             taken = _take(outcome)
             if taken is not None:
                 result, observed = taken
@@ -240,19 +213,38 @@ def run_snapshot_job(
                     {
                         "session_date": session_date,
                         "observed_at_ns": observed,
-                        "source_tr": TR_FLUCTUATION,
+                        "source_tr": TR_TRADE_AMOUNT,
                         "market_div_code": "J",
-                        "list_kind": "fluctuation",
+                        "list_kind": "trade_amount",
                         "rank": row.rank,
                         "symbol": row.symbol,
                         "change_pct": row.change_pct,
-                        "trade_value_krw": None,
+                        "trade_value_krw": row.trade_value_krw,
                     }
                     for row in cast("tuple[KisRankingRow, ...]", result)
                 )
-        if ranking_rows:
-            rows_added += store.append(SnapshotDataset.RANKING, ranking_rows)
-    elif job.kind is SnapshotJobKind.INDEX_SNAPSHOT:
+            if not truncated:
+                outcome = _guarded_call(source.get_fluctuation_ranking)
+                taken = _take(outcome)
+                if taken is not None:
+                    result, observed = taken
+                    ranking_rows.extend(
+                        {
+                            "session_date": session_date,
+                            "observed_at_ns": observed,
+                            "source_tr": TR_FLUCTUATION,
+                            "market_div_code": "J",
+                            "list_kind": "fluctuation",
+                            "rank": row.rank,
+                            "symbol": row.symbol,
+                            "change_pct": row.change_pct,
+                            "trade_value_krw": None,
+                        }
+                        for row in cast("tuple[KisRankingRow, ...]", result)
+                    )
+            if ranking_rows:
+                return store.append(SnapshotDataset.RANKING, ranking_rows)
+            return 0
         index_rows: list[dict[str, object]] = []
         for index_code in settings.index_codes:
             outcome = _guarded_call(partial(source.get_index_snapshot, index_code))
@@ -264,25 +256,11 @@ def run_snapshot_job(
             result, observed = taken
             index_rows.append({**result, "session_date": session_date, "observed_at_ns": observed})
         if index_rows:
-            rows_added += store.append(SnapshotDataset.INDEX_SNAPSHOT, index_rows)
-    elif job.kind is SnapshotJobKind.INDEX_MINUTE_BAR:
-        bar_rows: list[dict[str, object]] = []
-        for index_code in settings.index_codes:
-            outcome = _guarded_call(
-                partial(source.get_index_minute_bars, index_code, session_date=session_date)
-            )
-            taken = _take(outcome)
-            if taken is None:
-                if truncated:
-                    break
-                continue
-            result, observed = taken
-            bar_rows.extend(
-                {**row, "session_date": session_date, "observed_at_ns": observed} for row in result
-            )
-        if bar_rows:
-            rows_added += store.append(SnapshotDataset.INDEX_MINUTE_BAR, bar_rows)
-    elif job.kind is SnapshotJobKind.NEWS_TITLE:
+            return store.append(SnapshotDataset.INDEX_SNAPSHOT, index_rows)
+        return 0
+
+    def _handle_news() -> int:
+        nonlocal attempted, succeeded, failed, truncated
         news_rows: list[dict[str, object]] = []
         new_ids: list[str] = []
         claimed = set(news_seen)
@@ -316,9 +294,31 @@ def run_snapshot_job(
             last = page[-1]
             before = _ns_to_kst_cursor(cast(int, last["published_at_ns"]))
         if news_rows:
-            rows_added += store.append(SnapshotDataset.NEWS_TITLE, news_rows)
+            added = store.append(SnapshotDataset.NEWS_TITLE, news_rows)
             news_seen.update(new_ids)
-    else:
+            return added
+        return 0
+
+    def _handle_minute_bars() -> int:
+        if job.kind is SnapshotJobKind.INDEX_MINUTE_BAR:
+            bar_rows: list[dict[str, object]] = []
+            for index_code in settings.index_codes:
+                outcome = _guarded_call(
+                    partial(source.get_index_minute_bars, index_code, session_date=session_date)
+                )
+                taken = _take(outcome)
+                if taken is None:
+                    if truncated:
+                        break
+                    continue
+                result, observed = taken
+                bar_rows.extend(
+                    {**row, "session_date": session_date, "observed_at_ns": observed} for row in result
+                )
+            if bar_rows:
+                return store.append(SnapshotDataset.INDEX_MINUTE_BAR, bar_rows)
+            return 0
+        added = 0
         for symbol in _eod_targets(store, settings, symbols):
             outcome = _guarded_call(
                 partial(
@@ -340,7 +340,22 @@ def run_snapshot_job(
                 for row in cast("Sequence[dict[str, object]]", result)
             ]
             if stamped:
-                rows_added += store.append(SnapshotDataset.STOCK_MINUTE_BAR, stamped)
+                added += store.append(SnapshotDataset.STOCK_MINUTE_BAR, stamped)
+        return added
+
+    if job.kind in (
+        SnapshotJobKind.AUCTION_OPEN,
+        SnapshotJobKind.AUCTION_CLOSE,
+        SnapshotJobKind.INVESTOR_ESTIMATE,
+        SnapshotJobKind.PROGRAM_TRADE,
+    ):
+        rows_added += _handle_auction_security()
+    elif job.kind in (SnapshotJobKind.RANKING, SnapshotJobKind.INDEX_SNAPSHOT):
+        rows_added += _handle_ranking_index()
+    elif job.kind is SnapshotJobKind.NEWS_TITLE:
+        rows_added += _handle_news()
+    else:
+        rows_added += _handle_minute_bars()
     return SnapshotJobResult(
         job_id=job.job_id,
         kind=job.kind,

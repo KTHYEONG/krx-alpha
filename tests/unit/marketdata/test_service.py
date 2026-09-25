@@ -244,7 +244,7 @@ def test_backfill_program_trades_persists_per_symbol_and_survives_one_failure(tm
 
     import polars as pl
 
-    from src.marketdata import service
+    from src.marketdata import program_trade_service as service
     from src.marketdata.toss_program_trades import TossProgramTradesError
 
     rows_a = (_program_trade_row("005930", dt.date(2026, 9, 16)), _program_trade_row("005930", dt.date(2026, 9, 17)))
@@ -284,7 +284,7 @@ def test_backfill_program_trades_rejects_invalid_symbol_before_any_call(monkeypa
 
     import pytest
 
-    from src.marketdata import service
+    from src.marketdata import program_trade_service as service
 
     calls: list[str] = []
     monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: calls.append("token") or "tok")
@@ -310,7 +310,7 @@ def test_backfill_program_trades_rejects_invalid_symbol_before_any_call(monkeypa
 def test_backfill_program_trades_issues_token_exactly_once(monkeypatch) -> None:
     import datetime as dt
 
-    from src.marketdata import service
+    from src.marketdata import program_trade_service as service
 
     calls: list[dict] = []
     monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: calls.append(kwargs) or "tok")
@@ -336,7 +336,7 @@ def test_backfill_program_trades_wraps_token_issuance_failure(monkeypatch) -> No
 
     import pytest
 
-    from src.marketdata import service
+    from src.marketdata import program_trade_service as service
     from src.marketdata.toss_calendar import TossCalendarError
     from src.marketdata.toss_program_trades import TossProgramTradesError
 
@@ -360,7 +360,7 @@ def test_backfill_universe_program_trades_targets_only_uncovered_symbols(tmp_pat
     # Given: 3개 중 1개만 커버리지가 부족한 스토어
     import datetime as dt
 
-    from src.marketdata import service
+    from src.marketdata import program_trade_service as service
     from src.marketdata.toss_program_trades import append_program_trades
 
     store = tmp_path / "bars" / "program_trades.parquet"
@@ -399,7 +399,7 @@ def test_backfill_universe_program_trades_skips_vendor_call_when_all_covered(tmp
     # Given: 모든 심볼이 이미 커버됨
     import datetime as dt
 
-    from src.marketdata import service
+    from src.marketdata import program_trade_service as service
     from src.marketdata.toss_program_trades import append_program_trades
 
     store = tmp_path / "bars" / "program_trades.parquet"
@@ -440,7 +440,7 @@ def test_backfill_universe_program_trades_returns_zero_result_for_empty_symbols(
     # Given: 빈 심볼 목록
     import datetime as dt
 
-    from src.marketdata import service
+    from src.marketdata import program_trade_service as service
 
     def _must_not_call(**kwargs):
         raise AssertionError("backfill_program_trades must not be called for empty symbols")
@@ -467,7 +467,7 @@ def test_backfill_universe_program_trades_keeps_alphanumeric_and_skips_malformed
     import datetime as dt
     import logging
 
-    from src.marketdata import service
+    from src.marketdata import program_trade_service as service
 
     store = tmp_path / "bars" / "program_trades.parquet"
     reference_date = dt.date(2026, 9, 21)
@@ -500,7 +500,7 @@ def test_backfill_universe_program_trades_keeps_alphanumeric_and_skips_malformed
 def test_backfill_program_trades_accepts_alphanumeric_codes(tmp_path, monkeypatch) -> None:
     import datetime as dt
 
-    from src.marketdata import service
+    from src.marketdata import program_trade_service as service
 
     attempted: list[str] = []
 
@@ -529,7 +529,7 @@ def test_backfill_program_trades_rejects_malformed_code(monkeypatch) -> None:
 
     import pytest
 
-    from src.marketdata import service
+    from src.marketdata import program_trade_service as service
 
     monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: "tok")
 
@@ -549,7 +549,7 @@ def test_backfill_program_trades_isolates_single_vendor_rejection(tmp_path, monk
 
     import polars as pl
 
-    from src.marketdata import service
+    from src.marketdata import program_trade_service as service
     from src.marketdata.toss_program_trades import TossProgramTradesError
 
     def _fake_history(symbol, **kwargs):
@@ -635,3 +635,26 @@ def test_refresh_bars_via_kis_fallback_fails_closed_when_all_dates_mismatched(tm
             store_path=store_path, market_map_path=map_path, target_date=target, kis_client=_StaleClient(),
         )
     assert not store_path.exists()
+
+
+def test_backfill_universe_program_trades_returns_zero_when_all_symbols_malformed(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    from src.marketdata import program_trade_service as service
+
+    def _must_not_call(**kwargs):
+        raise AssertionError("backfill_program_trades must not be called when no clean symbols")
+
+    monkeypatch.setattr(service, "backfill_program_trades", _must_not_call)
+
+    result = service.backfill_universe_program_trades(
+        store_path=tmp_path / "program_trades.parquet",
+        symbols=("12", "ab!"),
+        lookback_days=120,
+        reference_date=dt.date(2026, 9, 21),
+        app_key="k",
+        app_secret="s",
+        rate_per_s=8.0,
+    )
+
+    assert (result.symbols_ok, result.symbols_failed, result.appended_rows) == (0, 0, 0)

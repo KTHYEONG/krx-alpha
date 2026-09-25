@@ -46,9 +46,9 @@ def run_eod_maintenance(
 ) -> int:
     return prune_old_journals(
         journal_root,
+        archive_root=archive_root,
         retain_days=retain_days,
         reference_date=today,
-        archive_root=archive_root,
         quarantine_root=quarantine_root,
         verified_remote_l1=verified_remote_l1,
         # 데몬 OOM crash loop를 막기 위해 정규화는 자식 프로세스로 격리한다

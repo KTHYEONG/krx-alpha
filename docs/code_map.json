@@ -1,4 +1,128 @@
 {
+  "src/brokers/kis/auth.py": {
+    "deps": [
+      "src/brokers/kis/rate.py",
+      "src/execution/contracts.py"
+    ],
+    "layer": 2,
+    "testing": [
+      "tests/unit/cli/test_bars_refresh.py",
+      "tests/unit/cli/test_collect_snapshots.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/cli/test_order.py",
+      "tests/unit/execution/test_gateways.py",
+      "tests/unit/execution/test_kis_client.py",
+      "tests/unit/execution/test_service.py",
+      "tests/unit/marketdata/test_service.py",
+      "tests/unit/marketdata/test_snapshot_service.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/universe/test_aftermarket.py"
+    ]
+  },
+  "src/brokers/kis/data.py": {
+    "deps": [
+      "src/brokers/kis/auth.py",
+      "src/brokers/kis/http.py",
+      "src/core/symbols.py",
+      "src/execution/contracts.py"
+    ],
+    "layer": 2,
+    "testing": [
+      "tests/unit/cli/test_bars_refresh.py",
+      "tests/unit/cli/test_collect_snapshots.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/cli/test_order.py",
+      "tests/unit/execution/test_kis_client.py",
+      "tests/unit/execution/test_service.py",
+      "tests/unit/marketdata/test_service.py",
+      "tests/unit/marketdata/test_snapshot_service.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/universe/test_aftermarket.py"
+    ]
+  },
+  "src/brokers/kis/http.py": {
+    "deps": [
+      "src/brokers/kis/auth.py",
+      "src/brokers/kis/rate.py",
+      "src/execution/contracts.py"
+    ],
+    "layer": 2,
+    "testing": [
+      "tests/unit/cli/test_bars_refresh.py",
+      "tests/unit/cli/test_collect_snapshots.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/cli/test_order.py",
+      "tests/unit/execution/test_gateways.py",
+      "tests/unit/execution/test_kis_client.py",
+      "tests/unit/execution/test_service.py",
+      "tests/unit/marketdata/test_service.py",
+      "tests/unit/marketdata/test_snapshot_service.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/universe/test_aftermarket.py"
+    ]
+  },
+  "src/brokers/kis/rate.py": {
+    "deps": [],
+    "layer": 2,
+    "testing": [
+      "tests/unit/cli/test_bars_refresh.py",
+      "tests/unit/cli/test_collect_snapshots.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/cli/test_order.py",
+      "tests/unit/cli/test_toss_program_trades_backfill.py",
+      "tests/unit/execution/test_gateways.py",
+      "tests/unit/execution/test_kis_client.py",
+      "tests/unit/execution/test_service.py",
+      "tests/unit/marketdata/test_service.py",
+      "tests/unit/marketdata/test_snapshot_service.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/universe/test_aftermarket.py"
+    ]
+  },
+  "src/brokers/kis/trading.py": {
+    "deps": [
+      "src/brokers/kis/http.py",
+      "src/brokers/kis/rate.py",
+      "src/core/config.py",
+      "src/execution/contracts.py"
+    ],
+    "layer": 2,
+    "testing": [
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/cli/test_order.py",
+      "tests/unit/execution/test_gateways.py",
+      "tests/unit/execution/test_kis_client.py",
+      "tests/unit/execution/test_service.py",
+      "tests/unit/marketdata/test_snapshot_service.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/universe/test_aftermarket.py"
+    ]
+  },
   "src/cli/bars_refresh.py": {
     "deps": [
       "src/core/config.py",
@@ -47,6 +171,19 @@
     ]
   },
   "src/cli/collect_snapshots.py": {
+    "deps": [
+      "src/brokers/kis/auth.py",
+      "src/brokers/kis/data.py",
+      "src/brokers/kis/http.py",
+      "src/brokers/kis/rate.py",
+      "src/core/config.py",
+      "src/core/errors.py",
+      "src/marketdata/snapshot_service.py",
+      "src/realtime/kis_sharding.py",
+      "src/storage/snapshot_store.py",
+      "src/universe/ipc.py"
+    ],
+    "layer": 7,
     "testing": [
       "tests/unit/cli/test_collect_snapshots.py",
       "tests/unit/cli/test_collect_stream.py",
@@ -78,8 +215,25 @@
       "tests/unit/cli/test_main.py"
     ]
   },
+  "src/cli/gdrive_cleanup.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/storage/remote.py"
+    ],
+    "layer": 7,
+    "testing": "tests/unit/cli/test_gdrive_cleanup.py"
+  },
   "src/cli/main.py": {
     "deps": [
+      "src/cli/bars_refresh.py",
+      "src/cli/collect_aftermarket.py",
+      "src/cli/collect_init.py",
+      "src/cli/collect_snapshots.py",
+      "src/cli/collect_status.py",
+      "src/cli/collect_stream.py",
+      "src/cli/order.py",
+      "src/cli/toss_program_trades_backfill.py",
+      "src/cli/universe_plan.py",
       "src/core/config.py",
       "src/core/observability.py"
     ],
@@ -115,6 +269,13 @@
     ]
   },
   "src/cli/toss_program_trades_backfill.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/core/errors.py",
+      "src/marketdata/program_trade_service.py",
+      "src/marketdata/toss_program_trades.py"
+    ],
+    "layer": 7,
     "testing": [
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
@@ -133,6 +294,27 @@
       "tests/unit/cli/test_universe_plan.py"
     ]
   },
+  "src/core/alerts.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/core/log_format.py"
+    ],
+    "layer": 0,
+    "testing": [
+      "tests/unit/cli/test_collect_aftermarket.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/core/test_observability.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_eod.py",
+      "tests/unit/realtime/test_streamer.py",
+      "tests/unit/storage/test_normalize_worker.py"
+    ]
+  },
   "src/core/calendar.py": {
     "deps": [
       "src/core/errors.py"
@@ -144,12 +326,14 @@
       "tests/unit/cli/test_collect_init.py",
       "tests/unit/cli/test_collect_snapshots.py",
       "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_gdrive_cleanup.py",
       "tests/unit/cli/test_main.py",
       "tests/unit/cli/test_order.py",
       "tests/unit/cli/test_toss_program_trades_backfill.py",
       "tests/unit/cli/test_universe_plan.py",
       "tests/unit/core/test_calendar.py",
       "tests/unit/core/test_config.py",
+      "tests/unit/core/test_deployment_config.py",
       "tests/unit/core/test_observability.py",
       "tests/unit/execution/test_contracts.py",
       "tests/unit/execution/test_gateways.py",
@@ -162,14 +346,21 @@
       "tests/unit/marketdata/test_service.py",
       "tests/unit/marketdata/test_snapshot_contracts.py",
       "tests/unit/marketdata/test_snapshot_service.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_deploy_gate.py",
       "tests/unit/orchestration/test_eod.py",
       "tests/unit/realtime/test_adapters_kis.py",
       "tests/unit/realtime/test_kis_sharding.py",
       "tests/unit/realtime/test_session.py",
       "tests/unit/realtime/test_streamer.py",
       "tests/unit/storage/test_normalize_worker.py",
+      "tests/unit/storage/test_quality.py",
       "tests/unit/storage/test_remote.py",
+      "tests/unit/storage/test_retention.py",
       "tests/unit/storage/test_snapshot_store.py",
       "tests/unit/universe/test_aftermarket.py",
       "tests/unit/universe/test_service.py"
@@ -178,7 +369,8 @@
   "src/core/config.py": {
     "deps": [
       "src/core/calendar.py",
-      "src/core/errors.py"
+      "src/core/errors.py",
+      "src/core/paths.py"
     ],
     "layer": 0,
     "testing": [
@@ -187,11 +379,13 @@
       "tests/unit/cli/test_collect_init.py",
       "tests/unit/cli/test_collect_snapshots.py",
       "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_gdrive_cleanup.py",
       "tests/unit/cli/test_main.py",
       "tests/unit/cli/test_order.py",
       "tests/unit/cli/test_toss_program_trades_backfill.py",
       "tests/unit/cli/test_universe_plan.py",
       "tests/unit/core/test_config.py",
+      "tests/unit/core/test_deployment_config.py",
       "tests/unit/core/test_observability.py",
       "tests/unit/execution/test_contracts.py",
       "tests/unit/execution/test_gateways.py",
@@ -204,20 +398,28 @@
       "tests/unit/marketdata/test_service.py",
       "tests/unit/marketdata/test_snapshot_contracts.py",
       "tests/unit/marketdata/test_snapshot_service.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/orchestration/test_eod.py",
       "tests/unit/realtime/test_adapters_kis.py",
       "tests/unit/realtime/test_kis_sharding.py",
       "tests/unit/realtime/test_session.py",
       "tests/unit/realtime/test_streamer.py",
       "tests/unit/storage/test_normalize_worker.py",
+      "tests/unit/storage/test_quality.py",
       "tests/unit/storage/test_remote.py",
+      "tests/unit/storage/test_retention.py",
       "tests/unit/storage/test_snapshot_store.py",
       "tests/unit/universe/test_aftermarket.py",
       "tests/unit/universe/test_service.py"
-    ]
+    ],
+    "architecture": "docs/architecture/overview.md"
   },
   "src/core/errors.py": {
+    "deps": [],
     "layer": 0,
     "testing": [
       "tests/unit/cli/test_bars_refresh.py",
@@ -226,6 +428,7 @@
       "tests/unit/cli/test_collect_snapshots.py",
       "tests/unit/cli/test_collect_status.py",
       "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_gdrive_cleanup.py",
       "tests/unit/cli/test_main.py",
       "tests/unit/cli/test_order.py",
       "tests/unit/cli/test_provision_kis_keypool.py",
@@ -233,6 +436,7 @@
       "tests/unit/cli/test_universe_plan.py",
       "tests/unit/core/test_calendar.py",
       "tests/unit/core/test_config.py",
+      "tests/unit/core/test_deployment_config.py",
       "tests/unit/core/test_kis_keypool_provisioning.py",
       "tests/unit/core/test_observability.py",
       "tests/unit/core/test_runtime_env_provisioning.py",
@@ -250,8 +454,14 @@
       "tests/unit/marketdata/test_snapshot_service.py",
       "tests/unit/marketdata/test_toss_calendar.py",
       "tests/unit/marketdata/test_toss_program_trades.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_deploy_gate.py",
       "tests/unit/orchestration/test_eod.py",
+      "tests/unit/orchestration/test_trading_day_gate.py",
       "tests/unit/realtime/test_adapters_kis.py",
       "tests/unit/realtime/test_adapters_ls.py",
       "tests/unit/realtime/test_clock.py",
@@ -262,7 +472,9 @@
       "tests/unit/realtime/test_streamer.py",
       "tests/unit/realtime/test_subscription.py",
       "tests/unit/storage/test_journal.py",
+      "tests/unit/storage/test_market_phase.py",
       "tests/unit/storage/test_normalize_worker.py",
+      "tests/unit/storage/test_quality.py",
       "tests/unit/storage/test_remote.py",
       "tests/unit/storage/test_retention.py",
       "tests/unit/storage/test_snapshot_store.py",
@@ -279,13 +491,34 @@
     "layer": 0,
     "testing": [
       "tests/unit/cli/test_provision_kis_keypool.py",
+      "tests/unit/core/test_deployment_config.py",
       "tests/unit/core/test_kis_keypool_provisioning.py",
       "tests/unit/core/test_runtime_env_provisioning.py"
     ]
   },
+  "src/core/log_format.py": {
+    "deps": [],
+    "layer": 0,
+    "testing": [
+      "tests/unit/cli/test_collect_aftermarket.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/core/test_observability.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_eod.py",
+      "tests/unit/realtime/test_streamer.py",
+      "tests/unit/storage/test_normalize_worker.py"
+    ]
+  },
   "src/core/observability.py": {
     "deps": [
-      "src/core/config.py"
+      "src/core/alerts.py",
+      "src/core/config.py",
+      "src/core/log_format.py"
     ],
     "layer": 0,
     "testing": [
@@ -293,10 +526,61 @@
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
       "tests/unit/core/test_observability.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/orchestration/test_eod.py",
       "tests/unit/realtime/test_streamer.py",
       "tests/unit/storage/test_normalize_worker.py"
+    ]
+  },
+  "src/core/paths.py": {
+    "deps": [],
+    "layer": 0,
+    "testing": [
+      "tests/unit/cli/test_bars_refresh.py",
+      "tests/unit/cli/test_collect_aftermarket.py",
+      "tests/unit/cli/test_collect_init.py",
+      "tests/unit/cli/test_collect_snapshots.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_gdrive_cleanup.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/cli/test_order.py",
+      "tests/unit/cli/test_toss_program_trades_backfill.py",
+      "tests/unit/cli/test_universe_plan.py",
+      "tests/unit/core/test_config.py",
+      "tests/unit/core/test_deployment_config.py",
+      "tests/unit/core/test_observability.py",
+      "tests/unit/execution/test_contracts.py",
+      "tests/unit/execution/test_gateways.py",
+      "tests/unit/execution/test_journal.py",
+      "tests/unit/execution/test_kis_client.py",
+      "tests/unit/execution/test_ledger.py",
+      "tests/unit/execution/test_oms.py",
+      "tests/unit/execution/test_risk.py",
+      "tests/unit/execution/test_service.py",
+      "tests/unit/marketdata/test_service.py",
+      "tests/unit/marketdata/test_snapshot_contracts.py",
+      "tests/unit/marketdata/test_snapshot_service.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_eod.py",
+      "tests/unit/realtime/test_adapters_kis.py",
+      "tests/unit/realtime/test_kis_sharding.py",
+      "tests/unit/realtime/test_session.py",
+      "tests/unit/realtime/test_streamer.py",
+      "tests/unit/storage/test_normalize_worker.py",
+      "tests/unit/storage/test_quality.py",
+      "tests/unit/storage/test_remote.py",
+      "tests/unit/storage/test_retention.py",
+      "tests/unit/storage/test_snapshot_store.py",
+      "tests/unit/universe/test_aftermarket.py",
+      "tests/unit/universe/test_service.py"
     ]
   },
   "src/core/runtime_env_provisioning.py": {
@@ -307,8 +591,40 @@
     "layer": 0,
     "testing": [
       "tests/unit/cli/test_provision_kis_keypool.py",
+      "tests/unit/core/test_deployment_config.py",
       "tests/unit/core/test_kis_keypool_provisioning.py",
       "tests/unit/core/test_runtime_env_provisioning.py"
+    ]
+  },
+  "src/core/symbols.py": {
+    "deps": [],
+    "layer": 0,
+    "testing": [
+      "tests/unit/cli/test_bars_refresh.py",
+      "tests/unit/cli/test_collect_aftermarket.py",
+      "tests/unit/cli/test_collect_init.py",
+      "tests/unit/cli/test_collect_snapshots.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/cli/test_order.py",
+      "tests/unit/cli/test_toss_program_trades_backfill.py",
+      "tests/unit/cli/test_universe_plan.py",
+      "tests/unit/core/test_symbols.py",
+      "tests/unit/execution/test_kis_client.py",
+      "tests/unit/execution/test_service.py",
+      "tests/unit/marketdata/test_service.py",
+      "tests/unit/marketdata/test_snapshot_service.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/realtime/test_adapters_kis.py",
+      "tests/unit/realtime/test_session.py",
+      "tests/unit/realtime/test_streamer.py",
+      "tests/unit/universe/test_aftermarket.py",
+      "tests/unit/universe/test_ipc.py",
+      "tests/unit/universe/test_service.py"
     ]
   },
   "src/execution/contracts.py": {
@@ -323,7 +639,6 @@
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
       "tests/unit/cli/test_order.py",
-      "tests/unit/cli/test_toss_program_trades_backfill.py",
       "tests/unit/cli/test_universe_plan.py",
       "tests/unit/execution/test_contracts.py",
       "tests/unit/execution/test_gateways.py",
@@ -334,17 +649,21 @@
       "tests/unit/execution/test_service.py",
       "tests/unit/marketdata/test_service.py",
       "tests/unit/marketdata/test_snapshot_service.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/universe/test_aftermarket.py",
       "tests/unit/universe/test_service.py"
     ]
   },
   "src/execution/gateways.py": {
     "deps": [
+      "src/brokers/kis/trading.py",
       "src/core/config.py",
       "src/execution/contracts.py",
       "src/execution/journal.py",
-      "src/execution/kis_client.py",
       "src/execution/ledger.py",
       "src/execution/risk.py"
     ],
@@ -373,23 +692,21 @@
   },
   "src/execution/kis_client.py": {
     "deps": [
+      "src/brokers/kis/auth.py",
+      "src/brokers/kis/data.py",
+      "src/brokers/kis/http.py",
+      "src/brokers/kis/rate.py",
+      "src/brokers/kis/trading.py",
       "src/core/config.py",
       "src/execution/contracts.py"
     ],
     "layer": 3,
     "testing": [
-      "tests/unit/cli/test_bars_refresh.py",
-      "tests/unit/cli/test_collect_snapshots.py",
-      "tests/unit/cli/test_collect_stream.py",
-      "tests/unit/cli/test_main.py",
-      "tests/unit/cli/test_order.py",
-      "tests/unit/cli/test_toss_program_trades_backfill.py",
-      "tests/unit/execution/test_gateways.py",
       "tests/unit/execution/test_kis_client.py",
       "tests/unit/execution/test_service.py",
-      "tests/unit/marketdata/test_service.py",
       "tests/unit/marketdata/test_snapshot_service.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
       "tests/unit/universe/test_aftermarket.py"
     ]
   },
@@ -441,11 +758,15 @@
   },
   "src/execution/service.py": {
     "deps": [
+      "src/brokers/kis/auth.py",
+      "src/brokers/kis/data.py",
+      "src/brokers/kis/http.py",
+      "src/brokers/kis/rate.py",
+      "src/brokers/kis/trading.py",
       "src/core/config.py",
       "src/execution/contracts.py",
       "src/execution/gateways.py",
       "src/execution/journal.py",
-      "src/execution/kis_client.py",
       "src/execution/ledger.py",
       "src/execution/oms.py",
       "src/execution/risk.py"
@@ -459,6 +780,7 @@
     ]
   },
   "src/execution/ticks.py": {
+    "deps": [],
     "layer": 1,
     "testing": [
       "tests/unit/cli/test_collect_stream.py",
@@ -470,9 +792,9 @@
       "tests/unit/execution/test_ticks.py"
     ]
   },
-  "src/marketdata/krx_bars.py": {
+  "src/marketdata/bar_store.py": {
     "deps": [
-      "src/core/errors.py",
+      "src/marketdata/bar_validation.py",
       "src/marketdata/schema.py"
     ],
     "layer": 1,
@@ -484,10 +806,84 @@
       "tests/unit/marketdata/test_krx_bars.py",
       "tests/unit/marketdata/test_service.py",
       "tests/unit/marketdata/test_toss_calendar.py",
-      "tests/unit/orchestration/test_daemon.py"
+      "tests/unit/marketdata/test_toss_program_trades.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_trading_day_gate.py"
+    ]
+  },
+  "src/marketdata/bar_validation.py": {
+    "deps": [
+      "src/core/errors.py"
+    ],
+    "layer": 1,
+    "testing": [
+      "tests/unit/cli/test_bars_refresh.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/cli/test_toss_program_trades_backfill.py",
+      "tests/unit/marketdata/test_krx_bars.py",
+      "tests/unit/marketdata/test_service.py",
+      "tests/unit/marketdata/test_toss_calendar.py",
+      "tests/unit/marketdata/test_toss_program_trades.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_trading_day_gate.py"
+    ]
+  },
+  "src/marketdata/krx_bars.py": {
+    "deps": [
+      "src/marketdata/bar_store.py",
+      "src/marketdata/bar_validation.py",
+      "src/marketdata/schema.py"
+    ],
+    "layer": 1,
+    "testing": [
+      "tests/unit/cli/test_bars_refresh.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/cli/test_toss_program_trades_backfill.py",
+      "tests/unit/marketdata/test_krx_bars.py",
+      "tests/unit/marketdata/test_service.py",
+      "tests/unit/marketdata/test_toss_calendar.py",
+      "tests/unit/marketdata/test_toss_program_trades.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_trading_day_gate.py"
+    ]
+  },
+  "src/marketdata/program_trade_service.py": {
+    "deps": [
+      "src/brokers/kis/rate.py",
+      "src/core/symbols.py",
+      "src/marketdata/toss_calendar.py",
+      "src/marketdata/toss_program_trades.py"
+    ],
+    "layer": 4,
+    "testing": [
+      "tests/unit/cli/test_bars_refresh.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/cli/test_toss_program_trades_backfill.py",
+      "tests/unit/marketdata/test_service.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py"
     ]
   },
   "src/marketdata/schema.py": {
+    "deps": [],
     "layer": 0,
     "testing": [
       "tests/unit/cli/test_bars_refresh.py",
@@ -498,7 +894,13 @@
       "tests/unit/marketdata/test_krx_bars.py",
       "tests/unit/marketdata/test_service.py",
       "tests/unit/marketdata/test_toss_calendar.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/marketdata/test_toss_program_trades.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_trading_day_gate.py",
       "tests/unit/realtime/test_contracts.py",
       "tests/unit/realtime/test_subscription.py",
       "tests/unit/universe/test_policy.py",
@@ -507,10 +909,12 @@
   },
   "src/marketdata/service.py": {
     "deps": [
+      "src/brokers/kis/data.py",
       "src/core/errors.py",
       "src/execution/contracts.py",
-      "src/execution/kis_client.py",
+      "src/marketdata/bar_store.py",
       "src/marketdata/krx_bars.py",
+      "src/marketdata/program_trade_service.py",
       "src/marketdata/schema.py"
     ],
     "layer": 4,
@@ -518,12 +922,41 @@
       "tests/unit/cli/test_bars_refresh.py",
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
-      "tests/unit/cli/test_toss_program_trades_backfill.py",
       "tests/unit/marketdata/test_service.py",
-      "tests/unit/orchestration/test_daemon.py"
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py"
     ]
   },
   "src/marketdata/snapshot_contracts.py": {
+    "deps": [
+      "src/marketdata/snapshot_plan.py",
+      "src/marketdata/snapshot_schema.py",
+      "src/marketdata/snapshot_validation.py"
+    ],
+    "layer": 1,
+    "testing": [
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/cli/test_universe_plan.py",
+      "tests/unit/marketdata/test_snapshot_contracts.py",
+      "tests/unit/marketdata/test_snapshot_service.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/storage/test_snapshot_store.py",
+      "tests/unit/universe/test_service.py"
+    ]
+  },
+  "src/marketdata/snapshot_plan.py": {
+    "deps": [
+      "src/core/config.py"
+    ],
+    "layer": 1,
     "testing": [
       "tests/unit/cli/test_collect_snapshots.py",
       "tests/unit/cli/test_collect_stream.py",
@@ -531,17 +964,71 @@
       "tests/unit/cli/test_universe_plan.py",
       "tests/unit/marketdata/test_snapshot_contracts.py",
       "tests/unit/marketdata/test_snapshot_service.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/storage/test_snapshot_store.py",
+      "tests/unit/universe/test_service.py"
+    ]
+  },
+  "src/marketdata/snapshot_schema.py": {
+    "deps": [],
+    "layer": 1,
+    "testing": [
+      "tests/unit/cli/test_collect_snapshots.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/cli/test_universe_plan.py",
+      "tests/unit/marketdata/test_snapshot_contracts.py",
+      "tests/unit/marketdata/test_snapshot_service.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/storage/test_snapshot_store.py",
       "tests/unit/universe/test_service.py"
     ]
   },
   "src/marketdata/snapshot_service.py": {
+    "deps": [
+      "src/brokers/kis/data.py",
+      "src/core/config.py",
+      "src/core/symbols.py",
+      "src/execution/contracts.py",
+      "src/marketdata/snapshot_plan.py",
+      "src/marketdata/snapshot_schema.py",
+      "src/storage/snapshot_store.py"
+    ],
+    "layer": 4,
     "testing": [
       "tests/unit/cli/test_collect_snapshots.py",
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
       "tests/unit/marketdata/test_snapshot_service.py"
+    ]
+  },
+  "src/marketdata/snapshot_validation.py": {
+    "deps": [
+      "src/marketdata/snapshot_schema.py"
+    ],
+    "layer": 1,
+    "testing": [
+      "tests/unit/cli/test_collect_snapshots.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/cli/test_universe_plan.py",
+      "tests/unit/marketdata/test_snapshot_contracts.py",
+      "tests/unit/marketdata/test_snapshot_service.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/storage/test_snapshot_store.py",
+      "tests/unit/universe/test_service.py"
     ]
   },
   "src/marketdata/toss_calendar.py": {
@@ -557,10 +1044,20 @@
       "tests/unit/cli/test_toss_program_trades_backfill.py",
       "tests/unit/marketdata/test_service.py",
       "tests/unit/marketdata/test_toss_calendar.py",
-      "tests/unit/orchestration/test_daemon.py"
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_trading_day_gate.py"
     ]
   },
   "src/marketdata/toss_program_trades.py": {
+    "deps": [
+      "src/core/errors.py",
+      "src/marketdata/krx_bars.py"
+    ],
+    "layer": 1,
     "testing": [
       "tests/unit/cli/test_bars_refresh.py",
       "tests/unit/cli/test_collect_stream.py",
@@ -568,31 +1065,61 @@
       "tests/unit/cli/test_toss_program_trades_backfill.py",
       "tests/unit/marketdata/test_service.py",
       "tests/unit/marketdata/test_toss_program_trades.py",
-      "tests/unit/orchestration/test_daemon.py"
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py"
     ]
   },
   "src/orchestration/daemon.py": {
     "deps": [
+      "src/brokers/kis/auth.py",
+      "src/brokers/kis/data.py",
+      "src/brokers/kis/http.py",
+      "src/brokers/kis/rate.py",
+      "src/brokers/kis/trading.py",
       "src/core/calendar.py",
       "src/core/config.py",
       "src/core/errors.py",
       "src/core/observability.py",
       "src/execution/contracts.py",
-      "src/execution/kis_client.py",
       "src/marketdata/krx_bars.py",
+      "src/marketdata/program_trade_service.py",
       "src/marketdata/service.py",
       "src/marketdata/toss_calendar.py",
+      "src/marketdata/toss_program_trades.py",
       "src/orchestration/eod.py",
       "src/orchestration/supervisor.py",
+      "src/orchestration/trading_day_gate.py",
       "src/realtime/contracts.py",
       "src/realtime/kis_sharding.py",
       "src/storage/remote.py",
+      "src/storage/snapshot_store.py",
       "src/universe/aftermarket.py",
       "src/universe/ipc.py",
+      "src/universe/policy.py",
       "src/universe/service.py"
     ],
     "layer": 6,
-    "testing": "tests/unit/orchestration/test_daemon.py"
+    "testing": [
+      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py"
+    ]
+  },
+  "src/orchestration/deploy_gate.py": {
+    "deps": [
+      "src/core/calendar.py"
+    ],
+    "layer": 5,
+    "testing": [
+      "tests/unit/core/test_deployment_config.py",
+      "tests/unit/orchestration/test_deploy_gate.py"
+    ]
   },
   "src/orchestration/eod.py": {
     "deps": [
@@ -604,15 +1131,38 @@
     ],
     "layer": 5,
     "testing": [
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/orchestration/test_eod.py"
     ]
   },
   "src/orchestration/supervisor.py": {
+    "deps": [],
     "layer": 5,
     "testing": [
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/orchestration/test_supervisor.py"
+    ]
+  },
+  "src/orchestration/trading_day_gate.py": {
+    "deps": [
+      "src/marketdata/toss_calendar.py"
+    ],
+    "layer": 5,
+    "testing": [
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_trading_day_gate.py"
     ]
   },
   "src/realtime/adapters/kis.py": {
@@ -651,7 +1201,11 @@
       "tests/unit/cli/test_collect_status.py",
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/orchestration/test_eod.py",
       "tests/unit/realtime/test_adapters_kis.py",
       "tests/unit/realtime/test_clock.py",
@@ -671,7 +1225,11 @@
       "tests/unit/cli/test_collect_snapshots.py",
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/orchestration/test_eod.py",
       "tests/unit/realtime/test_adapters_kis.py",
       "tests/unit/realtime/test_adapters_ls.py",
@@ -679,7 +1237,10 @@
       "tests/unit/realtime/test_kis_sharding.py",
       "tests/unit/realtime/test_session.py",
       "tests/unit/realtime/test_streamer.py",
-      "tests/unit/storage/test_journal.py"
+      "tests/unit/storage/test_journal.py",
+      "tests/unit/storage/test_market_phase.py",
+      "tests/unit/storage/test_normalize_worker.py",
+      "tests/unit/storage/test_retention.py"
     ]
   },
   "src/realtime/kis_lease.py": {
@@ -707,7 +1268,11 @@
       "tests/unit/cli/test_collect_snapshots.py",
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/orchestration/test_eod.py",
       "tests/unit/realtime/test_adapters_kis.py",
       "tests/unit/realtime/test_kis_sharding.py",
@@ -726,7 +1291,11 @@
       "tests/unit/cli/test_collect_status.py",
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/orchestration/test_eod.py",
       "tests/unit/realtime/test_adapters_kis.py",
       "tests/unit/realtime/test_manifest.py",
@@ -806,27 +1375,135 @@
       "tests/unit/storage/test_journal.py"
     ]
   },
-  "src/storage/normalize_worker.py": {
+  "src/storage/market_phase.py": {
     "deps": [
-      "src/core/config.py",
-      "src/core/observability.py",
-      "src/storage/retention.py"
+      "src/realtime/contracts.py"
     ],
-    "layer": 3,
-    "testing": [
-      "tests/unit/orchestration/test_daemon.py",
-      "tests/unit/orchestration/test_eod.py",
-      "tests/unit/storage/test_normalize_worker.py"
-    ]
-  },
-  "src/storage/quality.py": {
     "layer": 2,
     "testing": [
       "tests/unit/cli/test_collect_aftermarket.py",
       "tests/unit/cli/test_collect_init.py",
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_eod.py",
+      "tests/unit/realtime/test_adapters_kis.py",
+      "tests/unit/realtime/test_session.py",
+      "tests/unit/realtime/test_streamer.py",
+      "tests/unit/storage/test_market_phase.py",
+      "tests/unit/storage/test_normalize_worker.py",
+      "tests/unit/storage/test_retention.py"
+    ]
+  },
+  "src/storage/normalization.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/core/errors.py",
+      "src/storage/market_phase.py",
+      "src/storage/quality.py"
+    ],
+    "layer": 2,
+    "testing": [
+      "tests/unit/cli/test_collect_aftermarket.py",
+      "tests/unit/cli/test_collect_init.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_eod.py",
+      "tests/unit/realtime/test_adapters_kis.py",
+      "tests/unit/realtime/test_session.py",
+      "tests/unit/realtime/test_streamer.py",
+      "tests/unit/storage/test_normalize_worker.py",
+      "tests/unit/storage/test_retention.py"
+    ]
+  },
+  "src/storage/normalize_worker.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/core/observability.py",
+      "src/storage/normalization.py",
+      "src/storage/retention.py"
+    ],
+    "layer": 3,
+    "testing": [
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_eod.py",
+      "tests/unit/storage/test_normalize_worker.py"
+    ]
+  },
+  "src/storage/quality.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/storage/quality_kis.py",
+      "src/storage/quality_ls.py"
+    ],
+    "layer": 2,
+    "testing": [
+      "tests/unit/cli/test_collect_aftermarket.py",
+      "tests/unit/cli/test_collect_init.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_eod.py",
+      "tests/unit/realtime/test_adapters_kis.py",
+      "tests/unit/realtime/test_session.py",
+      "tests/unit/realtime/test_streamer.py",
+      "tests/unit/storage/test_normalize_worker.py",
+      "tests/unit/storage/test_quality.py",
+      "tests/unit/storage/test_retention.py"
+    ]
+  },
+  "src/storage/quality_kis.py": {
+    "deps": [],
+    "layer": 2,
+    "testing": [
+      "tests/unit/cli/test_collect_aftermarket.py",
+      "tests/unit/cli/test_collect_init.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
+      "tests/unit/orchestration/test_eod.py",
+      "tests/unit/realtime/test_adapters_kis.py",
+      "tests/unit/realtime/test_session.py",
+      "tests/unit/realtime/test_streamer.py",
+      "tests/unit/storage/test_normalize_worker.py",
+      "tests/unit/storage/test_quality.py",
+      "tests/unit/storage/test_retention.py"
+    ]
+  },
+  "src/storage/quality_ls.py": {
+    "deps": [],
+    "layer": 2,
+    "testing": [
+      "tests/unit/cli/test_collect_aftermarket.py",
+      "tests/unit/cli/test_collect_init.py",
+      "tests/unit/cli/test_collect_stream.py",
+      "tests/unit/cli/test_main.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/orchestration/test_eod.py",
       "tests/unit/realtime/test_adapters_kis.py",
       "tests/unit/realtime/test_session.py",
@@ -843,7 +1520,12 @@
     ],
     "layer": 2,
     "testing": [
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/cli/test_gdrive_cleanup.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/orchestration/test_eod.py",
       "tests/unit/storage/test_remote.py"
     ]
@@ -851,7 +1533,7 @@
   "src/storage/retention.py": {
     "deps": [
       "src/core/errors.py",
-      "src/storage/quality.py"
+      "src/storage/normalization.py"
     ],
     "layer": 2,
     "testing": [
@@ -859,7 +1541,11 @@
       "tests/unit/cli/test_collect_init.py",
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/orchestration/test_eod.py",
       "tests/unit/realtime/test_adapters_kis.py",
       "tests/unit/realtime/test_session.py",
@@ -869,31 +1555,49 @@
     ]
   },
   "src/storage/snapshot_store.py": {
+    "deps": [
+      "src/core/config.py",
+      "src/core/errors.py",
+      "src/marketdata/snapshot_schema.py",
+      "src/marketdata/snapshot_validation.py"
+    ],
+    "layer": 2,
     "testing": [
       "tests/unit/cli/test_collect_snapshots.py",
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
       "tests/unit/cli/test_universe_plan.py",
       "tests/unit/marketdata/test_snapshot_service.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/storage/test_snapshot_store.py",
       "tests/unit/universe/test_service.py"
     ]
   },
   "src/universe/aftermarket.py": {
     "deps": [
+      "src/brokers/kis/data.py",
       "src/core/errors.py",
-      "src/execution/kis_client.py",
+      "src/core/symbols.py",
       "src/universe/ipc.py"
     ],
+    "layer": 4,
     "testing": [
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/universe/test_aftermarket.py"
     ]
   },
   "src/universe/ipc.py": {
     "deps": [
-      "src/core/errors.py"
+      "src/core/errors.py",
+      "src/core/symbols.py"
     ],
     "layer": 2,
     "testing": [
@@ -903,7 +1607,11 @@
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
       "tests/unit/cli/test_universe_plan.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/realtime/test_adapters_kis.py",
       "tests/unit/realtime/test_session.py",
       "tests/unit/realtime/test_streamer.py",
@@ -922,7 +1630,11 @@
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
       "tests/unit/cli/test_universe_plan.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/realtime/test_contracts.py",
       "tests/unit/realtime/test_subscription.py",
       "tests/unit/universe/test_policy.py",
@@ -931,6 +1643,9 @@
   },
   "src/universe/service.py": {
     "deps": [
+      "src/execution/contracts.py",
+      "src/marketdata/snapshot_contracts.py",
+      "src/storage/snapshot_store.py",
       "src/universe/ipc.py",
       "src/universe/policy.py"
     ],
@@ -939,17 +1654,12 @@
       "tests/unit/cli/test_collect_stream.py",
       "tests/unit/cli/test_main.py",
       "tests/unit/cli/test_universe_plan.py",
-      "tests/unit/orchestration/test_daemon.py",
+      "tests/unit/orchestration/test_daemon_aftermarket.py",
+      "tests/unit/orchestration/test_daemon_eod.py",
+      "tests/unit/orchestration/test_daemon_orchestration.py",
+      "tests/unit/orchestration/test_daemon_shutdown.py",
+      "tests/unit/orchestration/test_daemon_supervision.py",
       "tests/unit/universe/test_service.py"
     ]
-  },
-  "src/orchestration/deploy_gate.py": {
-    "testing": "tests/unit/orchestration/test_deploy_gate.py"
-  },
-  "src/storage/market_phase.py": {
-    "testing": "tests/unit/storage/test_market_phase.py"
-  },
-  "src/orchestration/trading_day_gate.py": {
-    "testing": "tests/unit/orchestration/test_trading_day_gate.py"
   }
 }

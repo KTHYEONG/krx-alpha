@@ -11,6 +11,13 @@ from enum import StrEnum
 import polars as pl
 
 from src.core.config import DataQualitySettings
+from src.storage.quality_kis import decode_kis_quotes, decode_kis_ticks
+from src.storage.quality_ls import decode_ls_quotes, decode_ls_ticks
+
+_decode_tick_chunk = decode_ls_ticks
+_decode_ls_quote_chunk = decode_ls_quotes
+_decode_kis_tick_chunk = decode_kis_ticks
+_decode_kis_quote_frame = decode_kis_quotes
 
 _TICK_STREAM: str = "H0STCNT0"
 _TICK_STREAMS: tuple[str, ...] = ("H0STCNT0", "H0NXCNT0")
@@ -177,118 +184,6 @@ def evaluate_stream_quality(
     return DqVerdict(status=status, tick=tick, quote=quote, reasons=tuple(reasons))
 
 
-def _safe_parse_ls_body(raw: str) -> dict[str, object] | None:
-    try:
-        body = json.loads(raw)["body"]
-        # 벡터화 경로(str.json_decode)는 struct dtype에 없는 키를 null로 관대하게 처리한다 —
-        # 폴백도 동일하게 .get()으로 맞춰야 mdchecnt/mschecnt 같은 보조 필드 부재가
-        # shcode/price 등 핵심 필드까지 통째로 decode_fail 처리하는 비대칭을 만들지 않는다.
-        return {field: body.get(field) for field in _TICK_BODY_FIELDS}
-    except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
-        return None
-
-
-def _safe_parse_ls_quote_body(raw: str) -> dict[str, object] | None:
-    try:
-        body = json.loads(raw)["body"]
-        return {field: body[field] for field in _QUOTE_BODY_FIELDS}
-    except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
-        return None
-
-
-def _decode_tick_chunk(chunk: pl.DataFrame) -> pl.DataFrame:
-    body_dtype = pl.Struct(dict.fromkeys(_TICK_BODY_FIELDS, pl.String))
-    raw_dtype = pl.Struct({"header": pl.Struct({"tr_cd": pl.String, "tr_key": pl.String}), "body": body_dtype})
-    try:
-        decoded = chunk.with_columns(pl.col("raw").str.json_decode(raw_dtype).alias("decoded"))
-        raw_fields = decoded.with_columns(
-            shcode=pl.col("decoded").struct.field("body").struct.field("shcode"),
-            price_raw=pl.col("decoded").struct.field("body").struct.field("price"),
-            cvolume_raw=pl.col("decoded").struct.field("body").struct.field("cvolume"),
-            volume_raw=pl.col("decoded").struct.field("body").struct.field("volume"),
-            change_raw=pl.col("decoded").struct.field("body").struct.field("change"),
-            sign=pl.col("decoded").struct.field("body").struct.field("sign"),
-            drate_raw=pl.col("decoded").struct.field("body").struct.field("drate"),
-            mdchecnt_raw=pl.col("decoded").struct.field("body").struct.field("mdchecnt"),
-            mschecnt_raw=pl.col("decoded").struct.field("body").struct.field("mschecnt"),
-        ).select(
-            "shcode", "price_raw", "cvolume_raw", "volume_raw", "change_raw", "sign", "drate_raw",
-            "mdchecnt_raw", "mschecnt_raw", "recv_wall_ns",
-        )
-    except pl.exceptions.ComputeError:
-        # 벤더 JSON 파싱 자체가 실패한 배치: 행 단위 폴백은 문자열 그대로 남기고
-        # 숫자 캐스팅은 아래 strict=False cast 한 곳에서만 수행한다 (ValueError 이중 발생 지점 제거).
-        fallback: list[dict[str, object]] = []
-        for raw, wall in zip(chunk["raw"].to_list(), chunk["recv_wall_ns"].to_list(), strict=True):
-            row = _safe_parse_ls_body(raw)
-            if row is None:
-                row = {
-                    "shcode": None, "price": None, "cvolume": None, "volume": None, "change": None,
-                    "sign": None, "drate": None, "mdchecnt": None, "mschecnt": None,
-                }
-            fallback.append({
-                "shcode": row["shcode"],
-                "price_raw": row["price"],
-                "cvolume_raw": row["cvolume"],
-                "volume_raw": row["volume"],
-                "change_raw": row["change"],
-                "sign": row["sign"],
-                "drate_raw": row["drate"],
-                "mdchecnt_raw": row["mdchecnt"],
-                "mschecnt_raw": row["mschecnt"],
-                "recv_wall_ns": wall,
-            })
-        raw_fields = pl.DataFrame(
-            fallback,
-            schema={
-                "shcode": pl.String, "price_raw": pl.String, "cvolume_raw": pl.String,
-                "volume_raw": pl.String, "change_raw": pl.String, "sign": pl.String,
-                "drate_raw": pl.String, "mdchecnt_raw": pl.String, "mschecnt_raw": pl.String,
-                "recv_wall_ns": pl.Int64,
-            },
-            strict=False,
-        )
-    return raw_fields
-
-
-def _decode_kis_tick_chunk(chunk: pl.DataFrame) -> pl.DataFrame:
-    rows: list[dict[str, object]] = []
-    for raw, wall in zip(chunk["raw"].to_list(), chunk["recv_wall_ns"].to_list(), strict=True):
-        parts = raw.split("^") if isinstance(raw, str) else []
-        if len(parts) < _KIS_TICK_MIN_FIELDS:
-            rows.append({
-                "shcode": None, "price_raw": None, "cvolume_raw": None, "volume_raw": None,
-                "change_raw": None, "sign": None, "drate_raw": None,
-                "mdchecnt_raw": None, "mschecnt_raw": None, "recv_wall_ns": wall,
-            })
-            continue
-        change_raw = parts[_KIS_TICK_CHANGE]
-        if isinstance(change_raw, str) and change_raw.startswith("-"):
-            change_raw = change_raw[1:]
-        rows.append({
-            "shcode": parts[_KIS_TICK_SYMBOL],
-            "price_raw": parts[_KIS_TICK_PRICE],
-            "cvolume_raw": parts[_KIS_TICK_CVOLUME],
-            "volume_raw": parts[_KIS_TICK_VOLUME],
-            "change_raw": change_raw,
-            "sign": parts[_KIS_TICK_SIGN],
-            "drate_raw": parts[_KIS_TICK_DRATE],
-            "mdchecnt_raw": parts[_KIS_TICK_MDCHECNT],
-            "mschecnt_raw": parts[_KIS_TICK_MSCHECNT],
-            "recv_wall_ns": wall,
-        })
-    return pl.DataFrame(
-        rows,
-        schema={
-            "shcode": pl.String, "price_raw": pl.String, "cvolume_raw": pl.String,
-            "volume_raw": pl.String, "change_raw": pl.String, "sign": pl.String,
-            "drate_raw": pl.String, "mdchecnt_raw": pl.String, "mschecnt_raw": pl.String,
-            "recv_wall_ns": pl.Int64,
-        },
-        strict=False,
-    )
-
-
 def _split_kis_ls(chunk: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
     if "vendor" not in chunk.columns:
         return chunk.slice(0, 0), chunk
@@ -305,70 +200,6 @@ def _decode_tick_chunk_mixed(chunk: pl.DataFrame) -> pl.DataFrame:
     if ls.height > 0:
         parts.append(_decode_tick_chunk(ls))
     return pl.concat(parts)
-
-
-def _decode_kis_quote_frame(chunk: pl.DataFrame) -> pl.DataFrame:
-    data: dict[str, list[object]] = {"shcode": [], "hotime": [], "totofferrem": [], "totbidrem": []}
-    for k in range(1, _QUOTE_LEVELS + 1):
-        data[f"offerho{k}"] = []
-        data[f"bidho{k}"] = []
-    for k in range(1, _QUOTE_LEVELS + 1):
-        data[f"offerrem{k}"] = []
-        data[f"bidrem{k}"] = []
-    for raw in chunk["raw"].to_list():
-        parts = raw.split("^") if isinstance(raw, str) else []
-        if len(parts) < _KIS_QUOTE_MIN_FIELDS:
-            for key in data:
-                data[key].append(None)
-            continue
-        data["shcode"].append(parts[_KIS_QUOTE_SYMBOL])
-        data["hotime"].append(parts[_KIS_QUOTE_HOTIME])
-        for k in range(1, _QUOTE_LEVELS + 1):
-            data[f"offerho{k}"].append(parts[_KIS_QUOTE_ASK_BASE + k - 1])
-            data[f"bidho{k}"].append(parts[_KIS_QUOTE_BID_BASE + k - 1])
-        for k in range(1, _QUOTE_LEVELS + 1):
-            data[f"offerrem{k}"].append(parts[_KIS_QUOTE_ASKREM_BASE + k - 1])
-            data[f"bidrem{k}"].append(parts[_KIS_QUOTE_BIDREM_BASE + k - 1])
-        data["totofferrem"].append(parts[_KIS_QUOTE_TOT_ASK])
-        data["totbidrem"].append(parts[_KIS_QUOTE_TOT_BID])
-    num_quote_fields = [f for f in _QUOTE_BODY_FIELDS if f != "shcode"]
-    raw_frame = pl.DataFrame(
-        data,
-        schema={**{"shcode": pl.String}, **dict.fromkeys(num_quote_fields, pl.String)},
-        strict=False,
-    )
-    casts = [pl.col("shcode")]
-    casts.extend(pl.col(c).cast(pl.Int32, strict=False).alias(c) for c in num_quote_fields)
-    return raw_frame.select(casts)
-
-
-def _decode_ls_quote_chunk(chunk: pl.DataFrame) -> pl.DataFrame:
-    body_dtype = pl.Struct(dict.fromkeys(_QUOTE_BODY_FIELDS, pl.String))
-    raw_dtype = pl.Struct({"header": pl.Struct({"tr_cd": pl.String, "tr_key": pl.String}), "body": body_dtype})
-    num_fields = [f for f in _QUOTE_BODY_FIELDS if f != "shcode"]
-    try:
-        decoded = chunk.with_columns(pl.col("raw").str.json_decode(raw_dtype).alias("decoded"))
-        selects = [pl.col("decoded").struct.field("body").struct.field("shcode").alias("shcode")]
-        selects.extend(
-            pl.col("decoded").struct.field("body").struct.field(c).cast(pl.Int32, strict=False).alias(c) for c in num_fields
-        )
-        return decoded.select(selects)
-    except pl.exceptions.ComputeError:
-        fallback: list[dict[str, object]] = []
-        for raw in chunk["raw"].to_list():
-            row = _safe_parse_ls_quote_body(raw)
-            if row is None:
-                fallback.append(dict.fromkeys(_QUOTE_BODY_FIELDS, None))
-            else:
-                fallback.append({field: row[field] for field in _QUOTE_BODY_FIELDS})
-        raw_frame = pl.DataFrame(
-            fallback,
-            schema={**{"shcode": pl.String}, **dict.fromkeys(num_fields, pl.String)},
-            strict=False,
-        )
-        casts = [pl.col("shcode")]
-        casts.extend(pl.col(c).cast(pl.Int32, strict=False).alias(c) for c in num_fields)
-        return raw_frame.select(casts)
 
 
 def _summarize_tick_fields(raw_fields: pl.DataFrame, *, rows: int) -> TickQualitySummary:

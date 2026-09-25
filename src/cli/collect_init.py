@@ -13,27 +13,29 @@ from src.realtime.session import SessionConfig, bootstrap_session
 
 logger = logging.getLogger(__name__)
 
-_DEFAULTS = CollectorSettings()
-
 
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """'collect-init' 서브커맨드를 등록한다."""
+    defaults = CollectorSettings()
     parser = subparsers.add_parser("collect-init")
     parser.add_argument("--session-date", required=True)
     parser.add_argument("--journal-root", required=True)
     parser.add_argument("--manifest-path", required=True)
     parser.add_argument("--candidates-path", required=True)
-    parser.add_argument("--ntp-host", default=_DEFAULTS.ntp_host)
-    parser.add_argument("--slot-budget", type=int, default=_DEFAULTS.subscription_pair_budget)
-    parser.add_argument("--max-clock-offset-ns", type=int, default=_DEFAULTS.max_clock_offset_ns)
-    parser.add_argument("--streams", default=",".join(_DEFAULTS.streams))
-    parser.add_argument("--vendor", default=_DEFAULTS.vendor)
+    parser.add_argument("--ntp-host", default=defaults.ntp_host)
+    parser.add_argument("--slot-budget", type=int, default=defaults.subscription_pair_budget)
+    parser.add_argument("--max-clock-offset-ns", type=int, default=defaults.max_clock_offset_ns)
+    parser.add_argument("--streams", default=",".join(defaults.streams))
+    parser.add_argument("--vendor", default=defaults.vendor)
     parser.add_argument("--archive-root", default=None)
+    parser.add_argument("--min-free-disk-gb", type=float, default=defaults.min_free_disk_gb)
+    parser.add_argument("--journal-retain-days", type=int, default=defaults.journal_retain_days)
     parser.set_defaults(handler=run)
 
 
 def run(args: argparse.Namespace) -> int:
     """수집 세션을 부트스트랩하고 manifest 를 저장한다."""
+    fallback = CollectorSettings()
     cfg = SessionConfig(
         session_date=dt.date.fromisoformat(str(args.session_date)),
         journal_root=pathlib.Path(str(args.journal_root)),
@@ -45,6 +47,8 @@ def run(args: argparse.Namespace) -> int:
         desired_streams=tuple(str(args.streams).split(",")),
         vendor=str(args.vendor),
         archive_root=(pathlib.Path(str(args.archive_root)) if getattr(args, "archive_root", None) else None),
+        min_free_disk_gb=float(getattr(args, "min_free_disk_gb", fallback.min_free_disk_gb)),
+        journal_retain_days=int(getattr(args, "journal_retain_days", fallback.journal_retain_days)),
     )
     try:
         session = bootstrap_session(cfg)

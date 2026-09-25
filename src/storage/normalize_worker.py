@@ -11,7 +11,8 @@ from collections.abc import Callable, Sequence
 
 from src.core.config import CollectorSettings, DataQualitySettings, ObservabilitySettings, child_process_env
 from src.core.observability import configure_logging
-from src.storage.retention import L1NormalizationError, L1WorkerCrashError, normalize_l0_partition
+from src.storage.normalization import L1NormalizationError, normalize_l0_partition
+from src.storage.retention import L1WorkerCrashError
 
 EXIT_DATA_FAULT: int = 3
 CHILD_MALLOC_CONF: str = "dirty_decay_ms:0,muzzy_decay_ms:0"

@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
+from src.brokers.kis.trading import TR_CANCEL, KisTradingClient, build_cancel_body, build_order_body, order_tr_id
 from src.core.config import ExecutionMode, KisCredentials
 from src.execution.contracts import (
     BrokerOrderStatus,
@@ -21,7 +22,6 @@ from src.execution.contracts import (
     Side,
 )
 from src.execution.journal import OrderJournal
-from src.execution.kis_client import TR_CANCEL, build_cancel_body, build_order_body, order_tr_id
 from src.execution.ledger import Ledger
 from src.execution.risk import reference_price
 
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 class LiveOrderClient(Protocol):
-    """LiveGateway 가 사용하는 클라이언트 경계 (실전 KisRestClient)."""
+    """LiveGateway 가 사용하는 클라이언트 경계 (실전 KisTradingClient)."""
 
     def post_order(self, tr_id: str, body: dict[str, str]) -> BrokerOutcome: ...
     def get_daily_orders(self, day: dt.date) -> list[BrokerOrderStatus]: ...
@@ -168,12 +168,12 @@ class LiveGateway:
     def __init__(
         self,
         *,
-        client: LiveOrderClient,
+        client: KisTradingClient,
         creds: KisCredentials,
         journal: OrderJournal,
         today: Callable[[], dt.date],
     ) -> None:
-        self._client = client
+        self._client: KisTradingClient | LiveOrderClient = client
         self._creds = creds
         self._journal = journal
         self._today = today

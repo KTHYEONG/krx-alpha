@@ -49,6 +49,8 @@ class SessionConfig:
     ntp_fallback_hosts: tuple[str, ...] = ()
     route: StreamRoute | None = None
     shard: AftermarketShard | None = None
+    min_free_disk_gb: float = 3.0
+    journal_retain_days: int = 3
 
 
 @dataclass
@@ -59,6 +61,7 @@ class CollectorSession:
     manifest_path: pathlib.Path
     schedule: SessionSchedule = field(default_factory=SessionSchedule)
     route: StreamRoute | None = None
+    min_free_disk_gb: float = 3.0
 
     def current_state(self, now_dt: dt.datetime | None = None) -> SessionState:
         current = now_dt or dt.datetime.now(dt.UTC)
@@ -83,7 +86,7 @@ class CollectorSession:
         symbol: str = "",
         exchange_event_time: str = "",
     ) -> None:
-        if not check_disk_watermark(self.manifest_path.parent, min_free_gb=3.0): raise StorageExhaustedError('free disk below watermark')  # noqa: E701
+        if not check_disk_watermark(self.manifest_path.parent, min_free_gb=self.min_free_disk_gb): raise StorageExhaustedError('free disk below watermark')  # noqa: E701
         route = getattr(self, "route", None)
         # 라우팅 세션은 (venue, session, stream) 파티션 키로 검증한다.
         # 경로 불일치 프레임은 저널 미스 KeyError 로 쓰기 전에 거부된다 (모호한 파티션 기록 방지).
@@ -121,19 +124,42 @@ class CollectorSession:
 
 
 def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, now_ns: int | None = None) -> CollectorSession:
+    """Start a collection session only after a measured clock passes its offset gate.
+
+    Args:
+        cfg: Session paths, streams, NTP hosts, and maximum clock offset.
+        ntp_client: Optional injected NTP client for a deterministic boundary.
+        now_ns: Optional supplied start timestamp.
+
+    Returns:
+        A session with a persisted, measured clock offset.
+
+    Raises:
+        ClockUnsyncedError: Every configured host failed measurement, or
+            the measured offset exceeded cfg.max_clock_offset_ns.
+    """
+    if not cfg.min_free_disk_gb > 0:
+        raise ValueError("min_free_disk_gb must be positive")
+    if cfg.journal_retain_days < 0:
+        raise ValueError("journal_retain_days must be nonnegative")
+    hosts = (cfg.ntp_host, *cfg.ntp_fallback_hosts)
     offset_ns: int | None = None
-    for host in (cfg.ntp_host, *cfg.ntp_fallback_hosts):
+    for host in hosts:
         try:
             offset_ns = measure_ntp_offset_ns(host, client=ntp_client)
             break
         except ClockUnsyncedError:
             logger.warning("[DATA] stage=ntp_probe status=FAIL host=%s", host)
-    clock_status = "measured" if offset_ns is not None else "unmeasured"
     if offset_ns is None:
         logger.critical(
-            "[DATA] stage=bootstrap status=DEGRADED reason=ntp_unmeasured hosts=%d",
-            1 + len(cfg.ntp_fallback_hosts),
+            "[DATA] stage=bootstrap status=FAIL reason=ntp_unmeasured hosts=%d",
+            len(hosts),
         )
+        raise ClockUnsyncedError(f"ntp unreachable: all {len(hosts)} hosts failed")
+    if abs(offset_ns) > cfg.max_clock_offset_ns:
+        raise ClockUnsyncedError(f"clock offset {offset_ns}ns exceeds {cfg.max_clock_offset_ns}ns")
+    measured_ns: int = offset_ns
+    clock_status = "measured"
     started = now_ns if now_ns is not None else time.time_ns()
     manifest: SessionManifest | None = None
     if cfg.manifest_path.exists():
@@ -148,7 +174,7 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
             loaded = None
         if loaded is not None and loaded.session_date == cfg.session_date:
             manifest = loaded
-            manifest.clock_offset_ns = offset_ns or 0
+            manifest.clock_offset_ns = measured_ns
             manifest.clock_status = clock_status
     if manifest is None:
         venue = cfg.route.venue.value if cfg.route is not None else MarketVenue.KRX.value
@@ -159,7 +185,7 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
             expected_close_ns = int(close_at.timestamp() * 1_000_000_000)
         manifest = SessionManifest(
             session_date=cfg.session_date,
-            clock_offset_ns=offset_ns or 0,
+            clock_offset_ns=measured_ns,
             started_at_ns=started,
             clock_status=clock_status,
             venue=venue,
@@ -193,10 +219,10 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
         }
     else:
         journals = {(cfg.vendor, stream): L0JournalWriter(root=cfg.journal_root, vendor=cfg.vendor, stream=stream) for stream in cfg.desired_streams}
-    prune_old_journals(cfg.journal_root, retain_days=3, reference_date=cfg.session_date, archive_root=cfg.archive_root)
+    prune_old_journals(cfg.journal_root, archive_root=cfg.archive_root, retain_days=cfg.journal_retain_days, reference_date=cfg.session_date)
     session = CollectorSession(
         manifest=manifest, registry=registry, journals=journals, manifest_path=cfg.manifest_path, schedule=cfg.schedule,
-        route=cfg.route,
+        route=cfg.route, min_free_disk_gb=cfg.min_free_disk_gb,
     )
     if stored is not None and "rev" in stored:
         manifest.candidates_rev = int(cast(Any, stored["rev"]))
@@ -208,8 +234,6 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
             "clock_status": clock_status,
         }
     )
-    if clock_status == "measured":
-        manifest.assert_clock_within(max_offset_ns=cfg.max_clock_offset_ns)
     session.persist()
     logger.info(
         "[DATA] stage=bootstrap pairs=%d offset_ns=%d state=%s status=OK",

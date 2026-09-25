@@ -147,7 +147,7 @@ EOD 배치 단계에서 동일 `(conn_id, conn_seq)`로 중복을 제거하고 �
 ### 4.1 Time Conventions & Clock Synchronization
 1. **Timezone**: 모든 거래소 일정, 장 개폐 시각, 일별 파티셔닝은 `Asia/Seoul` (KST, UTC+9)을 기준으로 합니다.
 2. **Dual Timestamps**: 각 틱 메시지는 레이턴시 측정을 위한 `recv_mono_ns`(`time.monotonic_ns()`)와 시계열 정렬을 위한 `recv_wall_ns`(`time.time_ns()`)를 동시에 기록합니다.
-3. **NTP Clock Gate**: WSL2 가상머신 또는 컨테이너의 시간 편차(+1000ms 이상)가 호가 순서 왜곡을 유발하는 것을 방지하기 위해, 세션 기동 시 `kr.pool.ntp.org`의 중간값(Median) 오프셋을 실측하여 2초 초과 시 세션 진입을 즉시 거부합니다.
+3. **NTP Clock Gate**: WSL2 가상머신 또는 컨테이너의 시간 편차(+1000ms 이상)가 호가 순서 왜곡을 유발하는 것을 방지하기 위해, 세션 기동 시 `kr.pool.ntp.org`의 중간값(Median) 오프셋을 기본 호스트 뒤 폴백 호스트 순서대로 실측하여, 모든 호스트 측정 실패 또는 2초 초과 시 새 세션 진입을 즉시 거부합니다. 과거 매니페스트의 clock_status=unmeasured 값은 읽기 호환용으로만 유지됩니다.
 
 ### 4.2 Look-Ahead Bias Prevention
 * `select_universe` 함수는 인자로 전달된 `decision_date`를 초과하는 미래 일봉이 입력 데이터셋에 1행이라도 존재할 경우 즉시 `ValueError("lookahead: max date exceeds decision_date")`를 발생시키며 즉시 중단됩니다.

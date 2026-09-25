@@ -56,6 +56,8 @@ async def _run_stream(args: argparse.Namespace) -> int:
         vendor=settings.vendor,
         degraded_reason=getattr(args, "degraded_reason", None),
         ntp_fallback_hosts=settings.ntp_fallback_hosts,
+        min_free_disk_gb=settings.min_free_disk_gb,
+        journal_retain_days=settings.journal_retain_days,
     )
     session = bootstrap_session(cfg)
     stop = asyncio.Event()

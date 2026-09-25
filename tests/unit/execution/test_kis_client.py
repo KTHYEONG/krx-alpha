@@ -1,4 +1,27 @@
 
+def test_legacy_kis_facade_delegates_get_operations(monkeypatch, tmp_path) -> None:
+    from src.execution.kis_client import KisRestClient, RateLimiter
+    from tests.unit.execution.fakes import T0, make_creds
+
+    client = KisRestClient(
+        creds=make_creds(), session=object(), token_cache_path=tmp_path / "token.json",
+        limiter=RateLimiter(1000.0, sleep=lambda _: None), now=lambda: T0, timeout_s=1.0,
+    )
+    seen: list[tuple[object, ...]] = []
+    monkeypatch.setattr(client._get_transport, "headers", lambda *args: seen.append(("headers", *args)) or {"tr_id": args[0]})
+    monkeypatch.setattr(client._get_transport, "get", lambda *args: seen.append(("get", *args)) or ({"output": "ok"}, ""))
+    monkeypatch.setattr(client._get_transport, "get_paged", lambda *args: seen.append(("paged", *args)) or [{"item": 1}])
+
+    assert client._headers("TR", "next") == {"tr_id": "TR"}
+    assert client._get("/path", "TR", {"symbol": "005930"}, "next") == ({"output": "ok"}, "")
+    assert client._get_paged("/path", "TR", {"symbol": "005930"}, "output") == [{"item": 1}]
+    assert seen == [
+        ("headers", "TR", "next"),
+        ("get", "/path", "TR", {"symbol": "005930"}, "next"),
+        ("paged", "/path", "TR", {"symbol": "005930"}, "output"),
+    ]
+
+
 def test_rate_limiter_spaces_requests_by_interval() -> None:
     # Given: 2 req/s (모노토닉 시계/수면 주입)
     from src.execution.kis_client import RateLimiter
@@ -100,7 +123,7 @@ def test_access_token_rechecks_cache_after_cross_process_lock(monkeypatch, tmp_p
         limiter=RateLimiter(1000.0, sleep=lambda _: None), now=lambda: FixedClock(dt.datetime(2026, 9, 15, 9, tzinfo=dt.UTC))(), timeout_s=1.0,
     )
     results = iter([None, ("cached-after-lock", dt.datetime(2026, 9, 16, 9, tzinfo=dt.UTC))])
-    monkeypatch.setattr(client, "_read_valid_token", lambda _now: next(results))
+    monkeypatch.setattr(client._tokens, "_read_valid_token", lambda _now: next(results))
     assert client.access_token() == "cached-after-lock"
 
 def test_get_quote_parses_price_and_ten_level_book(tmp_path) -> None:

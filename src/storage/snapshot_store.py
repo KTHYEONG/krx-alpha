@@ -11,10 +11,12 @@ import polars as pl
 
 from src.core.config import DataPaths
 from src.core.errors import KrxAlphaError
-from src.marketdata.snapshot_contracts import (
+from src.marketdata.snapshot_schema import (
     SNAPSHOT_DEDUP_KEYS,
     SNAPSHOT_SCHEMAS,
     SnapshotDataset,
+)
+from src.marketdata.snapshot_validation import (
     normalize_legacy_snapshot_columns,
     snapshot_row_violations,
 )

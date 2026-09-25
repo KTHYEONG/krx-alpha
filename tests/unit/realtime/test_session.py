@@ -37,6 +37,33 @@ def test_session_current_state_follows_injected_schedule(tmp_path) -> None:
 """수집 세션 composition root 유닛 테스트."""
 
 
+def test_bootstrap_session_rejects_invalid_retention_and_disk_limits(tmp_path) -> None:
+    import datetime as dt
+    from dataclasses import replace
+
+    import pytest
+
+    from src.realtime.session import SessionConfig, bootstrap_session
+
+    cfg = SessionConfig(
+        session_date=dt.date(2026, 9, 14),
+        journal_root=tmp_path / "l0",
+        manifest_path=tmp_path / "session.json",
+        candidates_path=tmp_path / "candidates.json",
+        ntp_host="primary",
+        slot_budget=1,
+        max_clock_offset_ns=2_000_000_000,
+        desired_streams=("H0STCNT0",),
+        vendor="ls",
+    )
+
+    with pytest.raises(ValueError, match="min_free_disk_gb must be positive"):
+        bootstrap_session(replace(cfg, min_free_disk_gb=0.0))
+    with pytest.raises(ValueError, match="journal_retain_days must be nonnegative"):
+        bootstrap_session(replace(cfg, journal_retain_days=-1))
+    assert not cfg.manifest_path.exists()
+
+
 
 def test_bootstrap_session_wires_primitives_and_persists_manifest(tmp_path):
     # Given: 후보 2종목이 담긴 candidates.json + 가짜 NTP 클라이언트(offset 1.089s)
@@ -494,12 +521,49 @@ def test_bootstrap_session_falls_back_to_secondary_ntp_host(tmp_path, monkeypatc
     assert "stage=ntp_probe status=FAIL host=primary" in caplog.text
 
 
-def test_bootstrap_session_collects_with_unmeasured_clock_when_all_ntp_hosts_fail(tmp_path, monkeypatch, caplog) -> None:
+def test_bootstrap_session_rejects_when_all_ntp_hosts_fail(tmp_path, monkeypatch, caplog) -> None:
+
+    import datetime as dt
+    import logging
+
+    import pytest
+
+    from src.realtime.clock import ClockUnsyncedError
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+
+    def cfg_for(day, **extra):
+        return SessionConfig(session_date=day, journal_root=tmp_path / "l0", manifest_path=tmp_path / "s.json",
+                             candidates_path=cp, ntp_host="primary", slot_budget=200, max_clock_offset_ns=2_000_000_000,
+                             desired_streams=("H0STCNT0",), vendor="ls", **extra)
+
+    import src.realtime.session as session_mod
+
+    def _dead(host, *, client=None):
+        raise ClockUnsyncedError(f"ntp unreachable: {host}")
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", _dead)
+
+    with caplog.at_level(logging.CRITICAL), pytest.raises(ClockUnsyncedError):
+        bootstrap_session(cfg_for(dt.date(2026, 9, 14), ntp_fallback_hosts=("secondary",)), now_ns=1)
+
+    assert "stage=bootstrap status=FAIL reason=ntp_unmeasured hosts=2" in caplog.text
+    assert not (tmp_path / "s.json").exists()
+    assert not (tmp_path / "s.json.corrupt").exists()
+    assert not (tmp_path / "l0").exists()
+
+
+def test_bootstrap_session_preserves_manifest_when_ntp_gate_fails(tmp_path, monkeypatch) -> None:
 
     import datetime as dt
     import json
-    import logging
 
+    import pytest
+
+    from src.realtime.clock import ClockUnsyncedError
     from src.realtime.session import SessionConfig, bootstrap_session
     from src.universe.ipc import write_candidates
 
@@ -518,20 +582,92 @@ def test_bootstrap_session_collects_with_unmeasured_clock_when_all_ntp_hosts_fai
                              candidates_path=cp, ntp_host="primary", slot_budget=200, max_clock_offset_ns=2_000_000_000,
                              desired_streams=("H0STCNT0",), vendor="ls", **extra)
 
+    bootstrap_session(cfg_for(dt.date(2026, 9, 14)), ntp_client=_FC(), now_ns=1)
+    before = (tmp_path / "s.json").read_bytes()
+
     import src.realtime.session as session_mod
-    from src.realtime.clock import ClockUnsyncedError
 
     def _dead(host, *, client=None):
         raise ClockUnsyncedError(f"ntp unreachable: {host}")
 
     monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", _dead)
 
-    with caplog.at_level(logging.CRITICAL):
-        session = bootstrap_session(cfg_for(dt.date(2026, 9, 14), ntp_fallback_hosts=("secondary",)), now_ns=1)
+    with pytest.raises(ClockUnsyncedError):
+        bootstrap_session(cfg_for(dt.date(2026, 9, 14), ntp_fallback_hosts=("secondary",)), now_ns=2)
 
-    assert session.manifest.clock_status == "unmeasured"
-    assert session.manifest.clock_offset_ns == 0
-    assert "stage=bootstrap status=DEGRADED reason=ntp_unmeasured hosts=2" in caplog.text
+    assert (tmp_path / "s.json").read_bytes() == before
+    assert not (tmp_path / "s.json.corrupt").exists()
+    assert len(json.loads(before.decode("utf-8"))["boots"]) == 1
+
+
+def test_bootstrap_session_rejects_over_limit_before_side_effects(tmp_path, monkeypatch) -> None:
+
+    import datetime as dt
+
+    import pytest
+
+    from src.realtime.clock import ClockUnsyncedError
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+    cfg = SessionConfig(session_date=dt.date(2026, 9, 14), journal_root=tmp_path / "l0",
+                        manifest_path=tmp_path / "s.json", candidates_path=cp, ntp_host="primary",
+                        slot_budget=200, max_clock_offset_ns=2_000_000_000,
+                        desired_streams=("H0STCNT0",), vendor="ls")
+
+    import src.realtime.session as session_mod
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", lambda host, *, client=None: 3_000_000_000)
+
+    with pytest.raises(ClockUnsyncedError):
+        bootstrap_session(cfg, now_ns=1)
+
+    assert not cfg.manifest_path.exists()
+    assert not (tmp_path / "l0").exists()
+
+
+def test_bootstrap_session_loads_historical_unmeasured_manifest_but_requires_measured_boot(tmp_path, monkeypatch) -> None:
+
+    import datetime as dt
+    import json
+
+    import pytest
+
+    from src.realtime.clock import ClockUnsyncedError
+    from src.realtime.manifest import SessionManifest
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    legacy = {
+        "session_date": "2026-09-14", "clock_offset_ns": 0, "started_at_ns": 1,
+        "subscription_acks": [], "gaps": [], "candidates_rev": None, "degraded_reason": None,
+        "clock_status": "unmeasured", "boots": [{"started_at_ns": 1, "clock_offset_ns": 0, "clock_status": "unmeasured"}],
+        "venue": "krx", "session": "regular", "expected_close_ns": 0,
+        "writer_closed_at_ns": None, "planned_pairs": [], "shard_index": None, "credential_key_id": None,
+    }
+    (tmp_path / "s.json").write_text(json.dumps(legacy), encoding="utf-8")
+    loaded = SessionManifest.load(tmp_path / "s.json")
+    assert loaded.clock_status == "unmeasured"
+
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+    cfg = SessionConfig(session_date=dt.date(2026, 9, 14), journal_root=tmp_path / "l0",
+                        manifest_path=tmp_path / "s.json", candidates_path=cp, ntp_host="primary",
+                        slot_budget=200, max_clock_offset_ns=2_000_000_000,
+                        desired_streams=("H0STCNT0",), vendor="ls")
+
+    import src.realtime.session as session_mod
+
+    def _dead(host, *, client=None):
+        raise ClockUnsyncedError(f"ntp unreachable: {host}")
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", _dead)
+
+    with pytest.raises(ClockUnsyncedError):
+        bootstrap_session(cfg, now_ns=2)
+
     assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["clock_status"] == "unmeasured"
 
 
