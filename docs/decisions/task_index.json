@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "host_backup_status_relocation",
+      "date": "2026-09-25",
+      "adr_id": "ADR_20260925_host_backup_status_relocation",
+      "domain": "infra",
+      "title": "호스트 백업 상태 파일 이전 및 쓰기 실패 Fail-Closed",
+      "why": "root 소유 data/work에 호스트 ubuntu가 상태 파일을 쓰지 못했고, 쓰기 실패가 exit 0으로 숨겨져 daemon이 missing CRITICAL을 반복했다.",
+      "resolution": "상태 파일을 호스트 소유 디렉터리로 옮겨 컨테이너에 :ro 마운트하고, 상태 쓰기 실패 시 스크립트가 exit 74로 종료하게 했다.",
+      "impact": "쓰기 실패가 systemd OnFailure 알림으로 드러나고 배포마다 chown 조치가 필요 없어진다.",
+      "caveat": "배포 시 스크립트를 ubuntu로 1회 수동 실행해 디렉터리를 만든 뒤 compose를 적용해야 root 소유 생성이 재발하지 않는다."
+    },
+    {
       "task_id": "TASK_REFACTOR_MAINTAINABILITY",
       "date": "2026-09-25",
       "adr_id": "ADR_20260925_REFACTOR_MAINTAINABILITY",

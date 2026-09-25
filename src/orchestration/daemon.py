@@ -488,10 +488,15 @@ def _run_eod_housekeeping(cfg: CollectorSettings, paths: DataPaths, ref_day: dt.
 
 
 def _check_backup(
-    paths: DataPaths, ref_day: dt.date, *, now: dt.datetime, max_age: dt.timedelta
+    status_path: pathlib.Path,
+    paths: DataPaths,
+    ref_day: dt.date,
+    *,
+    now: dt.datetime,
+    max_age: dt.timedelta,
 ) -> tuple[list[str], bool, str]:
     host_reason = check_host_backup_freshness(
-        status_path=paths.host_backup_status, now=now, max_age=max_age
+        status_path=status_path, now=now, max_age=max_age
     )
     host_label = "ok" if host_reason is None else host_reason
     if host_reason is not None:
@@ -1010,6 +1015,7 @@ class DaemonRunner:
                 if day.status is TradingDayStatus.HOLIDAY:
                     housekeeping = _run_eod_housekeeping(cfg, paths, ref_day)
                     _check_backup(
+                        cfg.host_backup_status_path,
                         paths,
                         ref_day,
                         now=now,
@@ -1068,6 +1074,7 @@ class DaemonRunner:
                     else:
                         logger.warning("[DAEMON] stage=eod_reconciliation status=SKIP reason=calendar_unknown")
                     backup_missing, backup_ok, host_backup = _check_backup(
+                        cfg.host_backup_status_path,
                         paths,
                         ref_day,
                         now=now,

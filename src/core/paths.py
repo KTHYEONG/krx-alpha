@@ -9,6 +9,9 @@ from dataclasses import dataclass
 DEFAULT_DATA_ROOT: pathlib.Path = pathlib.Path("data")
 """Single hardcoded data root; settings defaults derive from this constant."""
 
+DEFAULT_HOST_BACKUP_STATUS_PATH: pathlib.Path = pathlib.Path("/run/host-backup/host_backup_status.json")
+"""Read-only container mount of the status file the host backup script writes."""
+
 DEFAULT_KIS_TOKEN_CACHE_DIR: pathlib.Path = DEFAULT_DATA_ROOT / "execution" / "kis_tokens"
 """Default KIS token cache directory derived from the single data root."""
 
@@ -58,10 +61,6 @@ class DataPaths:
     @property
     def work_root(self) -> pathlib.Path:
         return self.root / "work"
-
-    @property
-    def host_backup_status(self) -> pathlib.Path:
-        return self.work_root / "host_backup_status.json"
 
     @property
     def kis_ws_lease_dir(self) -> pathlib.Path:

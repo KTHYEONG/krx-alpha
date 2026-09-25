@@ -17,6 +17,7 @@ from src.core.calendar import SessionSchedule
 from src.core.errors import LiveNotArmedError, MissingCredentialsError, SlotBudgetExceededError
 from src.core.paths import (
     DEFAULT_DATA_ROOT,
+    DEFAULT_HOST_BACKUP_STATUS_PATH,
     DEFAULT_KIS_TOKEN_CACHE_DIR,
     DataPaths,
 )
@@ -40,6 +41,10 @@ class CollectorSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_", extra="ignore")
 
+    # The host backup script is the sole writer, and the container mounts this path
+    # read-only. It must not live under root-owned data_root, which the host user
+    # cannot write.
+    host_backup_status_path: pathlib.Path = DEFAULT_HOST_BACKUP_STATUS_PATH
     data_root: pathlib.Path = DEFAULT_DATA_ROOT
     ntp_host: str = "kr.pool.ntp.org"
     ntp_fallback_hosts: tuple[str, ...] = ("time.google.com", "time.cloudflare.com")
