@@ -172,3 +172,72 @@ def test_annotate_rejects_frame_without_stream_or_tr_id() -> None:
 
     with pytest.raises(ValueError, match="neither stream nor tr_id"):
         annotate_market_phase(_frame([{"raw": "{}"}]))
+
+
+def _csat_windows():
+    import datetime as dt
+
+    from src.core.session_anchors import AnchorSource, SessionAnchors
+    from src.storage.market_phase import phase_windows_for
+
+    anchors = SessionAnchors(
+        date=dt.date(2025, 11, 13),
+        regular_open=dt.time(10, 0),
+        closing_auction_start=dt.time(16, 20),
+        regular_close=dt.time(16, 30),
+        after_market_end=dt.time(20, 0),
+        source=AnchorSource.VENDOR,
+    )
+    return phase_windows_for(anchors)
+
+
+def test_standard_anchors_reproduce_contracted_table() -> None:
+    import datetime as dt
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.storage.market_phase import MARKET_PHASE_WINDOWS, phase_windows_for
+
+    assert phase_windows_for(standard_session_anchors(dt.date(2026, 10, 1))) == MARKET_PHASE_WINDOWS
+
+
+def test_csat_windows_shift_session_boundaries() -> None:
+    from src.storage.market_phase import classify_market_phase
+
+    windows = _csat_windows()
+
+    assert classify_market_phase(MarketVenue.KRX, "093500", EventKind.TRADE, windows=windows) is MarketPhase.PRE_MARKET_CLOSING_PRICE
+    assert classify_market_phase(MarketVenue.KRX, "095900", EventKind.TRADE, windows=windows) is MarketPhase.OPENING_AUCTION
+    assert classify_market_phase(MarketVenue.KRX, "152500", EventKind.TRADE, windows=windows) is MarketPhase.REGULAR
+    assert classify_market_phase(MarketVenue.KRX, "162500", EventKind.TRADE, windows=windows) is MarketPhase.CLOSING_AUCTION
+    assert classify_market_phase(MarketVenue.KRX, "165000", EventKind.TRADE, windows=windows) is MarketPhase.POST_MARKET_CLOSING_PRICE
+    assert classify_market_phase(MarketVenue.KRX, "170500", EventKind.TRADE, windows=windows) is MarketPhase.AFTERMARKET
+    assert classify_market_phase(MarketVenue.NXT, "164500", EventKind.TRADE, windows=windows) is MarketPhase.AFTERMARKET
+
+
+def test_scalar_and_vectorized_agree_under_shifted_windows() -> None:
+    from src.storage.market_phase import classify_market_phase
+
+    windows = _csat_windows()
+    rows = [
+        {"raw": _body("H0STCNT0", "093500"), "venue": "krx", "stream": "H0STCNT0", "exchange_event_time": "093500"},
+        {"raw": _body("H0STASP0", "095900"), "venue": "krx", "stream": "H0STASP0", "exchange_event_time": "095900"},
+        {"raw": _body("H0STCNT0", "152500"), "venue": "krx", "stream": "H0STCNT0", "exchange_event_time": "152500"},
+        {"raw": _body("H0STCNT0", "162500"), "venue": "krx", "stream": "H0STCNT0", "exchange_event_time": "162500"},
+        {"raw": _body("H0NXCNT0", "164500"), "venue": "nxt", "stream": "H0NXCNT0", "exchange_event_time": "164500"},
+        {"raw": _body("H0STCNT0", "170500"), "venue": "krx", "stream": "H0STCNT0", "exchange_event_time": "170500"},
+    ]
+    out = annotate_market_phase(_frame(rows), windows=windows)
+
+    for row in out.iter_rows(named=True):
+        kind = EventKind.TRADE if str(row["stream"]).endswith("CNT0") else EventKind.QUOTE
+        assert row["market_phase"] == classify_market_phase(MarketVenue(row["venue"]), str(row["exchange_event_time"]), kind, windows=windows).value
+
+
+def test_default_calls_preserve_existing_labels() -> None:
+    from src.storage.market_phase import MARKET_PHASE_WINDOWS, classify_market_phase
+
+    rows = [("083500", EventKind.TRADE), ("090000", EventKind.TRADE), ("152000", EventKind.TRADE), ("154500", EventKind.TRADE), ("160000", EventKind.TRADE)]
+    for event_time, kind in rows:
+        assert classify_market_phase(MarketVenue.KRX, event_time, kind) == classify_market_phase(MarketVenue.KRX, event_time, kind, windows=MARKET_PHASE_WINDOWS)
+    frame = _frame([{"raw": _body("H0STCNT0", "100000"), "venue": "krx", "stream": "H0STCNT0", "exchange_event_time": "100000"}])
+    assert annotate_market_phase(frame).equals(annotate_market_phase(frame, windows=MARKET_PHASE_WINDOWS))

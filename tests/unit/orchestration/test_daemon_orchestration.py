@@ -35,7 +35,7 @@ def test_run_session_orchestration_invokes_services_directly(tmp_path, monkeypat
 
     monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
         "date": [dt.date(2026, 9, 9)],
         "symbol": ["000001"],
@@ -43,7 +43,7 @@ def test_run_session_orchestration_invokes_services_directly(tmp_path, monkeypat
         "volume": [1000],
         "trade_value_100m": [100.0],
         "daily_change_pct": [1.0],
-    }).write_parquet(settings.paths.bars_store)
+    }).write_parquet(settings.paths.bars_daily_dir / "2026-09.parquet")
 
     calls: dict[str, object] = {}
 
@@ -67,7 +67,7 @@ def test_run_session_orchestration_invokes_services_directly(tmp_path, monkeypat
 
     # Then: argparse.Namespace 위조 없이 타입드 인자로 service 를 호출하고 후보 준비를 반환한다
     assert ready is True
-    assert calls["refresh"]["store_path"] == settings.paths.bars_store
+    assert calls["refresh"]["store_path"] == settings.paths.bars_daily_dir
     assert calls["plan"]["decision_date"] == dt.date(2026, 9, 9)
     assert calls["plan"]["slot_budget"] == settings.universe_slot_budget
 
@@ -116,7 +116,7 @@ def test_run_session_orchestration_passes_credentials_when_available(tmp_path, m
 
     monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
         "date": [dt.date(2026, 9, 9)],
         "symbol": ["000001"],
@@ -124,7 +124,7 @@ def test_run_session_orchestration_passes_credentials_when_available(tmp_path, m
         "volume": [1000],
         "trade_value_100m": [100.0],
         "daily_change_pct": [1.0],
-    }).write_parquet(settings.paths.bars_store)
+    }).write_parquet(settings.paths.bars_daily_dir / "2026-09.parquet")
 
     calls: dict[str, object] = {}
 
@@ -184,7 +184,7 @@ def test_run_session_orchestration_continues_when_refresh_raises_but_store_ready
     from src.universe.ipc import write_candidates
 
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
         "date": [dt.date(2026, 9, 9)],
         "symbol": ["000001"],
@@ -192,7 +192,7 @@ def test_run_session_orchestration_continues_when_refresh_raises_but_store_ready
         "volume": [1000],
         "trade_value_100m": [100.0],
         "daily_change_pct": [1.0],
-    }).write_parquet(settings.paths.bars_store)
+    }).write_parquet(settings.paths.bars_daily_dir / "2026-09.parquet")
     write_candidates(settings.paths.candidates, [{"symbol": "000001", "selection_reasons": ["limit_up"]}], rev=1)
 
     def _fail_refresh(**kwargs):
@@ -224,7 +224,7 @@ def test_run_session_orchestration_propagates_universe_plan_failure(tmp_path, mo
     from src.universe.ipc import write_candidates
 
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
         "date": [dt.date(2026, 9, 9)],
         "symbol": ["000001"],
@@ -232,7 +232,7 @@ def test_run_session_orchestration_propagates_universe_plan_failure(tmp_path, mo
         "volume": [1000],
         "trade_value_100m": [100.0],
         "daily_change_pct": [1.0],
-    }).write_parquet(settings.paths.bars_store)
+    }).write_parquet(settings.paths.bars_daily_dir / "2026-09.parquet")
     write_candidates(settings.paths.candidates, [{"symbol": "000001", "selection_reasons": ["limit_up"]}], rev=1)
 
     def _fake_refresh(**kwargs):
@@ -262,7 +262,7 @@ def test_run_session_orchestration_blocks_stale_bars_against_calendar(tmp_path, 
 
     monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
         "date": [dt.date(2026, 9, 9)],
         "symbol": ["000001"],
@@ -270,7 +270,7 @@ def test_run_session_orchestration_blocks_stale_bars_against_calendar(tmp_path, 
         "volume": [1000],
         "trade_value_100m": [100.0],
         "daily_change_pct": [1.0],
-    }).write_parquet(settings.paths.bars_store)
+    }).write_parquet(settings.paths.bars_daily_dir / "2026-09.parquet")
 
     def _fake_refresh(**kwargs):
         return daemon.BarsRefreshResult(trading_day=dt.date(2026, 9, 9), appended_rows=0, backfilled_days=0)
@@ -320,7 +320,7 @@ def test_run_session_orchestration_proceeds_when_decision_date_matches_previous_
 
     monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
         "date": [dt.date(2026, 9, 11)],
         "symbol": ["000001"],
@@ -328,7 +328,7 @@ def test_run_session_orchestration_proceeds_when_decision_date_matches_previous_
         "volume": [1000],
         "trade_value_100m": [100.0],
         "daily_change_pct": [1.0],
-    }).write_parquet(settings.paths.bars_store)
+    }).write_parquet(settings.paths.bars_daily_dir / "2026-09.parquet")
 
     calls: dict[str, object] = {}
 
@@ -539,11 +539,11 @@ def test_run_session_orchestration_falls_back_to_kis_when_bars_stale(tmp_path, m
 
     monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
         "date": [dt.date(2026, 9, 9)], "symbol": ["000001"], "close": [1000.0],
         "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0],
-    }).write_parquet(settings.paths.bars_store)
+    }).write_parquet(settings.paths.bars_daily_dir / "2026-09.parquet")
 
     def _fake_refresh(**kwargs):
         return daemon.BarsRefreshResult(trading_day=dt.date(2026, 9, 9), appended_rows=0, backfilled_days=0)
@@ -593,11 +593,11 @@ def test_run_session_orchestration_blocks_stale_bars_when_kis_fallback_also_fail
 
     monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
         "date": [dt.date(2026, 9, 9)], "symbol": ["000001"], "close": [1000.0],
         "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0],
-    }).write_parquet(settings.paths.bars_store)
+    }).write_parquet(settings.paths.bars_daily_dir / "2026-09.parquet")
 
     def _fake_refresh(**kwargs):
         return daemon.BarsRefreshResult(trading_day=dt.date(2026, 9, 9), appended_rows=0, backfilled_days=0)
@@ -670,10 +670,10 @@ def test_run_session_orchestration_blocks_stale_bars_when_calendar_unknown(tmp_p
 
     monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
 
     def _store(last: dt.date) -> None:
-        pl.DataFrame({"date": [last], "symbol": ["000001"], "close": [1000.0], "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0]}).write_parquet(settings.paths.bars_store)
+        pl.DataFrame({"date": [last], "symbol": ["000001"], "close": [1000.0], "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0]}).write_parquet(settings.paths.bars_daily_dir / f"{last:%Y-%m}.parquet")
 
     planned: list[dt.date] = []
 
@@ -708,10 +708,10 @@ def test_run_session_orchestration_allows_recent_bars_when_calendar_unknown(tmp_
 
     monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
 
     def _store(last: dt.date) -> None:
-        pl.DataFrame({"date": [last], "symbol": ["000001"], "close": [1000.0], "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0]}).write_parquet(settings.paths.bars_store)
+        pl.DataFrame({"date": [last], "symbol": ["000001"], "close": [1000.0], "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0]}).write_parquet(settings.paths.bars_daily_dir / f"{last:%Y-%m}.parquet")
 
     planned: list[dt.date] = []
 
@@ -744,10 +744,10 @@ def test_run_session_orchestration_uses_kis_fallback_on_incomplete_market(tmp_pa
 
     monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
 
     def _store(last: dt.date) -> None:
-        pl.DataFrame({"date": [last], "symbol": ["000001"], "close": [1000.0], "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0]}).write_parquet(settings.paths.bars_store)
+        pl.DataFrame({"date": [last], "symbol": ["000001"], "close": [1000.0], "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0]}).write_parquet(settings.paths.bars_daily_dir / f"{last:%Y-%m}.parquet")
 
     planned: list[dt.date] = []
 
@@ -797,10 +797,10 @@ def test_run_session_orchestration_fails_closed_when_kis_fallback_rowcount_impla
 
     monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
 
     def _store(last: dt.date) -> None:
-        pl.DataFrame({"date": [last], "symbol": ["000001"], "close": [1000.0], "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0]}).write_parquet(settings.paths.bars_store)
+        pl.DataFrame({"date": [last], "symbol": ["000001"], "close": [1000.0], "volume": [1000], "trade_value_100m": [100.0], "daily_change_pct": [1.0]}).write_parquet(settings.paths.bars_daily_dir / f"{last:%Y-%m}.parquet")
 
     planned: list[dt.date] = []
 
@@ -1198,7 +1198,7 @@ def test_run_session_orchestration_passes_status_source_and_store(tmp_path, monk
     for name in ("KIS_APP_KEY", "KIS_APP_SECRET", "KIS_ACCOUNT_NO", "KIS_ACCOUNT_PRODUCT_CODE"):
         monkeypatch.delenv(name, raising=False)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
         "date": [dt.date(2026, 9, 9)],
         "symbol": ["000001"],
@@ -1206,7 +1206,7 @@ def test_run_session_orchestration_passes_status_source_and_store(tmp_path, monk
         "volume": [1000],
         "trade_value_100m": [100.0],
         "daily_change_pct": [1.0],
-    }).write_parquet(settings.paths.bars_store)
+    }).write_parquet(settings.paths.bars_daily_dir / "2026-09.parquet")
 
     calls: dict[str, object] = {}
 
@@ -1256,7 +1256,7 @@ def _ready_orchestration_setup(tmp_path, monkeypatch, *, symbols=("005930", "000
     monkeypatch.setenv("TOSS_APP_SECRET", "tssk_test")
     _clear_program_backfill_env(monkeypatch)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
         "date": [dt.date(2026, 9, 9)],
         "symbol": ["000001"],
@@ -1264,7 +1264,7 @@ def _ready_orchestration_setup(tmp_path, monkeypatch, *, symbols=("005930", "000
         "volume": [1000],
         "trade_value_100m": [100.0],
         "daily_change_pct": [1.0],
-    }).write_parquet(settings.paths.bars_store)
+    }).write_parquet(settings.paths.bars_daily_dir / "2026-09.parquet")
 
     def _fake_refresh(**kwargs):
         return daemon.BarsRefreshResult(trading_day=dt.date(2026, 9, 9), appended_rows=0, backfilled_days=0)
@@ -1286,29 +1286,25 @@ def _ready_orchestration_setup(tmp_path, monkeypatch, *, symbols=("005930", "000
 
 
 def test_run_session_orchestration_triggers_auto_backfill_when_ready(tmp_path, monkeypatch) -> None:
-    # Given: 정상 bars/universe/candidates 준비 경로와 가짜 백필
+    # Given: 정상 bars/universe/candidates 준비 경로 (야간 싱크가 08:20 경로를 대체한다)
     import datetime as dt
 
-    from src.marketdata.service import ProgramTradesBackfillResult
+    from src.marketdata import program_trade_service as service
     from src.orchestration import daemon
 
     settings = _ready_orchestration_setup(tmp_path, monkeypatch)
-    seen: dict[str, object] = {}
 
-    def _fake_backfill(**kwargs):
-        seen.update(kwargs)
-        return ProgramTradesBackfillResult(symbols_ok=2, symbols_failed=0, appended_rows=10)
+    def _must_not_call(*args, **kwargs):
+        raise AssertionError("orchestration must not invoke program-trade fetch")
 
-    monkeypatch.setattr(daemon, "backfill_universe_program_trades", _fake_backfill)
+    monkeypatch.setattr(service, "backfill_program_trades_history", _must_not_call)
+    monkeypatch.setattr(service, "append_program_trades", _must_not_call)
 
     # When
     ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 10), settings=settings)
 
-    # Then: 오늘 candidates 심볼 튜플과 reference_date=today로 호출되고 반환은 그대로 True
+    # Then: Toss 호출 없이 후보 준비를 반환한다
     assert ready is True
-    assert seen["symbols"] == ("005930", "000660")
-    assert seen["reference_date"] == dt.date(2026, 9, 10)
-    assert seen["store_path"] == settings.paths.program_trades_store
 
 
 def test_run_session_orchestration_skips_auto_backfill_when_not_ready(tmp_path, monkeypatch) -> None:
@@ -1326,7 +1322,7 @@ def test_run_session_orchestration_skips_auto_backfill_when_not_ready(tmp_path, 
     monkeypatch.setenv("TOSS_APP_SECRET", "tssk_test")
     _clear_program_backfill_env(monkeypatch)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
         "date": [dt.date(2026, 9, 9)],
         "symbol": ["000001"],
@@ -1334,7 +1330,7 @@ def test_run_session_orchestration_skips_auto_backfill_when_not_ready(tmp_path, 
         "volume": [1000],
         "trade_value_100m": [100.0],
         "daily_change_pct": [1.0],
-    }).write_parquet(settings.paths.bars_store)
+    }).write_parquet(settings.paths.bars_daily_dir / "2026-09.parquet")
     monkeypatch.setattr(
         daemon, "refresh_bars", lambda **kw: daemon.BarsRefreshResult(trading_day=dt.date(2026, 9, 9), appended_rows=0, backfilled_days=0)
     )
@@ -1349,7 +1345,10 @@ def test_run_session_orchestration_skips_auto_backfill_when_not_ready(tmp_path, 
     def _must_not_call(**kwargs):
         raise AssertionError("backfill must not run when universe is not ready")
 
-    monkeypatch.setattr(daemon, "backfill_universe_program_trades", _must_not_call)
+    from src.marketdata import program_trade_service as service
+
+    monkeypatch.setattr(service, "backfill_program_trades_history", _must_not_call)
+    monkeypatch.setattr(service, "append_program_trades", _must_not_call)
 
     # When
     ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 10), settings=settings)
@@ -1359,125 +1358,46 @@ def test_run_session_orchestration_skips_auto_backfill_when_not_ready(tmp_path, 
 
 
 def test_run_session_orchestration_isolates_missing_toss_credentials(tmp_path, monkeypatch, caplog) -> None:
-    # Given: TOSS 자격증명 미설정, 그 외 정상 경로
+    # Given: TOSS 자격증명 미설정 (08:20 경로는 Toss를 전혀 쓰지 않는다)
     import datetime as dt
-    import logging
 
+    from src.marketdata import program_trade_service as service
     from src.orchestration import daemon
 
     settings = _ready_orchestration_setup(tmp_path, monkeypatch)
     monkeypatch.delenv("TOSS_APP_KEY", raising=False)
     monkeypatch.delenv("TOSS_APP_SECRET", raising=False)
 
-    def _must_not_call(**kwargs):
-        raise AssertionError("backfill must not run without credentials")
+    def _must_not_call(*args, **kwargs):
+        raise AssertionError("orchestration must not touch program trades")
 
-    monkeypatch.setattr(daemon, "backfill_universe_program_trades", _must_not_call)
+    monkeypatch.setattr(service, "backfill_program_trades_history", _must_not_call)
+    monkeypatch.setattr(service, "append_program_trades", _must_not_call)
 
-    # When
-    with caplog.at_level(logging.WARNING):
-        ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 10), settings=settings)
-
-    # Then: 스트리밍 준비에 영향 없이 True + WARNING 로그
+    # When / Then: 자격증명 없이도 스트리밍 준비에 영향 없이 True
+    ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 10), settings=settings)
     assert ready is True
-    assert "program_trades_auto_backfill" in caplog.text
-    assert any(r.levelno == logging.WARNING for r in caplog.records)
 
 
-def test_run_session_orchestration_isolates_program_trades_backfill_failure(tmp_path, monkeypatch, caplog) -> None:
-    # Given: 백필이 TossProgramTradesError를 던지는 경로
+def test_run_session_orchestration_ignores_program_trades_store_state(tmp_path, monkeypatch) -> None:
+    # Given: 손상된 프로그램매매 스토어 (08:20 경로는 이를 읽지 않는다)
     import datetime as dt
-    import logging
 
-    from src.marketdata.toss_program_trades import TossProgramTradesError
+    from src.marketdata import program_trade_service as service
     from src.orchestration import daemon
 
     settings = _ready_orchestration_setup(tmp_path, monkeypatch)
+    settings.paths.program_trades_dir.mkdir(parents=True, exist_ok=True)
+    (settings.paths.program_trades_dir / "2026-09.parquet").write_bytes(b"not-a-parquet")
 
-    def _fail_backfill(**kwargs):
-        raise TossProgramTradesError("store unreadable")
+    def _must_not_call(*args, **kwargs):
+        raise AssertionError("orchestration must not touch program trades")
 
-    monkeypatch.setattr(daemon, "backfill_universe_program_trades", _fail_backfill)
+    monkeypatch.setattr(service, "backfill_program_trades_history", _must_not_call)
+    monkeypatch.setattr(service, "append_program_trades", _must_not_call)
 
-    # When
-    with caplog.at_level(logging.ERROR):
-        ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 10), settings=settings)
-
-    # Then: 예외 전파 없이 True + ERROR 로그
-    assert ready is True
-    assert "program_trades_auto_backfill" in caplog.text
-    assert any(r.levelno == logging.ERROR for r in caplog.records)
-
-
-def test_program_trades_auto_backfill_skips_when_disabled(tmp_path, monkeypatch) -> None:
-    # Given: 자동 백필 비활성화 설정
-    import datetime as dt
-    import pathlib
-
-    from src.core.config import CollectorSettings
-    from src.orchestration import daemon
-
-    monkeypatch.setenv("TOSS_APP_KEY", "tsck_test")
-    monkeypatch.setenv("TOSS_APP_SECRET", "tssk_test")
-    monkeypatch.setenv("KRX_ALPHA_TOSS_PROGRAM_AUTO_BACKFILL_ENABLED", "false")
-    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-
-    def _must_not_call(**kwargs):
-        raise AssertionError("backfill must not run when disabled")
-
-    monkeypatch.setattr(daemon, "backfill_universe_program_trades", _must_not_call)
-
-    # When / Then: 후보 파일 유무와 무관하게 조용히 반환
-    daemon._run_program_trades_auto_backfill(settings.paths, dt.date(2026, 9, 10))
-
-
-def test_program_trades_auto_backfill_skips_when_no_candidates(tmp_path, monkeypatch) -> None:
-    # Given: 자격증명은 있으나 후보 파일이 없는 경로
-    import datetime as dt
-    import pathlib
-
-    from src.core.config import CollectorSettings
-    from src.orchestration import daemon
-
-    monkeypatch.setenv("TOSS_APP_KEY", "tsck_test")
-    monkeypatch.setenv("TOSS_APP_SECRET", "tssk_test")
-    _clear_program_backfill_env(monkeypatch)
-    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-
-    def _must_not_call(**kwargs):
-        raise AssertionError("backfill must not run without candidates")
-
-    monkeypatch.setattr(daemon, "backfill_universe_program_trades", _must_not_call)
-
-    # When / Then: 예외 없이 반환
-    daemon._run_program_trades_auto_backfill(settings.paths, dt.date(2026, 9, 10))
-
-
-def test_program_trades_auto_backfill_isolates_unexpected_failure(tmp_path, monkeypatch, caplog) -> None:
-    # Given: 손상된 후보 파일(읽기 시 예외 발생)
-    import datetime as dt
-    import logging
-    import pathlib
-
-    from src.core.config import CollectorSettings
-    from src.orchestration import daemon
-
-    monkeypatch.setenv("TOSS_APP_KEY", "tsck_test")
-    monkeypatch.setenv("TOSS_APP_SECRET", "tssk_test")
-    _clear_program_backfill_env(monkeypatch)
-    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
-    settings.paths.candidates.write_text("{not-json", encoding="utf-8")
-
-    def _must_not_call(**kwargs):
-        raise AssertionError("backfill must not run on corrupt candidates")
-
-    monkeypatch.setattr(daemon, "backfill_universe_program_trades", _must_not_call)
-
-    # When / Then: 호출자에게 전파하지 않고 ERROR 로그만 남긴다
-    with caplog.at_level(logging.ERROR):
-        daemon._run_program_trades_auto_backfill(settings.paths, dt.date(2026, 9, 10))
-    assert "program_trades_auto_backfill" in caplog.text
+    # When / Then: 스토어 상태와 무관하게 True
+    assert daemon.run_session_orchestration(today=dt.date(2026, 9, 10), settings=settings) is True
 
 
 def test_daemon_business_day_passes_trading_day_through(tmp_path, monkeypatch) -> None:
@@ -1491,7 +1411,7 @@ def test_daemon_business_day_passes_trading_day_through(tmp_path, monkeypatch) -
     monkeypatch.chdir(tmp_path)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
     business = _business_trading_day(dt.date(2026, 9, 14))
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: business)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: business)
     seen: list[dict] = []
     monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: seen.append(kw) or False)
 
@@ -1803,3 +1723,116 @@ def test_kis_token_preflight_records_snapshot_key_vendor_error(tmp_path, monkeyp
         r.levelno == logging.CRITICAL and "key_id=snapfp000001" in r.getMessage() and "reason=EGW00103" in r.getMessage()
         for r in caplog.records
     )
+
+
+def test_run_collector_daemon_logs_failed_store_migration_and_continues(tmp_path, monkeypatch, caplog) -> None:
+    # Given: legacy 파일과 파티션이 공존하는 모호한 bars 스토어
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    import polars as pl
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.legacy_bars_file.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "date": [dt.date(2026, 9, 9)],
+        "symbol": ["000001"],
+        "close": [1000.0],
+        "volume": [1000],
+        "trade_value_100m": [100.0],
+        "daily_change_pct": [1.0],
+    }).write_parquet(settings.paths.legacy_bars_file)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
+    (settings.paths.bars_daily_dir / "2026-09.parquet").write_bytes(b"existing-partition")
+    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None: "r")
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: False)
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = cmd
+            self.last_exit_code = None
+
+        def ensure_running(self):
+            return "started"
+
+        def stop(self, *, timeout_s=15.0):
+            return "graceful"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+
+    # When
+    with caplog.at_level(logging.CRITICAL):
+        daemon_mod.run_collector_daemon(
+            settings=settings,
+            sleep_fn=lambda s: None,
+            max_cycles=1,
+            now_fn=lambda: dt.datetime(2026, 9, 14, 8, 30, tzinfo=ZoneInfo("Asia/Seoul")),
+        )
+
+    # Then: 모호 상태로 CRITICAL을 남기고 루프는 계속된다
+    assert "[DATA] stage=store_migration status=FAIL store=bars" in caplog.text
+    assert settings.paths.legacy_bars_file.exists()
+    assert (settings.paths.bars_daily_dir / "2026-09.parquet").read_bytes() == b"existing-partition"
+
+
+def test_run_session_orchestration_fails_closed_while_migration_pending(tmp_path, monkeypatch, caplog) -> None:
+    # Given: 이관되지 않은 legacy bars 파일이 남아 있는 상태 (이관 실패)
+    import datetime as dt
+    import logging
+    import pathlib
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.legacy_bars_file.parent.mkdir(parents=True)
+    settings.paths.legacy_bars_file.write_bytes(b"legacy")
+    refreshed: list[dict] = []
+    monkeypatch.setattr(daemon, "refresh_bars", lambda **kwargs: refreshed.append(kwargs))
+
+    # When
+    with caplog.at_level(logging.CRITICAL):
+        ready = daemon.run_session_orchestration(today=dt.date(2026, 9, 10), settings=settings)
+
+    # Then: 빈 파티션에 재백필하지 않고 fail-closed
+    assert ready is False
+    assert refreshed == []
+    assert any("reason=store_migration_pending" in r.getMessage() for r in caplog.records)
+
+
+def test_run_session_orchestration_reports_progress_between_stages(tmp_path, monkeypatch) -> None:
+    # Given: bars 갱신·선정이 모두 성공하는 장전 준비
+    import datetime as dt
+    import pathlib
+
+    import polars as pl
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+
+    monkeypatch.setenv("KRX_OPENAPI_KEY", "k")
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"date": [dt.date(2026, 9, 9)], "symbol": ["000001"]}).write_parquet(
+        settings.paths.bars_daily_dir / "2026-09.parquet"
+    )
+    monkeypatch.setattr(
+        daemon,
+        "refresh_bars",
+        lambda **kw: daemon.BarsRefreshResult(trading_day=dt.date(2026, 9, 9), appended_rows=0, backfilled_days=0),
+    )
+    monkeypatch.setattr(daemon, "plan_universe", lambda **kw: None)
+    ticks: list[int] = []
+
+    # When
+    daemon.run_session_orchestration(today=dt.date(2026, 9, 10), settings=settings, progress=lambda: ticks.append(1))
+
+    # Then: 단계마다 생존 신호가 나가 장전 준비가 길어도 외부 감시가 멈춤으로 오판하지 않는다
+    assert len(ticks) >= 2

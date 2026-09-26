@@ -19,7 +19,7 @@ _DEFAULTS = CollectorSettings()
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """'universe-plan' 서브커맨드를 등록한다."""
     parser = subparsers.add_parser("universe-plan")
-    parser.add_argument("--bars-path", required=True)
+    parser.add_argument("--bars-path", required=True, help="bars month-partition root directory")
     parser.add_argument("--decision-date", required=True)
     parser.add_argument("--out-path", required=True)
     parser.add_argument("--slot-budget", type=int, default=_DEFAULTS.universe_slot_budget)
@@ -33,8 +33,9 @@ def run(args: argparse.Namespace) -> int:
     if isinstance(decision, str):
         decision = dt.date.fromisoformat(decision)
     result = plan_universe(
-        bars_path=pathlib.Path(str(args.bars_path)),
+        bars_root=pathlib.Path(str(args.bars_path)),
         decision_date=decision,
+        lookback_calendar_days=_DEFAULTS.selection_lookback_calendar_days,
         out_path=pathlib.Path(str(args.out_path)),
         slot_budget=int(args.slot_budget),
         candidates_path=(

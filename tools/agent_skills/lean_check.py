@@ -12,7 +12,6 @@ import pathlib
 import re
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 JsonDiag = dict[str, Any]
@@ -58,9 +57,11 @@ def run_cmd(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[s
     env["COVERAGE_NO_CTRACE"] = "1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["POLARS_MAX_THREADS"] = "2"
-    env["OMP_NUM_THREADS"] = "2"
-    env["OPENBLAS_NUM_THREADS"] = "2"
-    env["MKL_NUM_THREADS"] = "2"
+    env["OMP_NUM_THREADS"] = "1"
+    env["OPENBLAS_NUM_THREADS"] = "1"
+    env["MKL_NUM_THREADS"] = "1"
+    env["NUMBA_NUM_THREADS"] = "1"
+    env["RAY_ACCEL_NUM_WORKERS"] = "1"
     try:
         return subprocess.run(  # noqa: S603
             cmd, capture_output=True, text=True, shell=False, timeout=timeout, env=env
@@ -199,9 +200,9 @@ def _patch_target_modules(test_file: str, source_set: set[str]) -> set[str]:
         is_target_call = False
         if isinstance(func, ast.Attribute) and func.attr in {"setattr", "delattr"}:
             is_target_call = isinstance(func.value, ast.Name) and func.value.id == "monkeypatch"
-        elif isinstance(func, ast.Name) and func.id == "patch":
-            is_target_call = True
-        elif isinstance(func, ast.Attribute) and func.attr == "patch":
+        elif (isinstance(func, ast.Name) and func.id == "patch") or (
+            isinstance(func, ast.Attribute) and func.attr == "patch"
+        ):
             is_target_call = True
         elif isinstance(func, ast.Attribute) and func.attr == "object":
             value = func.value
@@ -715,13 +716,11 @@ def main() -> None:
             return "mypy", 1, [{"file": target_mypy[0], "line": 0, "error": out, "fix_hint": "Fix mypy type errors"}], "FAIL | Mypy Type Check Failed"
         return "mypy", 0, [], ""
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        f_ruff = executor.submit(check_ruff)
-        f_mypy = executor.submit(check_mypy)
-        for f in [f_ruff, f_mypy]:
-            phase, code, diags, msg = f.result()
-            if code != 0:
-                _exit_with_diags(phase, msg, diags)
+    # 3. Sequential Static Checks (Ruff Fail-Fast, then Mypy)
+    for check_fn in (check_ruff, check_mypy):
+        phase, code, diags, msg = check_fn()
+        if code != 0:
+            _exit_with_diags(phase, msg, diags)
 
     if args.fast:
         print("PASS | Fast Check Passed (Scaffolding, Ruff, Mypy verified)")
@@ -750,19 +749,22 @@ def main() -> None:
         print(_emit_json("PASS", "all", [], None), file=sys.stderr)
         return
 
-    # 5. Smart Pytest Execution (Resource Safety Guard)
+    # 5. Smart Pytest Execution (Resource Safety Guard: Serial Execution Default)
+    # 다중 프로젝트 및 로컬 동시성 환경 안정성을 위해 기본값은 항상 단일 프로세스(-n 0)로 고정.
+    # CI 등에서 명시적으로 LEAN_CHECK_WORKERS 환경변수가 2 이상으로 지정된 경우에만 제한적 병렬 허용.
     env_workers = os.environ.get("LEAN_CHECK_WORKERS")
     avail_mem_gb = _available_memory_gb()
 
     if (
         args.no_xdist
-        or len(test_files) <= 5
-        or (env_workers and env_workers in ("0", "1"))
+        or not env_workers
+        or not env_workers.isdigit()
+        or int(env_workers) <= 1
         or avail_mem_gb < 2.0
     ):
         xdist_args = ["-p", "no:cacheprovider", "-n", "0"]
     else:
-        target_workers = int(env_workers) if env_workers and env_workers.isdigit() else 2
+        target_workers = int(env_workers)
         worker_count = min(target_workers, os.cpu_count() or 2, len(test_files))
         xdist_args = ["-p", "no:cacheprovider", "-n", str(worker_count)]
 

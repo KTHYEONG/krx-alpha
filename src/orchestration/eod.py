@@ -7,11 +7,13 @@ import functools
 import json
 import logging
 import pathlib
+from collections.abc import Callable
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from src.core.session_anchors import STANDARD_AFTER_MARKET_END
 from src.realtime.kis_sharding import AftermarketShard
 from src.realtime.manifest import SessionManifest
 from src.storage.normalize_worker import run_isolated_normalize
@@ -21,8 +23,6 @@ from src.storage.retention import prune_local_l1, prune_old_journals
 logger = logging.getLogger(__name__)
 
 MAX_SESSION_GAP_S: float = 600.0
-_REGULAR_OPEN = dt.time(9, 0)
-_REGULAR_CLOSE = dt.time(15, 30)
 _KST = ZoneInfo("Asia/Seoul")
 
 
@@ -43,6 +43,8 @@ def run_eod_maintenance(
     quarantine_root: pathlib.Path | None = None,
     work_root: pathlib.Path | None = None,
     verified_remote_l1: AbstractSet[str] | None = None,
+    progress: Callable[[], None] | None = None,
+    normalize: bool = True,
 ) -> int:
     return prune_old_journals(
         journal_root,
@@ -51,6 +53,8 @@ def run_eod_maintenance(
         reference_date=today,
         quarantine_root=quarantine_root,
         verified_remote_l1=verified_remote_l1,
+        progress=progress,
+        normalize=normalize,
         # 데몬 OOM crash loop를 막기 위해 정규화는 자식 프로세스로 격리한다
         normalizer=functools.partial(run_isolated_normalize, work_root=work_root),
     )
@@ -64,6 +68,7 @@ def run_eod_offload(
     archiver: Any = None,
     reference_date: dt.date | None = None,
     retain_days: int = 30,
+    progress: Callable[[], None] | None = None,
 ) -> EodOffloadResult:
     arc = remote if remote is not None else archiver
     if arc is None:
@@ -72,7 +77,9 @@ def run_eod_offload(
         logger.critical("[DAEMON] stage=eod_offload status=FAIL reason=rclone_settings_missing")
         empty = SyncStats()
         return EodOffloadResult(l1=empty, manifests=SyncStats(), verified_remote_l1=frozenset(), purged=0)
-    l1_stats = arc.sync_l1_tree(archive_root)
+    if progress is not None and hasattr(arc, "bind_progress"):
+        arc.bind_progress(progress)
+    l1_stats = arc.sync_l1_tree(archive_root, progress=progress)
     manifest_path = pathlib.Path(manifest_root) if manifest_root is not None else pathlib.Path(archive_root).parent / "manifest"
     archiver = arc
     manifests_stats = archiver.sync_manifest_tree(manifest_path)
@@ -101,6 +108,7 @@ def run_eod_remote_l0_purge(
     verified_remote_l1: AbstractSet[str],
     *,
     archiver: Any = None,
+    progress: Callable[[], None] | None = None,
 ) -> PurgeStats:
     """Purge Drive L0 partitions superseded by remote-verified L1 after local L0 pruning.
 
@@ -111,12 +119,16 @@ def run_eod_remote_l0_purge(
     if arc is None:
         logger.critical("[DAEMON] stage=eod_l0_remote_purge status=FAIL reason=rclone_settings_missing")
         return PurgeStats()
-    return arc.purge_superseded_l0(verified_remote_l1, pathlib.Path(journal_root))
+    if progress is not None and hasattr(arc, "bind_progress"):
+        arc.bind_progress(progress)
+    return arc.purge_superseded_l0(verified_remote_l1, pathlib.Path(journal_root), progress=progress)
 
 
-def _regular_session_gap_s(gaps: list[dict[str, object]], date: dt.date) -> float:
-    open_ns = int(dt.datetime.combine(date, _REGULAR_OPEN, tzinfo=_KST).timestamp()) * 1_000_000_000
-    close_ns = int(dt.datetime.combine(date, _REGULAR_CLOSE, tzinfo=_KST).timestamp()) * 1_000_000_000
+def _regular_session_gap_s(
+    gaps: list[dict[str, object]], date: dt.date, regular_open: dt.time, regular_close: dt.time
+) -> float:
+    open_ns = int(dt.datetime.combine(date, regular_open, tzinfo=_KST).timestamp()) * 1_000_000_000
+    close_ns = int(dt.datetime.combine(date, regular_close, tzinfo=_KST).timestamp()) * 1_000_000_000
     clipped: list[tuple[int, int]] = []
     for g in gaps:
         start = int(g["gap_start_ns"])  # type: ignore[call-overload]
@@ -189,8 +201,10 @@ def aftermarket_eod_ready(
     date: dt.date,
     now: dt.datetime,
     expected_shards: tuple[AftermarketShard, ...] | None = None,
+    after_market_end: dt.time = STANDARD_AFTER_MARKET_END,
 ) -> bool:
-    if now.astimezone(_KST).time() < dt.time(20, 0): return False  # noqa: E701 - 20:00 전 EOD 차단
+    # 그날 애프터마켓 종료(앵커) 전에는 EOD 준비 완료로 보지 않는다.
+    if now.astimezone(_KST).time() < after_market_end: return False  # noqa: E701
     if not manifests: return False  # noqa: E701 - 대상 manifest 없이 성공 표기 금지
     closed: list[bool] = []
     routes: set[tuple[str, str]] = set()
@@ -300,6 +314,8 @@ def check_session_reconciliation(
     vendor: str,
     venue: str,
     session: str,
+    regular_open: dt.time,
+    regular_close: dt.time,
     max_gap_s: float = MAX_SESSION_GAP_S,
 ) -> bool:
     """Verify that a business-day regular session left a complete collection trail.
@@ -323,6 +339,8 @@ def check_session_reconciliation(
         vendor: Journal vendor directory (e.g. ``"ls"``).
         venue: Routed venue directory (e.g. ``"krx"``).
         session: Routed session directory (e.g. ``"regular"``).
+        regular_open: Regular-session open bound for gap clipping (KST).
+        regular_close: Regular-session close bound for gap clipping (KST).
         max_gap_s: Maximum tolerated regular-session gap in seconds.
 
     Returns:
@@ -343,7 +361,7 @@ def check_session_reconciliation(
     if manifest.exists():
         try:
             loaded = SessionManifest.load(manifest)
-            gap_s = _regular_session_gap_s(loaded.gaps, date)
+            gap_s = _regular_session_gap_s(loaded.gaps, date, regular_open, regular_close)
             if gap_s > max_gap_s:
                 issues.append(f"gap_exceeded:{int(gap_s)}s")
         except (ValueError, KeyError, TypeError):

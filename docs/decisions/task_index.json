@@ -1,6 +1,17 @@
 {
   "tasks": [
     {
+      "task_id": "longterm_ops_hardening",
+      "date": "2026-09-26",
+      "adr_id": "ADR_20260926_longterm_ops_hardening",
+      "domain": "infra",
+      "title": "장기 운용 결함 7종 근본 수정 (세션 기준 시각, 생존 감시, 배포, 무결성, 월 파티션, program_trades 야간 동기화)",
+      "why": "감사에서 수능일 시각 하드코딩, 데몬 크래시 무음, bars 무한 증가(OOM 예정), program_trades 갱신 누락, 배포 경합, 재시작 공백 미검출이 검증되었다.",
+      "resolution": "Toss 세션 앵커를 날짜별로 저장해 모든 소비처에 배선하고, 크래시·강제종료 보고와 healthchecks.io ping, sha 고정 원자 배포, 월 파티션 저장소, 야간 증분 동기화, 디스크 I/O 오류 분류를 구현했다.",
+      "impact": "특수 개장일 거짓 경보와 라벨 오염이 사라지고 메모리가 이력 길이와 무관해지며, 크래시·멈춤·백업 누락이 외부에서 10분 내 감지된다.",
+      "caveat": "첫 기동 때 bars·program_trades 마이그레이션이 자동 실행되며, healthchecks URL 2개가 서버 krx-alpha.env에 있어야 배포 검증을 통과한다."
+    },
+    {
       "task_id": "host_backup_status_relocation",
       "date": "2026-09-25",
       "adr_id": "ADR_20260925_host_backup_status_relocation",

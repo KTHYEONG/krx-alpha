@@ -256,9 +256,8 @@ def test_deploy_workflow_gates_recreate_behind_session_gate() -> None:
     assert "python3 -m src.orchestration.deploy_gate" in workflow
     assert workflow.index("deploy_gate") < workflow.index("up -d --force-recreate")
     assert "RECREATE_NOW" in workflow
-    assert "\\$C pull" in workflow
-    pull_line = next(line for line in workflow.splitlines() if "\\$C pull" in line)
-    assert "RECREATE_NOW" not in pull_line
+    assert "\\$C pull" not in workflow
+    assert "compose pull" not in workflow
     assert "krx-deferred-recreate.service" in workflow
     assert "krx-deferred-recreate.timer" in workflow
     assert "enable --now krx-deferred-recreate.timer" in workflow
@@ -423,3 +422,125 @@ def test_host_backup_unit_retries_with_direct_restart_mode() -> None:
     assert "OnFailure=kca-alert@%n.service" in unit
     assert "Type=oneshot" in unit
     assert "TimeoutStartSec=4h" in unit
+
+
+def test_deploy_runs_are_serialized() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    raw = yaml.safe_load(workflow)
+
+    assert raw["concurrency"]["group"] == "deploy-or-vps"
+    assert raw["concurrency"]["cancel-in-progress"] is False
+
+
+def test_image_carries_commit_revision_label() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert "org.opencontainers.image.revision=${{ github.sha }}" in workflow
+
+
+def test_remote_never_pulls_mutable_latest() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert "docker pull" in workflow
+    assert ":sha-" in workflow
+    assert "compose pull" not in workflow
+    assert "\\$C pull" not in workflow
+
+
+def test_revision_verified_after_recreate() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert "org.opencontainers.image.revision" in workflow
+    assert "docker inspect" in workflow
+    assert "krx-collector" in workflow
+    assert workflow.index("up -d --force-recreate") < workflow.rindex("org.opencontainers.image.revision")
+
+
+def test_host_artifacts_staged_then_promoted_atomically() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    scp_lines = [line for line in workflow.splitlines() if "scp " in line]
+    assert scp_lines
+    for line in scp_lines:
+        assert "~/krx-alpha/deploy/host/" not in line
+        assert "~/.config/systemd/user/" not in line
+        assert "~/krx-alpha/docker-compose.yml" not in line
+    assert ".deploy/staging/" in workflow
+    assert "mv -f" in workflow
+    assert ".new" in workflow
+    assert workflow.index("validate_runtime_env") < workflow.index("mv -f")
+    assert workflow.index("docker pull") < workflow.index("mv -f")
+
+
+def test_state_dir_created_before_any_compose_action() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert "~/.local/state/krx-alpha" in workflow
+    assert "mkdir -p" in workflow
+    assert workflow.index("~/.local/state/krx-alpha") < workflow.index("compose")
+
+
+def test_kca_warmup_timer_optional() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert "systemctl --user cat kca-kis-token-warmup.timer" in workflow
+    assert "enable --now kca-kis-token-warmup.timer" in workflow
+    assert "WARNING: kca-kis-token-warmup.timer not installed" in workflow
+
+
+def test_healthcheck_keys_required_at_deploy() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    body = _workflow_function_body(workflow, "validate_runtime_env")
+
+    assert "KRX_ALPHA_LIVENESS_HEALTHCHECK_URL" in body
+    assert "KRX_HOST_BACKUP_HEALTHCHECK_URL" in body
+    assert "Runtime env validated: 14 keys" in body
+
+
+def test_backup_unit_loads_runtime_env_optionally() -> None:
+    from pathlib import Path
+
+    unit = Path("deploy/host/krx-host-backup.service").read_text(encoding="utf-8")
+
+    assert "EnvironmentFile=-/home/ubuntu/quant-secrets/krx-alpha.env" in unit
+
+
+def test_promote_targets_created_on_fresh_host_before_promotion() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    # install 은 상위 디렉터리를 만들지 않으므로 새 호스트에서도 promote 대상이 먼저 존재해야 한다.
+    mkdir_lines = [line for line in workflow.splitlines() if "mkdir -p" in line and "~/krx-alpha/data" in line]
+    assert mkdir_lines
+    assert "~/krx-alpha/deploy/host" in mkdir_lines[0]
+    assert workflow.index(mkdir_lines[0]) < workflow.index("mv -f")
+
+
+def test_ghcr_token_never_passed_as_ssh_argument() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    ssh_lines = [line for line in workflow.splitlines() if line.strip().startswith("ssh ")]
+    assert ssh_lines
+    assert all("GHCR_PAT" not in line for line in ssh_lines)
+    assert "--password-stdin" in workflow

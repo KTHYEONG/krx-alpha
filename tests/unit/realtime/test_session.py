@@ -716,3 +716,133 @@ def test_bootstrap_session_records_shard_planned_pairs(tmp_path):
     assert session.manifest.shard_index == 0
     assert session.manifest.credential_key_id == "id1"
     assert sorted(session.replay_pairs()) == [("005930", "H0NXASP0"), ("005930", "H0NXCNT0")]
+
+
+def _kst_ns(year: int, month: int, day: int, hour: int, minute: int = 0) -> int:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    moment = dt.datetime(year, month, day, hour, minute, tzinfo=ZoneInfo("Asia/Seoul"))
+    return int(moment.timestamp() * 1_000_000_000)
+
+
+def _bootstrap_config(*, session_date, journal_root, manifest_path, candidates_path):
+    from src.realtime.session import SessionConfig
+
+    return SessionConfig(
+        session_date=session_date, journal_root=journal_root, manifest_path=manifest_path,
+        candidates_path=candidates_path, ntp_host="primary", slot_budget=200,
+        max_clock_offset_ns=2_000_000_000, desired_streams=("H0STCNT0",), vendor="ls",
+    )
+
+
+def test_bootstrap_session_records_restart_gap_from_last_journal_write(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    import os
+
+    import src.realtime.session as session_mod
+    from src.realtime.session import bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", lambda host, *, client=None: 0)
+    day = dt.date(2026, 9, 14)
+    journal_root = tmp_path / "l0"
+    manifest_path = tmp_path / "s.json"
+    candidates_path = tmp_path / "c.json"
+    write_candidates(candidates_path, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+
+    first_ns = _kst_ns(2026, 9, 14, 9, 0)
+    bootstrap_session(
+        _bootstrap_config(session_date=day, journal_root=journal_root,
+                          manifest_path=manifest_path, candidates_path=candidates_path),
+        now_ns=first_ns,
+    )
+
+    journal_file = journal_root / "ls" / "krx" / "regular" / "H0STCNT0" / "dt=2026-09-14" / "09.jsonl.zst"
+    journal_file.parent.mkdir(parents=True, exist_ok=True)
+    journal_file.write_bytes(b"x")
+    last_write_ns = _kst_ns(2026, 9, 14, 10, 0)
+    os.utime(journal_file, ns=(last_write_ns, last_write_ns))
+
+    second_ns = last_write_ns + 120_000_000_000
+    with caplog.at_level(logging.WARNING):
+        session = bootstrap_session(
+            _bootstrap_config(session_date=day, journal_root=journal_root,
+                              manifest_path=manifest_path, candidates_path=candidates_path),
+            now_ns=second_ns,
+        )
+
+    assert len(session.manifest.gaps) == 1
+    gap = session.manifest.gaps[0]
+    assert gap["reason"] == "restart"
+    assert gap["symbol"] == "*"
+    assert gap["gap_start_ns"] == last_write_ns
+    assert gap["gap_end_ns"] == second_ns
+    assert "[DATA] stage=bootstrap status=RESTART_GAP gap_s=120.0" in caplog.text
+
+
+def test_bootstrap_session_first_boot_records_no_restart_gap(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    import src.realtime.session as session_mod
+    from src.realtime.session import bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", lambda host, *, client=None: 0)
+    candidates_path = tmp_path / "c.json"
+    write_candidates(candidates_path, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+
+    session = bootstrap_session(
+        _bootstrap_config(session_date=dt.date(2026, 9, 14), journal_root=tmp_path / "l0",
+                          manifest_path=tmp_path / "s.json", candidates_path=candidates_path),
+        now_ns=_kst_ns(2026, 9, 14, 9, 0),
+    )
+
+    assert session.manifest.gaps == []
+
+
+def test_bootstrap_session_restart_without_prior_journals_records_no_gap(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    import src.realtime.session as session_mod
+    from src.realtime.session import bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", lambda host, *, client=None: 0)
+    day = dt.date(2026, 9, 14)
+    candidates_path = tmp_path / "c.json"
+    write_candidates(candidates_path, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+
+    def _cfg():
+        return _bootstrap_config(session_date=day, journal_root=tmp_path / "l0",
+                                 manifest_path=tmp_path / "s.json", candidates_path=candidates_path)
+
+    bootstrap_session(_cfg(), now_ns=_kst_ns(2026, 9, 14, 9, 0))
+    second = bootstrap_session(_cfg(), now_ns=_kst_ns(2026, 9, 14, 10, 0))
+
+    assert second.manifest.gaps == []
+    assert len(second.manifest.boots) == 2
+
+
+def test_restart_gap_ignores_sibling_shard_journal_writes(tmp_path) -> None:
+    import os
+
+    from src.realtime.session import last_journal_write_ns
+    from src.storage.journal import L0JournalWriter
+
+    at_ns = _kst_ns(2026, 9, 14, 17, 0)
+    own = L0JournalWriter(root=tmp_path, vendor="kis", venue="nxt", session="nxt_after", stream="H0NXCNT0", file_tag="s1")
+    sibling = L0JournalWriter(root=tmp_path, vendor="kis", venue="nxt", session="nxt_after", stream="H0NXCNT0", file_tag="s0")
+    own_file = own.partition_path(at_ns)
+    sibling_file = sibling.partition_path(at_ns)
+    own_file.parent.mkdir(parents=True)
+    own_file.write_bytes(b"x")
+    sibling_file.write_bytes(b"x")
+    own_last = _kst_ns(2026, 9, 14, 16, 30)
+    os.utime(own_file, ns=(own_last, own_last))
+    os.utime(sibling_file, ns=(at_ns, at_ns))
+
+    # 같은 파티션을 쓰는 형제 shard 의 최신 쓰기가 재시작 공백을 0 으로 줄이지 않는다.
+    assert own_file != sibling_file
+    assert last_journal_write_ns({("nxt", "nxt_after", "H0NXCNT0"): own}, at_ns) == own_last

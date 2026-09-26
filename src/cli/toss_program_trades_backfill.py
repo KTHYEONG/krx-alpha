@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Register the 'toss-program-trades-backfill' subcommand."""
     parser = subparsers.add_parser("toss-program-trades-backfill")
-    parser.add_argument("--store-path", required=True)
+    parser.add_argument("--store-path", required=True, help="program-trades month-partition root directory")
     parser.add_argument("--symbols", required=True)
     parser.add_argument("--min-date", required=True)
     parser.set_defaults(handler=run)

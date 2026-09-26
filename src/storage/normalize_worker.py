@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
+import logging
 import pathlib
 import subprocess
 import sys
@@ -11,10 +13,15 @@ from collections.abc import Callable, Sequence
 
 from src.core.config import CollectorSettings, DataQualitySettings, ObservabilitySettings, child_process_env
 from src.core.observability import configure_logging
-from src.storage.normalization import L1NormalizationError, normalize_l0_partition
+from src.core.session_anchors import resolve_session_anchors
+from src.storage.market_phase import MARKET_PHASE_WINDOWS, phase_windows_for
+from src.storage.normalization import L1NormalizationError, L1StorageIOError, normalize_l0_partition
 from src.storage.retention import L1WorkerCrashError
 
+logger = logging.getLogger(__name__)
+
 EXIT_DATA_FAULT: int = 3
+EXIT_IO_FAULT: int = 4
 CHILD_MALLOC_CONF: str = "dirty_decay_ms:0,muzzy_decay_ms:0"
 
 
@@ -24,6 +31,7 @@ def run_isolated_normalize(
     *,
     work_root: pathlib.Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    timeout_s: float | None = None,
 ) -> int:
     """Run L0->L1 normalization in a child process isolated from the daemon.
 
@@ -32,14 +40,17 @@ def run_isolated_normalize(
         out_path: Destination L1 parquet path.
         work_root: Spill directory root forwarded to the child.
         runner: Subprocess entry point (defaults to subprocess.run).
+        timeout_s: Child wall-clock bound; defaults to the collector setting.
 
     Returns:
         Number of L1 rows reported by the child.
 
     Raises:
         L1NormalizationError: When the child exits with EXIT_DATA_FAULT.
-        L1WorkerCrashError: When the child crashes or reports no verified row count.
+        L1StorageIOError: When the child exits with EXIT_IO_FAULT.
+        L1WorkerCrashError: When the child crashes, times out, or reports no verified row count.
     """
+    limit_s = timeout_s if timeout_s is not None else CollectorSettings().normalize_timeout_s
     cmd = [sys.executable, "-m", "src.storage.normalize_worker", "--part", str(part_dir), "--out", str(out_path)]
     if work_root is not None:
         cmd += ["--work-root", str(work_root)]
@@ -47,7 +58,10 @@ def run_isolated_normalize(
     env = child_process_env({"_RJEM_MALLOC_CONF": CHILD_MALLOC_CONF})
     run = runner if runner is not None else subprocess.run
     # 자식 [DATA] 로그는 컨테이너 로그로 흘려보내야 하므로 stderr를 계승한다
-    result = run(cmd, stdout=subprocess.PIPE, text=True, check=False, env=env)
+    try:
+        result = run(cmd, stdout=subprocess.PIPE, text=True, check=False, env=env, timeout=limit_s)
+    except subprocess.TimeoutExpired as exc:
+        raise L1WorkerCrashError(f"normalize worker timeout after {limit_s}s: part={part_dir}") from exc
     payload: dict[str, object] = {}
     lines = (result.stdout or "").splitlines()
     lines = [line for line in lines if line.strip()]
@@ -63,6 +77,8 @@ def run_isolated_normalize(
         return rows
     if result.returncode == EXIT_DATA_FAULT:
         raise L1NormalizationError(str(payload.get("error", f"normalize failed: {part_dir}")))
+    if result.returncode == EXIT_IO_FAULT:
+        raise L1StorageIOError(str(payload.get("error", f"normalize failed: {part_dir}")))
     raise L1WorkerCrashError(f"normalize worker crashed: part={part_dir} returncode={result.returncode}")
 
 
@@ -77,12 +93,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         log_dir=CollectorSettings().paths.logs_dir if ObservabilitySettings().persistent_logs else None,
     )
     try:
+        part_date = dt.date.fromisoformat(pathlib.Path(args.part).name.removeprefix("dt="))
+    except ValueError:
+        part_date = None
+    if part_date is None:
+        logger.warning(
+            "[DATA] stage=normalize status=DEFAULT reason=unparsable_partition part=%s", str(args.part)
+        )
+        phase_windows = MARKET_PHASE_WINDOWS
+    else:
+        phase_windows = phase_windows_for(
+            resolve_session_anchors(CollectorSettings().paths.session_calendar_dir, part_date)
+        )
+    try:
         rows = normalize_l0_partition(
             pathlib.Path(args.part),
             pathlib.Path(args.out),
             work_root=pathlib.Path(args.work_root) if args.work_root is not None else None,
             dq_settings=DataQualitySettings(),
+            phase_windows=phase_windows,
         )
+    except L1StorageIOError as exc:
+        print(json.dumps({"error": str(exc), "kind": "io"}), flush=True)  # noqa: T201 - child stdout protocol, read by parent
+        return EXIT_IO_FAULT
     except L1NormalizationError as exc:
         print(json.dumps({"error": str(exc)}), flush=True)  # noqa: T201 - child stdout protocol, read by parent
         return EXIT_DATA_FAULT

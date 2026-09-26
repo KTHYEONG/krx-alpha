@@ -21,7 +21,8 @@ def _verified_aftermarket_capacity(monkeypatch) -> None:
 
 
 
-def test_run_collector_daemon_single_cycle() -> None:
+def test_run_collector_daemon_single_cycle(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
     import datetime as dt
     from unittest.mock import MagicMock
     from zoneinfo import ZoneInfo
@@ -120,7 +121,8 @@ def test_run_collector_daemon_streamer_active_logs_circuit_open(tmp_path, monkey
     assert any('circuit_open' in r.message for r in caplog.records)
 
 
-def test_run_collector_daemon_weekend_sleeps_hourly() -> None:
+def test_run_collector_daemon_weekend_sleeps_hourly(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
     import datetime as dt
     from unittest.mock import MagicMock
     from zoneinfo import ZoneInfo
@@ -134,7 +136,8 @@ def test_run_collector_daemon_weekend_sleeps_hourly() -> None:
     mock_sleep.assert_called_once_with(3600.0)
 
 
-def test_run_collector_daemon_pre_market_sleeps_until_streamer_start() -> None:
+def test_run_collector_daemon_pre_market_sleeps_until_streamer_start(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
     import datetime as dt
     from unittest.mock import MagicMock
     from zoneinfo import ZoneInfo
@@ -523,7 +526,7 @@ def test_daemon_holiday_sleep_aligns_to_state_boundary(tmp_path, monkeypatch) ->
     monkeypatch.chdir(tmp_path)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
     holiday = _holiday_trading_day(dt.date(2026, 9, 14))
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: holiday)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: holiday)
     monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: (_ for _ in ()).throw(AssertionError("no orchestration")))
     sleeps: list[float] = []
     now = dt.datetime(2026, 9, 14, 15, 10, tzinfo=ZoneInfo("Asia/Seoul"))
@@ -546,7 +549,7 @@ def test_daemon_holiday_resolved_once_across_states(tmp_path, monkeypatch, caplo
     holiday = _holiday_trading_day(dt.date(2026, 9, 24))
     resolver_calls: list[object] = []
 
-    def _counting(day, cache):
+    def _counting(day, cache, _anchors_dir):
         resolver_calls.append(day)
         return holiday
 
@@ -592,7 +595,7 @@ def test_daemon_unknown_calendar_without_journals_warns_once(tmp_path, monkeypat
     monkeypatch.chdir(tmp_path)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
     kst = ZoneInfo("Asia/Seoul")
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: None)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: None)
     monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: True)
 
     class _FakeSupervisor:
@@ -631,7 +634,7 @@ def test_daemon_unknown_calendar_with_stale_journal_still_critical(tmp_path, mon
     f = part / "09.jsonl.zst"
     f.write_bytes(b"x")
     os.utime(f, (now.timestamp() - 600, now.timestamp() - 600))
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: None)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: None)
     monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: True)
 
     class _FakeSupervisor:
@@ -661,7 +664,7 @@ def test_daemon_stops_stale_supervisors_on_holiday(tmp_path, monkeypatch) -> Non
     business = _business_trading_day(dt.date(2026, 9, 14))
     holiday = _holiday_trading_day(dt.date(2026, 9, 15))
 
-    def _resolve(day, cache):
+    def _resolve(day, cache, _anchors_dir):
         return business if day == dt.date(2026, 9, 14) else holiday
 
     monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", _resolve)
@@ -699,7 +702,7 @@ def test_holiday_stops_snapshot_child_and_shutdown_collects_regular_child(tmp_pa
     runtime = resolve_collector_runtime(collector=CollectorSettings(data_root=tmp_path))
     runner = daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: now, sleep=lambda _: None)
     monkeypatch.setattr(
-        daemon_mod, "_resolve_trading_day_with_cache", lambda day, cache: _holiday_trading_day(day)
+        daemon_mod, "_resolve_trading_day_with_cache", lambda day, cache, _anchors_dir: _holiday_trading_day(day)
     )
     stops: list[float] = []
 

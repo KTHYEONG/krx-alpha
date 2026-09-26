@@ -23,7 +23,11 @@ class DataPaths:
     root: pathlib.Path
 
     @property
-    def bars_store(self) -> pathlib.Path:
+    def bars_daily_dir(self) -> pathlib.Path:
+        return self.root / "bars" / "daily"
+
+    @property
+    def legacy_bars_file(self) -> pathlib.Path:
         return self.root / "bars" / "daily.parquet"
 
     @property
@@ -31,7 +35,11 @@ class DataPaths:
         return self.root / "market_map.json"
 
     @property
-    def program_trades_store(self) -> pathlib.Path:
+    def program_trades_dir(self) -> pathlib.Path:
+        return self.root / "bars" / "program_trades"
+
+    @property
+    def legacy_program_trades_file(self) -> pathlib.Path:
         return self.root / "bars" / "program_trades.parquet"
 
     @property
@@ -73,6 +81,14 @@ class DataPaths:
     @property
     def calendar_cache(self) -> pathlib.Path:
         return self.root / "calendar_cache.json"
+
+    @property
+    def session_calendar_dir(self) -> pathlib.Path:
+        return self.root / "calendar"
+
+    @property
+    def daemon_lifecycle(self) -> pathlib.Path:
+        return self.work_root / "daemon_lifecycle.json"
 
     def universe_out(self, day: dt.date) -> pathlib.Path:
         return self.universe_dir / f"{day.isoformat()}.parquet"

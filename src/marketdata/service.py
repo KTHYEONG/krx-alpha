@@ -20,6 +20,7 @@ from src.marketdata.krx_bars import (
     derive_market_map,
     latest_trading_day,
 )
+from src.marketdata.partitioned_store import latest_partition_date
 from src.marketdata.program_trade_service import (
     ProgramTradesBackfillResult,
     backfill_program_trades,
@@ -57,10 +58,14 @@ def refresh_bars(
     auth_key: str,
     session: Any | None = None,
 ) -> BarsRefreshResult:
-    """bars store 누적 + market-map 기록을 수행한다 (KRX 실패 시 산출물 보존)."""
+    """bars store 누적 + market-map 기록을 수행한다 (KRX 실패 시 산출물 보존).
+
+    Args:
+        store_path: Month-partition root directory (``YYYY-MM.parquet`` files).
+    """
     store = pathlib.Path(store_path)
     backfilled_days = 0
-    if not store.exists():
+    if latest_partition_date(store) is None:
         backfill = backfill_bars(
             store, auth_key=auth_key, end_date=ref_date - dt.timedelta(days=1), window_days=window_days, session=session
         )
@@ -87,6 +92,9 @@ def refresh_bars_via_kis_fallback(
     """직전 성공 market_map.json 유니버스를 KIS 일봉으로 적재한다 (KRX 장애시 1회성 폴백).
 
     Bars whose session date differs from ``target_date`` are never stored.
+
+    Args:
+        store_path: Month-partition root directory (``YYYY-MM.parquet`` files).
     """
     try:
         market_map = json.loads(pathlib.Path(market_map_path).read_text(encoding="utf-8"))

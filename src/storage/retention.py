@@ -16,6 +16,7 @@ from src.storage.normalization import (
     _BATCH_BYTES,
     _GATHER_ROWS,
     L1NormalizationError,
+    L1StorageIOError,
     _dedup_sort_order,
     _iter_line_batches,
     normalize_l0_partition,
@@ -30,6 +31,7 @@ __all__ = [
     "_BATCH_BYTES",
     "_GATHER_ROWS",
     "L1NormalizationError",
+    "L1StorageIOError",
     "_dedup_sort_order",
     "_iter_line_batches",
     "normalize_l0_partition",
@@ -54,11 +56,13 @@ class PruneStats(int):
 
     _deleted: int
     _normalized: int
+    _failed: int
 
-    def __new__(cls, deleted: int, normalized: int = 0) -> PruneStats:
+    def __new__(cls, deleted: int, normalized: int = 0, failed: int = 0) -> PruneStats:
         obj = int.__new__(cls, deleted)
         obj._deleted = int(deleted)
         obj._normalized = int(normalized)
+        obj._failed = int(failed)
         return obj
 
     @property
@@ -68,6 +72,10 @@ class PruneStats(int):
     @property
     def normalized(self) -> int:
         return self._normalized
+
+    @property
+    def failed(self) -> int:
+        return self._failed
 
 
 def prune_old_journals(
@@ -79,6 +87,8 @@ def prune_old_journals(
     quarantine_root: pathlib.Path | None = None,
     normalizer: Callable[[pathlib.Path, pathlib.Path], int] | None = None,
     verified_remote_l1: AbstractSet[str] | None = None,
+    progress: Callable[[], None] | None = None,
+    normalize: bool = True,
 ) -> PruneStats:
     """Normalize eligible L0 partitions and delete only remotely verified inputs.
 
@@ -90,6 +100,10 @@ def prune_old_journals(
         quarantine_root: Optional non-destructive corruption destination.
         normalizer: Optional normalization boundary for isolated workers.
         verified_remote_l1: Paths confirmed present with matching remote bytes.
+        progress: Optional per-partition-attempt callback, called whatever the outcome.
+        normalize: When False (low-disk recovery), never run the normalizer and
+            only delete partitions whose L1 already exists locally and is in
+            ``verified_remote_l1``; normalizing needs spill space the disk lacks.
 
     Returns:
         Existing deleted and normalized counts.
@@ -100,46 +114,63 @@ def prune_old_journals(
     cutoff = ref - dt.timedelta(days=retain_days)
     deleted = 0
     normalized = 0
+    failed = 0
     archive_base = pathlib.Path(str(archive_root)) if not isinstance(archive_root, pathlib.Path) else archive_root
     for part in [p for p in pathlib.Path(str(journal_root)).rglob("dt=*") if p.is_dir()]:
         m = _DT_RE.fullmatch(part.name)
         part_date = dt.date.fromisoformat(m.group(0)[3:]) if m else None
         if part_date is None or part_date >= cutoff:
             continue
-        rel_parent = part.relative_to(pathlib.Path(str(journal_root))).parent
-        out_path = archive_base / rel_parent / f"{part.name}.parquet"
         try:
-            normalize = normalizer if normalizer is not None else normalize_l0_partition
-            rows = normalize(part, out_path)
-        except L1WorkerCrashError as exc:
-            logger.critical("[DATA] stage=prune status=FAIL reason=worker_crash part=%s error=%s", str(part), str(exc))
-            continue
-        except L1NormalizationError as exc:
-            logger.critical("[DATA] stage=prune status=FAIL reason=%s part=%s", str(exc), str(part))
-            if quarantine_root is not None:
-                rel_part = part.relative_to(pathlib.Path(str(journal_root)))
-                dest = pathlib.Path(quarantine_root) / rel_part
-                if dest.exists():
+            rel_parent = part.relative_to(pathlib.Path(str(journal_root))).parent
+            out_path = archive_base / rel_parent / f"{part.name}.parquet"
+            if not normalize:
+                rel = "l1/" + out_path.relative_to(archive_base).as_posix()
+                if out_path.exists() and verified_remote_l1 is not None and rel in verified_remote_l1:
+                    deleted += sum(1 for f in part.rglob("*") if f.is_file())
+                    shutil.rmtree(part)
+                continue
+            try:
+                normalize_fn = normalizer if normalizer is not None else normalize_l0_partition
+                rows = normalize_fn(part, out_path)
+            except L1StorageIOError as exc:
+                logger.critical("[DATA] stage=prune status=FAIL reason=storage_io part=%s error=%s", str(part), str(exc))
+                failed += 1
+                continue
+            except L1WorkerCrashError as exc:
+                logger.critical("[DATA] stage=prune status=FAIL reason=worker_crash part=%s error=%s", str(part), str(exc))
+                failed += 1
+                continue
+            except L1NormalizationError as exc:
+                logger.critical("[DATA] stage=prune status=FAIL reason=%s part=%s", str(exc), str(part))
+                failed += 1
+                if quarantine_root is not None:
+                    rel_part = part.relative_to(pathlib.Path(str(journal_root)))
+                    dest = pathlib.Path(quarantine_root) / rel_part
+                    if dest.exists():
+                        logger.critical(
+                            "[DATA] stage=quarantine part=%s status=FAIL reason=quarantine_exists", str(part)
+                        )
+                        continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(part), str(dest))
                     logger.critical(
-                        "[DATA] stage=quarantine part=%s status=FAIL reason=quarantine_exists", str(part)
+                        "[DATA] stage=quarantine part=%s dest=%s status=MOVED", str(part), str(dest)
                     )
-                    continue
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(part), str(dest))
-                logger.critical(
-                    "[DATA] stage=quarantine part=%s dest=%s status=MOVED", str(part), str(dest)
-                )
-            continue
-        if rows <= 0 or not out_path.exists():
-            logger.critical("[DATA] stage=prune status=FAIL reason=unverified part=%s", str(part))
-            continue
-        normalized += 1
-        rel = "l1/" + out_path.relative_to(archive_base).as_posix()
-        if verified_remote_l1 is None or rel not in verified_remote_l1:
-            continue
-        deleted += sum(1 for f in part.rglob("*") if f.is_file())
-        shutil.rmtree(part)
-    return PruneStats(deleted, normalized)
+                continue
+            if rows <= 0 or not out_path.exists():
+                logger.critical("[DATA] stage=prune status=FAIL reason=unverified part=%s", str(part))
+                continue
+            normalized += 1
+            rel = "l1/" + out_path.relative_to(archive_base).as_posix()
+            if verified_remote_l1 is None or rel not in verified_remote_l1:
+                continue
+            deleted += sum(1 for f in part.rglob("*") if f.is_file())
+            shutil.rmtree(part)
+        finally:
+            if progress is not None:
+                progress()
+    return PruneStats(deleted, normalized, failed)
 
 
 def prune_local_l1(

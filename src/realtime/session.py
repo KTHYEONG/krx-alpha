@@ -8,11 +8,14 @@ import logging
 import os
 import pathlib
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from src.core.calendar import SessionSchedule, SessionState, calc_sleep_seconds, get_target_state
+from src.core.config import DataPaths
+from src.core.session_anchors import resolve_session_anchors
 from src.realtime.clock import ClockUnsyncedError, measure_ntp_offset_ns
 from src.realtime.contracts import MarketSession, MarketVenue
 from src.realtime.kis_sharding import AftermarketShard
@@ -24,6 +27,22 @@ from src.realtime.subscription import SubscriptionDiff, SubscriptionRegistry
 
 logger = logging.getLogger(__name__)
 _KST = ZoneInfo("Asia/Seoul")
+
+
+def last_journal_write_ns(journals: Mapping[tuple[str, ...], L0JournalWriter], at_ns: int) -> int | None:
+    """Latest on-disk write time among this session's journal partitions for the date of ``at_ns``.
+
+    A restarted collector cannot know when its predecessor stopped receiving
+    frames; the newest journal file mtime is the last durable evidence of
+    reception, so the window from it to the new boot is the restart gap.
+    """
+    latest: int | None = None
+    for writer in journals.values():
+        for path in writer.owned_files(at_ns):
+            mtime_ns = path.stat().st_mtime_ns
+            if latest is None or mtime_ns > latest:
+                latest = mtime_ns
+    return latest
 
 
 @dataclass(frozen=True)
@@ -181,7 +200,10 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
         market_session = cfg.route.session.value if cfg.route is not None else MarketSession.REGULAR.value
         expected_close_ns = 0
         if cfg.route is not None:
-            close_at = dt.datetime.combine(cfg.session_date, dt.time(20, 0), tzinfo=_KST)
+            anchors = resolve_session_anchors(
+                DataPaths(cfg.journal_root.parent).session_calendar_dir, cfg.session_date
+            )
+            close_at = dt.datetime.combine(cfg.session_date, anchors.after_market_end, tzinfo=_KST)
             expected_close_ns = int(close_at.timestamp() * 1_000_000_000)
         manifest = SessionManifest(
             session_date=cfg.session_date,
@@ -214,11 +236,20 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
                 venue=cfg.route.venue,
                 session=cfg.route.session,
                 stream=stream,
+                file_tag=f"s{cfg.shard.shard_index}" if cfg.shard is not None else None,
             )
             for stream in cfg.desired_streams
         }
     else:
         journals = {(cfg.vendor, stream): L0JournalWriter(root=cfg.journal_root, vendor=cfg.vendor, stream=stream) for stream in cfg.desired_streams}
+    if manifest.boots:
+        last_write_ns = last_journal_write_ns(journals, started)
+        if last_write_ns is not None and started > last_write_ns:
+            manifest.record_gap(symbol="*", gap_start_ns=last_write_ns, gap_end_ns=started, reason="restart")
+            logger.warning(
+                "[DATA] stage=bootstrap status=RESTART_GAP gap_s=%.1f",
+                (started - last_write_ns) / 1_000_000_000,
+            )
     prune_old_journals(cfg.journal_root, archive_root=cfg.archive_root, retain_days=cfg.journal_retain_days, reference_date=cfg.session_date)
     session = CollectorSession(
         manifest=manifest, registry=registry, journals=journals, manifest_path=cfg.manifest_path, schedule=cfg.schedule,

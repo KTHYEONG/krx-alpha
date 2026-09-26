@@ -6,13 +6,21 @@ import datetime as dt
 import json
 import os
 import pathlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 from tenacity import retry, retry_if_exception_type, stop_after_attempt
 
 from src.core.errors import KrxAlphaError
+from src.core.session_anchors import (
+    STANDARD_AFTER_MARKET_END,
+    AnchorSource,
+    SessionAnchorError,
+    SessionAnchors,
+)
 from src.marketdata.krx_bars import retry_wait_seconds
 
 TOSS_TOKEN_URL: str = "https://openapi.tossinvest.com/oauth2/token"  # noqa: S105 - public endpoint, not a secret
@@ -29,6 +37,67 @@ class TradingDay:
     is_business_day: bool
     previous_business_day: dt.date
     next_business_day: dt.date
+    anchors: SessionAnchors | None = None
+    next_anchors: SessionAnchors | None = None
+
+
+_KST = ZoneInfo("Asia/Seoul")
+
+
+def _parse_vendor_time(day: dt.date, value: Any) -> dt.time | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        moment = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return None
+    kst = moment.astimezone(_KST)
+    if kst.date() != day:
+        return None
+    return kst.time()
+
+
+def parse_session_anchors(day: dt.date, integrated: Mapping[str, Any] | None) -> SessionAnchors | None:
+    """Parse Toss ``integrated`` session times into anchors for ``day``.
+
+    Returns ``None`` for holidays (``integrated is None``) and for any
+    malformed, missing, or cross-date time field, so a partial vendor payload
+    degrades to the standard schedule instead of invalidating the business-day
+    decision.
+    """
+    if integrated is None:
+        return None
+    try:
+        regular = integrated.get("regularMarket")
+        if not isinstance(regular, Mapping):
+            return None
+        regular_open = _parse_vendor_time(day, regular.get("startTime"))
+        closing_auction_start = _parse_vendor_time(day, regular.get("singlePriceAuctionStartTime"))
+        regular_close = _parse_vendor_time(day, regular.get("endTime"))
+        if regular_open is None or closing_auction_start is None or regular_close is None:
+            return None
+        after = integrated.get("afterMarket")
+        after_market_end: dt.time | None
+        if after is None:
+            after_market_end = STANDARD_AFTER_MARKET_END
+        else:
+            if not isinstance(after, Mapping):
+                return None
+            after_market_end = _parse_vendor_time(day, after.get("endTime"))
+            if after_market_end is None:
+                return None
+        return SessionAnchors(
+            date=day,
+            regular_open=regular_open,
+            closing_auction_start=closing_auction_start,
+            regular_close=regular_close,
+            after_market_end=after_market_end,
+            source=AnchorSource.VENDOR,
+        )
+    except (SessionAnchorError, AttributeError, TypeError, ValueError):
+        return None
 
 
 @retry(
@@ -89,11 +158,16 @@ def fetch_trading_day(ref_date: dt.date, *, app_key: str, app_secret: str, sessi
         next_business_day = dt.date.fromisoformat(nxt["date"])
     except (KeyError, TypeError, ValueError) as exc:
         raise TossCalendarError(f"toss calendar envelope invalid for {ref_date}: {exc}") from exc
+    next_integrated = nxt.get("integrated") if isinstance(nxt, dict) else None
     return TradingDay(
         date=date,
         is_business_day=integrated is not None,
         previous_business_day=previous_business_day,
         next_business_day=next_business_day,
+        anchors=parse_session_anchors(date, integrated if isinstance(integrated, Mapping) or integrated is None else None),
+        next_anchors=parse_session_anchors(
+            next_business_day, next_integrated if isinstance(next_integrated, Mapping) or next_integrated is None else None
+        ),
     )
 
 def save_trading_day_cache(path: pathlib.Path, day: TradingDay) -> None:

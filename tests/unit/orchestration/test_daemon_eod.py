@@ -78,7 +78,7 @@ def test_run_collector_daemon_eod_passes_quarantine_root(tmp_path, monkeypatch) 
 
     seen: dict[str, object] = {}
 
-    def _fake_maintenance(journal_root, *, retain_days=3, today=None, archive_root=None, quarantine_root=None, work_root=None, verified_remote_l1=None):
+    def _fake_maintenance(journal_root, *, retain_days=3, today=None, archive_root=None, quarantine_root=None, work_root=None, verified_remote_l1=None, progress=None, normalize=True):
         seen.update({'quarantine_root': quarantine_root, 'archive_root': archive_root, 'work_root': work_root})
         return 0
 
@@ -112,7 +112,7 @@ def test_run_collector_daemon_eod_logs_session_data_gap(tmp_path, monkeypatch, c
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: False)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 10)))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 10)))
 
     eod_time = dt.datetime(2026, 9, 10, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
@@ -152,7 +152,7 @@ def test_run_collector_daemon_eod_attempts_maintenance_once_per_date(tmp_path, m
     monkeypatch.setattr(daemon_mod, 'check_session_reconciliation', _reconcile)
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo('Asia/Seoul'))
 
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 14)))
 
     # When
     daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=3, now_fn=lambda: eod_time)
@@ -226,7 +226,7 @@ def test_run_collector_daemon_eod_runs_offload_and_reconciliation_when_maintenan
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo('Asia/Seoul'))
 
     # When
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 14)))
     with caplog.at_level(logging.INFO):
         daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
 
@@ -267,7 +267,7 @@ def test_run_collector_daemon_eod_logs_error_when_offload_raises_and_does_not_re
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo('Asia/Seoul'))
 
     # When
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 14)))
     with caplog.at_level(logging.INFO):
         daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: eod_time)
 
@@ -322,7 +322,7 @@ def test_run_collector_daemon_eod_reconciliation_failure_is_critical_and_degrade
         raise OSError("bars parquet unreadable")
 
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", _broken)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 14)))
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     with caplog.at_level(logging.INFO):
@@ -474,7 +474,7 @@ def test_run_collector_daemon_eod_backup_freshness_stale_is_critical(tmp_path, m
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     seen: dict[str, object] = {}
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 14)))
     monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
 
     def _freshness(**kw):
@@ -550,7 +550,7 @@ def test_run_collector_daemon_eod_passes_substantive_reconciliation_inputs(tmp_p
         return True
 
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", _reconcile)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 14)))
 
     daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
 
@@ -587,7 +587,7 @@ def test_run_collector_daemon_eod_sends_daily_digest_once_per_date(tmp_path, mon
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
     _write_eod_host_status(settings, eod_time, 20)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 14)))
     daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: eod_time)
 
     assert len(digests) == 1
@@ -615,7 +615,7 @@ def test_eod_runs_housekeeping_when_aftermarket_not_ready(monkeypatch, tmp_path,
     monkeypatch.setattr(daemon, 'run_eod_remote_l0_purge', lambda *a, **k: calls.append('purge') or 0)
     monkeypatch.setattr(daemon, 'check_session_reconciliation', lambda **kw: True)
     monkeypatch.setattr(daemon, 'check_backup_freshness', lambda **kw: [])
-    monkeypatch.setattr(daemon, '_resolve_trading_day_with_cache', lambda d, c: _business_trading_day(d))
+    monkeypatch.setattr(daemon, '_resolve_trading_day_with_cache', lambda d, c, _a: _business_trading_day(d))
     now = dt.datetime(2026,9,15,20,1,tzinfo=ZoneInfo('Asia/Seoul'))
     cfg = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
     with caplog.at_level(logging.INFO):
@@ -679,7 +679,7 @@ def test_eod_remote_l0_purge_runs_after_pruning_and_cannot_fail_eod(tmp_path, mo
     def _offload(*a, **kw):
         return _Offload()
 
-    def _purge(journal_root, verified):
+    def _purge(journal_root, verified, *, progress=None):
         order.append("purge")
         assert verified == _Offload.verified_remote_l1
         raise RuntimeError("purge boom")
@@ -717,7 +717,7 @@ def test_daemon_holiday_eod_runs_housekeeping_without_alerts(tmp_path, monkeypat
     )
     kst = ZoneInfo("Asia/Seoul")
     holiday = _holiday_trading_day(dt.date(2026, 9, 24))
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: holiday)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: holiday)
     calls: dict[str, int] = {"maintenance": 0, "offload": 0, "purge": 0, "freshness": 0}
 
     def _maintenance(*a, **kw):
@@ -769,7 +769,7 @@ def test_daemon_holiday_eod_offload_remote_failure_keeps_holiday_summary(tmp_pat
     monkeypatch.chdir(tmp_path)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
     holiday = _holiday_trading_day(dt.date(2026, 9, 24))
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: holiday)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: holiday)
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 1)
     monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
@@ -797,7 +797,7 @@ def test_daemon_holiday_eod_offload_unexpected_error_logged(tmp_path, monkeypatc
     monkeypatch.chdir(tmp_path)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
     holiday = _holiday_trading_day(dt.date(2026, 9, 24))
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: holiday)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: holiday)
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 1)
     monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
@@ -824,7 +824,7 @@ def test_daemon_aftermarket_failure_still_runs_housekeeping(tmp_path, monkeypatc
 
     monkeypatch.chdir(tmp_path)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(d))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(d))
     monkeypatch.setattr(daemon_mod, "aftermarket_eod_ready", lambda **kw: False)
     calls: dict[str, int] = {"maintenance": 0, "offload": 0, "purge": 0}
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: calls.__setitem__("maintenance", calls["maintenance"] + 1) or 0)
@@ -863,7 +863,7 @@ def test_daemon_ready_aftermarket_and_clean_checks_report_ok(tmp_path, monkeypat
         after_market_enabled=True,
         host_backup_status_path=_host_status_path(tmp_path),
     )
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(d))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(d))
     monkeypatch.setattr(daemon_mod, "aftermarket_eod_ready", lambda **kw: True)
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 1, "skipped": 0, "failed": 0, "purged": 0})
@@ -892,7 +892,7 @@ def test_daemon_reconciliation_receives_routed_layout(tmp_path, monkeypatch) -> 
 
     monkeypatch.chdir(tmp_path)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(d))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(d))
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
     monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *a, **kw: 0)
@@ -923,7 +923,7 @@ def test_daemon_unknown_calendar_skips_reconciliation_with_warning(tmp_path, mon
 
     monkeypatch.chdir(tmp_path)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: None)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: None)
     calls: dict[str, int] = {"maintenance": 0, "offload": 0}
 
     def _maintenance(*a, **kw):
@@ -964,7 +964,7 @@ def test_daemon_holiday_eod_maintenance_failure_still_summarizes(tmp_path, monke
 
     monkeypatch.chdir(tmp_path)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _holiday_trading_day(d))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _holiday_trading_day(d))
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: (_ for _ in ()).throw(L1WorkerCrashError("crashed")))
     monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
     monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *a, **kw: 0)
@@ -989,7 +989,7 @@ def test_daemon_holiday_eod_purge_failure_never_fails_holiday(tmp_path, monkeypa
 
     monkeypatch.chdir(tmp_path)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _holiday_trading_day(d))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _holiday_trading_day(d))
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
 
@@ -1018,7 +1018,7 @@ def test_daemon_holiday_eod_backup_stale_is_critical(tmp_path, monkeypatch, capl
 
     monkeypatch.chdir(tmp_path)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _holiday_trading_day(d))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _holiday_trading_day(d))
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
     monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *a, **kw: 0)
@@ -1044,7 +1044,7 @@ def test_daemon_holiday_eod_backup_remote_failure_is_critical(tmp_path, monkeypa
 
     monkeypatch.chdir(tmp_path)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _holiday_trading_day(d))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _holiday_trading_day(d))
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
     monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *a, **kw: 0)
@@ -1098,7 +1098,7 @@ def test_stale_host_backup_degrades_business_day_eod(tmp_path, monkeypatch, capl
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
     _write_eod_host_status(settings, eod_time, 40)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 14)))
 
     with caplog.at_level(logging.CRITICAL):
         daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
@@ -1142,7 +1142,7 @@ def test_business_eod_ignores_data_root_work_status_and_reports_missing(
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
     monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 14)))
 
     with caplog.at_level(logging.CRITICAL):
         daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
@@ -1180,7 +1180,7 @@ def test_fresh_host_backup_keeps_business_day_eod_ok(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
     _write_eod_host_status(settings, eod_time, 20)
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: _business_trading_day(dt.date(2026, 9, 14)))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 14)))
 
     daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
 
@@ -1205,7 +1205,7 @@ def test_holiday_eod_checks_host_backup_freshness_without_digest(tmp_path, monke
         host_backup_status_path=_host_status_path(tmp_path),
     )
     holiday = _holiday_trading_day(dt.date(2026, 9, 24))
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: holiday)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: holiday)
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
@@ -1229,3 +1229,63 @@ def test_holiday_eod_checks_host_backup_freshness_without_digest(tmp_path, monke
     assert "reason=missing" in missing[0].getMessage()
 
 
+
+
+def _housekeeping_offload_stub(*, uploaded=1):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(l1=SimpleNamespace(uploaded=uploaded), purged=0)
+
+
+def test_eod_housekeeping_low_disk_skips_maintenance_but_offloads(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    from unittest.mock import MagicMock
+
+    import src.orchestration.daemon as daemon_mod
+    from src.core.config import CollectorSettings
+
+    from src.storage.retention import PruneStats
+
+    monkeypatch.setattr(daemon_mod, "check_disk_watermark", lambda path, *, min_free_gb: False)
+    maintenance = MagicMock(return_value=PruneStats(0, 0))
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", maintenance)
+    stub = _housekeeping_offload_stub()
+    stub.verified_remote_l1 = frozenset({"l1/ls/H0STCNT0/dt=2026-09-01.parquet"})
+    offload = MagicMock(return_value=stub)
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", offload)
+    monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", MagicMock())
+
+    settings = CollectorSettings(data_root=tmp_path)
+
+    with caplog.at_level(logging.CRITICAL):
+        result = daemon_mod._run_eod_housekeeping(settings, settings.paths, dt.date(2026, 9, 14), progress=lambda: None)
+
+    # 정규화 패스는 건너뛰고, 원격 검증 집합으로 정규화 없는 삭제 패스만 1회 실행한다.
+    maintenance.assert_called_once()
+    assert maintenance.call_args.kwargs["normalize"] is False
+    assert maintenance.call_args.kwargs["verified_remote_l1"] == stub.verified_remote_l1
+    offload.assert_called_once()
+    assert result.maintenance_ok is False
+    criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert any("stage=eod_disk_guard" in message for message in criticals)
+
+
+def test_eod_housekeeping_failed_partitions_degrade_maintenance(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    import src.orchestration.daemon as daemon_mod
+    from src.core.config import CollectorSettings
+    from src.storage.retention import PruneStats
+
+    monkeypatch.setattr(daemon_mod, "check_disk_watermark", lambda path, *, min_free_gb: True)
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *args, **kwargs: PruneStats(0, 0, failed=1))
+    monkeypatch.setattr(
+        daemon_mod, "run_eod_offload", lambda *args, **kwargs: _housekeeping_offload_stub()
+    )
+    monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *args, **kwargs: None)
+
+    settings = CollectorSettings(data_root=tmp_path)
+    result = daemon_mod._run_eod_housekeeping(settings, settings.paths, dt.date(2026, 9, 14), progress=lambda: None)
+
+    assert result.maintenance_ok is False

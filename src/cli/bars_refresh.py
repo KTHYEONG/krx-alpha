@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """'bars-refresh' 서브커맨드를 등록한다."""
     parser = subparsers.add_parser("bars-refresh")
-    parser.add_argument("--store-path", required=True)
+    parser.add_argument("--store-path", required=True, help="bars month-partition root directory")
     parser.add_argument("--market-map-path", required=True)
     parser.add_argument("--ref-date", required=True)
     parser.add_argument("--window-days", type=int, default=90)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import os
 import pathlib
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -14,6 +13,11 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt
 
 from src.core.errors import KrxAlphaError
 from src.marketdata.krx_bars import retry_wait_seconds
+from src.marketdata.partitioned_store import (
+    PartitionedStoreError,
+    scan_month_partitions,
+    upsert_month_partitions,
+)
 
 TOSS_PROGRAM_TRADES_URL_TEMPLATE: str = "https://openapi.tossinvest.com/api/v1/stocks/{symbol}/program-trades"
 TOSS_PROGRAM_TRADES_PAGE_COUNT: int = 100
@@ -183,7 +187,8 @@ def backfill_program_trades_history(
             days.append(day)
             if day not in by_date:
                 by_date[day] = row
-        if all(day < min_date for day in days):
+        # 커서는 과거로만 진행하므로 한 페이지에 min_date 이전 날짜가 하나라도 있으면 더 오래된 페이지는 불필요하다.
+        if any(day < min_date for day in days):
             break
         if next_until is None:
             break
@@ -198,35 +203,38 @@ def backfill_program_trades_history(
 def append_program_trades(store_path: pathlib.Path, rows: Sequence[Mapping[str, object]]) -> int:
     """Idempotently upsert program-trade history rows keyed by (symbol, date).
 
+    Args:
+        store_path: Month-partition root directory (``YYYY-MM.parquet`` files).
+
     Raises:
-        TossProgramTradesError: If ``store_path`` exists but cannot be read as
+        TossProgramTradesError: If the store exists but cannot be read as
             a matching Parquet store.
     """
     if not rows:
         return 0
     store = pathlib.Path(store_path)
+    if store.exists() and not store.is_dir():
+        raise TossProgramTradesError(f"toss program-trades store unreadable at {store_path}: not a directory")
     columns = list(PROGRAM_TRADE_HISTORY_SCHEMA)
     incoming = pl.DataFrame(
         [{key: row[key] for key in columns} for row in rows],
         schema=PROGRAM_TRADE_HISTORY_SCHEMA,
     ).select(columns)
-    if store.exists():
-        try:
-            existing = pl.read_parquet(store).select(columns)
-        except Exception as exc:
-            raise TossProgramTradesError(f"toss program-trades store unreadable at {store}: {exc}") from exc
-        new_rows = incoming.join(existing.select(["symbol", "date"]), on=["symbol", "date"], how="anti")
-        kept = existing.join(incoming.select(["symbol", "date"]), on=["symbol", "date"], how="anti")
-        combined = pl.concat([kept, incoming]).sort(["symbol", "date"])
-        added = new_rows.height
-    else:
-        combined = incoming.sort(["symbol", "date"])
-        added = incoming.height
-    store.parent.mkdir(parents=True, exist_ok=True)
-    tmp = store.parent / f".{store.name}.tmp"
-    combined.write_parquet(tmp, compression="zstd")
-    os.replace(tmp, store)
-    return added
+    try:
+        return upsert_month_partitions(
+            pathlib.Path(store_path),
+            incoming,
+            key_columns=("symbol", "date"),
+            sort_columns=("symbol", "date"),
+        )
+    except PartitionedStoreError as exc:
+        raise TossProgramTradesError(f"toss program-trades store unreadable at {store_path}: {exc}") from exc
+
+
+def _stored_symbol_dates(store_path: pathlib.Path) -> pl.LazyFrame:
+    """Lazily scan stored ``symbol``/``date`` pairs without materializing history."""
+    return scan_month_partitions(pathlib.Path(store_path)).select(["symbol", "date"])
+
 
 def symbols_needing_backfill(
     store_path: pathlib.Path, symbols: Sequence[str], min_date: dt.date
@@ -240,25 +248,60 @@ def symbols_needing_backfill(
     it cannot exist.
 
     Raises:
-        TossProgramTradesError: If ``store_path`` exists but cannot be read.
+        TossProgramTradesError: If the store exists but cannot be read.
     """
     if not symbols:
         return ()
     store = pathlib.Path(store_path)
-    if not store.exists():
-        return tuple(symbols)
-    try:
-        frame = pl.read_parquet(store).select(["symbol", "date"])
-    except Exception as exc:
-        raise TossProgramTradesError(f"toss program-trades store unreadable at {store}: {exc}") from exc
+    if store.exists() and not store.is_dir():
+        raise TossProgramTradesError(f"toss program-trades store unreadable at {store_path}: not a directory")
     wanted = set(symbols)
-    covered = (
-        frame.filter(pl.col("symbol").is_in(wanted))
-        .group_by("symbol")
-        .agg(pl.col("date").min().alias("min_date"))
-        .filter(pl.col("min_date") <= min_date)
-        .get_column("symbol")
-        .to_list()
-    )
+    try:
+        covered = (
+            _stored_symbol_dates(store_path)
+            .filter(pl.col("symbol").is_in(wanted))
+            .group_by("symbol")
+            .agg(pl.col("date").min().alias("min_date"))
+            .filter(pl.col("min_date") <= min_date)
+            .collect(engine="streaming")
+            .get_column("symbol")
+            .to_list()
+        )
+    except PartitionedStoreError:
+        return tuple(symbols)
+    except Exception as exc:
+        raise TossProgramTradesError(
+            f"toss program-trades store unreadable at {store_path}: {exc}"
+        ) from exc
     covered_set = set(covered)
     return tuple(symbol for symbol in symbols if symbol not in covered_set)
+
+
+def program_trade_coverage(
+    store_path: pathlib.Path, symbols: Sequence[str]
+) -> dict[str, tuple[dt.date, dt.date]]:
+    """Return ``(min_date, max_date)`` per stored symbol with a bounded lazy scan."""
+    wanted = set(symbols)
+    if not wanted:
+        return {}
+    store = pathlib.Path(store_path)
+    if store.exists() and not store.is_dir():
+        raise TossProgramTradesError(f"toss program-trades store unreadable at {store_path}: not a directory")
+    try:
+        bounds = (
+            _stored_symbol_dates(store_path)
+            .filter(pl.col("symbol").is_in(wanted))
+            .group_by("symbol")
+            .agg(pl.col("date").min().alias("min_date"), pl.col("date").max().alias("max_date"))
+            .collect(engine="streaming")
+        )
+    except PartitionedStoreError:
+        return {}
+    except Exception as exc:
+        raise TossProgramTradesError(
+            f"toss program-trades store unreadable at {store_path}: {exc}"
+        ) from exc
+    return {
+        str(symbol): (min_date, max_date)
+        for symbol, min_date, max_date in bounds.iter_rows()
+    }

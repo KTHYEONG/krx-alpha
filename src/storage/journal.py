@@ -35,6 +35,7 @@ class L0JournalWriter:
         stream: str = "",
         *,
         compress_level: int = 3,
+        file_tag: str | None = None,
     ) -> None:
         self._root = pathlib.Path(root)
         self._vendor = vendor
@@ -42,6 +43,8 @@ class L0JournalWriter:
         self._session = MarketSession(session)
         self._stream = stream
         self._compress_level = compress_level
+        # 같은 파티션을 여러 shard 프로세스가 쓰면 파일 이름으로 소유자를 구분해야 재시작 공백을 shard 별로 잴 수 있다.
+        self._file_tag = file_tag
         self._buffer: list[dict[str, Any]] = []
 
     def partition_path(self, recv_wall_ns: int) -> pathlib.Path:
@@ -53,8 +56,13 @@ class L0JournalWriter:
             / self._session.value
             / self._stream
             / f"dt={ts.date().isoformat()}"
-            / f"{ts.hour:02d}.jsonl.zst"
+            / (f"{ts.hour:02d}.{self._file_tag}.jsonl.zst" if self._file_tag else f"{ts.hour:02d}.jsonl.zst")
         )
+
+    def owned_files(self, at_ns: int) -> list[pathlib.Path]:
+        """Journal files this writer (not sibling shards) wrote for the date of ``at_ns``."""
+        pattern = f"[0-9][0-9].{self._file_tag}.jsonl.zst" if self._file_tag else "[0-9][0-9].jsonl.zst"
+        return sorted(self.partition_path(at_ns).parent.glob(pattern))
 
     def append(
         self,

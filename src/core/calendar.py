@@ -8,8 +8,10 @@ from enum import StrEnum
 from zoneinfo import ZoneInfo
 
 from src.core.errors import ScheduleOrderError
+from src.core.session_anchors import SessionAnchors
 
 _KST = ZoneInfo("Asia/Seoul")
+_BASE_DATE: dt.date = dt.date(2000, 1, 1)
 
 
 class SessionState(StrEnum):
@@ -87,3 +89,28 @@ def calc_sleep_seconds(now_dt: dt.datetime, target_time: dt.time) -> float:
     if target_dt <= kst_dt:
         target_dt += dt.timedelta(days=1)
     return float((target_dt - kst_dt).total_seconds())
+
+
+def _shift_time(value: dt.time, delta: dt.timedelta) -> dt.time:
+    return (dt.datetime.combine(_BASE_DATE, value) + delta).time()
+
+
+def schedule_for(anchors: SessionAnchors, base: SessionSchedule) -> SessionSchedule:
+    """Return ``base`` with close-dependent transitions moved by the day's close shift.
+
+    Only ``market_close`` and ``eod_done`` move; streamer/scanner starts stay
+    early so a late-open day still connects before the shifted open, and the
+    20:00 aftermarket boundaries are anchored to ``after_market_end``.
+    """
+    after_gap = dt.datetime.combine(_BASE_DATE, base.after_market_eod_done) - dt.datetime.combine(
+        _BASE_DATE, base.after_market_close
+    )
+    return SessionSchedule(
+        streamer_start=base.streamer_start,
+        scanner_start=base.scanner_start,
+        market_close=_shift_time(base.market_close, anchors.close_shift),
+        eod_done=_shift_time(base.eod_done, anchors.close_shift),
+        after_market_enabled=base.after_market_enabled,
+        after_market_close=anchors.after_market_end,
+        after_market_eod_done=_shift_time(anchors.after_market_end, after_gap),
+    )

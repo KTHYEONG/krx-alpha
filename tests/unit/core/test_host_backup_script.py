@@ -35,6 +35,8 @@ def _base_env(tmp_path: Path, argv_log: Path) -> dict[str, str]:
     (krx_root / "data").mkdir(parents=True)
     fake_bin = _write_fake_rclone(tmp_path / "fake-rclone.sh", argv_log)
     env = dict(os.environ)
+    # 개발 셸에 export 된 실제 healthchecks URL 로 테스트가 ping 하지 않게 격리한다.
+    env.pop("KRX_HOST_BACKUP_HEALTHCHECK_URL", None)
     env.update(
         {
             "KRX_ROOT": str(krx_root),
@@ -412,3 +414,169 @@ def test_corrupt_previous_status_tolerated(tmp_path) -> None:
     body = _read_status(tmp_path)
     assert body["rc"] == 0
     assert body["last_ok_at"] == body["attempt_finished_at"]
+
+
+def _write_fake_curl(path: Path, argv_log: Path, rc: int = 0) -> Path:
+    path.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf \'%s\\n\' "$*" >> "{argv_log}"\n'
+        f"exit {rc}\n",
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return path
+
+
+def _health_env(tmp_path: Path, curl_log: Path, curl_rc: int = 0, **overrides: str) -> dict[str, str]:
+    import os
+
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir(exist_ok=True)
+    _write_fake_curl(fakebin / "curl", curl_log, rc=curl_rc)
+    env["PATH"] = f"{fakebin}:{os.environ['PATH']}"
+    env["KRX_HOST_BACKUP_HEALTHCHECK_URL"] = "https://hc.example.com/ping/test-uuid-secret"
+    env.update(overrides)
+    return env
+
+
+def _read_curls(curl_log: Path) -> list[str]:
+    if not curl_log.exists():
+        return []
+    return curl_log.read_text(encoding="utf-8").splitlines()
+
+
+def test_healthcheck_disabled_without_url(tmp_path) -> None:
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+    env.pop("KRX_HOST_BACKUP_HEALTHCHECK_URL", None)
+
+    result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    assert "step=healthcheck status=disabled" in result.stdout
+
+
+def test_start_and_exit_code_pings_on_success(tmp_path) -> None:
+    curl_log = tmp_path / "curl.log"
+    env = _health_env(tmp_path, curl_log)
+
+    result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    pings = [line for line in _read_curls(curl_log) if "hc.example.com" in line]
+    assert len(pings) == 2
+    assert "/start?rid=" in pings[0]
+    assert "/0?rid=" in pings[1]
+    rid_start = pings[0].split("rid=")[1].split()[0]
+    rid_end = pings[1].split("rid=")[1].split()[0]
+    assert rid_start == rid_end
+
+
+def test_failure_exit_code_reported(tmp_path) -> None:
+    curl_log = tmp_path / "curl.log"
+    env = _health_env(tmp_path, curl_log, FAKE_COPY_RC="1")
+
+    result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 1
+    pings = [line for line in _read_curls(curl_log) if "hc.example.com" in line]
+    assert pings
+    assert "/1?rid=" in pings[-1]
+
+
+def test_lock_timeout_reported(tmp_path) -> None:
+    import fcntl
+
+    curl_log = tmp_path / "curl.log"
+    env = _health_env(tmp_path, curl_log, LOCK_WAIT_SEC="1")
+    lock_path = Path(env["QUANT_GDRIVE_LOCK"])
+    lock_path.touch()
+    with open(lock_path, "w", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+            ["bash", str(SCRIPT)],  # noqa: S607
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    assert result.returncode == 75
+    pings = [line for line in _read_curls(curl_log) if "hc.example.com" in line]
+    assert any("/start?rid=" in line for line in pings)
+    assert any("/75?rid=" in line for line in pings)
+
+
+def test_status_write_failure_reported(tmp_path) -> None:
+    curl_log = tmp_path / "curl.log"
+    env = _health_env(tmp_path, curl_log)
+    _status_path(tmp_path).mkdir(parents=True)
+
+    result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 74
+    pings = [line for line in _read_curls(curl_log) if "hc.example.com" in line]
+    assert pings
+    assert "/74?rid=" in pings[-1]
+
+
+def test_curl_failure_never_changes_exit_code(tmp_path) -> None:
+    curl_log = tmp_path / "curl.log"
+    env = _health_env(tmp_path, curl_log, curl_rc=7)
+
+    result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    assert "step=healthcheck status=failed" in result.stdout
+
+
+def test_url_never_logged(tmp_path) -> None:
+    curl_log = tmp_path / "curl.log"
+    env = _health_env(tmp_path, curl_log)
+    secret = env["KRX_HOST_BACKUP_HEALTHCHECK_URL"]
+
+    result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0
+    assert secret not in result.stdout
+    log_dir = Path(env["LOG_DIR"])
+    logged = "".join(p.read_text(encoding="utf-8") for p in log_dir.glob("*.log"))
+    assert secret not in logged

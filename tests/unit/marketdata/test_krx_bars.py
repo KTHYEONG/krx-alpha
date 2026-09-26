@@ -179,8 +179,8 @@ def test_fetch_daily_bars_degrades_class_columns_when_base_info_empty(caplog) ->
     assert sum('stage=krx_base_info status=DEGRADED' in rec.message for rec in caplog.records) == 2
 
 
-def test_append_daily_bars_migrates_legacy_store_without_touching_old_rows(tmp_path) -> None:
-    # Given: 필수 6컬럼만 가진 기존 store + 확장 컬럼 포함 신규 일자
+def test_append_daily_bars_coerces_narrow_frame_without_touching_old_rows(tmp_path) -> None:
+    # Given: 필수 6컬럼만 가진 신규 일자 + 확장 컬럼 포함 다음 일자
     import datetime as dt
 
     import polars as pl
@@ -188,15 +188,16 @@ def test_append_daily_bars_migrates_legacy_store_without_touching_old_rows(tmp_p
     from src.marketdata.krx_bars import append_daily_bars
     from src.marketdata.schema import BAR_SCHEMA, STORED_BAR_COLUMNS
 
-    store_path = tmp_path / 'daily.parquet'
-    pl.DataFrame({
+    store_path = tmp_path / 'daily'
+    narrow = pl.DataFrame({
         'date': [dt.date(2026, 9, 4)],
         'symbol': ['005930'],
         'close': [70000.0],
         'volume': [1000],
         'trade_value_100m': [700.0],
         'daily_change_pct': [1.0],
-    }).write_parquet(store_path)
+    })
+    assert append_daily_bars(store_path, narrow) == 1
     incoming = pl.DataFrame([{
         'date': dt.date(2026, 9, 7),
         'symbol': '005930',
@@ -221,7 +222,7 @@ def test_append_daily_bars_migrates_legacy_store_without_touching_old_rows(tmp_p
 
     # Then
     assert added == 1
-    saved = pl.read_parquet(store_path)
+    saved = pl.read_parquet(store_path / '2026-09.parquet')
     assert saved.columns == list(STORED_BAR_COLUMNS)
     old = saved.filter(pl.col('date') == dt.date(2026, 9, 4))
     assert old['close'].to_list() == [70000.0]
@@ -343,15 +344,15 @@ def test_append_daily_bars_creates_new_store_file(tmp_path) -> None:
     from src.marketdata.krx_bars import append_daily_bars
     from src.marketdata.schema import STORED_BAR_COLUMNS
 
-    store = tmp_path / 'bars.parquet'
+    store = tmp_path / 'bars'
     bars = pl.DataFrame({'date': [dt.date(2026, 9, 7)], 'symbol': ['005930'], 'close': [270000.0],
                          'volume': [100], 'trade_value_100m': [1.0], 'daily_change_pct': [5.68], 'market': ['KOSPI']})
 
     appended = append_daily_bars(store, bars)
 
     assert appended == 1
-    assert store.exists()
-    stored = pl.read_parquet(store)
+    assert (store / '2026-09.parquet').exists()
+    stored = pl.read_parquet(store / '2026-09.parquet')
     assert stored.columns == list(STORED_BAR_COLUMNS)
 
 
@@ -362,7 +363,7 @@ def test_append_daily_bars_appends_new_date_alongside_existing(tmp_path) -> None
     import polars as pl
     from src.marketdata.krx_bars import append_daily_bars
 
-    store = tmp_path / 'bars.parquet'
+    store = tmp_path / 'bars'
     day1 = pl.DataFrame({'date': [dt.date(2026, 9, 7)], 'symbol': ['005930'], 'close': [1.0],
                          'volume': [1], 'trade_value_100m': [1.0], 'daily_change_pct': [0.1]})
     day2 = pl.DataFrame({'date': [dt.date(2026, 9, 8)], 'symbol': ['005930'], 'close': [2.0],
@@ -372,7 +373,7 @@ def test_append_daily_bars_appends_new_date_alongside_existing(tmp_path) -> None
     second = append_daily_bars(store, day2)
 
     assert second == 1
-    assert pl.read_parquet(store).height == 2
+    assert pl.read_parquet(store / '2026-09.parquet').height == 2
 
 
 def test_backfill_bars_accumulates_until_window_days_reached(tmp_path, monkeypatch) -> None:
@@ -389,11 +390,11 @@ def test_backfill_bars_accumulates_until_window_days_reached(tmp_path, monkeypat
 
     monkeypatch.setattr(bars_mod, 'fetch_daily_bars', _fake_fetch)
 
-    result = backfill_bars(tmp_path / 'bars.parquet', auth_key='k', end_date=dt.date(2026, 9, 7), window_days=5)
+    result = backfill_bars(tmp_path / 'bars', auth_key='k', end_date=dt.date(2026, 9, 7), window_days=5)
 
     assert result['trading_days'] == 5
     assert result['appended_rows'] == 5
-    assert pl.read_parquet(tmp_path / 'bars.parquet').height == 5
+    assert pl.read_parquet(tmp_path / 'bars' / '2026-09.parquet').height == 5
 
 def test_backfill_bars_raises_when_calendar_cap_exhausted_before_window(tmp_path, monkeypatch) -> None:
     import datetime as dt
@@ -407,7 +408,7 @@ def test_backfill_bars_raises_when_calendar_cap_exhausted_before_window(tmp_path
     monkeypatch.setattr(bars_mod, 'fetch_daily_bars', _always_fail)
 
     with pytest.raises(KrxBarsError):
-        backfill_bars(tmp_path / 'bars.parquet', auth_key='k', end_date=dt.date(2026, 9, 7), window_days=3)
+        backfill_bars(tmp_path / 'bars', auth_key='k', end_date=dt.date(2026, 9, 7), window_days=3)
 
 
 def test_write_market_map_writes_atomic_json(tmp_path) -> None:
@@ -478,7 +479,7 @@ def test_append_daily_bars_recovers_missing_symbols_for_existing_date(tmp_path) 
 
     from src.marketdata.krx_bars import append_daily_bars
 
-    store = tmp_path / 'bars.parquet'
+    store = tmp_path / 'bars'
     partial = pl.DataFrame({'date': [dt.date(2026, 9, 7)], 'symbol': ['005930'], 'close': [1.0],
                             'volume': [1], 'trade_value_100m': [1.0], 'daily_change_pct': [0.1]})
     full = pl.DataFrame({'date': [dt.date(2026, 9, 7), dt.date(2026, 9, 7)], 'symbol': ['005930', '035720'],
@@ -493,7 +494,7 @@ def test_append_daily_bars_recovers_missing_symbols_for_existing_date(tmp_path) 
     # Then: date 단위 락인 없이 누락 심볼이 복구된다
     assert first == 1
     assert second == 1
-    stored = pl.read_parquet(store)
+    stored = pl.read_parquet(store / '2026-09.parquet')
     assert sorted(stored['symbol'].to_list()) == ['005930', '035720']
     assert stored.height == 2
 
@@ -506,7 +507,7 @@ def test_append_daily_bars_is_idempotent_for_identical_rows(tmp_path) -> None:
 
     from src.marketdata.krx_bars import append_daily_bars
 
-    store = tmp_path / 'bars.parquet'
+    store = tmp_path / 'bars'
     bars = pl.DataFrame({'date': [dt.date(2026, 9, 7)], 'symbol': ['005930'], 'close': [270000.0],
                          'volume': [100], 'trade_value_100m': [1.0], 'daily_change_pct': [5.68]})
 
@@ -517,7 +518,7 @@ def test_append_daily_bars_is_idempotent_for_identical_rows(tmp_path) -> None:
     # Then: 신규 키가 없으면 재기록하지 않는다
     assert first == 1
     assert second == 0
-    assert pl.read_parquet(store).height == 1
+    assert pl.read_parquet(store / '2026-09.parquet').height == 1
 
 
 def test_append_daily_bars_raises_on_implausible_rowcount(tmp_path) -> None:
@@ -530,7 +531,7 @@ def test_append_daily_bars_raises_on_implausible_rowcount(tmp_path) -> None:
 
     from src.marketdata.krx_bars import ImplausibleRowCountError, append_daily_bars
 
-    store = tmp_path / 'bars.parquet'
+    store = tmp_path / 'bars'
     prev = pl.DataFrame({
         'date': [dt.date(2026, 9, 7)] * 10,
         'symbol': [f'{i:06d}' for i in range(10)],
@@ -546,7 +547,7 @@ def test_append_daily_bars_raises_on_implausible_rowcount(tmp_path) -> None:
     with pytest.raises(ImplausibleRowCountError):
         append_daily_bars(store, truncated)
 
-    assert pl.read_parquet(store).height == 10
+    assert pl.read_parquet(store / '2026-09.parquet').height == 10
 
 
 def test_append_daily_bars_accepts_rowcount_within_ratio(tmp_path) -> None:
@@ -557,7 +558,7 @@ def test_append_daily_bars_accepts_rowcount_within_ratio(tmp_path) -> None:
 
     from src.marketdata.krx_bars import MIN_ROWCOUNT_RATIO, append_daily_bars
 
-    store = tmp_path / 'bars.parquet'
+    store = tmp_path / 'bars'
     prev = pl.DataFrame({
         'date': [dt.date(2026, 9, 7)] * 10,
         'symbol': [f'{i:06d}' for i in range(10)],
@@ -578,7 +579,7 @@ def test_append_daily_bars_accepts_rowcount_within_ratio(tmp_path) -> None:
     # Then: 경계값은 정상 상장폐지/거래정지 변동으로 수용한다
     assert MIN_ROWCOUNT_RATIO == 0.90
     assert appended == 9
-    assert pl.read_parquet(store).height == 19
+    assert pl.read_parquet(store / '2026-09.parquet').height == 19
 
 
 def test_fetch_daily_bars_raises_transport_error_on_request_exception() -> None:
@@ -660,7 +661,7 @@ def test_backfill_bars_propagates_transport_error(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(bars_mod, "fetch_daily_bars", _fake)
 
     with pytest.raises(KrxTransportError):
-        backfill_bars(tmp_path / "bars.parquet", auth_key="k", end_date=dt.date(2026, 9, 7), window_days=3)
+        backfill_bars(tmp_path / "bars", auth_key="k", end_date=dt.date(2026, 9, 7), window_days=3)
 
 
 def test_partial_and_implausible_errors_are_krx_bars_errors() -> None:
@@ -835,10 +836,10 @@ def test_append_daily_bars_leaves_store_untouched_on_implausible_batch(tmp_path)
 
     from src.marketdata.krx_bars import ImplausibleBarValuesError, append_daily_bars
 
-    store = tmp_path / "daily.parquet"
+    store = tmp_path / "daily"
     append_daily_bars(store, _bars_frame([_valid_bar_row()]))
-    before = store.read_bytes()
+    before = (store / "2026-09.parquet").read_bytes()
     with pytest.raises(ImplausibleBarValuesError):
         append_daily_bars(store, _bars_frame([_valid_bar_row(close=0.0, low=0.0, open=0.0, high=1.0)]))
-    assert store.read_bytes() == before
-    assert pl.read_parquet(store).height == 1
+    assert (store / "2026-09.parquet").read_bytes() == before
+    assert pl.read_parquet(store / "2026-09.parquet").height == 1

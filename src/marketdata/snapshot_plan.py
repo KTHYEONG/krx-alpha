@@ -9,9 +9,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
-from src.core.config import SnapshotSettings
+from src.core.calendar import SessionSchedule, schedule_for
+from src.core.config import SnapshotSettings, validate_snapshot_order
+from src.core.session_anchors import SessionAnchors
 
 _KST = ZoneInfo("Asia/Seoul")
+_BASE_DATE: dt.date = dt.date(2000, 1, 1)
 
 
 class SnapshotJobKind(StrEnum):
@@ -94,6 +97,41 @@ def _coverage_series(start_exclusive: dt.datetime, interval_s: int, end_inclusiv
     if not out or out[-1] != end_inclusive:
         out.append(end_inclusive)
     return out
+
+
+def _shift_time(value: dt.time, delta: dt.timedelta) -> dt.time:
+    return (dt.datetime.combine(_BASE_DATE, value) + delta).time()
+
+
+def shift_snapshot_settings(settings: SnapshotSettings, anchors: SessionAnchors) -> SnapshotSettings:
+    """Move every snapshot time with the session it samples.
+
+    Opening-auction samples follow the open shift; closing-auction, EOD minute
+    bars, run end and intraday end follow the close shift; intraday starts,
+    investor-estimate times and news start follow the open shift.
+
+    Raises:
+        ValueError: If the shifted times violate the session order against the
+            day's shifted close transition.
+    """
+    open_shift = anchors.open_shift
+    close_shift = anchors.close_shift
+    shifted = settings.model_copy(
+        update={
+            "auction_open_times": tuple(_shift_time(t, open_shift) for t in settings.auction_open_times),
+            "auction_open_deadline": _shift_time(settings.auction_open_deadline, open_shift),
+            "auction_close_times": tuple(_shift_time(t, close_shift) for t in settings.auction_close_times),
+            "auction_close_deadline": _shift_time(settings.auction_close_deadline, close_shift),
+            "intraday_start": _shift_time(settings.intraday_start, open_shift),
+            "intraday_end": _shift_time(settings.intraday_end, close_shift),
+            "news_start": _shift_time(settings.news_start, open_shift),
+            "investor_estimate_times": tuple(_shift_time(t, open_shift) for t in settings.investor_estimate_times),
+            "eod_collect_time": _shift_time(settings.eod_collect_time, close_shift),
+            "run_end": _shift_time(settings.run_end, close_shift),
+        }
+    )
+    validate_snapshot_order(shifted, market_close=schedule_for(anchors, SessionSchedule()).market_close)
+    return shifted
 
 
 def build_session_jobs(

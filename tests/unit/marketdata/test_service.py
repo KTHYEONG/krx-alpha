@@ -22,7 +22,7 @@ def test_refresh_bars_appends_store_and_writes_market_map(tmp_path, monkeypatch)
     monkeypatch.setattr(service, "latest_trading_day", _fake_latest)
     monkeypatch.setattr(service, "backfill_bars", lambda *a, **k: {"trading_days": 1, "appended_rows": 0})
 
-    store = tmp_path / "bars" / "daily.parquet"
+    store = tmp_path / "bars" / "daily"
     market_map = tmp_path / "market_map.json"
 
     # When
@@ -55,12 +55,14 @@ def test_refresh_bars_preserves_artifacts_on_krx_failure(tmp_path, monkeypatch) 
 
     monkeypatch.setattr(service, "latest_trading_day", _fail)
 
-    store = tmp_path / "bars.parquet"
-    store.write_bytes(b"existing")
+    store = tmp_path / "bars" / "daily"
+    store.mkdir(parents=True, exist_ok=True)
+    (store / "2026-09.parquet").write_bytes(b"existing")
     market_map = tmp_path / "market_map.json"
     market_map.write_text('{"005930": "KOSPI"}', encoding="utf-8")
 
     # When / Then: 예외를 삼키지 않고 표면화하며 기존 산출물은 보존된다
+    monkeypatch.setattr(service, "latest_partition_date", lambda root: dt.date(2026, 9, 9))
     with pytest.raises(KrxBarsError, match="down"):
         service.refresh_bars(
             store_path=store,
@@ -70,7 +72,7 @@ def test_refresh_bars_preserves_artifacts_on_krx_failure(tmp_path, monkeypatch) 
             auth_key="dummy",
         )
     assert market_map.read_text(encoding="utf-8") == '{"005930": "KOSPI"}'
-    assert store.read_bytes() == b"existing"
+    assert (store / "2026-09.parquet").read_bytes() == b"existing"
 
 
 def test_refresh_bars_via_kis_fallback_raises_when_market_map_missing(tmp_path) -> None:
@@ -82,7 +84,7 @@ def test_refresh_bars_via_kis_fallback_raises_when_market_map_missing(tmp_path) 
 
     with pytest.raises(KisFallbackError, match="market_map"):
         refresh_bars_via_kis_fallback(
-            store_path=tmp_path / "bars" / "daily.parquet",
+            store_path=tmp_path / "bars" / "daily",
             market_map_path=tmp_path / "market_map.json",
             target_date=dt.date(2026, 9, 10),
             kis_client=object(),
@@ -101,7 +103,7 @@ def test_refresh_bars_via_kis_fallback_raises_when_market_map_empty(tmp_path) ->
 
     with pytest.raises(KisFallbackError, match="empty"):
         refresh_bars_via_kis_fallback(
-            store_path=tmp_path / "bars" / "daily.parquet",
+            store_path=tmp_path / "bars" / "daily",
             market_map_path=map_path,
             target_date=dt.date(2026, 9, 10),
             kis_client=object(),
@@ -118,7 +120,7 @@ def test_refresh_bars_via_kis_fallback_writes_valid_rows_and_skips_invalid(tmp_p
 
     map_path = tmp_path / "market_map.json"
     map_path.write_text(json.dumps({"005930": "KOSPI", "000660": "KOSPI"}), encoding="utf-8")
-    store_path = tmp_path / "bars" / "daily.parquet"
+    store_path = tmp_path / "bars" / "daily"
 
     class _FakeKisClient:
         def get_daily_bar(self, symbol: str, day: dt.date) -> dict[str, str] | None:
@@ -140,7 +142,7 @@ def test_refresh_bars_via_kis_fallback_writes_valid_rows_and_skips_invalid(tmp_p
 
     assert result.trading_day == dt.date(2026, 9, 10)
     assert result.appended_rows == 1
-    saved = pl.read_parquet(store_path)
+    saved = pl.read_parquet(store_path / "2026-09.parquet")
     assert saved["symbol"].to_list() == ["005930"]
     assert saved["close"].to_list() == [269000.0]
     assert saved["volume"].to_list() == [22517075]
@@ -162,7 +164,7 @@ def test_refresh_bars_via_kis_fallback_raises_when_zero_rows_survive(tmp_path) -
 
     with pytest.raises(KisFallbackError, match="0 rows"):
         refresh_bars_via_kis_fallback(
-            store_path=tmp_path / "bars" / "daily.parquet",
+            store_path=tmp_path / "bars" / "daily",
             market_map_path=map_path,
             target_date=dt.date(2026, 9, 10),
             kis_client=_AllNoneClient(),
@@ -178,7 +180,7 @@ def test_refresh_bars_via_kis_fallback_zeroes_change_pct_when_prev_close_is_zero
 
     map_path = tmp_path / "market_map.json"
     map_path.write_text(json.dumps({"900001": "KOSDAQ"}), encoding="utf-8")
-    store_path = tmp_path / "bars" / "daily.parquet"
+    store_path = tmp_path / "bars" / "daily"
 
     class _IpoClient:
         def get_daily_bar(self, symbol: str, day: dt.date) -> dict[str, str] | None:
@@ -190,7 +192,7 @@ def test_refresh_bars_via_kis_fallback_zeroes_change_pct_when_prev_close_is_zero
     )
 
     assert result.appended_rows == 1
-    saved = pl.read_parquet(store_path)
+    saved = pl.read_parquet(store_path / "2026-09.parquet")
     assert saved["daily_change_pct"].to_list() == [0.0]
 
 
@@ -204,7 +206,7 @@ def test_kis_fallback_populates_ohl_and_base_price(tmp_path) -> None:
 
     map_path = tmp_path / "market_map.json"
     map_path.write_text(json.dumps({"005930": "KOSPI"}), encoding="utf-8")
-    store_path = tmp_path / "bars" / "daily.parquet"
+    store_path = tmp_path / "bars" / "daily"
 
     class _OhlClient:
         def get_daily_bar(self, symbol: str, day: dt.date) -> dict[str, str] | None:
@@ -216,7 +218,7 @@ def test_kis_fallback_populates_ohl_and_base_price(tmp_path) -> None:
     )
 
     assert result.appended_rows == 1
-    saved = pl.read_parquet(store_path)
+    saved = pl.read_parquet(store_path / "2026-09.parquet")
     assert saved["open"].to_list() == [960.0]
     assert saved["high"].to_list() == [1010.0]
     assert saved["low"].to_list() == [950.0]
@@ -258,7 +260,7 @@ def test_backfill_program_trades_persists_per_symbol_and_survives_one_failure(tm
     monkeypatch.setattr(service, "backfill_program_trades_history", _fake_history)
     monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: "tok")
 
-    store = tmp_path / "bars" / "program_trades.parquet"
+    store = tmp_path / "bars" / "program_trades"
 
     # When
     with caplog.at_level(logging.WARNING):
@@ -273,7 +275,7 @@ def test_backfill_program_trades_persists_per_symbol_and_survives_one_failure(tm
 
     # Then
     assert (result.symbols_ok, result.symbols_failed, result.appended_rows) == (2, 1, 3)
-    saved = pl.read_parquet(store)
+    saved = pl.read_parquet(store / "2026-09.parquet")
     assert sorted(saved["symbol"].unique().to_list()) == ["000660", "005930"]
     assert saved.height == 3
     assert sum("status=SKIP" in record.message for record in caplog.records) == 1
@@ -363,7 +365,7 @@ def test_backfill_universe_program_trades_targets_only_uncovered_symbols(tmp_pat
     from src.marketdata import program_trade_service as service
     from src.marketdata.toss_program_trades import append_program_trades
 
-    store = tmp_path / "bars" / "program_trades.parquet"
+    store = tmp_path / "bars" / "program_trades"
     reference_date = dt.date(2026, 9, 17)
     min_date = reference_date - dt.timedelta(days=120)
     append_program_trades(store, [_program_trade_row("005930", min_date - dt.timedelta(days=1))])
@@ -402,7 +404,7 @@ def test_backfill_universe_program_trades_skips_vendor_call_when_all_covered(tmp
     from src.marketdata import program_trade_service as service
     from src.marketdata.toss_program_trades import append_program_trades
 
-    store = tmp_path / "bars" / "program_trades.parquet"
+    store = tmp_path / "bars" / "program_trades"
     reference_date = dt.date(2026, 9, 17)
     min_date = reference_date - dt.timedelta(days=120)
     append_program_trades(store, [_program_trade_row("005930", min_date - dt.timedelta(days=1))])
@@ -469,7 +471,7 @@ def test_backfill_universe_program_trades_keeps_alphanumeric_and_skips_malformed
 
     from src.marketdata import program_trade_service as service
 
-    store = tmp_path / "bars" / "program_trades.parquet"
+    store = tmp_path / "bars" / "program_trades"
     reference_date = dt.date(2026, 9, 21)
     seen: dict[str, object] = {}
 
@@ -512,7 +514,7 @@ def test_backfill_program_trades_accepts_alphanumeric_codes(tmp_path, monkeypatc
     monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: "tok")
 
     result = service.backfill_program_trades(
-        store_path=tmp_path / "bars" / "program_trades.parquet",
+        store_path=tmp_path / "bars" / "program_trades",
         symbols=("005930", "0004V0"),
         min_date=dt.date(2026, 9, 1),
         app_key="k",
@@ -560,7 +562,7 @@ def test_backfill_program_trades_isolates_single_vendor_rejection(tmp_path, monk
     monkeypatch.setattr(service, "backfill_program_trades_history", _fake_history)
     monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: "tok")
 
-    store = tmp_path / "bars" / "program_trades.parquet"
+    store = tmp_path / "bars" / "program_trades"
     result = service.backfill_program_trades(
         store_path=store,
         symbols=("005930", "0004V0"),
@@ -571,7 +573,7 @@ def test_backfill_program_trades_isolates_single_vendor_rejection(tmp_path, monk
     )
 
     assert (result.symbols_ok, result.symbols_failed) == (1, 1)
-    assert pl.read_parquet(store)["symbol"].unique().to_list() == ["005930"]
+    assert pl.read_parquet(store / "2026-09.parquet")["symbol"].unique().to_list() == ["005930"]
 
 
 def _kis_row(bsop_date="20260910", close="70000", vol="1000", value="70000000", vrss="700", oprc="69500", hgpr="70500", lwpr="69000"):    return {
@@ -592,7 +594,7 @@ def test_refresh_bars_via_kis_fallback_skips_bar_from_another_session(tmp_path, 
     target = dt.date(2026, 9, 10)
     map_path = tmp_path / "market_map.json"
     map_path.write_text(json.dumps({"005930": "KOSPI", "000660": "KOSPI"}), encoding="utf-8")
-    store_path = tmp_path / "bars" / "daily.parquet"
+    store_path = tmp_path / "bars" / "daily"
 
     class _MixedDateClient:
         def get_daily_bar(self, symbol: str, day: dt.date):
@@ -607,7 +609,7 @@ def test_refresh_bars_via_kis_fallback_skips_bar_from_another_session(tmp_path, 
 
     assert result.trading_day == target
     assert result.appended_rows == 1
-    saved = pl.read_parquet(store_path)
+    saved = pl.read_parquet(store_path / "2026-09.parquet")
     assert saved["symbol"].to_list() == ["005930"]
     assert saved["date"].to_list() == [target]
     assert "date_mismatch" in caplog.text
@@ -624,7 +626,7 @@ def test_refresh_bars_via_kis_fallback_fails_closed_when_all_dates_mismatched(tm
     target = dt.date(2026, 9, 10)
     map_path = tmp_path / "market_map.json"
     map_path.write_text(json.dumps({"005930": "KOSPI"}), encoding="utf-8")
-    store_path = tmp_path / "bars" / "daily.parquet"
+    store_path = tmp_path / "bars" / "daily"
 
     class _StaleClient:
         def get_daily_bar(self, symbol: str, day: dt.date):
@@ -634,7 +636,7 @@ def test_refresh_bars_via_kis_fallback_fails_closed_when_all_dates_mismatched(tm
         refresh_bars_via_kis_fallback(
             store_path=store_path, market_map_path=map_path, target_date=target, kis_client=_StaleClient(),
         )
-    assert not store_path.exists()
+    assert not list(store_path.glob("*.parquet"))
 
 
 def test_backfill_universe_program_trades_returns_zero_when_all_symbols_malformed(tmp_path, monkeypatch) -> None:
@@ -648,7 +650,7 @@ def test_backfill_universe_program_trades_returns_zero_when_all_symbols_malforme
     monkeypatch.setattr(service, "backfill_program_trades", _must_not_call)
 
     result = service.backfill_universe_program_trades(
-        store_path=tmp_path / "program_trades.parquet",
+        store_path=tmp_path / "program_trades",
         symbols=("12", "ab!"),
         lookback_days=120,
         reference_date=dt.date(2026, 9, 21),
@@ -658,3 +660,67 @@ def test_backfill_universe_program_trades_returns_zero_when_all_symbols_malforme
     )
 
     assert (result.symbols_ok, result.symbols_failed, result.appended_rows) == (0, 0, 0)
+
+
+def test_backfill_program_trades_writes_store_once(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    from src.marketdata import program_trade_service as service
+
+    histories = {
+        "005930": (
+            _program_trade_row("005930", dt.date(2026, 9, 16)),
+            _program_trade_row("005930", dt.date(2026, 9, 17)),
+        ),
+        "000660": (_program_trade_row("000660", dt.date(2026, 9, 17)),),
+        "035720": (
+            _program_trade_row("035720", dt.date(2026, 9, 16)),
+            _program_trade_row("035720", dt.date(2026, 9, 17)),
+        ),
+    }
+    monkeypatch.setattr(service, "backfill_program_trades_history", lambda symbol, **kwargs: histories[symbol])
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: "tok")
+    calls: list[tuple] = []
+    real_append = service.append_program_trades
+
+    def _counting_append(store_path, rows):
+        calls.append((store_path, [dict(row) for row in rows]))
+        return real_append(store_path, rows)
+
+    monkeypatch.setattr(service, "append_program_trades", _counting_append)
+    store = tmp_path / "bars" / "program_trades"
+
+    result = service.backfill_program_trades(
+        store_path=store,
+        symbols=("005930", "000660", "035720", "005930"),
+        min_date=dt.date(2026, 9, 1),
+        app_key="k",
+        app_secret="s",
+        rate_per_s=1000.0,
+    )
+
+    assert (result.symbols_ok, result.symbols_failed, result.appended_rows) == (3, 0, 5)
+    assert len(calls) == 1
+    assert sorted(row["symbol"] for row in calls[0][1]) == ["000660", "005930", "005930", "035720", "035720"]
+
+
+def test_program_trade_coverage_returns_min_max_per_symbol(tmp_path) -> None:
+    import datetime as dt
+
+    from src.marketdata.toss_program_trades import append_program_trades, program_trade_coverage
+
+    store = tmp_path / "bars" / "program_trades"
+    append_program_trades(store, [
+        _program_trade_row("005930", dt.date(2026, 5, 19)),
+        _program_trade_row("005930", dt.date(2026, 9, 17)),
+        _program_trade_row("000660", dt.date(2026, 8, 1)),
+        _program_trade_row("000660", dt.date(2026, 8, 2)),
+    ])
+
+    coverage = program_trade_coverage(store, ("005930", "000660", "035720"))
+
+    assert coverage == {
+        "005930": (dt.date(2026, 5, 19), dt.date(2026, 9, 17)),
+        "000660": (dt.date(2026, 8, 1), dt.date(2026, 8, 2)),
+    }
+    assert program_trade_coverage(store, ()) == {}

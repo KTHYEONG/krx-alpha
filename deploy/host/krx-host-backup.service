@@ -7,6 +7,7 @@ OnFailure=kca-alert@%n.service
 [Service]
 Type=oneshot
 ExecStart=%h/krx-alpha/deploy/host/krx-host-backup.sh
+EnvironmentFile=-/home/ubuntu/quant-secrets/krx-alpha.env
 TimeoutStartSec=4h
 Restart=on-failure
 RestartMode=direct

@@ -4,6 +4,10 @@ on:
   push:
     branches: [ main ]
 
+concurrency:
+  group: deploy-or-vps
+  cancel-in-progress: false
+
 env:
   IMAGE: ghcr.io/kthyeong/krx-collector
 
@@ -37,6 +41,8 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -71,18 +77,18 @@ jobs:
           ssh-keygen -l -f ~/.ssh/deploy_key
           SSH_OPTS="-i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20"
 
-          # 원격 서버 디렉터리 준비
-          ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/krx-alpha/data ~/krx-alpha/logs"
+          # 1. Stage: live 경로에는 쓰지 않고 스테이징에만 적재한다.
+          STAGING_DIR=".deploy/staging/$GITHUB_SHA"
+          ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/krx-alpha/data ~/krx-alpha/logs ~/krx-alpha/deploy/host ~/.local/state/krx-alpha ~/.config/systemd/user ~/krx-alpha/$STAGING_DIR"
 
-          # docker-compose.yml 전송
-          scp $SSH_OPTS docker-compose.yml "$REMOTE_USER@$HOST:~/krx-alpha/"
+          # docker-compose.yml 스테이징
+          scp $SSH_OPTS docker-compose.yml "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/docker-compose.yml"
 
-          # 호스트 백업 스크립트/필터/유닛 전송
-          ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/krx-alpha/deploy/host ~/.config/systemd/user"
-          scp $SSH_OPTS deploy/host/krx-host-backup.sh "$REMOTE_USER@$HOST:~/krx-alpha/deploy/host/"
-          scp $SSH_OPTS deploy/host/krx-alpha.rclone-filter "$REMOTE_USER@$HOST:~/krx-alpha/deploy/host/"
-          scp $SSH_OPTS deploy/host/krx-host-backup.service deploy/host/krx-host-backup.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
-          scp $SSH_OPTS deploy/host/krx-deferred-recreate.service deploy/host/krx-deferred-recreate.timer "$REMOTE_USER@$HOST:~/.config/systemd/user/"
+          # 호스트 백업 스크립트/필터/유닛 스테이징
+          scp $SSH_OPTS deploy/host/krx-host-backup.sh "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/krx-host-backup.sh"
+          scp $SSH_OPTS deploy/host/krx-alpha.rclone-filter "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/krx-alpha.rclone-filter"
+          scp $SSH_OPTS deploy/host/krx-host-backup.service deploy/host/krx-host-backup.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
+          scp $SSH_OPTS deploy/host/krx-deferred-recreate.service deploy/host/krx-deferred-recreate.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
 
           # Deploy session gate: defer in-session recreate to the 22:00 KST timer.
           set +e
@@ -95,10 +101,11 @@ jobs:
           fi
           if [ "$GATE_RC" -eq 0 ]; then RECREATE_NOW=1; else RECREATE_NOW=0; fi
 
-          # 원격 컨테이너 최신 이미지 pull 및 재기동
-          ssh $SSH_OPTS "$REMOTE_USER@$HOST" bash -s <<EOF
-          set -e
+          # 원격 컨테이너 핀 이미지 배포 및 재기동
+          ssh $SSH_OPTS "$REMOTE_USER@$HOST" "GITHUB_SHA=$GITHUB_SHA RECREATE_NOW=$RECREATE_NOW bash -s" <<EOF
+          set -euo pipefail
           cd ~/krx-alpha
+          STAGING_DIR=".deploy/staging/\$GITHUB_SHA"
 
           DATA_ENV_FILE="/home/ubuntu/quant-secrets/kis-data.env"
           RUNTIME_ENV_FILE="/home/ubuntu/quant-secrets/krx-alpha.env"
@@ -186,7 +193,7 @@ jobs:
             fi
             unexpected_key="\$(awk -F= '
               /^[[:space:]]*(#|$)/ { next }
-              \$1 !~ /^(KRX_OPENAPI_KEY|TOSS_APP_KEY|TOSS_APP_SECRET|LS_APP_KEY|LS_APP_SECRET|KIS_APP_KEY|KIS_APP_SECRET|KIS_ACCOUNT_NO|KIS_ACCOUNT_PRODUCT_CODE|ALERT_GMAIL_USER|ALERT_GMAIL_APP_PASSWORD|ALERT_GMAIL_TO)$/ { print \$1; exit 1 }
+              \$1 !~ /^(KRX_OPENAPI_KEY|TOSS_APP_KEY|TOSS_APP_SECRET|LS_APP_KEY|LS_APP_SECRET|KIS_APP_KEY|KIS_APP_SECRET|KIS_ACCOUNT_NO|KIS_ACCOUNT_PRODUCT_CODE|ALERT_GMAIL_USER|ALERT_GMAIL_APP_PASSWORD|ALERT_GMAIL_TO|KRX_ALPHA_LIVENESS_HEALTHCHECK_URL|KRX_HOST_BACKUP_HEALTHCHECK_URL)$/ { print \$1; exit 1 }
             ' "\$file")"
             if [ -n "\$unexpected_key" ]; then
               echo "Runtime env contains an unexpected key: \$unexpected_key" >&2
@@ -196,7 +203,8 @@ jobs:
               KRX_OPENAPI_KEY TOSS_APP_KEY TOSS_APP_SECRET \
               LS_APP_KEY LS_APP_SECRET \
               KIS_APP_KEY KIS_APP_SECRET KIS_ACCOUNT_NO KIS_ACCOUNT_PRODUCT_CODE \
-              ALERT_GMAIL_USER ALERT_GMAIL_APP_PASSWORD ALERT_GMAIL_TO; do
+              ALERT_GMAIL_USER ALERT_GMAIL_APP_PASSWORD ALERT_GMAIL_TO \
+              KRX_ALPHA_LIVENESS_HEALTHCHECK_URL KRX_HOST_BACKUP_HEALTHCHECK_URL; do
               credential_value="\$(awk -F= -v key="\$required_key" '\$1 == key { print substr(\$0, index(\$0, "=") + 1); exit }' "\$file")"
               if [ -z "\$credential_value" ]; then
                 echo "Missing required runtime env key: \$required_key" >&2
@@ -204,18 +212,42 @@ jobs:
                 return 1
               fi
             done
-            echo "Runtime env validated: 12 keys"
+            echo "Runtime env validated: 14 keys"
           }
           validate_runtime_env "\$RUNTIME_ENV_FILE"
 
+          # 토큰은 러너에서 heredoc 본문(stdin)으로만 확장한다: ssh 명령 인자나 원격 환경변수에 싣지 않는다.
+          echo '$GHCR_PAT' | docker login ghcr.io -u '$GHCR_USER' --password-stdin
+          docker pull ghcr.io/kthyeong/krx-collector:sha-\$GITHUB_SHA
+          pulled_revision="\$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' ghcr.io/kthyeong/krx-collector:sha-\$GITHUB_SHA)"
+          if [ "\$pulled_revision" != "\$GITHUB_SHA" ]; then
+            echo "Image revision mismatch: \$pulled_revision != \$GITHUB_SHA" >&2
+            exit 1
+          fi
+          docker tag ghcr.io/kthyeong/krx-collector:sha-\$GITHUB_SHA ghcr.io/kthyeong/krx-collector:latest
+
+          # 4. Promote: staged 파일을 원자적으로 교체한다 (rename은 새 inode를 준다).
+          install -m 644 "\$STAGING_DIR/docker-compose.yml" ~/krx-alpha/docker-compose.yml.new && mv -f ~/krx-alpha/docker-compose.yml.new ~/krx-alpha/docker-compose.yml
+          install -m 755 "\$STAGING_DIR/krx-host-backup.sh" ~/krx-alpha/deploy/host/krx-host-backup.sh.new && mv -f ~/krx-alpha/deploy/host/krx-host-backup.sh.new ~/krx-alpha/deploy/host/krx-host-backup.sh
+          install -m 644 "\$STAGING_DIR/krx-alpha.rclone-filter" ~/krx-alpha/deploy/host/krx-alpha.rclone-filter.new && mv -f ~/krx-alpha/deploy/host/krx-alpha.rclone-filter.new ~/krx-alpha/deploy/host/krx-alpha.rclone-filter
+          install -m 644 "\$STAGING_DIR/krx-host-backup.service" ~/.config/systemd/user/krx-host-backup.service.new && mv -f ~/.config/systemd/user/krx-host-backup.service.new ~/.config/systemd/user/krx-host-backup.service
+          install -m 644 "\$STAGING_DIR/krx-host-backup.timer" ~/.config/systemd/user/krx-host-backup.timer.new && mv -f ~/.config/systemd/user/krx-host-backup.timer.new ~/.config/systemd/user/krx-host-backup.timer
+          install -m 644 "\$STAGING_DIR/krx-deferred-recreate.service" ~/.config/systemd/user/krx-deferred-recreate.service.new && mv -f ~/.config/systemd/user/krx-deferred-recreate.service.new ~/.config/systemd/user/krx-deferred-recreate.service
+          install -m 644 "\$STAGING_DIR/krx-deferred-recreate.timer" ~/.config/systemd/user/krx-deferred-recreate.timer.new && mv -f ~/.config/systemd/user/krx-deferred-recreate.timer.new ~/.config/systemd/user/krx-deferred-recreate.timer
+
           # KCA reads the same shared fragment through its user-systemd unit.
           DROPIN_DIR="\$HOME/.config/systemd/user/kca-kis-token-warmup.service.d"
-          mkdir -p "\$DROPIN_DIR"
-          printf '[Service]\nEnvironmentFile=%s\n' "\$DATA_ENV_FILE" > "\$DROPIN_DIR/10-kis-data-env.conf"
-          chmod 600 "\$DROPIN_DIR/10-kis-data-env.conf"
-          systemctl --user daemon-reload
-          systemctl --user enable --now kca-kis-token-warmup.timer
+          if systemctl --user cat kca-kis-token-warmup.timer >/dev/null 2>&1; then
+            mkdir -p "\$DROPIN_DIR"
+            printf '[Service]\nEnvironmentFile=%s\n' "\$DATA_ENV_FILE" > "\$DROPIN_DIR/10-kis-data-env.conf"
+            chmod 600 "\$DROPIN_DIR/10-kis-data-env.conf"
+            systemctl --user daemon-reload
+            systemctl --user enable --now kca-kis-token-warmup.timer
+          else
+            echo "WARNING: kca-kis-token-warmup.timer not installed; krx issues tokens itself (KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE=true)"
+          fi
           chmod +x ~/krx-alpha/deploy/host/krx-host-backup.sh
+          systemctl --user daemon-reload
           systemctl --user enable --now krx-host-backup.timer
           systemctl --user enable --now krx-deferred-recreate.timer
           # 공용 quant-lake 타이머 폐기 가드: PROJECTS 항목이 krx-alpha뿐일 때만 폐기한다.
@@ -240,13 +272,17 @@ jobs:
             echo "WARNING: ~/.config/rclone/rclone.conf is missing. Please configure rclone remote credentials manually."
           fi
 
-          echo '$GHCR_PAT' | docker login ghcr.io -u '$GHCR_USER' --password-stdin
           if docker compose version >/dev/null 2>&1; then C="docker compose"; else C="docker-compose"; fi
-          \$C pull
           if [ "$RECREATE_NOW" = "1" ]; then
             \$C up -d --force-recreate --remove-orphans
+            running_revision="\$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' krx-collector)"
+            if [ "\$running_revision" != "\$GITHUB_SHA" ]; then
+              echo "Running container revision mismatch: \$running_revision != \$GITHUB_SHA" >&2
+              exit 1
+            fi
           else
-            echo "DEFERRED: krx-collector recreate scheduled by krx-deferred-recreate.timer (22:00 KST)"
+            echo "DEFERRED: krx-collector recreate scheduled by krx-deferred-recreate.timer (22:00 KST) revision=\$GITHUB_SHA"
           fi
+          rm -rf ~/krx-alpha/.deploy/staging/\$GITHUB_SHA
           docker image prune -f
           EOF

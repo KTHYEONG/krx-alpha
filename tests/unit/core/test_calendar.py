@@ -110,3 +110,38 @@ def test_after_market_schedule_rejects_non_monotonic_boundaries():
 
     with pytest.raises(ValueError, match="monotonic"):  # noqa: PT011 - skeleton requires ValueError
         SessionSchedule(after_market_close=time(15, 30))
+
+
+def test_schedule_for_standard_anchors_returns_base() -> None:
+    import datetime as dt
+
+    from src.core.calendar import SessionSchedule, schedule_for
+    from src.core.session_anchors import standard_session_anchors
+
+    base = SessionSchedule(after_market_enabled=True)
+
+    assert schedule_for(standard_session_anchors(dt.date(2026, 10, 1)), base) == base
+
+
+def test_schedule_for_csat_anchors_shifts_close_transitions() -> None:
+    import datetime as dt
+
+    from src.core.calendar import SessionSchedule, schedule_for
+    from src.core.session_anchors import AnchorSource, SessionAnchors
+
+    base = SessionSchedule(after_market_enabled=True)
+    anchors = SessionAnchors(
+        date=dt.date(2026, 11, 19),
+        regular_open=dt.time(10, 0),
+        closing_auction_start=dt.time(16, 20),
+        regular_close=dt.time(16, 30),
+        after_market_end=dt.time(20, 0),
+        source=AnchorSource.VENDOR,
+    )
+
+    shifted = schedule_for(anchors, base)
+
+    assert shifted.market_close == dt.time(16, 40)
+    assert shifted.streamer_start == base.streamer_start
+    assert shifted.after_market_close == dt.time(20, 0)
+    assert shifted.after_market_eod_done == dt.time(20, 30)

@@ -227,14 +227,16 @@ def test_email_alert_handler_logs_warning_and_does_not_raise_on_send_failure(cap
         calls.append(subject)
         raise smtplib.SMTPAuthenticationError(535, b"bad credentials")
 
-    handler = EmailAlertHandler(component="daemon", run_id="r", sender=failing, clock=lambda: 0.0)
+    handler = EmailAlertHandler(
+        component="daemon", run_id="r", sender=failing, clock=lambda: 0.0, sleep=lambda s: None
+    )
     record = logging.LogRecord("x", logging.CRITICAL, __file__, 1, "[DAEMON] down", (), None)
 
     with caplog.at_level(logging.WARNING):
         handler.handle(record)
         handler.handle(record)
 
-    assert len(calls) == 2
+    assert len(calls) == 6
     assert "stage=alert status=FAIL reason=SMTPAuthenticationError" in caplog.text
 
 
@@ -321,11 +323,13 @@ def test_send_digest_logs_warning_and_returns_false_on_smtp_failure(caplog) -> N
         raise smtplib.SMTPServerDisconnected("closed")
 
     settings = AlertSettings(alert_gmail_user="u@x", alert_gmail_app_password="pw", alert_gmail_to="t@x")
+    sleeps: list[float] = []
     with caplog.at_level(logging.WARNING):
-        ok = send_digest("s", "b", settings=settings, sender=_broken)
+        ok = send_digest("s", "b", settings=settings, sender=_broken, sleep=sleeps.append)
 
     assert ok is False
     assert "stage=digest status=FAIL reason=SMTPServerDisconnected" in caplog.text
+    assert sleeps == [2.0, 8.0]
 
 
 def test_format_alert_subject_mappings() -> None:

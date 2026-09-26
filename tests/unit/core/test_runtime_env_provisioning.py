@@ -19,6 +19,8 @@ def test_build_runtime_fragment_emits_declared_keys_in_canonical_order(tmp_path)
                 "export LIVE_ALERT_GMAIL_USER=alert@example.com",
                 "export LIVE_ALERT_GMAIL_APP_PASSWORD=alert-pass",
                 "export ALERT_GMAIL_TO=ops@example.com",
+                "export KRX_ALPHA_LIVENESS_HEALTHCHECK_URL=https://hc.example.com/ping/liveness",
+                "export KRX_HOST_BACKUP_HEALTHCHECK_URL=https://hc.example.com/ping/host-backup",
             ]
         )
         + "\n",
@@ -29,7 +31,7 @@ def test_build_runtime_fragment_emits_declared_keys_in_canonical_order(tmp_path)
 
     lines = fragment.splitlines()
     assert [line.partition("=")[0] for line in lines] == [key.target for key in RUNTIME_ENV_SPEC]
-    assert len(lines) == 12
+    assert len(lines) == 14
     assert fragment.endswith("\n")
     assert "export " not in fragment
     assert "TOSS_APP_KEY=toss-key" in lines
@@ -60,6 +62,8 @@ def test_build_runtime_fragment_prefers_primary_source_over_alias(tmp_path) -> N
                 "ALERT_GMAIL_APP_PASSWORD=primary-pass",
                 "LIVE_ALERT_GMAIL_APP_PASSWORD=alias-pass",
                 "ALERT_GMAIL_TO=ops@example.com",
+                "KRX_ALPHA_LIVENESS_HEALTHCHECK_URL=https://hc.example.com/ping/liveness",
+                "KRX_HOST_BACKUP_HEALTHCHECK_URL=https://hc.example.com/ping/host-backup",
             ]
         )
         + "\n",
@@ -125,6 +129,8 @@ def test_build_runtime_fragment_never_leaks_keypool_or_undeclared_keys(tmp_path)
                 "ALERT_GMAIL_USER=alert@example.com",
                 "ALERT_GMAIL_APP_PASSWORD=alert-pass",
                 "ALERT_GMAIL_TO=ops@example.com",
+                "KRX_ALPHA_LIVENESS_HEALTHCHECK_URL=https://hc.example.com/ping/liveness",
+                "KRX_HOST_BACKUP_HEALTHCHECK_URL=https://hc.example.com/ping/host-backup",
                 "KIS_DATA_1_APP_SECRET=pool-secret",
                 "KIS_TRADE_APP_KEY=trade-key",
                 "KIS_HTS_ID=hts-id",

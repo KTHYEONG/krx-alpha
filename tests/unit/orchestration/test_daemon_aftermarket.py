@@ -306,13 +306,13 @@ def test_daemon_reselection_passes_classification_exclusions(monkeypatch, tmp_pa
     from src.universe.ipc import read_candidate_snapshot
 
     settings = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
         "date": [dt.date(2026, 9, 16)],
         "symbol": ["005935"],
         "stock_cert_kind": ["구형우선주"],
         "section": [None],
-    }).write_parquet(settings.paths.bars_store)
+    }).write_parquet(settings.paths.bars_daily_dir / "2026-09.parquet")
 
     class FakeClient:
         def get_trade_amount_ranking(self):
@@ -419,8 +419,8 @@ def test_daemon_reselection_degrades_on_unreadable_bar_store(monkeypatch, tmp_pa
     from src.orchestration import daemon
 
     settings = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
-    settings.paths.bars_store.parent.mkdir(parents=True, exist_ok=True)
-    settings.paths.bars_store.write_bytes(b'\x00\x01broken-parquet')
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
+    (settings.paths.bars_daily_dir / "2026-09.parquet").write_bytes(b'\x00\x01broken-parquet')
 
     class FakeClient:
         def get_trade_amount_ranking(self):
@@ -465,7 +465,7 @@ def test_daemon_restart_aftermarket_on_holiday_plans_nothing(tmp_path, monkeypat
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
     kst = ZoneInfo("Asia/Seoul")
     holiday = _holiday_trading_day(dt.date(2026, 9, 24))
-    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c: holiday)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: holiday)
 
     constructed: list[list[str]] = []
 
@@ -507,7 +507,7 @@ def test_daemon_holiday_active_stops_aftermarket_supervisors(tmp_path, monkeypat
     business = _business_trading_day(dt.date(2026, 9, 14))
     holiday = _holiday_trading_day(dt.date(2026, 9, 15))
 
-    def _resolve(day, cache):
+    def _resolve(day, cache, _anchors_dir):
         return business if day == dt.date(2026, 9, 14) else holiday
 
     monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", _resolve)
@@ -539,3 +539,134 @@ def test_daemon_holiday_active_stops_aftermarket_supervisors(tmp_path, monkeypat
     assert any("collect-aftermarket" in " ".join(cmd) for cmd in stops)
 
 
+
+
+def _aftermarket_runner(tmp_path, monkeypatch):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings, resolve_collector_runtime
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda day, cache, _a: None)
+    settings = CollectorSettings(data_root=tmp_path, after_market_enabled=True)
+    runtime = resolve_collector_runtime(collector=settings)
+    now = dt.datetime(2026, 9, 16, 16, 30, tzinfo=ZoneInfo("Asia/Seoul"))
+    runner = daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: now, sleep=lambda _: None)
+    runner.state.aftermarket_plan_day = dt.date(2026, 9, 16)
+    runner.state.aftermarket_plan = ()
+    return runner, now
+
+
+class _ScriptedSupervisor:
+    def __init__(self, results, *, exit_code=-9):
+        self._results = list(results)
+        self.last_exit_code = exit_code
+
+    def ensure_running(self):
+        if len(self._results) > 1:
+            return self._results.pop(0)
+        return self._results[0]
+
+    def stop(self, *, timeout_s=15.0):
+        return "graceful"
+
+
+def test_aftermarket_restart_logged_and_counted(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    runner, now = _aftermarket_runner(tmp_path, monkeypatch)
+    runner.children.aftermarket["nxt:0"] = _ScriptedSupervisor(["restarted"])
+
+    with caplog.at_level(logging.WARNING):
+        runner.step(now)
+
+    assert runner.state.aftermarket_results == {"nxt:0": "restarted"}
+    assert runner.state.aftermarket_restarts == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings.count("[DAEMON] stage=aftermarket_stream status=RESTARTED key=nxt:0 exit_code=-9") == 1
+
+
+def test_aftermarket_circuit_open_alerted_once_per_key(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    runner, now = _aftermarket_runner(tmp_path, monkeypatch)
+    runner.children.aftermarket["krx:2"] = _ScriptedSupervisor(["circuit_open"])
+
+    with caplog.at_level(logging.CRITICAL):
+        for _ in range(3):
+            runner.step(now)
+
+    criticals = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.CRITICAL and "stage=aftermarket_stream" in r.getMessage()
+    ]
+    assert criticals == ["[DAEMON] stage=aftermarket_stream status=FAIL reason=circuit_open key=krx:2"]
+    assert runner.state.aftermarket_results == {"krx:2": "circuit_open"}
+
+
+def test_daemon_reselection_degrades_on_monthless_bar_store(monkeypatch, tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+    from unittest.mock import MagicMock
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.execution.kis_client import KisRankingRow
+    from src.orchestration import daemon
+
+    settings = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
+    settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
+    (settings.paths.bars_daily_dir / "notes.parquet").write_bytes(b"x")
+
+    class FakeClient:
+        def get_trade_amount_ranking(self):
+            return (KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=100),)
+
+        def get_fluctuation_ranking(self):
+            return (KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=100),)
+
+    class Supervisor:
+        def __init__(self, *, cmd, breaker):
+            pass
+        def ensure_running(self):
+            return 'running'
+        def stop(self, *, timeout_s=15.0):
+            return 'stopped'
+
+    monkeypatch.setattr(daemon, '_build_kis_client', lambda _: FakeClient())
+    monkeypatch.setattr(daemon, 'run_session_orchestration', lambda **_: True)
+    monkeypatch.setattr(daemon, '_resolve_trading_day_with_cache', lambda *_: None)
+    monkeypatch.setattr(daemon, 'ProcessSupervisor', Supervisor)
+    kst = ZoneInfo('Asia/Seoul')
+    times = iter([dt.datetime(2026, 9, 16, 15, 31, tzinfo=kst)])
+
+    with caplog.at_level(logging.WARNING):
+        daemon.run_collector_daemon(settings=settings, now_fn=lambda: next(times), sleep_fn=MagicMock(), max_cycles=1)
+
+    assert settings.paths.aftermarket_candidates(dt.date(2026, 9, 16)).exists()
+    degraded = [record for record in caplog.records if 'stage=aftermarket_eligibility' in record.getMessage()]
+    assert len(degraded) == 1
+    assert 'reason=bars_unreadable' in degraded[0].getMessage()
+
+
+def test_aftermarket_circuit_open_not_realerted_after_breaker_recovers(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    runner, now = _aftermarket_runner(tmp_path, monkeypatch)
+    # 차단기가 열렸다가 30분 창이 지나 재시작 후 다시 열리는 같은 날의 반복
+    runner.children.aftermarket["krx:2"] = _ScriptedSupervisor(
+        ["circuit_open", "restarted", "running", "circuit_open"]
+    )
+
+    with caplog.at_level(logging.CRITICAL):
+        for _ in range(4):
+            runner.step(now)
+
+    criticals = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.CRITICAL and "reason=circuit_open" in r.getMessage()
+    ]
+    assert criticals == ["[DAEMON] stage=aftermarket_stream status=FAIL reason=circuit_open key=krx:2"]
