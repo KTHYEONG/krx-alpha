@@ -21,7 +21,7 @@ Post-development protocol for task finalization, compact decision recording, and
 
 2. **Complete Temporary Artifact Cleanup**:
    - `sync_task.py` executes full post-task cleanup by default:
-     - Purges completed temporary specs (`docs/specs/*.md`, `*_contract.json`), while strictly preserving `00_architecture.md`.
+     - Purges completed temporary specs (`docs/specs/*.md`, `*_contract.json`).
      - Clears all temporary scratch probe scripts and caches under `scratch/` (preserving `.gitignore`).
      - Clears all test coverage and runner artifacts under `tmp/` (preserving `.gitignore`).
      - Wipes dangling `.tmp` and `.bak` files across the workspace.

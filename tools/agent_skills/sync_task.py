@@ -266,7 +266,6 @@ def _clean_specs(
 
     count = 0
     keep_set = set(keep_specs or [])
-    keep_set.add("00_architecture.md")
 
     # 1. Targeted removal when explicit spec files are provided
     if remove_specs:
@@ -300,7 +299,7 @@ def _clean_specs(
                         pass
         return count
 
-    # 2. Default: purge all temporary specs except 00_architecture.md and keep_set
+    # 2. Default: purge all temporary specs except keep_set
     if purge_all:
         for fname in os.listdir(specs_dir):
             if fname in keep_set:
