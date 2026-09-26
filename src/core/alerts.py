@@ -15,6 +15,8 @@ from src.core.log_format import format_record_timestamp
 
 ALERT_COOLDOWN_S: float = 1800.0
 ALERT_DAILY_CAP: int = 20
+ALERT_SEND_ATTEMPTS: int = 3
+ALERT_RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 8.0)
 
 _KST = ZoneInfo("Asia/Seoul")
 _KV_RE = re.compile(r"(\w+)=(\S+)")
@@ -367,6 +369,9 @@ class EmailAlertHandler(logging.Handler):
         daily_cap: int = ALERT_DAILY_CAP,
         clock: Callable[[], float] = time.monotonic,
         today: Callable[[], dt.date] | None = None,
+        send_attempts: int = ALERT_SEND_ATTEMPTS,
+        retry_backoff_s: tuple[float, ...] = ALERT_RETRY_BACKOFF_S,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         super().__init__(level=logging.CRITICAL)
         self._component = component
@@ -376,11 +381,20 @@ class EmailAlertHandler(logging.Handler):
         self._daily_cap = daily_cap
         self._clock = clock
         self._today = today if today is not None else (lambda: dt.datetime.now(_KST).date())
+        self._send_attempts = send_attempts
+        self._retry_backoff_s = retry_backoff_s
+        self._sleep = sleep
         self._sent_today = 0
         self._current_day: dt.date | None = None
         self._last_sent: dict[str, float] = {}
 
     def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._emit_guarded(record)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("[SYS] stage=alert status=FAIL reason=%s", type(exc).__name__)
+
+    def _emit_guarded(self, record: logging.LogRecord) -> None:
         key = str(record.getMessage())[:80]
         day = self._today()
         if self._current_day is None:
@@ -400,11 +414,19 @@ class EmailAlertHandler(logging.Handler):
         subject = format_alert_subject(self._component, msg, fields)
         text_body = format_alert_text(record, self._component, self._run_id, fields)
         html_body = format_alert_html(record, self._component, self._run_id, fields)
-        try:
-            _call_sender(self._sender, subject, text_body, html_body=html_body)
-        except (smtplib.SMTPException, OSError) as exc:
-            logging.getLogger(__name__).warning("[SYS] stage=alert status=FAIL reason=%s", type(exc).__name__)
-            return
+        attempts = max(1, self._send_attempts)
+        for attempt in range(attempts):
+            try:
+                _call_sender(self._sender, subject, text_body, html_body=html_body)
+                break
+            except (smtplib.SMTPException, OSError) as exc:
+                if attempt + 1 >= attempts:
+                    logging.getLogger(__name__).warning(
+                        "[SYS] stage=alert status=FAIL reason=%s", type(exc).__name__
+                    )
+                    return
+                backoff = self._retry_backoff_s
+                self._sleep(backoff[attempt] if attempt < len(backoff) else backoff[-1])
         self._last_sent[key] = now
         self._sent_today += 1
 
@@ -428,7 +450,12 @@ def gmail_sender(settings: AlertSettings) -> Callable[..., None]:
 
 
 def send_digest(
-    subject: str, body: str, *, settings: AlertSettings | None = None, sender: Callable[..., None] | None = None
+    subject: str,
+    body: str,
+    *,
+    settings: AlertSettings | None = None,
+    sender: Callable[..., None] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
     """Send the daily digest email, or skip when alerts are disabled."""
     s = settings if settings is not None else AlertSettings()
@@ -439,18 +466,25 @@ def send_digest(
     html_body = format_digest_html(subject, body)
     text_body = format_digest_text(subject, body)
     actual_sender = sender or gmail_sender(s)
-    try:
-        _call_sender(actual_sender, subject, text_body, html_body=html_body)
-    except (smtplib.SMTPException, OSError) as exc:
-        sys_logger.warning("[SYS] stage=digest status=FAIL reason=%s", type(exc).__name__)
-        return False
-    sys_logger.info("[SYS] stage=digest status=SENT")
-    return True
+    attempts = ALERT_SEND_ATTEMPTS
+    for attempt in range(attempts):
+        try:
+            _call_sender(actual_sender, subject, text_body, html_body=html_body)
+            sys_logger.info("[SYS] stage=digest status=SENT")
+            return True
+        except (smtplib.SMTPException, OSError) as exc:
+            if attempt + 1 >= attempts:
+                sys_logger.warning("[SYS] stage=digest status=FAIL reason=%s", type(exc).__name__)
+                return False
+            sleep(ALERT_RETRY_BACKOFF_S[attempt] if attempt < len(ALERT_RETRY_BACKOFF_S) else ALERT_RETRY_BACKOFF_S[-1])
+    return False  # pragma: no cover - loop above always returns; satisfies the type checker
 
 
 __all__ = [
     "ALERT_COOLDOWN_S",
     "ALERT_DAILY_CAP",
+    "ALERT_RETRY_BACKOFF_S",
+    "ALERT_SEND_ATTEMPTS",
     "EmailAlertHandler",
     "format_alert_html",
     "format_alert_subject",

@@ -52,7 +52,7 @@ def test_run_eod_offload_syncs_and_prunes_with_injected_archiver(tmp_path) -> No
     old_pq.write_bytes(b'x')
 
     class _Arc:
-        def sync_l1_tree(self, archive_root):
+        def sync_l1_tree(self, archive_root, *, progress=None):
             from src.storage.remote import SyncStats
 
             return SyncStats(uploaded=1, skipped_verified=0, failed_verification=0)
@@ -106,7 +106,7 @@ def test_run_eod_maintenance_forwards_quarantine_root(tmp_path, monkeypatch) -> 
 
     seen: dict[str, object] = {}
 
-    def _fake_prune(root, archive_root=None, *, retain_days=3, reference_date=None, quarantine_root=None, normalizer=None, verified_remote_l1=None):
+    def _fake_prune(root, archive_root=None, *, retain_days=3, reference_date=None, quarantine_root=None, normalizer=None, verified_remote_l1=None, progress=None, normalize=True):
         seen.update({
             'root': root, 'archive_root': archive_root, 'retain_days': retain_days,
             'reference_date': reference_date, 'quarantine_root': quarantine_root, 'normalizer': normalizer,
@@ -195,6 +195,8 @@ def test_check_session_reconciliation_passes_for_complete_routed_session(tmp_pat
             vendor="ls",
             venue="krx",
             session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
         )
 
     assert ok is True
@@ -222,6 +224,8 @@ def test_check_session_reconciliation_fails_for_missing_stream_journal(tmp_path,
             vendor="ls",
             venue="krx",
             session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
         )
 
     assert ok is False
@@ -252,6 +256,8 @@ def test_check_session_reconciliation_rejects_legacy_layout(tmp_path, caplog) ->
             vendor="ls",
             venue="krx",
             session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
         )
 
     assert ok is False
@@ -278,6 +284,8 @@ def test_check_session_reconciliation_fails_for_missing_manifest(tmp_path, caplo
             vendor="ls",
             venue="krx",
             session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
         )
 
     assert ok is False
@@ -309,6 +317,8 @@ def test_check_session_reconciliation_fails_for_gap_over_limit(tmp_path, caplog)
             vendor="ls",
             venue="krx",
             session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
         )
 
     assert ok is False
@@ -335,6 +345,8 @@ def test_check_session_reconciliation_ignores_bars_store(tmp_path) -> None:
         vendor="ls",
         venue="krx",
         session="regular",
+        regular_open=dt.time(9, 0),
+        regular_close=dt.time(15, 30),
     )
 
     assert (tmp_path / "bars" / "daily.parquet").exists() is False
@@ -411,7 +423,7 @@ def test_check_session_reconciliation_flags_gap_union_over_limit_in_regular_sess
     with caplog.at_level(logging.CRITICAL):
         ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
                                           streams=("H0STCNT0", "H0STASP0"), vendor="ls",
-                                          venue="krx", session="regular")
+                                          venue="krx", session="regular", regular_open=dt.time(9, 0), regular_close=dt.time(15, 30))
 
     assert ok is False
     assert "[DATA] stage=session_reconciliation status=FAIL date=2026-09-14 reasons=gap_exceeded:900s" in caplog.text
@@ -450,7 +462,7 @@ def test_check_session_reconciliation_clips_gaps_outside_regular_session(tmp_pat
 
     ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
                                       streams=("H0STCNT0", "H0STASP0"), vendor="ls",
-                                      venue="krx", session="regular")
+                                      venue="krx", session="regular", regular_open=dt.time(9, 0), regular_close=dt.time(15, 30))
 
     assert ok is True
 
@@ -486,7 +498,7 @@ def test_check_session_reconciliation_flags_missing_stream_journal(tmp_path, cap
     with caplog.at_level(logging.CRITICAL):
         ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
                                           streams=("H0STCNT0", "H0STASP0"), vendor="ls",
-                                          venue="krx", session="regular")
+                                          venue="krx", session="regular", regular_open=dt.time(9, 0), regular_close=dt.time(15, 30))
 
     assert ok is False
     assert "reasons=journal_missing:H0STASP0" in caplog.text
@@ -514,10 +526,82 @@ def test_check_session_reconciliation_flags_unreadable_manifest_in_substantive_m
     with caplog.at_level(logging.CRITICAL):
         ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
                                           streams=("H0STCNT0",), vendor="ls",
-                                          venue="krx", session="regular")
+                                          venue="krx", session="regular", regular_open=dt.time(9, 0), regular_close=dt.time(15, 30))
 
     assert ok is False
     assert "reasons=manifest_unreadable" in caplog.text
+
+def test_check_session_reconciliation_clips_gap_outside_shifted_window(tmp_path) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.orchestration.eod import check_session_reconciliation
+    from src.realtime.manifest import SessionManifest
+
+    kst = ZoneInfo("Asia/Seoul")
+    day = dt.date(2026, 11, 19)
+    journal_root = tmp_path / "l0"
+
+    def journal(stream):
+        part = journal_root / "ls" / "krx" / "regular" / stream / "dt=2026-11-19"
+        part.mkdir(parents=True, exist_ok=True)
+        (part / "10.jsonl.zst").write_bytes(b"x")
+
+    def ns(h, m):
+        return int(dt.datetime(2026, 11, 19, h, m, tzinfo=kst).timestamp()) * 1_000_000_000
+
+    journal("H0STCNT0")
+    journal("H0STASP0")
+    path = tmp_path / "manifest" / "2026-11-19.json"
+    manifest = SessionManifest(session_date=day, clock_offset_ns=0, started_at_ns=0)
+    manifest.record_gap(symbol="005930", gap_start_ns=ns(9, 0), gap_end_ns=ns(10, 0), reason="disconnect")
+    manifest.save(path)
+
+    ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
+                                      streams=("H0STCNT0", "H0STASP0"), vendor="ls",
+                                      venue="krx", session="regular",
+                                      regular_open=dt.time(10, 0), regular_close=dt.time(16, 30))
+
+    assert ok is True
+
+
+def test_check_session_reconciliation_counts_gap_inside_shifted_window(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from src.orchestration.eod import check_session_reconciliation
+    from src.realtime.manifest import SessionManifest
+
+    kst = ZoneInfo("Asia/Seoul")
+    day = dt.date(2026, 11, 19)
+    journal_root = tmp_path / "l0"
+
+    def journal(stream):
+        part = journal_root / "ls" / "krx" / "regular" / stream / "dt=2026-11-19"
+        part.mkdir(parents=True, exist_ok=True)
+        (part / "10.jsonl.zst").write_bytes(b"x")
+
+    def ns(h, m):
+        return int(dt.datetime(2026, 11, 19, h, m, tzinfo=kst).timestamp()) * 1_000_000_000
+
+    journal("H0STCNT0")
+    journal("H0STASP0")
+    path = tmp_path / "manifest" / "2026-11-19.json"
+    manifest = SessionManifest(session_date=day, clock_offset_ns=0, started_at_ns=0)
+    manifest.record_gap(symbol="005930", gap_start_ns=ns(16, 0), gap_end_ns=ns(16, 15), reason="disconnect")
+    manifest.save(path)
+
+    with caplog.at_level(logging.CRITICAL):
+        ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
+                                          streams=("H0STCNT0", "H0STASP0"), vendor="ls",
+                                          venue="krx", session="regular",
+                                          regular_open=dt.time(10, 0), regular_close=dt.time(16, 30),
+                                          max_gap_s=600)
+
+    assert ok is False
+    assert "reasons=gap_exceeded:900s" in caplog.text
+
 
 def test_classify_remote_failure_detects_auth_expiry() -> None:
     from src.orchestration.eod import classify_remote_failure
@@ -585,7 +669,7 @@ def failing_archiver():
     from src.storage.remote import SyncStats
 
     class _Failing:
-        def sync_l1_tree(self, local_root):
+        def sync_l1_tree(self, local_root, *, progress=None):
             return SyncStats(uploaded=0, skipped_verified=0, failed_verification=1)
 
         def sync_manifest_tree(self, manifest_root):
@@ -766,7 +850,7 @@ def test_run_eod_remote_l0_purge_delegates_with_journal_root(tmp_path) -> None:
     seen: dict[str, object] = {}
 
     class _Fake:
-        def purge_superseded_l0(self, verified, journal_root):
+        def purge_superseded_l0(self, verified, journal_root, *, progress=None):
             seen["verified"] = set(verified)
             seen["root"] = journal_root
             return PurgeStats(purged=2, skipped_local_present=1, skipped_absent=0, failed=0)
@@ -906,3 +990,151 @@ def test_check_host_backup_freshness_treats_future_last_ok_as_fresh(tmp_path) ->
     _write_host_status(status, (now + dt.timedelta(hours=1)).isoformat())
 
     assert check_host_backup_freshness(status_path=status, now=now, max_age=dt.timedelta(hours=36)) is None
+
+
+def test_run_eod_offload_rclone_timeout_follows_failure_path(tmp_path) -> None:
+    import datetime as dt
+    import subprocess
+
+    import pytest
+
+    from src.orchestration.eod import run_eod_offload
+    from src.storage.remote import GDriveArchiver, RemoteArchiveError
+
+    root = tmp_path / "l1" / "ls" / "H0STCNT0"
+    root.mkdir(parents=True)
+    (root / "dt=2026-09-01.parquet").write_bytes(b"0123456789")
+
+    def _behavior(mode):
+        def _runner(cmd, **kwargs):
+            if "copyto" in cmd:
+                if mode == "timeout":
+                    raise subprocess.TimeoutExpired(cmd, 600)
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+            return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+        return _runner
+
+    def _archiver(mode):
+        return GDriveArchiver(remote_name="gdrive", remote_path="q", runner=_behavior(mode))
+
+    for mode in ("timeout", "rc"):
+        with pytest.raises(RemoteArchiveError, match="offload verification failed"):
+            run_eod_offload(tmp_path / "l1", archiver=_archiver(mode), reference_date=dt.date(2026, 9, 8))
+
+    timeout_stats = _archiver("timeout").sync_l1_tree(root)
+    rc_stats = _archiver("rc").sync_l1_tree(root)
+    assert (timeout_stats.uploaded, timeout_stats.failed_verification) == (0, 1)
+    assert (rc_stats.uploaded, rc_stats.failed_verification) == (0, 1)
+
+
+def test_check_session_reconciliation_fails_for_accumulated_restart_gaps(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    kst = ZoneInfo("Asia/Seoul")
+    day = dt.date(2026, 9, 14)
+    journal_root = tmp_path / "l0"
+    _write_routed_journal(journal_root, stream="H0STCNT0", date=day)
+    _write_routed_journal(journal_root, stream="H0STASP0", date=day)
+    base_ns = int(dt.datetime(2026, 9, 14, 9, 10, tzinfo=kst).timestamp()) * 1_000_000_000
+    gaps = [("*", base_ns + i * 1_000_000_000_000, base_ns + i * 1_000_000_000_000 + 90_000_000_000) for i in range(8)]
+    manifest_path = tmp_path / "manifest" / "2026-09-14.json"
+    _write_session_manifest(manifest_path, day, gaps=gaps)
+
+    with caplog.at_level(logging.CRITICAL):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+        )
+
+    assert ok is False
+    assert "gap_exceeded:720s" in caplog.text
+
+
+def test_offload_and_purge_report_progress_for_every_rclone_call(tmp_path) -> None:
+    import datetime as dt
+    import pathlib
+    from types import SimpleNamespace
+
+    from src.orchestration.eod import run_eod_offload, run_eod_remote_l0_purge
+    from src.storage.remote import RcloneArchiver, RemoteArchiveError
+
+    # Given: 업로드 대상 L1 1개, manifest 1개, 원격 검증된 L0 1개
+    l1 = pathlib.Path(tmp_path) / "l1" / "ls" / "H0STCNT0" / "dt=2026-09-01.parquet"
+    l1.parent.mkdir(parents=True)
+    l1.write_bytes(b"x" * 10)
+    manifest = pathlib.Path(tmp_path) / "manifest" / "2026-09-01.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def _runner(args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    arc = RcloneArchiver(remote_name="gdrive", remote_path="p", runner=_runner)
+    progress: list[int] = []
+
+    # When: EOD 오프로드와 원격 L0 정리를 진행 콜백과 함께 실행
+    # 가짜 원격은 빈 목록을 돌려주므로 검증 실패로 끝난다; 관심사는 실패 경로를 포함한 호출별 진행 신호다.
+    with pytest.raises(RemoteArchiveError, match="verif"):
+        run_eod_offload(
+            pathlib.Path(tmp_path) / "l1",
+            pathlib.Path(tmp_path) / "manifest",
+            archiver=arc,
+            reference_date=dt.date(2026, 9, 8),
+            progress=lambda: progress.append(1),
+        )
+    offload_calls = len(calls)
+    run_eod_remote_l0_purge(
+        pathlib.Path(tmp_path) / "l0",
+        {"l1/ls/H0STCNT0/dt=2026-09-01.parquet"},
+        archiver=arc,
+        progress=lambda: progress.append(1),
+    )
+
+    # Then: 오프로드·정리의 모든 rclone 호출이 진행 신호를 남겨 EOD 무핑 구간이 호출 1회로 제한된다
+    assert offload_calls > 0
+    assert len(calls) > offload_calls
+    assert len(progress) >= len(calls)
+
+
+def test_aftermarket_eod_ready_waits_for_day_after_market_end(tmp_path):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.orchestration.eod import aftermarket_eod_ready
+    from src.realtime.manifest import SessionManifest
+
+    paths = []
+    for venue, session, streams in [
+        ("nxt", "nxt_after", ("H0NXCNT0", "H0NXASP0")),
+        ("krx", "krx_after", ("H0STCNT0", "H0STASP0")),
+    ]:
+        manifest = SessionManifest(
+            session_date=dt.date(2026, 9, 15), clock_offset_ns=0, started_at_ns=1, venue=venue,
+            session=session, expected_close_ns=1, writer_closed_at_ns=2,
+        )
+        for stream in streams:
+            manifest.record_ack(vendor="kis", tr_id=stream, symbol="005930", rt_cd="0", accepted=True)
+        path = tmp_path / f"{venue}.json"
+        manifest.save(path)
+        paths.append(path)
+    now = dt.datetime(2026, 9, 15, 19, 5, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    # 20:00 하드코딩이 아니라 그날 앵커의 애프터마켓 종료를 기준으로 판정한다.
+    assert aftermarket_eod_ready(manifests=paths, date=dt.date(2026, 9, 15), now=now) is False
+    assert aftermarket_eod_ready(
+        manifests=paths, date=dt.date(2026, 9, 15), now=now, after_market_end=dt.time(19, 0)
+    ) is True

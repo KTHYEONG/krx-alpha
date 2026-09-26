@@ -10,6 +10,7 @@ from typing import TypeVar
 
 import polars as pl
 
+from src.core.session_anchors import SessionAnchors
 from src.realtime.contracts import MarketVenue
 
 FrameT = TypeVar("FrameT", pl.DataFrame, pl.LazyFrame)
@@ -81,7 +82,27 @@ def _parse_event_time(event_time: str) -> dt.time | None:
     return dt.time(hour, minute, second)
 
 
-def classify_market_phase(venue: MarketVenue, event_time: str, kind: EventKind) -> MarketPhase:
+def phase_windows_for(anchors: SessionAnchors) -> tuple[PhaseWindow, ...]:
+    """Shift the contracted phase table by session anchors.
+
+    Boundary mapping (each boundary of ``MARKET_PHASE_WINDOWS`` classified once):
+    08:30 and 08:40 (before 09:00, pre-open) use ``shift_pre_open``;
+    09:00 maps to ``regular_open``; 15:20 maps to ``closing_auction_start``;
+    15:40 and 16:00 (at or after 15:30 and before 20:00, post-close) use
+    ``shift_post_close``; 20:00 maps to ``after_market_end``.
+    """
+    return (
+        PhaseWindow(MarketVenue.KRX, EventKind.TRADE, anchors.shift_pre_open(dt.time(8, 30)), anchors.shift_pre_open(dt.time(8, 40)), MarketPhase.PRE_MARKET_CLOSING_PRICE),
+        PhaseWindow(MarketVenue.KRX, None, anchors.shift_pre_open(dt.time(8, 30)), anchors.regular_open, MarketPhase.OPENING_AUCTION),
+        PhaseWindow(MarketVenue.KRX, None, anchors.regular_open, anchors.closing_auction_start, MarketPhase.REGULAR),
+        PhaseWindow(MarketVenue.KRX, None, anchors.closing_auction_start, anchors.shift_post_close(dt.time(15, 40)), MarketPhase.CLOSING_AUCTION),
+        PhaseWindow(MarketVenue.KRX, None, anchors.shift_post_close(dt.time(15, 40)), anchors.shift_post_close(dt.time(16, 0)), MarketPhase.POST_MARKET_CLOSING_PRICE),
+        PhaseWindow(MarketVenue.KRX, None, anchors.shift_post_close(dt.time(16, 0)), anchors.after_market_end, MarketPhase.AFTERMARKET),
+        PhaseWindow(MarketVenue.NXT, None, anchors.shift_post_close(dt.time(15, 40)), anchors.after_market_end, MarketPhase.AFTERMARKET),
+    )
+
+
+def classify_market_phase(venue: MarketVenue, event_time: str, kind: EventKind, *, windows: tuple[PhaseWindow, ...] = MARKET_PHASE_WINDOWS) -> MarketPhase:
     """Classify one event by exchange time using ``MARKET_PHASE_WINDOWS``.
 
     Args:
@@ -96,7 +117,7 @@ def classify_market_phase(venue: MarketVenue, event_time: str, kind: EventKind) 
     moment = _parse_event_time(event_time)
     if moment is None:
         return MarketPhase.UNCLASSIFIED
-    for window in MARKET_PHASE_WINDOWS:
+    for window in windows:
         if window.venue == venue and (window.kind is None or window.kind == kind) and window.start <= moment < window.end:
             return window.phase
     return MarketPhase.UNCLASSIFIED
@@ -129,7 +150,7 @@ def event_time_expr() -> pl.Expr:
     return _event_time_value().alias("exchange_event_time")
 
 
-def market_phase_expr() -> pl.Expr:
+def market_phase_expr(*, windows: tuple[PhaseWindow, ...] = MARKET_PHASE_WINDOWS) -> pl.Expr:
     """Vectorized ``classify_market_phase`` over ``venue``, ``stream`` and ``event_time_expr()``.
 
     Produces exactly the value the scalar classifier returns for every row, so
@@ -139,10 +160,10 @@ def market_phase_expr() -> pl.Expr:
     valid = (
         event.str.contains(_VALID_HHMMSS_RE)
         & pl.col("stream").is_in(list(STREAM_EVENT_KIND))
-        & pl.col("venue").is_in(sorted({window.venue.value for window in MARKET_PHASE_WINDOWS}))
+        & pl.col("venue").is_in(sorted({window.venue.value for window in windows}))
     )
     result: pl.Expr = pl.lit(MarketPhase.UNCLASSIFIED.value)
-    for window in reversed(MARKET_PHASE_WINDOWS):
+    for window in reversed(windows):
         cond = (
             (pl.col("venue") == window.venue.value)
             & (event >= window.start.strftime("%H%M%S"))
@@ -154,7 +175,7 @@ def market_phase_expr() -> pl.Expr:
     return result.alias("market_phase")
 
 
-def annotate_market_phase(frame: FrameT) -> FrameT:
+def annotate_market_phase(frame: FrameT, *, windows: tuple[PhaseWindow, ...] = MARKET_PHASE_WINDOWS) -> FrameT:
     """Fill ``exchange_event_time`` and add a ``market_phase`` column.
 
     Accepts current L1 frames and legacy L1 frames written before venue
@@ -182,4 +203,4 @@ def annotate_market_phase(frame: FrameT) -> FrameT:
         out = out.with_columns(pl.col("tr_id").alias("stream"))
     if "exchange_event_time" not in names:
         out = out.with_columns(pl.lit("").alias("exchange_event_time"))
-    return out.with_columns(event_time_expr(), market_phase_expr())
+    return out.with_columns(event_time_expr(), market_phase_expr(windows=windows))

@@ -44,6 +44,8 @@ RUNTIME_ENV_SPEC: tuple[RuntimeEnvKey, ...] = (
         sources=("ALERT_GMAIL_APP_PASSWORD", "LIVE_ALERT_GMAIL_APP_PASSWORD"),
     ),
     RuntimeEnvKey(target="ALERT_GMAIL_TO", sources=("ALERT_GMAIL_TO",)),
+    RuntimeEnvKey(target="KRX_ALPHA_LIVENESS_HEALTHCHECK_URL", sources=("KRX_ALPHA_LIVENESS_HEALTHCHECK_URL",)),
+    RuntimeEnvKey(target="KRX_HOST_BACKUP_HEALTHCHECK_URL", sources=("KRX_HOST_BACKUP_HEALTHCHECK_URL",)),
 )
 
 REMOTE_RUNTIME_INSTALL_SCRIPT = """set -euo pipefail
@@ -61,7 +63,7 @@ chown ubuntu:ubuntu "$dest"
 
 
 def build_runtime_fragment(source_path: Path) -> str:
-    """Build the canonical 12-line runtime fragment from a workstation source file."""
+    """Build the canonical 14-line runtime fragment from a workstation source file."""
     accepted_keys = frozenset(source for key in RUNTIME_ENV_SPEC for source in key.sources)
     parsed = parse_workstation_assignments(source_path, accepted_keys)
     lines: list[str] = []

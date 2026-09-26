@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 
+def _seed_cli_bars(root, frame) -> None:
+    from src.marketdata.bar_store import append_daily_bars
+
+    append_daily_bars(root, frame)
+
 def test_universe_plan_run_writes_selection_output(tmp_path):
     # Given: 일봉 parquet 과 CLI 인자
     import argparse
@@ -13,16 +18,16 @@ def test_universe_plan_run_writes_selection_output(tmp_path):
     n = 60
     base = dt.date(2026, 1, 5)
     decision = base + dt.timedelta(days=n - 1)
-    bars_path = tmp_path / "bars.parquet"
+    bars_path = tmp_path / "bars"
     out_path = tmp_path / "universe.parquet"
-    pl.DataFrame({
+    _seed_cli_bars(bars_path, pl.DataFrame({
         "date": [base + dt.timedelta(days=i) for i in range(n)],
         "symbol": ["000001"] * n,
         "close": [1000.0] * (n - 1) + [1300.0],
         "volume": [1000] * n,
         "trade_value_100m": [100.0] * (n - 1) + [1000.0],
         "daily_change_pct": [0.0] * (n - 1) + [29.9],
-    }).write_parquet(bars_path)
+    }))
 
     args = argparse.Namespace(
         bars_path=str(bars_path),
@@ -54,15 +59,15 @@ def test_universe_plan_run_emits_candidates_when_path_given(tmp_path):
     n = 60
     base = dt.date(2026, 1, 5)
     decision = base + dt.timedelta(days=n - 1)
-    bars_path = tmp_path / "bars.parquet"
-    pl.DataFrame({
+    bars_path = tmp_path / "bars"
+    _seed_cli_bars(bars_path, pl.DataFrame({
         "date": [base + dt.timedelta(days=i) for i in range(n)],
         "symbol": ["000001"] * n,
         "close": [1000.0] * (n - 1) + [1300.0],
         "volume": [1000] * n,
         "trade_value_100m": [100.0] * (n - 1) + [1000.0],
         "daily_change_pct": [0.0] * (n - 1) + [29.9],
-    }).write_parquet(bars_path)
+    }))
 
     cand_path = tmp_path / "candidates.json"
     args = argparse.Namespace(
@@ -97,8 +102,8 @@ def test_universe_plan_run_creates_missing_out_dir(tmp_path) -> None:
         'trade_value_100m': [100.0] * (n - 1) + [900.0],
         'daily_change_pct': [1.0] * (n - 2) + [30.0, 15.0],
     })
-    bars_path = tmp_path / 'bars.parquet'
-    bars.write_parquet(bars_path)
+    bars_path = tmp_path / 'bars'
+    _seed_cli_bars(bars_path, bars)
     out_path = tmp_path / 'nested' / 'does' / 'not' / 'exist' / 'out.parquet'
 
     args = argparse.Namespace(bars_path=str(bars_path), decision_date=decision.isoformat(),

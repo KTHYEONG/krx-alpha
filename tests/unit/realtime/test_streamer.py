@@ -260,17 +260,19 @@ def test_regular_session_silence_limit_only_during_regular_session() -> None:
     import datetime as dt
     from zoneinfo import ZoneInfo
 
+    from src.core.session_anchors import standard_session_anchors
     from src.realtime.streamer import SILENCE_LIMIT_S, regular_session_silence_limit_s
 
     kst = ZoneInfo("Asia/Seoul")
+    anchors = standard_session_anchors(dt.date(2026, 9, 14))
 
     assert SILENCE_LIMIT_S == 30.0
-    assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 8, 59, 59, tzinfo=kst)) is None
-    assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 9, 0, 0, tzinfo=kst)) == 30.0
-    assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 15, 29, 59, tzinfo=kst)) == 30.0
-    assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 15, 30, 0, tzinfo=kst)) is None
-    assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 1, 0, 0, tzinfo=dt.UTC)) == 30.0
-    assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 0, 0, 0, tzinfo=dt.UTC), limit_s=5.0) == 5.0
+    assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 8, 59, 59, tzinfo=kst), anchors=anchors) is None
+    assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 9, 0, 0, tzinfo=kst), anchors=anchors) == 30.0
+    assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 15, 29, 59, tzinfo=kst), anchors=anchors) == 30.0
+    assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 15, 30, 0, tzinfo=kst), anchors=anchors) is None
+    assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 1, 0, 0, tzinfo=dt.UTC), anchors=anchors) == 30.0
+    assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 0, 0, 0, tzinfo=dt.UTC), anchors=anchors, limit_s=5.0) == 5.0
 
 
 def test_streamer_pump_returns_watchdog_when_vendor_goes_silent() -> None:
@@ -953,10 +955,58 @@ def test_aftermarket_silence_limit_honors_distinct_starts():
     from zoneinfo import ZoneInfo
     from src.realtime.contracts import MarketSession, MarketVenue
     from src.realtime.session import StreamRoute
+    from src.core.session_anchors import standard_session_anchors
     from src.realtime.streamer import aftermarket_silence_limit_s
     kst = ZoneInfo('Asia/Seoul')
+    anchors = standard_session_anchors(dt.date(2026, 9, 15))
     nxt = StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER)
     krx = StreamRoute(MarketVenue.KRX, MarketSession.KRX_AFTER)
     now = dt.datetime(2026, 9, 15, 15, 45, tzinfo=kst)
-    assert aftermarket_silence_limit_s(now, route=nxt) == 30.0
-    assert aftermarket_silence_limit_s(now, route=krx) is None
+    assert aftermarket_silence_limit_s(now, route=nxt, anchors=anchors) == 30.0
+    assert aftermarket_silence_limit_s(now, route=krx, anchors=anchors) is None
+
+
+def test_regular_session_silence_limit_follows_anchors() -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.core.session_anchors import AnchorSource, SessionAnchors
+    from src.realtime.streamer import regular_session_silence_limit_s
+
+    kst = ZoneInfo("Asia/Seoul")
+    anchors = SessionAnchors(
+        date=dt.date(2026, 11, 19),
+        regular_open=dt.time(10, 0),
+        closing_auction_start=dt.time(16, 20),
+        regular_close=dt.time(16, 30),
+        after_market_end=dt.time(20, 0),
+        source=AnchorSource.VENDOR,
+    )
+
+    assert regular_session_silence_limit_s(dt.datetime(2026, 11, 19, 9, 30, tzinfo=kst), anchors=anchors) is None
+    assert regular_session_silence_limit_s(dt.datetime(2026, 11, 19, 10, 5, tzinfo=kst), anchors=anchors) == 30.0
+    assert regular_session_silence_limit_s(dt.datetime(2026, 11, 19, 16, 25, tzinfo=kst), anchors=anchors) == 30.0
+
+
+def test_aftermarket_silence_limit_follows_shifted_close() -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.core.session_anchors import AnchorSource, SessionAnchors
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import StreamRoute
+    from src.realtime.streamer import aftermarket_silence_limit_s
+
+    kst = ZoneInfo("Asia/Seoul")
+    anchors = SessionAnchors(
+        date=dt.date(2026, 11, 19),
+        regular_open=dt.time(10, 0),
+        closing_auction_start=dt.time(16, 20),
+        regular_close=dt.time(16, 30),
+        after_market_end=dt.time(20, 0),
+        source=AnchorSource.VENDOR,
+    )
+    nxt = StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER)
+
+    assert aftermarket_silence_limit_s(dt.datetime(2026, 11, 19, 16, 35, tzinfo=kst), route=nxt, anchors=anchors) is None
+    assert aftermarket_silence_limit_s(dt.datetime(2026, 11, 19, 16, 45, tzinfo=kst), route=nxt, anchors=anchors) == 30.0

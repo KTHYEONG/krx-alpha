@@ -88,6 +88,7 @@ class GDriveArchiver:
         remote_name: str | None = None,
         remote_path: str | None = None,
         runner: Callable[..., Any] | None = None,
+        timeout_s: float = 600.0,
     ) -> None:
         cfg_name = getattr(config, "remote_name", None) if config is not None else None
         cfg_path = getattr(config, "remote_path", None) if config is not None else None
@@ -97,13 +98,33 @@ class GDriveArchiver:
             remote_path if remote_path is not None else (cfg_path or "quant-lake/live/krx-alpha/data")
         )
         self._runner = runner if runner is not None else (cfg_runner or subprocess.run)
+        self._timeout_s = timeout_s
+        self._progress: Callable[[], None] | None = None
+
+    def bind_progress(self, progress: Callable[[], None] | None) -> None:
+        """Report liveness after every rclone call so EOD never goes silent longer than one call."""
+        self._progress = progress
 
     @classmethod
     def try_from_env(cls) -> GDriveArchiver | None:
         if shutil.which("rclone") is None:
             return None
         settings = RcloneArchiveSettings()
-        return cls(remote_name=settings.remote_name, remote_path=settings.remote_path)
+        return cls(
+            remote_name=settings.remote_name,
+            remote_path=settings.remote_path,
+            timeout_s=settings.rclone_timeout_s,
+        )
+
+    def _run(self, cmd: list[str]) -> Any:
+        """Run one rclone call; a timeout surfaces as a non-zero result."""
+        try:
+            return self._runner(cmd, capture_output=True, text=True, check=False, timeout=self._timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            return subprocess.CompletedProcess(cmd, 124, stdout="", stderr=f"rclone timed out after {exc.timeout}s")
+        finally:
+            if self._progress is not None:
+                self._progress()
 
     def repo_path_for(self, archive_root: pathlib.Path, local_parquet: pathlib.Path) -> str:
         rel = pathlib.Path(local_parquet).relative_to(archive_root).as_posix()
@@ -115,7 +136,7 @@ class GDriveArchiver:
 
     def _remote_size(self, repo_path: str) -> int:
         dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
-        result = self._runner(["rclone", "lsjson", dest], capture_output=True, text=True, check=False)
+        result = self._run(["rclone", "lsjson", dest])
         entries = json.loads(result.stdout) if result.returncode == 0 else []
         if not entries:
             raise RemoteArchiveError(f"verify failed: {repo_path}")
@@ -124,9 +145,7 @@ class GDriveArchiver:
     def upload_and_verify(self, local_parquet: pathlib.Path, repo_path: str) -> bool:
         local = pathlib.Path(local_parquet)
         dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
-        result = self._runner(
-            ["rclone", "copyto", str(local), dest], capture_output=True, text=True, check=False
-        )
+        result = self._run(["rclone", "copyto", str(local), dest])
         if result.returncode != 0:
             raise RemoteArchiveError(f"upload failed: {repo_path} {result.stderr}")
         return self._remote_size(repo_path) == local.stat().st_size
@@ -134,12 +153,7 @@ class GDriveArchiver:
     def _lsjson_recursive(self, prefix: str = "") -> list[dict[str, Any]]:
         norm = prefix.rstrip("/")
         dest = f"{self._remote_name}:{self._remote_path}/{norm}" if norm else f"{self._remote_name}:{self._remote_path}"
-        result = self._runner(
-            ["rclone", "lsjson", dest, "--recursive", "--fast-list", "--files-only"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = self._run(["rclone", "lsjson", dest, "--recursive", "--fast-list", "--files-only"])
         if result.returncode == 3:
             return []
         if result.returncode != 0:
@@ -191,36 +205,38 @@ class GDriveArchiver:
             sizes[path] = size
         return sizes
 
-    def sync_l1_tree(self, local_root: pathlib.Path) -> SyncStats:
+    def sync_l1_tree(self, local_root: pathlib.Path, *, progress: Callable[[], None] | None = None) -> SyncStats:
         root = pathlib.Path(local_root)
         sizes = self.remote_file_sizes("l1/")
         stats = SyncStats()
         for pq in sorted(root.rglob("*.parquet")):
-            repo_path = self.repo_path_for(root, pq)
-            local_size = pq.stat().st_size
-            if sizes.get(repo_path) == local_size:
-                stats.skipped_verified += 1
-                continue
             try:
-                dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
-                result = self._runner(
-                    ["rclone", "copyto", str(pq), dest], capture_output=True, text=True, check=False
-                )
-                if result.returncode != 0:
-                    raise RemoteArchiveError(f"upload failed: {repo_path} {result.stderr}")
-                remote_size = self._remote_size(repo_path)
-                if remote_size != local_size:
-                    logger.critical(
-                        "[DATA] stage=rclone_offload status=FAIL reason=size_mismatch path=%s", repo_path
-                    )
+                repo_path = self.repo_path_for(root, pq)
+                local_size = pq.stat().st_size
+                if sizes.get(repo_path) == local_size:
+                    stats.skipped_verified += 1
+                    continue
+                try:
+                    dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
+                    result = self._run(["rclone", "copyto", str(pq), dest])
+                    if result.returncode != 0:
+                        raise RemoteArchiveError(f"upload failed: {repo_path} {result.stderr}")
+                    remote_size = self._remote_size(repo_path)
+                    if remote_size != local_size:
+                        logger.critical(
+                            "[DATA] stage=rclone_offload status=FAIL reason=size_mismatch path=%s", repo_path
+                        )
+                        stats.failed_verification += 1
+                        continue
+                    stats.uploaded += 1
+                    sizes[repo_path] = local_size
+                except RemoteArchiveError:
+                    logger.critical("[DATA] stage=rclone_offload status=FAIL path=%s", repo_path)
                     stats.failed_verification += 1
                     continue
-                stats.uploaded += 1
-                sizes[repo_path] = local_size
-            except RemoteArchiveError:
-                logger.critical("[DATA] stage=rclone_offload status=FAIL path=%s", repo_path)
-                stats.failed_verification += 1
-                continue
+            finally:
+                if progress is not None:
+                    progress()
         return stats
 
     def sync_manifest_tree(self, manifest_root: pathlib.Path) -> SyncStats:
@@ -234,9 +250,7 @@ class GDriveArchiver:
                 stats.skipped_verified += 1
                 continue
             dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
-            result = self._runner(
-                ["rclone", "copyto", str(jf), dest], capture_output=True, text=True, check=False
-            )
+            result = self._run(["rclone", "copyto", str(jf), dest])
             if result.returncode != 0:
                 raise RemoteArchiveError(f"upload failed: {repo_path} {result.stderr}")
             if self._remote_size(repo_path) != local_size:
@@ -246,7 +260,8 @@ class GDriveArchiver:
         return stats
 
     def purge_superseded_l0(
-        self, verified_remote_l1: AbstractSet[str], journal_root: pathlib.Path
+        self, verified_remote_l1: AbstractSet[str], journal_root: pathlib.Path,
+        *, progress: Callable[[], None] | None = None,
     ) -> PurgeStats:
         """Remove remote L0 partitions made redundant by remote-verified L1 objects.
 
@@ -268,39 +283,36 @@ class GDriveArchiver:
         )
         base = pathlib.Path(journal_root)
         for l0_dir in l0_dirs:
-            if not l0_dir.startswith("l0/"):
-                continue
             try:
-                if (base / l0_dir[len("l0/") :]).exists():
-                    stats.skipped_local_present += 1
+                if not l0_dir.startswith("l0/"):
                     continue
-                dest = f"{self._remote_name}:{self._remote_path}/{l0_dir}"
-                probe = self._runner(
-                    ["rclone", "lsjson", dest, "--max-depth", "1"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if probe.returncode == 3:
-                    stats.skipped_absent += 1
-                    continue
-                if probe.returncode != 0:
+                try:
+                    if (base / l0_dir[len("l0/") :]).exists():
+                        stats.skipped_local_present += 1
+                        continue
+                    dest = f"{self._remote_name}:{self._remote_path}/{l0_dir}"
+                    probe = self._run(["rclone", "lsjson", dest, "--max-depth", "1"])
+                    if probe.returncode == 3:
+                        stats.skipped_absent += 1
+                        continue
+                    if probe.returncode != 0:
+                        stats.failed += 1
+                        logger.critical("[DATA] stage=l0_remote_purge part=%s status=FAIL", l0_dir)
+                        continue
+                    purged = self._run(["rclone", "purge", dest])
+                    if purged.returncode != 0:
+                        stats.failed += 1
+                        logger.critical("[DATA] stage=l0_remote_purge part=%s status=FAIL", l0_dir)
+                        continue
+                    stats.purged += 1
+                    logger.info("[DATA] stage=l0_remote_purge part=%s status=PURGED", l0_dir)
+                except Exception:
                     stats.failed += 1
                     logger.critical("[DATA] stage=l0_remote_purge part=%s status=FAIL", l0_dir)
                     continue
-                purged = self._runner(
-                    ["rclone", "purge", dest], capture_output=True, text=True, check=False
-                )
-                if purged.returncode != 0:
-                    stats.failed += 1
-                    logger.critical("[DATA] stage=l0_remote_purge part=%s status=FAIL", l0_dir)
-                    continue
-                stats.purged += 1
-                logger.info("[DATA] stage=l0_remote_purge part=%s status=PURGED", l0_dir)
-            except Exception:
-                stats.failed += 1
-                logger.critical("[DATA] stage=l0_remote_purge part=%s status=FAIL", l0_dir)
-                continue
+            finally:
+                if progress is not None:
+                    progress()
         logger.info(
             "[DATA] stage=l0_remote_purge purged=%d skipped_local_present=%d skipped_absent=%d failed=%d",
             stats.purged,

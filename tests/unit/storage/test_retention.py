@@ -1225,3 +1225,165 @@ def test_partition_without_tick_or_quote_still_carries_phase_footer(tmp_path) ->
     assert meta is not None
     counts = json.loads(meta[b'krx_alpha.market_phase'].decode())
     assert sum(counts.values()) == 1
+
+
+def test_prune_old_journals_calls_progress_per_partition_regardless_of_outcome(tmp_path) -> None:
+    import datetime as dt
+    import pathlib
+
+    from src.storage.normalization import L1NormalizationError
+    from src.storage.retention import L1WorkerCrashError, prune_old_journals
+
+    root = tmp_path / "l0"
+    for name in ("dt=2026-09-20", "dt=2026-09-21", "dt=2026-09-22"):
+        (root / "ls" / "H0STCNT0" / name).mkdir(parents=True, exist_ok=True)
+
+    def _normalizer(part: pathlib.Path, out: pathlib.Path) -> int:
+        if part.name == "dt=2026-09-20":
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"l1")
+            return 1
+        if part.name == "dt=2026-09-21":
+            raise L1NormalizationError("bad partition")
+        raise L1WorkerCrashError("worker died")
+
+    progress_calls: list[None] = []
+    stats = prune_old_journals(
+        root,
+        archive_root=tmp_path / "l1",
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 30),
+        normalizer=_normalizer,
+        verified_remote_l1=frozenset(),
+        progress=lambda: progress_calls.append(None),
+    )
+
+    assert len(progress_calls) == 3
+    assert stats.normalized == 1
+    assert stats.deleted == 0
+
+
+def test_prune_old_journals_normalize_timeout_is_retryable_crash(tmp_path, caplog) -> None:
+    import datetime as dt
+    import functools
+    import logging
+    import subprocess
+
+    from src.storage.normalize_worker import run_isolated_normalize
+    from src.storage.retention import prune_old_journals
+
+    part = tmp_path / "l0" / "ls" / "H0STCNT0" / "dt=2026-09-20"
+    part.mkdir(parents=True, exist_ok=True)
+    (part / "09.jsonl.zst").write_bytes(b"raw")
+
+    def _timeout(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 900)
+
+    progress_calls: list[None] = []
+    with caplog.at_level(logging.CRITICAL):
+        stats = prune_old_journals(
+            tmp_path / "l0",
+            archive_root=tmp_path / "l1",
+            retain_days=3,
+            reference_date=dt.date(2026, 9, 30),
+            normalizer=functools.partial(run_isolated_normalize, runner=_timeout),
+            quarantine_root=tmp_path / "quarantine",
+            verified_remote_l1=frozenset(),
+            progress=lambda: progress_calls.append(None),
+        )
+
+    assert stats.deleted == 0
+    assert len(progress_calls) == 1
+    assert (part / "09.jsonl.zst").exists()
+    assert not (tmp_path / "quarantine").exists()
+    assert "normalize worker timeout" in caplog.text
+
+
+def test_prune_old_journals_storage_io_keeps_partition_in_l0(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.storage.normalization import L1StorageIOError
+    from src.storage.retention import prune_old_journals
+
+    part = tmp_path / "l0" / "ls" / "H0STCNT0" / "dt=2026-09-01"
+    part.mkdir(parents=True)
+    (part / "09.jsonl.zst").write_bytes(b"kept")
+    quarantine = tmp_path / "quarantine"
+
+    def _io_error(part_dir, out_path):
+        raise L1StorageIOError("normalize failed: disk full")
+
+    with caplog.at_level(logging.CRITICAL):
+        stats = prune_old_journals(
+            tmp_path / "l0", archive_root=tmp_path / "l1", retain_days=3,
+            reference_date=dt.date(2026, 9, 30), quarantine_root=quarantine, normalizer=_io_error,
+        )
+
+    assert stats.deleted == 0
+    assert stats.failed == 1
+    assert (part / "09.jsonl.zst").read_bytes() == b"kept"
+    assert not quarantine.exists()
+    assert "reason=storage_io" in caplog.text
+
+
+def test_prune_stats_failed_counts_faults_while_int_compares_deleted(tmp_path) -> None:
+    import datetime as dt
+
+    from src.storage.normalization import L1StorageIOError
+    from src.storage.retention import L1NormalizationError, L1WorkerCrashError, prune_old_journals
+
+    def _stats_for(fault):
+        part = tmp_path / "l0" / "ls" / "H0STCNT0" / "dt=2026-09-01"
+        part.mkdir(parents=True, exist_ok=True)
+        (part / "09.jsonl.zst").write_bytes(b"x")
+
+        def _raise(part_dir, out_path):
+            raise fault
+
+        return prune_old_journals(
+            tmp_path / "l0", archive_root=tmp_path / "l1", retain_days=3,
+            reference_date=dt.date(2026, 9, 30), normalizer=_raise,
+        )
+
+    assert _stats_for(L1WorkerCrashError("crashed")).failed == 1
+    assert _stats_for(L1StorageIOError("disk full")).failed == 1
+    assert _stats_for(L1NormalizationError("corrupt")).failed == 1
+    assert _stats_for(L1WorkerCrashError("crashed")) == 0
+
+
+def test_low_disk_prune_deletes_only_verified_existing_l1_without_normalizing(tmp_path) -> None:
+    import datetime as dt
+
+    from src.storage.retention import prune_old_journals
+
+    # Given: 로컬 L1 이 있고 원격 검증된 파티션 1개, L1 이 없는 파티션 1개
+    verified_part = tmp_path / "l0" / "kis" / "H0STCNT0" / "dt=2026-09-01"
+    pending_part = tmp_path / "l0" / "kis" / "H0STCNT0" / "dt=2026-09-02"
+    for part in (verified_part, pending_part):
+        part.mkdir(parents=True)
+        (part / "09.jsonl.zst").write_bytes(b"x")
+    archive_root = tmp_path / "l1"
+    l1 = archive_root / "kis" / "H0STCNT0" / "dt=2026-09-01.parquet"
+    l1.parent.mkdir(parents=True)
+    l1.write_bytes(b"pq")
+
+    def _normalizer(part, out):
+        raise AssertionError("normalizer must not run when disk is low")
+
+    # When
+    stats = prune_old_journals(
+        tmp_path / "l0",
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 8),
+        archive_root=archive_root,
+        verified_remote_l1={"l1/kis/H0STCNT0/dt=2026-09-01.parquet"},
+        normalizer=_normalizer,
+        normalize=False,
+    )
+
+    # Then: 검증된 L0 만 지워 공간을 회복하고, 미검증 L0 은 실패 집계 없이 남는다
+    assert not verified_part.exists()
+    assert pending_part.exists()
+    assert stats == 1
+    assert stats.failed == 0

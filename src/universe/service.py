@@ -13,6 +13,7 @@ from typing import Protocol
 import polars as pl
 
 from src.execution.contracts import KisApiError
+from src.marketdata.partitioned_store import scan_month_partitions
 from src.marketdata.snapshot_contracts import SnapshotDataset
 from src.storage.snapshot_store import SnapshotStore, SnapshotStoreError
 from src.universe.ipc import emit_candidates
@@ -39,8 +40,9 @@ class UniversePlanResult:
 
 def plan_universe(
     *,
-    bars_path: pathlib.Path,
+    bars_root: pathlib.Path,
     decision_date: dt.date,
+    lookback_calendar_days: int,
     out_path: pathlib.Path,
     slot_budget: int,
     candidates_path: pathlib.Path | None = None,
@@ -50,6 +52,11 @@ def plan_universe(
     wall_ns: Callable[[], int] = time.time_ns,
 ) -> UniversePlanResult:
     """Select the session universe, drop designated managed stocks, and publish candidates.
+
+    Reads only the month partitions overlapping the lookback window ending at
+    ``decision_date``. Rolling windows are at most 60 rows and corporate-action
+    normalization cancels outside the window, so the decision-date output
+    equals the output computed from full history.
 
     Managed-stock designation for KOSPI is only observable through the broker
     status flag, so it is checked after bar-based selection on the selected
@@ -61,7 +68,11 @@ def plan_universe(
     """
     if status_source is not None and session_date is None:
         raise ValueError("status_source requires session_date")
-    bars = pl.read_parquet(pathlib.Path(bars_path))
+    bars = scan_month_partitions(
+        pathlib.Path(bars_root),
+        min_date=decision_date - dt.timedelta(days=lookback_calendar_days),
+        max_date=decision_date,
+    ).collect()
     bars = bars.filter(pl.col("date") <= decision_date)
     featured = compute_selection_features(bars)
     selected = select_universe(featured, decision_date, slot_budget=slot_budget)

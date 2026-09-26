@@ -54,6 +54,8 @@ class CollectorSettings(BaseSettings):
     ls_capacity_pairs: int = 200
     universe_slot_budget: int = 90
     bars_window_days: int = 90
+    # 61거래행 + 최장 KRX 휴장(약 10일)을 여유 있게 cover: 150역일은 약 100거래일.
+    selection_lookback_calendar_days: int = Field(default=150, ge=100)
     journal_retain_days: int = 3
     archive_retain_days: int = 30
     min_free_disk_gb: float = 3.0
@@ -63,6 +65,7 @@ class CollectorSettings(BaseSettings):
     # 36시간이면 하룻밤 누락을 감지하면서 다음날 아침까지 끝나는 재시도는 허용한다.
     host_backup_max_age_h: float = 36.0
     stale_bars_max_calendar_days: int = 4
+    normalize_timeout_s: float = 900.0
     schedule: SessionSchedule = SessionSchedule()
     after_market_enabled: bool = False
 
@@ -138,11 +141,17 @@ class TossProgramTradesSettings(BaseSettings):
     request_timeout_s: float = 10.0
     auto_backfill_enabled: bool = True
     auto_backfill_lookback_days: int = 120
+    max_stale_ratio: float = 0.05
+    sync_timeout_s: float = 2400.0
 
     @model_validator(mode="after")
     def check_positive(self) -> TossProgramTradesSettings:
         if self.rate_per_s <= 0 or self.request_timeout_s <= 0 or self.auto_backfill_lookback_days <= 0:
             raise ValueError("rate_per_s, request_timeout_s, and auto_backfill_lookback_days must be positive")
+        if not 0 < self.max_stale_ratio < 1:
+            raise ValueError("max_stale_ratio must be in (0, 1)")
+        if self.sync_timeout_s <= 0:
+            raise ValueError("sync_timeout_s must be positive")
         return self
 
 
@@ -162,6 +171,7 @@ class RcloneArchiveSettings(BaseSettings):
 
     remote_name: str = "gdrive"
     remote_path: str = "quant-lake/live/krx-alpha/data"
+    rclone_timeout_s: float = 600.0
 
 
 class KisCredentials(BaseSettings):
@@ -185,6 +195,29 @@ class KisTokenSettings(BaseSettings):
         validation_alias=AliasChoices("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", "token_cache_dir"),
     )
     allow_issue: bool = True
+
+
+def validate_snapshot_order(settings: SnapshotSettings, *, market_close: dt.time) -> None:
+    """Check that snapshot polling ends before the day's regular-session close transition.
+
+    ``market_close`` is a parameter because shifted sessions (CSAT day) move the
+    close transition; the settings validator applies the standard close.
+
+    Raises:
+        ValueError: If ``news_start < intraday_start < intraday_end <=
+            eod_collect_time < run_end < market_close`` does not hold.
+    """
+    if not (
+        settings.news_start
+        < settings.intraday_start
+        < settings.intraday_end
+        <= settings.eod_collect_time
+        < settings.run_end
+        < market_close
+    ):
+        raise ValueError(
+            "session time order must satisfy news_start < intraday_start < intraday_end <= eod_collect_time < run_end < market_close"
+        )
 
 
 class SnapshotSettings(BaseSettings):
@@ -257,10 +290,7 @@ class SnapshotSettings(BaseSettings):
             raise ValueError("intraday_start must precede investor_estimate_times")
         if not (max(self.investor_estimate_times) < self.intraday_end):
             raise ValueError("investor_estimate_times must precede intraday_end")
-        if not (
-            self.news_start < self.intraday_start < self.intraday_end <= self.eod_collect_time < self.run_end < SessionSchedule().market_close
-        ):
-            raise ValueError("session time order must satisfy news_start < intraday_start < intraday_end <= eod_collect_time < run_end < market_close")
+        validate_snapshot_order(self, market_close=SessionSchedule().market_close)
         for name in ("ranking_interval_s", "index_interval_s", "index_minute_interval_s", "news_interval_s", "program_trade_interval_s"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -343,6 +373,39 @@ class AlertSettings(BaseSettings):
     @property
     def enabled(self) -> bool:
         return bool(self.alert_gmail_user and self.alert_gmail_app_password and self.alert_gmail_to)
+
+
+class LivenessSettings(BaseSettings):
+    """External liveness signalling (env_prefix='KRX_ALPHA_LIVENESS_').
+
+    ``healthcheck_url`` is a healthchecks.io ping URL. The URL alone authorizes
+    pings, so it is treated as a credential and never logged.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_LIVENESS_", extra="ignore")
+
+    healthcheck_url: str = ""
+    ping_interval_s: float = 60.0
+    ping_timeout_s: float = 5.0
+    crash_alert_daily_budget: int = 3
+
+    @property
+    def enabled(self) -> bool:
+        return self.healthcheck_url.startswith("https://")
+
+    @model_validator(mode="after")
+    def check_liveness_bounds(self) -> LivenessSettings:
+        if not (
+            self.ping_interval_s > 0
+            and self.ping_timeout_s > 0
+            and self.ping_timeout_s < self.ping_interval_s
+            and self.crash_alert_daily_budget >= 1
+        ):
+            raise ValueError(
+                "liveness requires ping_interval_s > 0, 0 < ping_timeout_s < ping_interval_s, "
+                "and crash_alert_daily_budget >= 1"
+            )
+        return self
 
 
 @dataclass(frozen=True)

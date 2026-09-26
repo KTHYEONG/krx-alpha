@@ -166,7 +166,7 @@ def test_append_program_trades_upserts_by_symbol_and_date(tmp_path) -> None:
     # Given: 같은 키의 구값이 들어있는 스토어
     import polars as pl
 
-    store = tmp_path / "bars" / "program_trades.parquet"
+    store = tmp_path / "bars" / "program_trades"
     old = _row("005930", dt.date(2026, 9, 1))
     old["arbitrage_buy_volume"] = 1
     tpt.append_program_trades(store, [old])
@@ -177,21 +177,23 @@ def test_append_program_trades_upserts_by_symbol_and_date(tmp_path) -> None:
     added = tpt.append_program_trades(store, [new, _row("005930", dt.date(2026, 9, 2))])
 
     # Then: 신규 조합만 카운트, 구값은 신값으로 교체
+    from src.marketdata.partitioned_store import scan_month_partitions
+
     assert added == 1
-    saved = pl.read_parquet(store).sort("date")
+    saved = scan_month_partitions(store).collect().sort("date")
     assert saved.height == 2
     assert saved.filter(pl.col("date") == dt.date(2026, 9, 1))["arbitrage_buy_volume"].to_list() == [999]
 
 
 def test_append_program_trades_empty_rows_writes_nothing(tmp_path) -> None:
     # Given: 파일이 없는 상태의 빈 배치
-    store = tmp_path / "bars" / "program_trades.parquet"
+    store = tmp_path / "bars" / "program_trades"
 
     # When
     assert tpt.append_program_trades(store, []) == 0
 
     # Then: 파일 미생성
-    assert not store.exists()
+    assert list(store.glob("*.parquet")) == []
 
 
 def test_fetch_program_trades_page_sends_until_cursor() -> None:
@@ -264,15 +266,15 @@ def test_backfill_program_trades_history_returns_accumulated_on_empty_page(monke
 
 
 def test_append_program_trades_preserves_corrupt_store_and_raises(tmp_path) -> None:
-    # Given: 손상된 기존 스토어 파일
-    store = tmp_path / "bars" / "program_trades.parquet"
-    store.parent.mkdir(parents=True, exist_ok=True)
-    store.write_bytes(b"not-a-parquet")
+    # Given: 손상된 기존 스토어 파티션
+    store = tmp_path / "bars" / "program_trades"
+    store.mkdir(parents=True, exist_ok=True)
+    (store / "2026-09.parquet").write_bytes(b"not-a-parquet")
 
     # When / Then: 원본 보존 + fail-closed
     with pytest.raises(TossProgramTradesError, match="unreadable"):
         tpt.append_program_trades(store, [_row("005930", dt.date(2026, 9, 17))])
-    assert store.read_bytes() == b"not-a-parquet"
+    assert (store / "2026-09.parquet").read_bytes() == b"not-a-parquet"
 
 class _FlakySession:
     """지정한 횟수만큼 전송 계층 예외를 던진 뒤 정상 응답으로 전환되는 가짜 세션."""
@@ -350,7 +352,7 @@ def test_fetch_program_trades_page_does_not_retry_permanent_http_error() -> None
 
 def test_symbols_needing_backfill_returns_all_when_store_missing(tmp_path) -> None:
     # Given: 존재하지 않는 store 경로
-    store = tmp_path / "bars" / "program_trades.parquet"
+    store = tmp_path / "bars" / "program_trades"
 
     # When
     out = tpt.symbols_needing_backfill(store, ("005930", "000660"), dt.date(2026, 5, 20))
@@ -361,7 +363,7 @@ def test_symbols_needing_backfill_returns_all_when_store_missing(tmp_path) -> No
 
 def test_symbols_needing_backfill_returns_empty_for_no_symbols(tmp_path) -> None:
     # Given: 빈 심볼 목록
-    store = tmp_path / "bars" / "program_trades.parquet"
+    store = tmp_path / "bars" / "program_trades"
 
     # When / Then: 벤더 호출 없이 즉시 빈 튜플
     assert tpt.symbols_needing_backfill(store, (), dt.date(2026, 5, 20)) == ()
@@ -369,13 +371,13 @@ def test_symbols_needing_backfill_returns_empty_for_no_symbols(tmp_path) -> None
 
 def test_symbols_needing_backfill_skips_fully_covered_symbols(tmp_path) -> None:
     # Given: 005930은 min_date 이전부터, 000660은 이후부터만 존재
-    import polars as pl
+    from src.marketdata.partitioned_store import scan_month_partitions
 
-    store = tmp_path / "bars" / "program_trades.parquet"
+    store = tmp_path / "bars" / "program_trades"
     min_date = dt.date(2026, 5, 20)
     tpt.append_program_trades(store, [_row("005930", dt.date(2026, 5, 19)), _row("005930", dt.date(2026, 9, 17))])
     tpt.append_program_trades(store, [_row("000660", dt.date(2026, 5, 21)), _row("000660", dt.date(2026, 9, 17))])
-    assert pl.read_parquet(store).height == 4
+    assert scan_month_partitions(store).collect().height == 4
 
     # When
     out = tpt.symbols_needing_backfill(store, ("005930", "000660"), min_date)
@@ -386,7 +388,7 @@ def test_symbols_needing_backfill_skips_fully_covered_symbols(tmp_path) -> None:
 
 def test_symbols_needing_backfill_treats_absent_symbol_as_needing_backfill(tmp_path) -> None:
     # Given: 스토어에 다른 심볼만 존재
-    store = tmp_path / "bars" / "program_trades.parquet"
+    store = tmp_path / "bars" / "program_trades"
     tpt.append_program_trades(store, [_row("005930", dt.date(2026, 1, 5))])
 
     # When
@@ -398,7 +400,7 @@ def test_symbols_needing_backfill_treats_absent_symbol_as_needing_backfill(tmp_p
 
 def test_symbols_needing_backfill_preserves_requested_order(tmp_path) -> None:
     # Given: 스토어에 아무 이력도 없음(대상 심볼 부재)
-    store = tmp_path / "bars" / "program_trades.parquet"
+    store = tmp_path / "bars" / "program_trades"
     tpt.append_program_trades(store, [_row("005930", dt.date(2026, 1, 5))])
 
     # When
@@ -409,11 +411,74 @@ def test_symbols_needing_backfill_preserves_requested_order(tmp_path) -> None:
 
 
 def test_symbols_needing_backfill_raises_on_corrupt_store(tmp_path) -> None:
-    # Given: 손상된 parquet 바이트 파일
-    store = tmp_path / "bars" / "program_trades.parquet"
-    store.parent.mkdir(parents=True, exist_ok=True)
-    store.write_bytes(b"not-a-parquet")
+    # Given: 손상된 parquet 바이트 파티션
+    store = tmp_path / "bars" / "program_trades"
+    store.mkdir(parents=True, exist_ok=True)
+    (store / "2026-09.parquet").write_bytes(b"not-a-parquet")
 
     # When / Then: fail-closed
     with pytest.raises(TossProgramTradesError):
         tpt.symbols_needing_backfill(store, ("005930",), dt.date(2026, 5, 20))
+
+
+def test_append_program_trades_rejects_file_path_store(tmp_path) -> None:
+    store = tmp_path / "program_trades.parquet"
+    store.write_bytes(b"legacy bytes")
+
+    with pytest.raises(TossProgramTradesError, match="unreadable"):
+        tpt.append_program_trades(store, [_row("005930", dt.date(2026, 9, 17))])
+    assert store.read_bytes() == b"legacy bytes"
+
+
+def test_symbols_needing_backfill_rejects_file_path_store(tmp_path) -> None:
+    store = tmp_path / "program_trades.parquet"
+    store.write_bytes(b"legacy bytes")
+
+    with pytest.raises(TossProgramTradesError, match="unreadable"):
+        tpt.symbols_needing_backfill(store, ("005930",), dt.date(2026, 5, 20))
+
+
+def test_program_trade_coverage_without_store_is_empty(tmp_path) -> None:
+    from src.marketdata.toss_program_trades import program_trade_coverage
+
+    assert program_trade_coverage(tmp_path / "missing", ("005930",)) == {}
+
+
+def test_program_trade_coverage_rejects_unreadable_store(tmp_path) -> None:
+    from src.marketdata.toss_program_trades import program_trade_coverage
+
+    store = tmp_path / "program_trades"
+    store.mkdir(parents=True)
+    (store / "2026-09.parquet").write_bytes(b"not-a-parquet")
+
+    with pytest.raises(TossProgramTradesError, match="unreadable"):
+        program_trade_coverage(store, ("005930",))
+
+
+def test_program_trade_coverage_rejects_file_path_store(tmp_path) -> None:
+    from src.marketdata.toss_program_trades import program_trade_coverage
+
+    store = tmp_path / "program_trades.parquet"
+    store.write_bytes(b"legacy bytes")
+
+    with pytest.raises(TossProgramTradesError, match="unreadable"):
+        program_trade_coverage(store, ("005930",))
+
+
+def test_backfill_program_trades_history_uses_one_page_when_gap_fits(monkeypatch) -> None:
+    # Given: 첫 페이지가 min_date 이후(신규 8일)와 이전(이미 저장된 날짜)을 함께 담는 증분 동기화 상황
+    page1 = tuple(_row("005930", dt.date(2026, 9, 25) - dt.timedelta(days=i)) for i in range(20))
+    calls: list[int] = []
+
+    def _fake(symbol: str, **kwargs: object) -> tuple[tuple[dict, ...], dt.date | None]:
+        calls.append(1)
+        return page1, dt.date(2026, 9, 5)
+
+    monkeypatch.setattr(tpt, "fetch_program_trades_page", _fake)
+
+    # When
+    out = tpt.backfill_program_trades_history("005930", access_token="tok", min_date=dt.date(2026, 9, 18))
+
+    # Then: 더 오래된 페이지는 요청하지 않고 신규 날짜만 반환한다
+    assert len(calls) == 1
+    assert [r["date"] for r in out] == [dt.date(2026, 9, 18) + dt.timedelta(days=i) for i in range(8)]

@@ -19,7 +19,7 @@ import zstandard as zstd
 
 from src.core.config import DataQualitySettings
 from src.core.errors import KrxAlphaError
-from src.storage.market_phase import MARKET_PHASE_METADATA_KEY, annotate_market_phase
+from src.storage.market_phase import MARKET_PHASE_METADATA_KEY, MARKET_PHASE_WINDOWS, PhaseWindow, annotate_market_phase
 from src.storage.quality import (
     DqStatus,
     QuoteQualitySummary,
@@ -51,6 +51,14 @@ _WORK_DIR_PREFIX: str = 'krx-l1-normalize-'
 
 class L1NormalizationError(KrxAlphaError):
     """Signal a corrupt or unprocessable partition without deleting its L0 input."""
+
+
+class L1StorageIOError(KrxAlphaError):
+    """Local storage failed (disk full, I/O error) while normalizing a partition.
+
+    The source partition is intact; it must stay in L0 and be retried, never
+    quarantined as corrupt.
+    """
 
 
 def _iter_line_batches(path: pathlib.Path, batch_bytes: int) -> Iterator[bytes]:
@@ -129,6 +137,7 @@ def normalize_l0_partition(
     *,
     work_root: pathlib.Path | None = None,
     dq_settings: DataQualitySettings | None = None,
+    phase_windows: tuple[PhaseWindow, ...] = MARKET_PHASE_WINDOWS,
 ) -> int:
     """Write one deduplicated, quality-annotated L1 partition from L0 records.
 
@@ -137,6 +146,7 @@ def normalize_l0_partition(
         out_path: Final L1 Parquet path.
         work_root: Optional bounded spill workspace.
         dq_settings: Typed quality thresholds.
+        phase_windows: Market-phase windows for the partition date.
 
     Returns:
         Number of persisted L1 records.
@@ -222,7 +232,7 @@ def normalize_l0_partition(
         settings = dq_settings if dq_settings is not None else DataQualitySettings()
         for ci, lo in enumerate(range(0, order.size, _GATHER_ROWS)):
             chunk = reader.take(order[lo : lo + _GATHER_ROWS])
-            chunk = annotate_market_phase(chunk)
+            chunk = annotate_market_phase(chunk, windows=phase_windows)
             for phase, count in chunk["market_phase"].value_counts().iter_rows():
                 phase_counts[str(phase)] = phase_counts.get(str(phase), 0) + int(count)
             vendors.update(v for v in chunk["vendor"].unique().to_list() if v is not None)
@@ -307,7 +317,11 @@ def normalize_l0_partition(
         )
         succeeded = True
         return int(order.size)
-    except (zstd.ZstdError, OSError, ValueError, pl.exceptions.ComputeError) as exc:
+    except zstd.ZstdError as exc:
+        raise L1NormalizationError(f"normalize failed: {part} ({exc})") from exc
+    except OSError as exc:
+        raise L1StorageIOError(f"normalize failed: {part} ({exc})") from exc
+    except (ValueError, pl.exceptions.ComputeError) as exc:
         raise L1NormalizationError(f"normalize failed: {part} ({exc})") from exc
     finally:
         if writer is not None:

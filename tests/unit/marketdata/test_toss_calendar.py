@@ -214,3 +214,279 @@ def test_trading_day_from_cache_derives_only_decidable_days() -> None:
     assert trading_day_from_cache(friday, dt.date(2026, 9, 14)) == TradingDay(date=dt.date(2026, 9, 14), is_business_day=False, previous_business_day=dt.date(2026, 9, 11), next_business_day=dt.date(2026, 9, 15))
     assert trading_day_from_cache(friday, dt.date(2026, 9, 16)) is None
     assert trading_day_from_cache(friday, dt.date(2026, 9, 10)) is None
+
+
+def _calendar_session(payload):
+    class _Resp:
+        def __init__(self, body):
+            self._body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._body
+
+    class _Session:
+        def post(self, url, **kw):
+            return _Resp({"access_token": "tok"})
+
+        def get(self, url, **kw):
+            return _Resp(payload)
+
+    return _Session()
+
+
+def _integrated(day, open_hhmm, auction_hhmm, close_hhmm, after_hhmm, *, pre_null=True):
+    def _ts(hhmm):
+        return f"{day}T{hhmm[:2]}:{hhmm[2:]}:00.000+09:00"
+
+    return {
+        "regularMarket": {
+            "startTime": _ts(open_hhmm),
+            "singlePriceAuctionStartTime": _ts(auction_hhmm),
+            "endTime": _ts(close_hhmm),
+        },
+        "preMarket": None if pre_null else {},
+        "afterMarket": None if after_hhmm is None else {"endTime": _ts(after_hhmm)},
+    }
+
+
+def test_fetch_trading_day_parses_normal_day_anchors() -> None:
+    import datetime as dt
+
+    from src.core.session_anchors import AnchorSource
+    from src.marketdata.toss_calendar import fetch_trading_day
+
+    payload = {
+        "result": {
+            "today": {"date": "2026-10-01", "integrated": _integrated("2026-10-01", "0900", "1520", "1530", "2000")},
+            "previousBusinessDay": {"date": "2026-09-30", "integrated": {}},
+            "nextBusinessDay": {"date": "2026-10-02", "integrated": _integrated("2026-10-02", "0900", "1520", "1530", "2000")},
+        }
+    }
+    out = fetch_trading_day(dt.date(2026, 10, 1), app_key="k", app_secret="s", session=_calendar_session(payload))
+
+    assert out.is_business_day is True
+    assert out.anchors is not None
+    assert (out.anchors.regular_open, out.anchors.closing_auction_start, out.anchors.regular_close, out.anchors.after_market_end) == (
+        dt.time(9, 0),
+        dt.time(15, 20),
+        dt.time(15, 30),
+        dt.time(20, 0),
+    )
+    assert out.anchors.source is AnchorSource.VENDOR
+
+
+def test_fetch_trading_day_parses_csat_payload_with_null_premarket() -> None:
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import fetch_trading_day
+
+    payload = {
+        "result": {
+            "today": {"date": "2025-11-13", "integrated": _integrated("2025-11-13", "1000", "1620", "1630", "2000")},
+            "previousBusinessDay": {"date": "2025-11-12", "integrated": {}},
+            "nextBusinessDay": {"date": "2025-11-14", "integrated": None},
+        }
+    }
+    out = fetch_trading_day(dt.date(2025, 11, 13), app_key="k", app_secret="s", session=_calendar_session(payload))
+
+    assert out.anchors is not None
+    assert (out.anchors.regular_open, out.anchors.closing_auction_start, out.anchors.regular_close, out.anchors.after_market_end) == (
+        dt.time(10, 0),
+        dt.time(16, 20),
+        dt.time(16, 30),
+        dt.time(20, 0),
+    )
+
+
+def test_fetch_trading_day_holiday_has_no_anchors() -> None:
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import fetch_trading_day
+
+    payload = {
+        "result": {
+            "today": {"date": "2026-10-04", "integrated": None},
+            "previousBusinessDay": {"date": "2026-10-02"},
+            "nextBusinessDay": {"date": "2026-10-05"},
+        }
+    }
+    out = fetch_trading_day(dt.date(2026, 10, 4), app_key="k", app_secret="s", session=_calendar_session(payload))
+
+    assert out.is_business_day is False
+    assert out.anchors is None
+
+
+def test_fetch_trading_day_parses_next_business_day_anchors() -> None:
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import fetch_trading_day
+
+    payload = {
+        "result": {
+            "today": {"date": "2026-10-01", "integrated": _integrated("2026-10-01", "0900", "1520", "1530", "2000")},
+            "previousBusinessDay": {"date": "2026-09-30", "integrated": {}},
+            "nextBusinessDay": {"date": "2026-10-02", "integrated": _integrated("2026-10-02", "1000", "1620", "1630", "2000")},
+        }
+    }
+    out = fetch_trading_day(dt.date(2026, 10, 1), app_key="k", app_secret="s", session=_calendar_session(payload))
+
+    assert out.next_anchors is not None
+    assert out.next_anchors.date == dt.date(2026, 10, 2)
+    assert out.next_anchors.regular_open == dt.time(10, 0)
+
+
+def test_fetch_trading_day_malformed_time_degrades_to_none() -> None:
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import fetch_trading_day
+
+    integrated = _integrated("2026-10-01", "0900", "1520", "1530", "2000")
+    integrated["regularMarket"]["endTime"] = "bad"
+    payload = {
+        "result": {
+            "today": {"date": "2026-10-01", "integrated": integrated},
+            "previousBusinessDay": {"date": "2026-09-30", "integrated": {}},
+            "nextBusinessDay": {"date": "2026-10-02", "integrated": None},
+        }
+    }
+    out = fetch_trading_day(dt.date(2026, 10, 1), app_key="k", app_secret="s", session=_calendar_session(payload))
+
+    assert out.anchors is None
+    assert out.is_business_day is True
+
+
+def test_parse_session_anchors_converts_utc_offset_to_kst() -> None:
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import parse_session_anchors
+
+    integrated = {
+        "regularMarket": {
+            "startTime": "2026-11-19T01:00:00.000Z",
+            "singlePriceAuctionStartTime": "2026-11-19T07:20:00.000Z",
+            "endTime": "2026-11-19T07:30:00.000Z",
+        },
+        "afterMarket": {"endTime": "2026-11-19T11:00:00.000Z"},
+    }
+
+    anchors = parse_session_anchors(dt.date(2026, 11, 19), integrated)
+
+    assert anchors is not None
+    assert anchors.regular_open == dt.time(10, 0)
+
+
+def test_trading_day_cache_round_trip_keeps_legacy_format(tmp_path) -> None:
+    import datetime as dt
+    import json
+
+    from src.marketdata.toss_calendar import TradingDay, load_trading_day_cache, save_trading_day_cache
+
+    day = TradingDay(
+        date=dt.date(2026, 10, 1),
+        is_business_day=True,
+        previous_business_day=dt.date(2026, 9, 30),
+        next_business_day=dt.date(2026, 10, 2),
+    )
+
+    def _path(tmp_path):
+        return tmp_path / "calendar_cache.json"
+
+    path = _path(tmp_path)
+    save_trading_day_cache(path, day)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+
+    assert sorted(raw.keys()) == ["date", "is_business_day", "next_business_day", "previous_business_day"]
+    assert load_trading_day_cache(path) is not None
+    assert load_trading_day_cache(path).anchors is None
+
+
+def test_parse_session_anchors_rejects_naive_timestamp() -> None:
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import parse_session_anchors
+
+    integrated = {
+        "regularMarket": {
+            "startTime": "2026-10-01T09:00:00.000",
+            "singlePriceAuctionStartTime": "2026-10-01T15:20:00.000+09:00",
+            "endTime": "2026-10-01T15:30:00.000+09:00",
+        },
+        "afterMarket": {"endTime": "2026-10-01T20:00:00.000+09:00"},
+    }
+
+    assert parse_session_anchors(dt.date(2026, 10, 1), integrated) is None
+
+
+def test_parse_session_anchors_rejects_cross_date_timestamp() -> None:
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import parse_session_anchors
+
+    integrated = {
+        "regularMarket": {
+            "startTime": "2026-10-01T09:00:00.000+09:00",
+            "singlePriceAuctionStartTime": "2026-10-01T15:20:00.000+09:00",
+            "endTime": "2026-10-01T15:30:00.000+09:00",
+        },
+        "afterMarket": {"endTime": "2026-10-01T20:00:00.000+09:00"},
+    }
+
+    assert parse_session_anchors(dt.date(2026, 10, 2), integrated) is None
+
+
+def test_parse_session_anchors_uses_standard_aftermarket_when_null() -> None:
+    import datetime as dt
+
+    from src.core.session_anchors import STANDARD_AFTER_MARKET_END
+    from src.marketdata.toss_calendar import parse_session_anchors
+
+    integrated = {
+        "regularMarket": {
+            "startTime": "2026-10-01T09:00:00.000+09:00",
+            "singlePriceAuctionStartTime": "2026-10-01T15:20:00.000+09:00",
+            "endTime": "2026-10-01T15:30:00.000+09:00",
+        },
+        "afterMarket": None,
+    }
+
+    anchors = parse_session_anchors(dt.date(2026, 10, 1), integrated)
+
+    assert anchors is not None
+    assert anchors.after_market_end == STANDARD_AFTER_MARKET_END
+
+
+def test_parse_session_anchors_rejects_non_mapping_sections() -> None:
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import parse_session_anchors
+
+    day = dt.date(2026, 10, 1)
+    regular = {
+        "startTime": "2026-10-01T09:00:00.000+09:00",
+        "singlePriceAuctionStartTime": "2026-10-01T15:20:00.000+09:00",
+        "endTime": "2026-10-01T15:30:00.000+09:00",
+    }
+
+    assert parse_session_anchors(day, {"regularMarket": None, "afterMarket": None}) is None
+    assert parse_session_anchors(day, {"regularMarket": regular, "afterMarket": "bad"}) is None
+    assert parse_session_anchors(day, {"regularMarket": regular, "afterMarket": {"endTime": "bad"}}) is None
+
+
+def test_parse_session_anchors_rejects_out_of_order_vendor_times() -> None:
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import parse_session_anchors
+
+    integrated = {
+        "regularMarket": {
+            "startTime": "2026-10-01T12:30:00.000+09:00",
+            "singlePriceAuctionStartTime": "2026-10-01T12:20:00.000+09:00",
+            "endTime": "2026-10-01T15:30:00.000+09:00",
+        },
+        "afterMarket": {"endTime": "2026-10-01T20:00:00.000+09:00"},
+    }
+
+    assert parse_session_anchors(dt.date(2026, 10, 1), integrated) is None

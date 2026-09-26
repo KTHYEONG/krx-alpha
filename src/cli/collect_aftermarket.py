@@ -16,6 +16,7 @@ import aiohttp
 from src.core.config import DataPaths, resolve_collector_runtime
 from src.core.errors import MissingCredentialsError, SlotBudgetExceededError
 from src.core.observability import EVENT
+from src.core.session_anchors import resolve_session_anchors
 from src.realtime.adapters.kis import KisRealtimeAdapter
 from src.realtime.contracts import MarketSession, MarketVenue
 from src.realtime.kis_lease import KisWebSocketLease
@@ -73,8 +74,12 @@ async def _run_stream(args: argparse.Namespace) -> int:
     if len(set(symbols)) != len(symbols) or symbols != expected_symbols:
         raise MissingCredentialsError(f"shard symbols do not exactly match candidate order for slot {slot}")
     shard = AftermarketShard(route.venue, int(args.shard_index), symbols, streams, cred.slot, cred.key_id)
+    session_date = dt.date.fromisoformat(str(args.session_date))
+    anchors = resolve_session_anchors(
+        DataPaths(pathlib.Path(str(args.journal_root)).parent).session_calendar_dir, session_date
+    )
     cfg = SessionConfig(
-        session_date=dt.date.fromisoformat(str(args.session_date)),
+        session_date=session_date,
         journal_root=pathlib.Path(str(args.journal_root)),
         manifest_path=pathlib.Path(str(args.manifest_path)),
         candidates_path=pathlib.Path(str(args.candidates_path)),
@@ -118,7 +123,7 @@ async def _run_stream(args: argparse.Namespace) -> int:
             adapter=adapter,
             sink=SessionFrameSink(session=session),
             replay_pairs=pairs,
-            silence_limit=lambda: aftermarket_silence_limit_s(dt.datetime.now(dt.UTC), route=route),
+            silence_limit=lambda: aftermarket_silence_limit_s(dt.datetime.now(dt.UTC), route=route, anchors=anchors),
         )
         await streamer.run_forever(stop, max_cycles=getattr(args, "max_cycles", None))
     finally:

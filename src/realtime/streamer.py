@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from src.core.observability import EVENT
+from src.core.session_anchors import SessionAnchors
 from src.realtime.contracts import (
     L0Frame,
     MarketVenue,
@@ -30,30 +31,33 @@ logger = logging.getLogger(__name__)
 SILENCE_LIMIT_S: float = 30.0
 OUTAGE_CRITICAL_S: float = 300.0
 AUTH_BACKOFF_MAX_S: float = 300.0
-_REGULAR_OPEN = dt.time(9, 0)
-_REGULAR_CLOSE = dt.time(15, 30)
+STANDARD_REGULAR_OPEN: dt.time = dt.time(9, 0)
+STANDARD_REGULAR_CLOSE: dt.time = dt.time(15, 30)
+STANDARD_NXT_AFTER_OPEN: dt.time = dt.time(15, 40)
+STANDARD_KRX_AFTER_OPEN: dt.time = dt.time(16, 0)
+STANDARD_AFTER_CLOSE: dt.time = dt.time(20, 0)
 _KST = ZoneInfo("Asia/Seoul")
 
 
-def regular_session_silence_limit_s(now: dt.datetime, *, limit_s: float = SILENCE_LIMIT_S) -> float | None:
+def regular_session_silence_limit_s(
+    now: dt.datetime, *, anchors: SessionAnchors, limit_s: float = SILENCE_LIMIT_S
+) -> float | None:
     # 2026-09-14 L0 실측: 장중(09:00-15:30) 프레임 간격 최대 0.4s에 불과해 30s 침묵은 장애다.
     # 반면 정규장 밖 구간(장전 시간외종가·동시호가·장후 시간외종가·애프터마켓) 침묵은 22-450s까지 정상이므로 정규 세션 시간대에만 침묵 감시를 켠다.
-    if _REGULAR_OPEN <= now.astimezone(_KST).time() < _REGULAR_CLOSE:
+    if anchors.regular_open <= now.astimezone(_KST).time() < anchors.regular_close:
         return limit_s
     return None
 
 
-_NXT_AFTER_OPEN = dt.time(15, 40)
-_KRX_AFTER_OPEN = dt.time(16, 0)
-_AFTER_CLOSE = dt.time(20, 0)
-
-
 def aftermarket_silence_limit_s(
-    now: dt.datetime, *, route: Any, limit_s: float = SILENCE_LIMIT_S
+    now: dt.datetime, *, route: Any, anchors: SessionAnchors, limit_s: float = SILENCE_LIMIT_S
 ) -> float | None:
     venue = route.venue if hasattr(route, "venue") else route
-    open_t = _NXT_AFTER_OPEN if MarketVenue(venue) == MarketVenue.NXT else _KRX_AFTER_OPEN
-    if open_t <= now.astimezone(_KST).time() < _AFTER_CLOSE:
+    if MarketVenue(venue) == MarketVenue.NXT:
+        open_t = anchors.shift_post_close(STANDARD_NXT_AFTER_OPEN)
+    else:
+        open_t = anchors.shift_post_close(STANDARD_KRX_AFTER_OPEN)
+    if open_t <= now.astimezone(_KST).time() < anchors.after_market_end:
         return limit_s
     return None
 

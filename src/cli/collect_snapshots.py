@@ -18,6 +18,8 @@ from src.brokers.kis.http import KisGetTransport
 from src.brokers.kis.rate import RateLimiter
 from src.core.config import KisTokenSettings, resolve_collector_runtime
 from src.core.errors import MissingCredentialsError
+from src.core.session_anchors import resolve_session_anchors
+from src.marketdata.snapshot_plan import shift_snapshot_settings
 from src.marketdata.snapshot_service import run_snapshot_session
 from src.realtime.kis_sharding import load_kis_data_credentials
 from src.storage.snapshot_store import SnapshotStore
@@ -81,7 +83,9 @@ def run(args: argparse.Namespace) -> int:
         symbols = tuple(str(row["symbol"]) for row in candidates)
     store = SnapshotStore(paths=runtime.paths, session_date=session_date)
     run_snapshot_session(
-        settings=settings,
+        settings=shift_snapshot_settings(
+            settings, resolve_session_anchors(runtime.paths.session_calendar_dir, session_date)
+        ),
         session_date=session_date,
         source=client,
         store=store,

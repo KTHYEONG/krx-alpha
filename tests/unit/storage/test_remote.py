@@ -796,3 +796,77 @@ def test_purge_superseded_l0_runner_exception_counts_failed(tmp_path) -> None:
     stats = arc.purge_superseded_l0({"l1/ls/H0STASP0/dt=2026-09-11.parquet"}, tmp_path / "l0")
 
     assert stats.failed == 1
+
+
+def test_sync_l1_tree_calls_progress_per_file(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from src.storage.remote import RcloneArchiver
+
+    root = tmp_path / "l1" / "kis" / "H0STCNT0"
+    root.mkdir(parents=True)
+    (root / "dt=2026-09-01.parquet").write_bytes(b"a" * 50)
+    (root / "dt=2026-09-02.parquet").write_bytes(b"b" * 60)
+
+    def _runner(args, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    arc = RcloneArchiver(remote_name="gdrive", remote_path="q", runner=_runner)
+    progress_calls: list[None] = []
+
+    stats = arc.sync_l1_tree(tmp_path / "l1", progress=lambda: progress_calls.append(None))
+
+    assert stats.failed_verification == 2
+    assert len(progress_calls) == 2
+
+
+def test_purge_superseded_l0_calls_progress_per_dir(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from src.storage.remote import RcloneArchiver
+
+    def _runner(args, **kwargs):
+        return SimpleNamespace(returncode=3, stdout="", stderr="")
+
+    arc = RcloneArchiver(remote_name="gdrive", remote_path="q", runner=_runner)
+    progress_calls: list[None] = []
+
+    stats = arc.purge_superseded_l0(
+        {"l1/ls/H0STCNT0/dt=2026-09-01.parquet"},
+        tmp_path / "l0",
+        progress=lambda: progress_calls.append(None),
+    )
+
+    assert stats.skipped_absent == 1
+    assert len(progress_calls) == 1
+
+
+def test_every_rclone_call_reports_progress(tmp_path) -> None:
+    import json
+    import subprocess
+    from types import SimpleNamespace
+
+    import pytest
+
+    from src.storage.remote import RcloneArchiver, RemoteArchiveError
+
+    pq = tmp_path / "dt=2026-09-01.parquet"
+    pq.write_bytes(b"x" * 100)
+    calls: list[list[str]] = []
+
+    def _runner(args, **kwargs):
+        calls.append(args)
+        if args[1] == "copyto":
+            raise subprocess.TimeoutExpired(args, 600)
+        return SimpleNamespace(returncode=0, stdout=json.dumps([{"Path": "x", "Size": 100, "IsDir": False}]), stderr="")
+
+    progress: list[int] = []
+    arc = RcloneArchiver(remote_name="gdrive", remote_path="p", runner=_runner)
+    arc.bind_progress(lambda: progress.append(1))
+
+    with pytest.raises(RemoteArchiveError):
+        arc.upload_and_verify(pq, "l1/kis/H0STCNT0/dt=2026-09-01.parquet")
+    arc.remote_files("l1/")
+
+    # 타임아웃으로 끝난 호출을 포함해 rclone 호출마다 정확히 한 번씩 진행 신호가 나간다.
+    assert len(progress) == len(calls) >= 2

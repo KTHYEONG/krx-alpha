@@ -22,6 +22,33 @@ log() {
   printf '%s\n' "$*" | tee -a "$LOG_FILE"
 }
 
+HC_URL="${KRX_HOST_BACKUP_HEALTHCHECK_URL:-}"
+ATTEMPT_RID="${ATTEMPT_RID:-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "no-uuid")}"
+HC_DISABLED_LOGGED=0
+
+hc_ping() {
+  local suffix="$1"
+  local body="${2:-}"
+  if [ -z "$HC_URL" ]; then
+    if [ "$HC_DISABLED_LOGGED" -eq 0 ]; then
+      HC_DISABLED_LOGGED=1
+      log "[SYS] stage=gdrive_backup project=krx-alpha step=healthcheck status=disabled"
+    fi
+    return 0
+  fi
+  local ping_url="$HC_URL/$suffix?rid=$ATTEMPT_RID"
+  if [ -n "$body" ]; then
+    if ! curl -fsS -m 10 --retry 2 -o /dev/null --data-raw "$body" "$ping_url" >/dev/null 2>&1; then
+      log "[SYS] stage=gdrive_backup project=krx-alpha step=healthcheck status=failed"
+    fi
+  else
+    if ! curl -fsS -m 10 --retry 2 -o /dev/null "$ping_url" >/dev/null 2>&1; then
+      log "[SYS] stage=gdrive_backup project=krx-alpha step=healthcheck status=failed"
+    fi
+  fi
+  return 0
+}
+
 collect_lock_holders() {
   LOCK_HOLDERS=()
   local lock_target="$1" fd rest pid cmdline cmd
@@ -95,12 +122,14 @@ PYEOF
 
 if ! mkdir -p "$KRX_HOST_STATE_DIR"; then
   log "[SYS] stage=gdrive_backup project=krx-alpha step=status status=failed"
+  hc_ping "74"
   exit 74
 fi
 
 exec 9>"$QUANT_GDRIVE_LOCK"
 SECONDS=0
 if ! flock -w "$LOCK_WAIT_SEC" 9; then
+  hc_ping "start"
   lock_wait_s="$SECONDS"
   lock_target="$(readlink -f "$QUANT_GDRIVE_LOCK" 2>/dev/null || printf '%s' "$QUANT_GDRIVE_LOCK")"
   collect_lock_holders "$lock_target"
@@ -116,9 +145,11 @@ if ! flock -w "$LOCK_WAIT_SEC" 9; then
     log "[SYS] stage=gdrive_backup project=krx-alpha step=status status=failed"
   fi
   rm -f "$HOLDERS_TMP"
+  hc_ping "75"
   exit 75
 fi
 lock_wait_s="$SECONDS"
+hc_ping "start"
 
 overall_rc=0
 
@@ -177,4 +208,5 @@ if ! write_status "$overall_rc" "$data_rc" "$prune_rc" "$lock_wait_s"; then
 fi
 rm -f "$HOLDERS_TMP"
 
+hc_ping "$overall_rc"
 exit "$overall_rc"

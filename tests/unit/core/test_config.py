@@ -11,7 +11,8 @@ def test_data_paths_derive_from_single_root() -> None:
     paths = settings.paths
 
     # Then: 모든 산출 경로가 단일 루트에서 파생된다
-    assert paths.bars_store == pathlib.Path("var/krx/bars/daily.parquet")
+    assert paths.bars_daily_dir == pathlib.Path("var/krx/bars/daily")
+    assert paths.legacy_bars_file == pathlib.Path("var/krx/bars/daily.parquet")
     assert paths.market_map == pathlib.Path("var/krx/market_map.json")
     assert paths.candidates == pathlib.Path("var/krx/candidates.json")
     assert paths.journal_root == pathlib.Path("var/krx/l0")
@@ -472,14 +473,45 @@ def test_toss_program_trades_settings_rejects_non_positive_lookback() -> None:
         TossProgramTradesSettings(auto_backfill_lookback_days=0)
 
 
+def test_toss_program_trades_sync_tolerance_defaults(monkeypatch) -> None:
+    # Given: 환경변수 없음
+    import os
+
+    from src.core.config import TossProgramTradesSettings
+
+    for name in [n for n in os.environ if n.startswith("KRX_ALPHA_TOSS_PROGRAM_")]:
+        monkeypatch.delenv(name, raising=False)
+
+    # When
+    settings = TossProgramTradesSettings()
+
+    # Then: stale 허용치와 싱크 타임아웃 기본값
+    assert settings.max_stale_ratio == 0.05
+    assert settings.sync_timeout_s == 2400.0
+
+
+def test_toss_program_trades_settings_rejects_out_of_range_stale_ratio() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import TossProgramTradesSettings
+
+    with pytest.raises(ValidationError):
+        TossProgramTradesSettings(max_stale_ratio=0.0)
+    with pytest.raises(ValidationError):
+        TossProgramTradesSettings(max_stale_ratio=1.0)
+    with pytest.raises(ValidationError):
+        TossProgramTradesSettings(sync_timeout_s=0)
+
+
 def test_data_paths_program_trades_store_colocates_with_bars() -> None:
     import pathlib
 
     from src.core.config import CollectorSettings
 
-    assert CollectorSettings(data_root=pathlib.Path("var/krx")).paths.program_trades_store == pathlib.Path(
-        "var/krx/bars/program_trades.parquet"
-    )
+    paths = CollectorSettings(data_root=pathlib.Path("var/krx")).paths
+    assert paths.program_trades_dir == pathlib.Path("var/krx/bars/program_trades")
+    assert paths.legacy_program_trades_file == pathlib.Path("var/krx/bars/program_trades.parquet")
 
 
 def test_snapshot_settings_default_index_intervals() -> None:
@@ -509,3 +541,32 @@ def test_snapshot_settings_rejects_zero_index_minute_interval() -> None:
 
     with pytest.raises(ValidationError):
         SnapshotSettings(index_minute_interval_s=0)
+
+
+def test_liveness_settings_rejects_invalid_bounds() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import LivenessSettings
+
+    assert LivenessSettings().enabled is False
+    assert LivenessSettings(healthcheck_url="https://hc.example.com/ping/x").enabled is True
+    assert LivenessSettings(healthcheck_url="http://hc.example.com/ping/x").enabled is False
+
+    with pytest.raises(ValidationError):
+        LivenessSettings(ping_interval_s=0)
+    with pytest.raises(ValidationError):
+        LivenessSettings(ping_timeout_s=60.0, ping_interval_s=60.0)
+    with pytest.raises(ValidationError):
+        LivenessSettings(crash_alert_daily_budget=0)
+
+
+def test_selection_lookback_calendar_days_defaults_and_floor() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import CollectorSettings
+
+    assert CollectorSettings().selection_lookback_calendar_days == 150
+    with pytest.raises(ValidationError):
+        CollectorSettings(selection_lookback_calendar_days=99)
