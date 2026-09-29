@@ -219,6 +219,7 @@ __marimo__/
 
 # Project temporary and scratch directories
 scratch/
+docs/specs/
 tm/
 tmp/
 
