@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.agent_skills.dependency_graph import (
+from tests.architecture.dependency_graph import (
     dependency_cycles,
     internal_dependencies,
     repository_source_files,

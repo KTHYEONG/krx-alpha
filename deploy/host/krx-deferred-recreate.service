@@ -6,6 +6,7 @@ OnFailure=kca-alert@%n.service
 Type=oneshot
 WorkingDirectory=%h/krx-alpha
 ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecStartPost=/bin/bash %h/krx-alpha/deploy/host/krx-deferred-verify.sh
 TimeoutStartSec=10min
 
 [Install]
