@@ -27,3 +27,5 @@ scratch/
 logs/
 data/
 results/
+tests/
+docs/

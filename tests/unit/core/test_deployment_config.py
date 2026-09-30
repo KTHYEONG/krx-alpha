@@ -55,7 +55,7 @@ def test_dockerfile_keeps_uv_cache_out_of_image_and_runs_venv_python() -> None:
     assert dockerfile.splitlines()[0].startswith("# syntax=docker/dockerfile:1")
     assert "UV_CACHE_DIR=/root/.cache/uv" in dockerfile
     assert dockerfile.count("--mount=type=cache,target=/root/.cache/uv,sharing=locked") == 2
-    assert "libgomp1" in dockerfile
+    assert "libgomp1" not in dockerfile
     assert 'CMD ["/app/.venv/bin/python", "-m", "src.orchestration.daemon"]' in dockerfile
     assert '"uv", "run"' not in dockerfile
 
@@ -679,3 +679,125 @@ def test_architecture_cycle_check_does_not_depend_on_removed_tooling() -> None:
     from pathlib import Path
 
     assert "tools.agent_skills" not in Path("tests/architecture/test_layering.py").read_text(encoding="utf-8")
+
+
+def test_runtime_dependencies_match_code_usage() -> None:
+    import ast
+    import re
+    import sys
+    import tomllib
+    from importlib import metadata
+    from pathlib import Path
+
+    def _normalize(name: str) -> str:
+        return re.sub(r"[-_.]+", "-", name).lower()
+
+    raw = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    declared = {
+        _normalize(re.split(r"[<>=!~;\s\[]", req, maxsplit=1)[0].strip()) for req in raw["project"]["dependencies"]
+    }
+
+    local_tops = {"src", "__future__"}
+    local_tops.update(p.stem for p in Path("src").iterdir())
+    stdlib = set(sys.stdlib_module_names)
+
+    imported_modules: set[str] = set()
+    for path in Path("src").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported_modules.add(alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported_modules.add(node.module.split(".")[0])
+
+    third_party = {m for m in imported_modules if m not in stdlib and m not in local_tops}
+    distributions = metadata.packages_distributions()
+    imported: set[str] = set()
+    for module in third_party:
+        mapped = distributions.get(module) or distributions.get(module.lower())
+        if mapped:
+            imported.update(_normalize(dist) for dist in mapped)
+        else:
+            imported.add(_normalize(module))
+
+    transitive_allowed: set[str] = set()
+    for parent in ("pydantic", "pydantic-settings", "requests"):
+        try:
+            requirements = metadata.requires(parent) or []
+        except metadata.PackageNotFoundError:
+            continue
+        for requirement in requirements:
+            match = re.match(r"^\s*([A-Za-z0-9_.\-]+)", requirement)
+            if match:
+                transitive_allowed.add(_normalize(match.group(1)))
+
+    undeclared = sorted(imported - declared - transitive_allowed)
+    assert not undeclared, f"imports not declared in [project].dependencies: {undeclared}"
+
+    unused = sorted(declared - imported)
+    assert not unused, f"declared dependencies never imported in src/: {unused}"
+
+
+def test_removed_heavyweights_stay_out_of_image_build() -> None:
+    import re
+    import tomllib
+    from pathlib import Path
+
+    raw = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    declared = {
+        re.sub(r"[-_.]+", "-", re.split(r"[<>=!~;\s\[]", req, maxsplit=1)[0].strip()).lower()
+        for req in raw["project"]["dependencies"]
+    }
+
+    heavyweights = {"pandas", "scipy", "scikit-learn", "lightgbm", "numba"}
+    offenders = sorted(declared & heavyweights)
+    assert not offenders, f"removed heavyweights still declared: {offenders}"
+
+
+def test_docker_context_excludes_non_runtime_trees() -> None:
+    from pathlib import Path
+
+    lines = [
+        line.strip()
+        for line in Path(".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+    assert "tests/" in lines
+    assert "docs/" in lines
+    assert "src/" not in lines
+    assert "src" not in lines
+
+
+def test_lock_has_no_removed_roots() -> None:
+    import tomllib
+    from pathlib import Path
+
+    removed = {
+        "pandas",
+        "python-dotenv",
+        "scipy",
+        "psutil",
+        "tqdm",
+        "openpyxl",
+        "gspread",
+        "oauth2client",
+        "joblib",
+        "pykrx",
+        "setuptools",
+        "scikit-learn",
+        "lightgbm",
+        "numba",
+    }
+
+    raw = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))
+    names = {str(package["name"]).lower() for package in raw["package"]}
+
+    offenders = sorted(names & (removed - {"python-dotenv"}))
+    assert not offenders, f"removed packages still present in uv.lock: {offenders}"
+    assert "python-dotenv" in names, "python-dotenv must remain as a pydantic-settings dependency"
+
+    settings = next(p for p in raw["package"] if str(p["name"]).lower() == "pydantic-settings")
+    transitive = {str(dep["name"]).lower() for dep in settings.get("dependencies", [])}
+    assert "python-dotenv" in transitive
