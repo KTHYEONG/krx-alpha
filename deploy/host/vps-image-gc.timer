@@ -1,0 +1,10 @@
+[Unit]
+Description=VPS shared image garbage collector daily
+
+[Timer]
+OnCalendar=*-*-* 05:30:00 Asia/Seoul
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=VPS shared image garbage collector
+OnFailure=kca-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/krx-alpha/deploy/host/vps_image_gc.py --repo ghcr.io/kthyeong/krx-collector --repo ghcr.io/kthyeong/crypto-pilot-live --repo ghcr.io/kthyeong/k-closing-alpha
+TimeoutStartSec=45min
+
+[Install]
+WantedBy=default.target

@@ -3,7 +3,7 @@ def test_no_upward_layer_dependency_in_src() -> None:
     import pathlib
 
     from tests.architecture.layers import LAYER_RANK
-    from tools.agent_skills.dependency_graph import internal_dependencies, repository_source_files
+    from tests.architecture.dependency_graph import internal_dependencies, repository_source_files
 
     source_files = repository_source_files(pathlib.Path("."))
     modules = [m for m in source_files if not m.endswith("__init__.py")]
@@ -40,7 +40,7 @@ def test_no_upward_layer_dependency_in_src() -> None:
 def test_no_dependency_cycles_in_src() -> None:
     import pathlib
 
-    from tools.agent_skills.dependency_graph import (
+    from tests.architecture.dependency_graph import (
         dependency_cycles,
         internal_dependencies,
         repository_source_files,

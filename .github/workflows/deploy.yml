@@ -12,14 +12,33 @@ env:
   IMAGE: ghcr.io/kthyeong/krx-collector
 
 jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Run test suite
+        run: uv run pytest -q -n auto
+
   build-and-push:
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -47,11 +66,12 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
-    needs: build-and-push
-    runs-on: ubuntu-latest
+    needs: [test, build-and-push]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # Tailscale 가상 사설망 연결
       - name: Connect to Tailscale
@@ -71,6 +91,8 @@ jobs:
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
         run: |
           set -euo pipefail
+          STAGE=runner_init
+          trap 'rc=$?; echo "::error title=vps-deploy/krx-alpha/${STAGE}::rc=${rc} line=${LINENO} side=runner"' ERR
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
@@ -79,6 +101,7 @@ jobs:
 
           # 1. Stage: live 경로에는 쓰지 않고 스테이징에만 적재한다.
           STAGING_DIR=".deploy/staging/$GITHUB_SHA"
+          STAGE=stage_upload
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" "mkdir -p ~/krx-alpha/data ~/krx-alpha/logs ~/krx-alpha/deploy/host ~/.local/state/krx-alpha ~/.config/systemd/user ~/krx-alpha/$STAGING_DIR"
 
           # docker-compose.yml 스테이징
@@ -89,8 +112,15 @@ jobs:
           scp $SSH_OPTS deploy/host/krx-alpha.rclone-filter "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/krx-alpha.rclone-filter"
           scp $SSH_OPTS deploy/host/krx-host-backup.service deploy/host/krx-host-backup.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
           scp $SSH_OPTS deploy/host/krx-deferred-recreate.service deploy/host/krx-deferred-recreate.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
+          scp $SSH_OPTS deploy/host/krx-deferred-verify.sh "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/krx-deferred-verify.sh"
+
+          # 공유 VPS 배포 키트 스테이징 (원격은 스테이징된 lib를 source하므로 항상 배포 커밋과 일치한다)
+          scp $SSH_OPTS deploy/host/vps-deploy-lib.sh "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/vps-deploy-lib.sh"
+          scp $SSH_OPTS deploy/host/vps_image_gc.py "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/vps_image_gc.py"
+          scp $SSH_OPTS deploy/host/vps-image-gc.service deploy/host/vps-image-gc.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
 
           # Deploy session gate: defer in-session recreate to the 22:00 KST timer.
+          STAGE=deploy_gate
           set +e
           python3 -m src.orchestration.deploy_gate
           GATE_RC=$?
@@ -102,10 +132,14 @@ jobs:
           if [ "$GATE_RC" -eq 0 ]; then RECREATE_NOW=1; else RECREATE_NOW=0; fi
 
           # 원격 컨테이너 핀 이미지 배포 및 재기동
+          STAGE=remote
           ssh $SSH_OPTS "$REMOTE_USER@$HOST" "GITHUB_SHA=$GITHUB_SHA RECREATE_NOW=$RECREATE_NOW bash -s" <<EOF
           set -euo pipefail
           cd ~/krx-alpha
           STAGING_DIR=".deploy/staging/\$GITHUB_SHA"
+
+          source "\$STAGING_DIR/vps-deploy-lib.sh"
+          vps_deploy_init krx-alpha "\$GITHUB_SHA"
 
           DATA_ENV_FILE="/home/ubuntu/quant-secrets/kis-data.env"
           RUNTIME_ENV_FILE="/home/ubuntu/quant-secrets/krx-alpha.env"
@@ -167,6 +201,7 @@ jobs:
             done
             echo "Shared KIS data env validated: 17 keys"
           }
+          vps_stage validate_env
           validate_shared_keypool "\$DATA_ENV_FILE"
 
           # CI never provisions credentials: the runtime fragment is installed
@@ -217,16 +252,13 @@ jobs:
           validate_runtime_env "\$RUNTIME_ENV_FILE"
 
           # 토큰은 러너에서 heredoc 본문(stdin)으로만 확장한다: ssh 명령 인자나 원격 환경변수에 싣지 않는다.
+          vps_stage pull
           echo '$GHCR_PAT' | docker login ghcr.io -u '$GHCR_USER' --password-stdin
-          docker pull ghcr.io/kthyeong/krx-collector:sha-\$GITHUB_SHA
-          pulled_revision="\$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' ghcr.io/kthyeong/krx-collector:sha-\$GITHUB_SHA)"
-          if [ "\$pulled_revision" != "\$GITHUB_SHA" ]; then
-            echo "Image revision mismatch: \$pulled_revision != \$GITHUB_SHA" >&2
-            exit 1
-          fi
-          docker tag ghcr.io/kthyeong/krx-collector:sha-\$GITHUB_SHA ghcr.io/kthyeong/krx-collector:latest
+          vps_pull_verified ghcr.io/kthyeong/krx-collector "\$GITHUB_SHA"
+          vps_promote_latest ghcr.io/kthyeong/krx-collector "\$GITHUB_SHA"
 
           # 4. Promote: staged 파일을 원자적으로 교체한다 (rename은 새 inode를 준다).
+          vps_stage promote
           install -m 644 "\$STAGING_DIR/docker-compose.yml" ~/krx-alpha/docker-compose.yml.new && mv -f ~/krx-alpha/docker-compose.yml.new ~/krx-alpha/docker-compose.yml
           install -m 755 "\$STAGING_DIR/krx-host-backup.sh" ~/krx-alpha/deploy/host/krx-host-backup.sh.new && mv -f ~/krx-alpha/deploy/host/krx-host-backup.sh.new ~/krx-alpha/deploy/host/krx-host-backup.sh
           install -m 644 "\$STAGING_DIR/krx-alpha.rclone-filter" ~/krx-alpha/deploy/host/krx-alpha.rclone-filter.new && mv -f ~/krx-alpha/deploy/host/krx-alpha.rclone-filter.new ~/krx-alpha/deploy/host/krx-alpha.rclone-filter
@@ -234,6 +266,11 @@ jobs:
           install -m 644 "\$STAGING_DIR/krx-host-backup.timer" ~/.config/systemd/user/krx-host-backup.timer.new && mv -f ~/.config/systemd/user/krx-host-backup.timer.new ~/.config/systemd/user/krx-host-backup.timer
           install -m 644 "\$STAGING_DIR/krx-deferred-recreate.service" ~/.config/systemd/user/krx-deferred-recreate.service.new && mv -f ~/.config/systemd/user/krx-deferred-recreate.service.new ~/.config/systemd/user/krx-deferred-recreate.service
           install -m 644 "\$STAGING_DIR/krx-deferred-recreate.timer" ~/.config/systemd/user/krx-deferred-recreate.timer.new && mv -f ~/.config/systemd/user/krx-deferred-recreate.timer.new ~/.config/systemd/user/krx-deferred-recreate.timer
+          install -m 755 "\$STAGING_DIR/krx-deferred-verify.sh" ~/krx-alpha/deploy/host/krx-deferred-verify.sh.new && mv -f ~/krx-alpha/deploy/host/krx-deferred-verify.sh.new ~/krx-alpha/deploy/host/krx-deferred-verify.sh
+          install -m 644 "\$STAGING_DIR/vps-deploy-lib.sh" ~/krx-alpha/deploy/host/vps-deploy-lib.sh.new && mv -f ~/krx-alpha/deploy/host/vps-deploy-lib.sh.new ~/krx-alpha/deploy/host/vps-deploy-lib.sh
+          install -m 755 "\$STAGING_DIR/vps_image_gc.py" ~/krx-alpha/deploy/host/vps_image_gc.py.new && mv -f ~/krx-alpha/deploy/host/vps_image_gc.py.new ~/krx-alpha/deploy/host/vps_image_gc.py
+          install -m 644 "\$STAGING_DIR/vps-image-gc.service" ~/.config/systemd/user/vps-image-gc.service.new && mv -f ~/.config/systemd/user/vps-image-gc.service.new ~/.config/systemd/user/vps-image-gc.service
+          install -m 644 "\$STAGING_DIR/vps-image-gc.timer" ~/.config/systemd/user/vps-image-gc.timer.new && mv -f ~/.config/systemd/user/vps-image-gc.timer.new ~/.config/systemd/user/vps-image-gc.timer
 
           # KCA reads the same shared fragment through its user-systemd unit.
           DROPIN_DIR="\$HOME/.config/systemd/user/kca-kis-token-warmup.service.d"
@@ -247,9 +284,12 @@ jobs:
             echo "WARNING: kca-kis-token-warmup.timer not installed; krx issues tokens itself (KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE=true)"
           fi
           chmod +x ~/krx-alpha/deploy/host/krx-host-backup.sh
+          chmod +x ~/krx-alpha/deploy/host/vps_image_gc.py
+          vps_stage units
           systemctl --user daemon-reload
           systemctl --user enable --now krx-host-backup.timer
           systemctl --user enable --now krx-deferred-recreate.timer
+          systemctl --user enable --now vps-image-gc.timer
           # 공용 quant-lake 타이머 폐기 가드: PROJECTS 항목이 krx-alpha뿐일 때만 폐기한다.
           # 원격 셸에서 평가되도록 \$ 이스케이프(비인용 heredoc은 러너에서 먼저 확장된다).
           # QUANT_LAKE_RETIRE_GUARD_BEGIN
@@ -273,16 +313,17 @@ jobs:
           fi
 
           if docker compose version >/dev/null 2>&1; then C="docker compose"; else C="docker-compose"; fi
+          vps_stage recreate
           if [ "$RECREATE_NOW" = "1" ]; then
             \$C up -d --force-recreate --remove-orphans
+            vps_stage verify
             running_revision="\$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' krx-collector)"
             if [ "\$running_revision" != "\$GITHUB_SHA" ]; then
-              echo "Running container revision mismatch: \$running_revision != \$GITHUB_SHA" >&2
-              exit 1
+              vps_fail running_revision_mismatch
             fi
+            vps_verify_stable 45 krx-collector
           else
             echo "DEFERRED: krx-collector recreate scheduled by krx-deferred-recreate.timer (22:00 KST) revision=\$GITHUB_SHA"
           fi
           rm -rf ~/krx-alpha/.deploy/staging/\$GITHUB_SHA
-          docker image prune -f
           EOF

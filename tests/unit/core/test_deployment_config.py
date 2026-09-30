@@ -449,7 +449,7 @@ def test_remote_never_pulls_mutable_latest() -> None:
 
     workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
 
-    assert "docker pull" in workflow
+    assert "vps_pull_verified ghcr.io/kthyeong/krx-collector" in workflow
     assert ":sha-" in workflow
     assert "compose pull" not in workflow
     assert "\\$C pull" not in workflow
@@ -481,7 +481,7 @@ def test_host_artifacts_staged_then_promoted_atomically() -> None:
     assert "mv -f" in workflow
     assert ".new" in workflow
     assert workflow.index("validate_runtime_env") < workflow.index("mv -f")
-    assert workflow.index("docker pull") < workflow.index("mv -f")
+    assert workflow.index("vps_pull_verified") < workflow.index("mv -f")
 
 
 def test_state_dir_created_before_any_compose_action() -> None:
@@ -544,3 +544,138 @@ def test_ghcr_token_never_passed_as_ssh_argument() -> None:
     assert ssh_lines
     assert all("GHCR_PAT" not in line for line in ssh_lines)
     assert "--password-stdin" in workflow
+
+
+def test_gc_timer_runs_outside_collection_session() -> None:
+    from pathlib import Path
+
+    timer = Path("deploy/host/vps-image-gc.timer").read_text(encoding="utf-8")
+
+    assert "OnCalendar=*-*-* 05:30:00 Asia/Seoul" in timer
+    assert "Persistent=true" in timer
+
+
+def test_gc_service_covers_all_repositories_and_alerts() -> None:
+    from pathlib import Path
+
+    service = Path("deploy/host/vps-image-gc.service").read_text(encoding="utf-8")
+
+    assert "--repo ghcr.io/kthyeong/krx-collector" in service
+    assert "--repo ghcr.io/kthyeong/crypto-pilot-live" in service
+    assert "--repo ghcr.io/kthyeong/k-closing-alpha" in service
+    assert "OnFailure=kca-alert@%n.service" in service
+    assert "Type=oneshot" in service
+
+
+def test_deploy_uses_verified_pull_and_promotion() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert workflow.index("vps_pull_verified ghcr.io/kthyeong/krx-collector") < workflow.index(
+        "vps_promote_latest ghcr.io/kthyeong/krx-collector"
+    )
+    assert workflow.index("vps_promote_latest ghcr.io/kthyeong/krx-collector") < workflow.index(
+        "--force-recreate"
+    )
+
+
+def test_deploy_never_prunes_images() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert "image prune" not in workflow
+    assert "docker pull" not in workflow
+
+
+def test_immediate_recreate_is_stability_verified() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert workflow.index("--force-recreate") < workflow.index("vps_verify_stable 45 krx-collector")
+
+
+def test_kit_is_staged_promoted_and_gc_timer_enabled() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert "deploy/host/vps-deploy-lib.sh" in workflow
+    assert "deploy/host/vps_image_gc.py" in workflow
+    assert "enable --now vps-image-gc.timer" in workflow
+    assert workflow.index('source "\\$STAGING_DIR/vps-deploy-lib.sh"') < workflow.index(
+        'validate_shared_keypool "'
+    )
+
+
+def test_runner_failures_are_annotated_with_stage() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert "::error title=vps-deploy/krx-alpha/${STAGE}" in workflow
+
+
+def test_deploy_waits_for_both_test_and_build() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    raw = yaml.safe_load(Path(".github/workflows/deploy.yml").read_text(encoding="utf-8"))
+
+    assert set(raw["jobs"]["deploy"]["needs"]) == {"test", "build-and-push"}
+    assert "needs" not in raw["jobs"]["build-and-push"]
+
+
+def test_test_job_runs_full_suite_in_parallel_mode() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    raw = yaml.safe_load(Path(".github/workflows/deploy.yml").read_text(encoding="utf-8"))
+    steps = raw["jobs"]["test"]["steps"]
+    runs = [step.get("run", "") for step in steps]
+
+    assert any("uv sync --frozen" in run for run in runs)
+    assert any("uv run pytest -q -n auto" in run for run in runs)
+
+
+def test_every_job_is_time_bounded() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    raw = yaml.safe_load(Path(".github/workflows/deploy.yml").read_text(encoding="utf-8"))
+
+    assert raw["jobs"]
+    for name, job in raw["jobs"].items():
+        assert isinstance(job.get("timeout-minutes"), int), name
+
+
+def test_no_floating_runner_or_deprecated_checkout() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert "ubuntu-latest" not in workflow
+    assert "actions/checkout@v4" not in workflow
+
+
+def test_build_toolchain_refs_are_pinned() -> None:
+    from pathlib import Path
+
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+    pinned = [line for line in dockerfile.splitlines() if line.startswith("FROM") or "COPY --from=" in line]
+
+    assert pinned
+    assert all(":latest" not in line for line in pinned)
+    assert "python:3.11.16-slim-trixie" in dockerfile
+    assert "astral-sh/uv:0.12.20" in dockerfile
+
+
+def test_architecture_cycle_check_does_not_depend_on_removed_tooling() -> None:
+    from pathlib import Path
+
+    assert "tools.agent_skills" not in Path("tests/architecture/test_layering.py").read_text(encoding="utf-8")
