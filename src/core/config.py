@@ -68,6 +68,10 @@ class CollectorSettings(BaseSettings):
     normalize_timeout_s: float = 900.0
     schedule: SessionSchedule = SessionSchedule()
     after_market_enabled: bool = False
+    # Host-wide KIS pacing reservation lead for daemon data usage (standard work).
+    # Critical execution work books without bound; this only bounds the daemon's
+    # own data-slot bookings so a critical arrival waits at most this lead.
+    kis_rest_max_lead_s: float = Field(default=1.0, gt=0)
 
     @property
     def paths(self) -> DataPaths:
@@ -143,6 +147,8 @@ class TossProgramTradesSettings(BaseSettings):
     auto_backfill_lookback_days: int = 120
     max_stale_ratio: float = 0.05
     sync_timeout_s: float = 2400.0
+    # Host-wide Toss pacing reservation lead for program-trades sync/backfill (bulk work).
+    rest_max_lead_s: float = Field(default=0.25, gt=0)
 
     @model_validator(mode="after")
     def check_positive(self) -> TossProgramTradesSettings:
@@ -270,6 +276,8 @@ class SnapshotSettings(BaseSettings):
     run_end: dt.time = dt.time(15, 39)
     stock_minute_max_symbols: int = 60
     idle_sleep_cap_s: float = 5.0
+    # Host-wide KIS pacing reservation lead for snapshot collection (standard work).
+    rest_max_lead_s: float = Field(default=1.0, gt=0)
 
     @model_validator(mode="after")
     def check_snapshot_contract(self) -> SnapshotSettings:
@@ -329,6 +337,9 @@ class ExecutionSettings(BaseSettings):
     max_orders_per_minute: int = 10
     max_daily_loss_krw: int = 300_000
     symbol_whitelist: tuple[str, ...] = ()
+    # Host-wide KIS pacing reservation lead for order execution (critical work:
+    # None books without bound so execution never waits behind bulk bookings).
+    rest_max_lead_s: float | None = None
 
     @property
     def paths(self) -> DataPaths:
@@ -338,6 +349,8 @@ class ExecutionSettings(BaseSettings):
     def check_live_armed(self) -> ExecutionSettings:
         if self.mode is ExecutionMode.LIVE and not self.live_armed:
             raise LiveNotArmedError("live mode requires KRX_ALPHA_EXEC_LIVE_ARMED=true")
+        if self.rest_max_lead_s is not None and self.rest_max_lead_s <= 0:
+            raise ValueError("rest_max_lead_s must be positive or None")
         return self
 
 

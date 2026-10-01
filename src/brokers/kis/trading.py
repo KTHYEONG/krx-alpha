@@ -15,7 +15,7 @@ from src.brokers.kis.http import (
     _RATE_LIMIT_CODES,
     KisGetTransport,
 )
-from src.brokers.kis.rate import RateLimiter
+from src.brokers.kis.rate import HostPacedRateLimiter, RateLimiter
 from src.core.config import KisCredentials
 from src.execution.contracts import (
     BrokerOrderStatus,
@@ -107,7 +107,7 @@ class KisTradingClient:
         transport: KisGetTransport,
         session: Any,
         credentials: KisCredentials,
-        limiter: RateLimiter,
+        limiter: RateLimiter | HostPacedRateLimiter,
         timeout_s: float,
         base_url: str,
     ) -> None:
@@ -240,7 +240,8 @@ class KisTradingClient:
                 retries += 1
                 continue
             if msg_cd in _EXPIRED_TOKEN_CODES and not refreshed:
-                self._transport.refresh_token()
+                rejected = self._transport.access_token()
+                self._transport.refresh_token(rejected)
                 refreshed = True
                 continue
             if data.get("rt_cd") != "0":

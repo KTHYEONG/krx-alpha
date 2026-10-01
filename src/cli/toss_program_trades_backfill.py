@@ -7,7 +7,7 @@ import datetime as dt
 import logging
 import pathlib
 
-from src.core.config import TossCredentials, TossProgramTradesSettings, load_credentials
+from src.core.config import KisTokenSettings, TossCredentials, TossProgramTradesSettings, load_credentials
 from src.core.errors import MissingCredentialsError
 from src.marketdata.program_trade_service import ProgramTradesBackfillResult as ProgramTradesBackfillResult
 from src.marketdata.program_trade_service import backfill_program_trades
@@ -36,13 +36,16 @@ def run(args: argparse.Namespace) -> int:
         logger.error("[DATA] stage=toss_program_backfill status=FAIL reason=missing_credentials:%s", str(exc))
         return 4
     try:
+        settings = TossProgramTradesSettings()
         result = backfill_program_trades(
             store_path=store,
             symbols=symbols,
             min_date=min_date,
             app_key=creds.toss_app_key,
             app_secret=creds.toss_app_secret,
-            rate_per_s=TossProgramTradesSettings().rate_per_s,
+            rate_per_s=settings.rate_per_s,
+            cache_dir=KisTokenSettings().token_cache_dir,
+            max_lead_s=settings.rest_max_lead_s,
         )
     except (ValueError, TossProgramTradesError) as exc:
         logger.error("[DATA] stage=toss_program_backfill status=FAIL reason=%s", str(exc))

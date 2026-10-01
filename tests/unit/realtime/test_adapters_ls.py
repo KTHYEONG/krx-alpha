@@ -589,3 +589,151 @@ def test_ls_adapter_connect_raises_auth_rejected_on_401_without_error_code() -> 
     with pytest.raises(VendorAuthRejected, match=r"auth_rejected:401:$"):
         asyncio.run(adapter.connect())
 
+
+
+def test_ls_adapter_reconnect_reuses_stored_token(tmp_path) -> None:
+    # Given: 유효한 저장 토큰을 쥔 어댑터
+    import asyncio
+
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+
+    store = TossTokenStore(ls_token_path(tmp_path, "k"))
+    posts: list[str] = []
+
+    class _Resp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self):
+            posts.append("token-post")
+            return {"access_token": "STORED"}
+
+    class _WSCtx:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Http:
+        def post(self, url, **kw):
+            return _Resp()
+
+        def ws_connect(self, url, **kw):
+            return _WSCtx()
+
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(), market_of={}, token_store=store)
+
+    # When: connect()를 두 번 수행한다
+    asyncio.run(adapter.connect())
+    asyncio.run(adapter.connect())
+
+    # Then: 토큰 POST는 0회다
+    assert posts == ["token-post"]
+
+
+def test_ls_adapter_rejected_token_rotates_once(tmp_path) -> None:
+    # Given: 저장 토큰 A에서 WS 인증 거부가 나는 어댑터
+    import asyncio
+
+    import pytest
+
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import VendorAuthRejected
+
+    store = TossTokenStore(ls_token_path(tmp_path, "k"))
+    issued: list[str] = []
+
+    class _Resp:
+        def __init__(self, token):
+            self._token = token
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self):
+            issued.append(self._token)
+            return {"access_token": self._token}
+
+    class _WSCtx:
+        def __init__(self, fail):
+            self._fail = fail
+
+        async def __aenter__(self):
+            if self._fail:
+                raise VendorAuthRejected("auth_rejected:401:")
+            return object()
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Http:
+        def __init__(self):
+            self.reject_ws = False
+
+        def post(self, url, **kw):
+            return _Resp("B" if len(issued) else "A")
+
+        def ws_connect(self, url, **kw):
+            return _WSCtx(self.reject_ws)
+
+    http = _Http()
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=http, market_of={}, token_store=store)
+
+    # When: 첫 접속은 저장 토큰 A를 쓰고 WS 거부가 난다
+    asyncio.run(adapter.connect())
+    http.reject_ws = True
+    with pytest.raises(VendorAuthRejected):
+        asyncio.run(adapter.connect())
+
+    # Then: 1회 발급으로 세대가 전진하고 다음 접속은 POST 없이 B를 쓴다
+    assert issued == ["A", "B"]
+    assert store.read().generation == 2
+    http.reject_ws = False
+    asyncio.run(adapter.connect())
+    assert issued == ["A", "B"]
+
+
+def test_ls_adapter_ws_transport_failure_maps_to_disconnected(tmp_path) -> None:
+    # Given: WS 접속이 전송 실패하는 어댑터
+    import asyncio
+
+    import aiohttp
+    import pytest
+
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import VendorDisconnected
+
+    store = TossTokenStore(ls_token_path(tmp_path, "k"))
+
+    class _Resp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self):
+            return {"access_token": "TOK"}
+
+    class _Http:
+        def post(self, url, **kw):
+            return _Resp()
+
+        def ws_connect(self, url, **kw):
+            raise aiohttp.ClientConnectionError("reset")
+
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(), market_of={}, token_store=store)
+
+    # When / Then
+    with pytest.raises(VendorDisconnected, match="connect_failed"):
+        asyncio.run(adapter.connect())

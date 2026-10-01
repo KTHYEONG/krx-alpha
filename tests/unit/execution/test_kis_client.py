@@ -1559,3 +1559,75 @@ def test_issuance_non_json_response_enters_backoff(tmp_path) -> None:
     with pytest.raises(KisApiError, match="TOKEN_BACKOFF"):
         client.access_token()
     assert len(session.calls) == 1
+
+
+def test_forced_refresh_adopts_peer_rotated_token(tmp_path) -> None:
+    # Given: 거부된 토큰과 다른 당일 발급 유효 토큰을 쥔 캐시 (KCA가 회전시킴)
+    import datetime as dt
+    import json
+    from zoneinfo import ZoneInfo
+
+    from src.execution.kis_client import KisRestClient, RateLimiter, TokenSource
+    from tests.unit.execution.fakes import FixedClock, make_creds
+
+    kst = ZoneInfo("Asia/Seoul")
+    now = dt.datetime(2026, 9, 15, 9, 0, tzinfo=kst)
+    cache = tmp_path / "token.json"
+    cache.write_text(json.dumps({
+        "access_token": "peer-rotated",
+        "expired_at": (now + dt.timedelta(hours=20)).isoformat(),
+        "app_key": "app-key",
+        "issued_at": now.isoformat(),
+    }), encoding="utf-8")
+
+    class _Session:
+        def post(self, *args, **kwargs):
+            raise AssertionError("must not issue when a peer already rotated")
+
+    client = KisRestClient(
+        creds=make_creds(), session=_Session(), token_cache_path=cache,
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=FixedClock(now), timeout_s=5.0,
+    )
+
+    # When / Then: 발급 없이 캐시 토큰을 CACHE 출처로 채택한다
+    assert client.access_token(force=True, rejected_token="stale-rejected") == "peer-rotated"
+    assert client.ensure_token() is TokenSource.CACHE
+
+
+def test_forced_refresh_with_same_token_keeps_daily_limit(tmp_path) -> None:
+    # Given: 거부된 토큰과 같은 당일 발급 캐시
+    import datetime as dt
+    import json
+
+    import pytest
+    from zoneinfo import ZoneInfo
+
+    from src.execution.kis_client import KisRestClient, RateLimiter
+    from tests.unit.execution.fakes import FixedClock, make_creds
+
+    kst = ZoneInfo("Asia/Seoul")
+    now = dt.datetime(2026, 9, 15, 9, 0, tzinfo=kst)
+    cache = tmp_path / "token.json"
+    cache.write_text(json.dumps({
+        "access_token": "same-as-rejected",
+        "expired_at": (now - dt.timedelta(hours=1)).isoformat(),
+        "app_key": "app-key",
+        "issued_at": (now - dt.timedelta(hours=2)).isoformat(),
+    }), encoding="utf-8")
+
+    class _Session:
+        def post(self, *args, **kwargs):
+            raise AssertionError("daily guard must fire before any issuance")
+
+    client = KisRestClient(
+        creds=make_creds(), session=_Session(), token_cache_path=cache,
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=FixedClock(now), timeout_s=5.0,
+    )
+
+    # When / Then: TOKEN_DAILY_LIMIT이 유지된다
+    from src.execution.contracts import KisApiError
+
+    with pytest.raises(KisApiError, match="TOKEN_DAILY_LIMIT"):
+        client.access_token(force=True, rejected_token="same-as-rejected")

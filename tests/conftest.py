@@ -90,6 +90,20 @@ def _hermetic_credentials_and_network(monkeypatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolated_broker_admission_dir(tmp_path, monkeypatch) -> None:
+    """Route the shared token/pacing cache at an isolated dir with the host marker.
+
+    Host-paced limiters and shared token stores resolve their files through
+    ``KisTokenSettings().token_cache_dir``; without isolation unit tests would
+    read and write the real developer cache and interfere across runs.
+    """
+    cache = tmp_path / "kis-token-cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / ".host-admission").touch()
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(cache))
+
+
+@pytest.fixture(autouse=True)
 def _shutdown_managed_logging():
     yield
     from src.core.observability import shutdown_logging

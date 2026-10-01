@@ -1836,3 +1836,33 @@ def test_run_session_orchestration_reports_progress_between_stages(tmp_path, mon
 
     # Then: 단계마다 생존 신호가 나가 장전 준비가 길어도 외부 감시가 멈춤으로 오판하지 않는다
     assert len(ticks) >= 2
+
+
+def test_build_data_client_uses_host_pacing_with_configured_lead(tmp_path, monkeypatch) -> None:
+    # Given: 표준 등급 리드를 가진 설정
+    import pathlib
+
+    from src.brokers.kis.rate import HostPacedRateLimiter
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon
+
+    cache = pathlib.Path(tmp_path) / "kis-tokens"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / ".host-admission").touch()
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(cache))
+
+    # When
+    _, client = daemon._build_data_client(
+        app_key="data-key",
+        app_secret="data-secret",
+        rate_per_s=18.0,
+        timeout_s=5.0,
+        allow_issue=False,
+        max_lead_s=CollectorSettings(data_root=tmp_path).kis_rest_max_lead_s,
+    )
+
+    # Then: 호스트 공유 리미터가 설정 리드로 묶인다
+    limiter = client._transport._limiter
+    assert isinstance(limiter, HostPacedRateLimiter)
+    assert limiter._max_lead_s == 1.0
+    assert limiter._state_path.parent == cache

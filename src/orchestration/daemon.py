@@ -21,7 +21,7 @@ import requests
 from src.brokers.kis.auth import KisAppAuth, KisTokenProvider, kis_app_key_fingerprint, kis_token_cache_path
 from src.brokers.kis.data import KisDataClient
 from src.brokers.kis.http import KisGetTransport
-from src.brokers.kis.rate import RateLimiter
+from src.brokers.kis.rate import HostPacedRateLimiter, kis_state_path
 from src.brokers.kis.trading import KIS_LIVE_BASE_URL
 from src.core.calendar import SessionState, calc_sleep_seconds, get_target_state, schedule_for
 from src.core.config import (
@@ -132,11 +132,16 @@ def _build_data_client(
     rate_per_s: float,
     timeout_s: float,
     allow_issue: bool,
+    max_lead_s: float | None,
 ) -> tuple[KisTokenProvider, KisDataClient]:
     """Build a data-only KIS stack from an app key pair (no account fields)."""
     token_settings = KisTokenSettings()
     auth = KisAppAuth(app_key=app_key, app_secret=app_secret)
-    limiter = RateLimiter(rate_per_s)
+    limiter = HostPacedRateLimiter(
+        kis_state_path(token_settings.token_cache_dir, app_key),
+        rate_per_s,
+        max_lead_s=max_lead_s,
+    )
     tokens = KisTokenProvider(
         auth=auth,
         session=requests,
@@ -162,6 +167,7 @@ def _build_kis_client(paths: DataPaths) -> KisDataClient:
     """execution 모듈과 동일한 토큰 캐시를 공유하는 KIS 데이터 클라이언트를 생성한다."""
     creds = load_credentials(KisCredentials)
     execution = ExecutionSettings(data_root=paths.root)
+    collector = CollectorSettings(data_root=paths.root)
     token_settings = KisTokenSettings()
     _, client = _build_data_client(
         app_key=creds.kis_app_key,
@@ -169,6 +175,7 @@ def _build_kis_client(paths: DataPaths) -> KisDataClient:
         rate_per_s=execution.rest_rate_per_s,
         timeout_s=execution.request_timeout_s,
         allow_issue=token_settings.allow_issue,
+        max_lead_s=collector.kis_rest_max_lead_s,
     )
     return client
 
@@ -187,6 +194,7 @@ def _build_snapshot_preflight_client(paths: DataPaths, snapshot_settings: Snapsh
         rate_per_s=snapshot_cfg.rest_rate_per_s,
         timeout_s=snapshot_cfg.request_timeout_s,
         allow_issue=token_settings.allow_issue,
+        max_lead_s=snapshot_cfg.rest_max_lead_s,
     )
     return client, cred.key_id
 

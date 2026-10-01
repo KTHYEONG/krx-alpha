@@ -12,6 +12,7 @@ from typing import cast
 
 from src.core.config import (
     CollectorSettings,
+    KisTokenSettings,
     TossCredentials,
     TossProgramTradesSettings,
     load_credentials,
@@ -80,6 +81,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             app_secret=creds.toss_app_secret,
             rate_per_s=settings.rate_per_s,
             active_symbols=_active_symbols(paths.market_map),
+            cache_dir=KisTokenSettings().token_cache_dir,
+            max_lead_s=settings.rest_max_lead_s,
         )
     except MissingCredentialsError as exc:
         logger.error("[DATA] stage=program_trades_sync status=FAIL reason=missing_credentials:%s", str(exc))

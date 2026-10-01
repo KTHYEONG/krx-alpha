@@ -10,6 +10,8 @@ from typing import Any
 
 import aiohttp
 
+from src.core.config import KisTokenSettings
+from src.marketdata.toss_token_store import IssuedToken, TossTokenStore, ls_token_path
 from src.realtime.contracts import L0Frame, VendorAck, VendorAuthRejected, VendorDisconnected
 
 LS_TOKEN_URL = "https://openapi.ls-sec.co.kr:8080/oauth2/token"  # noqa: S105 - public endpoint, not a secret
@@ -42,6 +44,7 @@ class LsRealtimeAdapter:
         ws_url: str = LS_WS_URL,
         heartbeat_s: float = 10.0,
         ack_timeout_s: float = 10.0,
+        token_store: TossTokenStore | None = None,
     ) -> None:
         self.name = "ls"
         self.capacity_pairs = capacity_pairs
@@ -54,13 +57,18 @@ class LsRealtimeAdapter:
         self._ws_url = ws_url
         self._heartbeat_s = heartbeat_s
         self._ack_timeout_s = ack_timeout_s
+        self._token_store = (
+            token_store
+            if token_store is not None
+            else TossTokenStore(ls_token_path(KisTokenSettings().token_cache_dir, app_key))
+        )
         self._ws: Any = None
         self._token: str | None = None
         self._seq = 0
         self._conn_id: str = ""
         self._pending: list[L0Frame] = []  # subscribe 중 끼어든 데이터 프레임 (recv 가 먼저 소진)
 
-    async def connect(self) -> None:
+    async def _issue_token(self) -> IssuedToken:
         try:
             async with self._http.post(
                 self._token_url,
@@ -77,8 +85,19 @@ class LsRealtimeAdapter:
                     code = str(data.get('error_code', ''))
                     if status in (401, 403) or code:
                         raise VendorAuthRejected(f'auth_rejected:{status}:{code}')
-            self._token = str(data["access_token"])
+                token = str(data["access_token"])
+        except (TimeoutError, aiohttp.ClientError, ValueError, KeyError) as exc:
+            raise VendorDisconnected(f"connect_failed:{type(exc).__name__}") from exc
+        return IssuedToken(token, None)
+
+    async def connect(self) -> None:
+        token = await self._token_store.aget_or_issue(self._issue_token)
+        self._token = token
+        try:
             self._ws = await (self._http.ws_connect(self._ws_url, heartbeat=self._heartbeat_s)).__aenter__()
+        except VendorAuthRejected:
+            await self._token_store.areplace_rejected(token, self._issue_token)
+            raise
         except (TimeoutError, aiohttp.ClientError, ValueError, KeyError) as exc:
             raise VendorDisconnected(f"connect_failed:{type(exc).__name__}") from exc
         self._seq = 0

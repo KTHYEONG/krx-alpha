@@ -15,7 +15,7 @@ import requests
 from src.brokers.kis.auth import KisAppAuth, KisTokenProvider, kis_token_cache_path
 from src.brokers.kis.data import KisDataClient
 from src.brokers.kis.http import KisGetTransport
-from src.brokers.kis.rate import RateLimiter
+from src.brokers.kis.rate import HostPacedRateLimiter, kis_state_path
 from src.core.config import KisTokenSettings, resolve_collector_runtime
 from src.core.errors import MissingCredentialsError
 from src.core.session_anchors import resolve_session_anchors
@@ -50,7 +50,11 @@ def run(args: argparse.Namespace) -> int:
         raise MissingCredentialsError(f"no data credential for slot {settings.kis_data_slot}")
     token_settings = KisTokenSettings()
     auth = KisAppAuth(app_key=cred.app_key, app_secret=cred.app_secret)
-    limiter = RateLimiter(settings.rest_rate_per_s)
+    limiter = HostPacedRateLimiter(
+        kis_state_path(token_settings.token_cache_dir, cred.app_key),
+        settings.rest_rate_per_s,
+        max_lead_s=settings.rest_max_lead_s,
+    )
     tokens = KisTokenProvider(
         auth=auth,
         session=requests,

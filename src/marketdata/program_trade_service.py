@@ -5,23 +5,113 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import pathlib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
-from src.brokers.kis.rate import RateLimiter
+from src.brokers.kis.rate import HostPacedRateLimiter, host_state_path
+from src.core.config import KisTokenSettings, TossProgramTradesSettings
 from src.core.symbols import is_krx_short_code
 from src.marketdata.partitioned_store import PartitionedStoreError, scan_month_partitions
-from src.marketdata.toss_calendar import TossCalendarError, issue_access_token
+from src.marketdata.toss_calendar import (
+    TOSS_STOCK_TRADING_TREND_GROUP,
+    TossCalendarError,
+    issue_access_token,
+)
 from src.marketdata.toss_program_trades import (
     TossProgramTradesError,
+    _TossProgramTradesAuthRejected,
     append_program_trades,
     backfill_program_trades_history,
     program_trade_coverage,
     symbols_needing_backfill,
 )
+from src.marketdata.toss_token_store import IssuedToken, TossTokenStore, toss_token_path
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_pacing(
+    *,
+    app_key: str,
+    app_secret: str,
+    rate_per_s: float,
+    cache_dir: pathlib.Path | None,
+    max_lead_s: float | None,
+    session: Any | None,
+) -> tuple[HostPacedRateLimiter, _TokenSession]:
+    """Build the host-shared Toss pacing limiter and token session, issuing one token.
+
+    Raises:
+        TossProgramTradesError: When the initial token issuance fails.
+    """
+    if rate_per_s <= 0:
+        raise ValueError("rate_per_s must be positive")
+    directory = pathlib.Path(cache_dir) if cache_dir is not None else KisTokenSettings().token_cache_dir
+    lead = max_lead_s if max_lead_s is not None else TossProgramTradesSettings().rest_max_lead_s
+    limiter = HostPacedRateLimiter(
+        host_state_path(directory, "toss", app_key, TOSS_STOCK_TRADING_TREND_GROUP),
+        rate_per_s,
+        max_lead_s=lead,
+    )
+    tokens = _TokenSession(
+        TossTokenStore(toss_token_path(directory, app_key)),
+        lambda: IssuedToken(issue_access_token(app_key=app_key, app_secret=app_secret, session=session), None),
+    )
+    return limiter, tokens
+
+
+class _TokenIssuanceFailed(TossProgramTradesError):  # noqa: N818 - surfaced as TossProgramTradesError
+    """Toss token issuance failure; aborts the whole run since no symbol can succeed."""
+
+
+class _TokenSession:
+    """One run's Toss token, rotated at most once per vendor rejection."""
+
+    def __init__(self, store: TossTokenStore, issue: Callable[[], IssuedToken]) -> None:
+        self._store = store
+        self._issue = issue
+        try:
+            self.token = store.get_or_issue(issue)
+        except TossCalendarError as exc:
+            raise _TokenIssuanceFailed(f"toss program-trades token issuance failed: {exc}") from exc
+
+    def rotate(self) -> None:
+        """Replace the rejected token, adopting a peer-rotated token when present."""
+        try:
+            self.token = self._store.replace_rejected(self.token, self._issue)
+        except TossCalendarError as exc:
+            raise _TokenIssuanceFailed(f"toss program-trades token issuance failed: {exc}") from exc
+
+
+def _fetch_symbol(
+    symbol: str,
+    tokens: _TokenSession,
+    fetch: Callable[..., Sequence[dict[str, object]]],
+) -> Sequence[dict[str, object]] | None:
+    """Fetch one symbol with a single token rotation on auth rejection.
+
+    Returns:
+        Fetched rows, or ``None`` when this symbol failed for a symbol-local reason
+        (logged and skipped so the remaining symbols still run).
+
+    Raises:
+        TossProgramTradesError: When token issuance fails or the rotated token is
+            also rejected; credentials are unusable for every symbol, so the run
+            aborts fail-closed.
+    """
+    try:
+        try:
+            return fetch(access_token=tokens.token)
+        except _TossProgramTradesAuthRejected:
+            tokens.rotate()
+        return fetch(access_token=tokens.token)
+    except (_TossProgramTradesAuthRejected, _TokenIssuanceFailed):
+        raise
+    except TossProgramTradesError as exc:
+        logger.warning("[DATA] stage=toss_program_backfill status=SKIP symbol=%s reason=%s", symbol, str(exc))
+        return None
 
 
 @dataclass(frozen=True)
@@ -68,6 +158,8 @@ def sync_program_trades_forward(
     rate_per_s: float,
     session: Any | None = None,
     active_symbols: frozenset[str] | None = None,
+    cache_dir: pathlib.Path | None = None,
+    max_lead_s: float | None = None,
 ) -> ProgramTradesSyncResult:
     """Forward-sync tracked symbols to ``session_date`` plus candidate history depth.
 
@@ -111,26 +203,31 @@ def sync_program_trades_forward(
         if symbol in candidate_set:
             dates.append(candidate_floor)
         min_date_by_symbol[symbol] = min(dates)
-    try:
-        token = issue_access_token(app_key=app_key, app_secret=app_secret, session=session)
-    except TossCalendarError as exc:
-        raise TossProgramTradesError(f"toss program-trades token issuance failed: {exc}") from exc
-    limiter = RateLimiter(rate_per_s)
+    limiter, tokens = _resolve_pacing(
+        app_key=app_key,
+        app_secret=app_secret,
+        rate_per_s=rate_per_s,
+        cache_dir=cache_dir,
+        max_lead_s=max_lead_s,
+        session=session,
+    )
     symbols_ok = 0
     symbols_failed = 0
     fetched: list[dict[str, object]] = []
     fetched_max: dict[str, dt.date] = {}
     for symbol in union:
-        try:
-            rows = backfill_program_trades_history(
+        rows = _fetch_symbol(
+            symbol,
+            tokens,
+            partial(
+                backfill_program_trades_history,
                 symbol,
-                access_token=token,
                 min_date=min_date_by_symbol[symbol],
                 session=session,
                 throttle=limiter.acquire,
-            )
-        except TossProgramTradesError as exc:
-            logger.warning("[DATA] stage=toss_program_backfill status=SKIP symbol=%s reason=%s", symbol, str(exc))
+            ),
+        )
+        if rows is None:
             symbols_failed += 1
             continue
         symbols_ok += 1
@@ -175,26 +272,31 @@ def backfill_program_trades(
     app_secret: str,
     rate_per_s: float,
     session: Any | None = None,
+    cache_dir: pathlib.Path | None = None,
+    max_lead_s: float | None = None,
 ) -> ProgramTradesBackfillResult:
     """Fetch a fixed symbol set under the Toss rate limit and persist successes."""
     unique = list(dict.fromkeys(symbols))
     if not unique or any(not is_krx_short_code(code) for code in unique):
         raise ValueError(f"symbols must be non-empty KRX short codes: {list(symbols)!r}")
-    try:
-        token = issue_access_token(app_key=app_key, app_secret=app_secret, session=session)
-    except TossCalendarError as exc:
-        raise TossProgramTradesError(f"toss program-trades token issuance failed: {exc}") from exc
-    limiter = RateLimiter(rate_per_s)
+    limiter, tokens = _resolve_pacing(
+        app_key=app_key,
+        app_secret=app_secret,
+        rate_per_s=rate_per_s,
+        cache_dir=cache_dir,
+        max_lead_s=max_lead_s,
+        session=session,
+    )
     symbols_ok = 0
     symbols_failed = 0
     fetched: list[dict[str, object]] = []
     for code in unique:
-        try:
-            rows = backfill_program_trades_history(
-                code, access_token=token, min_date=min_date, session=session, throttle=limiter.acquire
-            )
-        except TossProgramTradesError as exc:
-            logger.warning("[DATA] stage=toss_program_backfill status=SKIP symbol=%s reason=%s", code, str(exc))
+        rows = _fetch_symbol(
+            code,
+            tokens,
+            partial(backfill_program_trades_history, code, min_date=min_date, session=session, throttle=limiter.acquire),
+        )
+        if rows is None:
             symbols_failed += 1
             continue
         fetched.extend(rows)
@@ -219,6 +321,8 @@ def backfill_universe_program_trades(
     app_secret: str,
     rate_per_s: float,
     session: Any | None = None,
+    cache_dir: pathlib.Path | None = None,
+    max_lead_s: float | None = None,
 ) -> ProgramTradesBackfillResult:
     """Backfill only universe symbols lacking the requested historical window."""
     if not symbols:
@@ -243,4 +347,6 @@ def backfill_universe_program_trades(
         app_secret=app_secret,
         rate_per_s=rate_per_s,
         session=session,
+        cache_dir=cache_dir,
+        max_lead_s=max_lead_s,
     )
