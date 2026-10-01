@@ -13,7 +13,6 @@ from src.marketdata.schema import REQUIRED_BAR_COLUMNS
 logger = logging.getLogger(__name__)
 
 FEATURE_COLUMNS: tuple[str, ...] = ("tv_median_20", "close_max_60", "tv_ratio")
-SELECTION_REASONS: tuple[str, ...] = ("limit_up", "surge10", "volsurge", "newhigh60")
 PRICE_LIMIT_GUARD_PCT: float = 31.0
 LIMIT_UP_PCT: float = 29.0
 SURGE_PCT: float = 10.0

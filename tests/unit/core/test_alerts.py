@@ -96,3 +96,65 @@ def test_unexpected_formatting_error_keeps_listener_alive() -> None:
         shutdown_logging()
 
     assert len(calls) == 2
+
+
+def test_html_sender_internal_type_error_not_resent(caplog) -> None:
+    import logging
+
+    from src.core.alerts import EmailAlertHandler
+
+    calls: list[tuple] = []
+
+    def _html_sender(subject: str, body: str, *, html_body: str | None = None) -> None:
+        calls.append((subject, body, html_body))
+        raise TypeError("sender bug after transmit")
+
+    handler = EmailAlertHandler(component="daemon", run_id="r", sender=_html_sender, sleep=lambda s: None)
+
+    with caplog.at_level(logging.WARNING):
+        handler.handle(_record())
+
+    assert len(calls) == 1
+    assert any("stage=alert status=FAIL" in r.getMessage() for r in caplog.records)
+
+
+def test_plain_sender_receives_plain_once() -> None:
+    from src.core.alerts import _call_sender
+
+    calls: list[tuple] = []
+
+    def _plain(subject, body):
+        calls.append((subject, body))
+
+    _call_sender(_plain, "s", "b", html_body="<p>")
+
+    assert calls == [("s", "b")]
+
+
+def test_kwargs_sender_receives_html() -> None:
+    from src.core.alerts import _call_sender
+
+    calls: list[tuple] = []
+
+    def _kwargs(subject, body, **kw):
+        calls.append((subject, body, kw))
+
+    _call_sender(_kwargs, "s", "b", html_body="<p>")
+
+    assert calls == [("s", "b", {"html_body": "<p>"})]
+
+
+def test_unintrospectable_sender_falls_back_plain(monkeypatch) -> None:
+    import inspect
+
+    from src.core.alerts import _call_sender
+
+    calls: list[tuple] = []
+
+    def _plain(subject, body):
+        calls.append((subject, body))
+
+    monkeypatch.setattr(inspect, "signature", lambda fn: (_ for _ in ()).throw(ValueError("no signature")))
+    _call_sender(_plain, "s", "b", html_body="<p>")
+
+    assert calls == [("s", "b")]

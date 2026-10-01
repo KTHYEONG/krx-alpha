@@ -12,6 +12,7 @@ from collections.abc import Set as AbstractSet
 from zoneinfo import ZoneInfo
 
 from src.core.errors import KrxAlphaError
+from src.storage.layout import l1_relpath_for_l0_partition, l1_repo_path
 from src.storage.normalization import (
     _BATCH_BYTES,
     _GATHER_ROWS,
@@ -122,10 +123,11 @@ def prune_old_journals(
         if part_date is None or part_date >= cutoff:
             continue
         try:
-            rel_parent = part.relative_to(pathlib.Path(str(journal_root))).parent
-            out_path = archive_base / rel_parent / f"{part.name}.parquet"
+            out_path = archive_base / l1_relpath_for_l0_partition(
+                part.relative_to(pathlib.Path(str(journal_root)))
+            )
             if not normalize:
-                rel = "l1/" + out_path.relative_to(archive_base).as_posix()
+                rel = l1_repo_path(out_path.relative_to(archive_base))
                 if out_path.exists() and verified_remote_l1 is not None and rel in verified_remote_l1:
                     deleted += sum(1 for f in part.rglob("*") if f.is_file())
                     shutil.rmtree(part)
@@ -162,7 +164,7 @@ def prune_old_journals(
                 logger.critical("[DATA] stage=prune status=FAIL reason=unverified part=%s", str(part))
                 continue
             normalized += 1
-            rel = "l1/" + out_path.relative_to(archive_base).as_posix()
+            rel = l1_repo_path(out_path.relative_to(archive_base))
             if verified_remote_l1 is None or rel not in verified_remote_l1:
                 continue
             deleted += sum(1 for f in part.rglob("*") if f.is_file())
@@ -191,7 +193,7 @@ def prune_local_l1(
         part_date = dt.date.fromisoformat(m.group(0)[3:]) if m else None
         if part_date is None or part_date >= cutoff:
             continue
-        rel = "l1/" + pq_file.relative_to(root).as_posix()
+        rel = l1_repo_path(pq_file.relative_to(root))
         if rel not in confirmed_remote:
             continue
         pq_file.unlink()

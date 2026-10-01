@@ -10,12 +10,12 @@ from typing import Any
 import requests
 
 from src.brokers.kis.http import (
-    _EXPIRED_TOKEN_CODES,
-    _MAX_SAFE_RETRIES,
-    _RATE_LIMIT_CODES,
+    MAX_SAFE_RETRIES,
     KisGetTransport,
+    KisRetryDecision,
+    classify_kis_retry,
 )
-from src.brokers.kis.rate import HostPacedRateLimiter, RateLimiter
+from src.brokers.kis.rate import Pacer
 from src.core.config import KisCredentials
 from src.execution.contracts import (
     BrokerOrderStatus,
@@ -107,7 +107,7 @@ class KisTradingClient:
         transport: KisGetTransport,
         session: Any,
         credentials: KisCredentials,
-        limiter: RateLimiter | HostPacedRateLimiter,
+        limiter: Pacer,
         timeout_s: float,
         base_url: str,
     ) -> None:
@@ -210,15 +210,16 @@ class KisTradingClient:
         retries = 0
         while True:
             self._limiter.acquire()
+            sent_headers, sent_token = self._transport.authorized_headers(tr_id, "")
             try:
                 resp = self._session.post(
                     self._base_url + path,
-                    headers=self._transport.headers(tr_id, ""),
+                    headers=sent_headers,
                     json=body,
                     timeout=self._timeout_s,
                 )
             except requests.ConnectTimeout:
-                if retries < _MAX_SAFE_RETRIES:
+                if retries < MAX_SAFE_RETRIES:
                     retries += 1
                     continue
                 return BrokerOutcome(
@@ -236,12 +237,12 @@ class KisTradingClient:
                 )
             msg_cd = str(data.get("msg_cd", ""))
             message = str(data.get("msg1", "")).strip()
-            if msg_cd in _RATE_LIMIT_CODES and retries < _MAX_SAFE_RETRIES:
+            decision = classify_kis_retry(msg_cd, retries=retries, refreshed=refreshed)
+            if decision is KisRetryDecision.RETRY_RATE_LIMITED:
                 retries += 1
                 continue
-            if msg_cd in _EXPIRED_TOKEN_CODES and not refreshed:
-                rejected = self._transport.access_token()
-                self._transport.refresh_token(rejected)
+            if decision is KisRetryDecision.RETRY_AFTER_TOKEN_REFRESH:
+                self._transport.refresh_token(sent_token)
                 refreshed = True
                 continue
             if data.get("rt_cd") != "0":

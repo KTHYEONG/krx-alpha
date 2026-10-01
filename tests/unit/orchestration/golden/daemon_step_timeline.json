@@ -1,0 +1,1511 @@
+{
+  "steps": [
+    {
+      "sleep": 10.0,
+      "logs": [
+        [
+          "DEBUG",
+          "[DAEMON] cycle=%d now=%s state=%s",
+          [
+            1,
+            "2026-09-16 08:25:00",
+            "STREAMER_ACTIVE"
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=state_change from=%s to=%s cycle=%d",
+          [
+            null,
+            "STREAMER_ACTIVE",
+            1
+          ],
+          true
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
+          [
+            "STREAMER_ACTIVE",
+            1,
+            false,
+            0
+          ],
+          false
+        ],
+        [
+          "CRITICAL",
+          "[DAEMON] stage=session status=FAIL reason=candidates_not_ready date=%s attempt=%d next_retry=%s",
+          [
+            "2026-09-16",
+            1,
+            "2026-09-16T08:30:00+09:00"
+          ],
+          false
+        ],
+        [
+          "CRITICAL",
+          "[DAEMON] stage=streamer status=DEGRADED reason=orchestration_failed candidates_rev=%d",
+          [
+            20260915
+          ],
+          false
+        ]
+      ],
+      "calls": [
+        [
+          "orchestration",
+          "2026-09-16",
+          false
+        ],
+        [
+          "new",
+          "regular",
+          [
+            "<PY>",
+            "-m",
+            "src.cli.main",
+            "collect-stream",
+            "--session-date",
+            "2026-09-16",
+            "--journal-root",
+            "<TMP>/data/l0",
+            "--manifest-path",
+            "<TMP>/data/manifest/2026-09-16.json",
+            "--candidates-path",
+            "<TMP>/data/candidates.json",
+            "--market-map",
+            "<TMP>/data/market_map.json",
+            "--degraded-reason",
+            "orchestration_failed"
+          ]
+        ],
+        [
+          "new",
+          "snapshot",
+          [
+            "<PY>",
+            "-m",
+            "src.cli.main",
+            "collect-snapshots",
+            "--session-date",
+            "2026-09-16",
+            "--candidates-path",
+            "<TMP>/data/candidates.json"
+          ]
+        ],
+        [
+          "ensure",
+          "regular",
+          "running"
+        ],
+        [
+          "ensure",
+          "snapshot",
+          "running"
+        ]
+      ],
+      "state": {
+        "aftermarket_circuit_alerted": [],
+        "aftermarket_eligibility_day": null,
+        "aftermarket_plan": [],
+        "aftermarket_plan_day": null,
+        "aftermarket_refresh_day": null,
+        "aftermarket_restarts": 0,
+        "aftermarket_results": {},
+        "anchors_reloaded_for": "2026-09-16",
+        "cycle": 1,
+        "degraded_active": true,
+        "eod_attempted_for": null,
+        "holiday_skip_logged_for": null,
+        "ingest_stale": false,
+        "last_ingest_check": null,
+        "last_snapshot_result": "running",
+        "last_summary": "2026-09-16T08:25:00+09:00",
+        "last_supervisor_result": "running",
+        "next_aftermarket_refresh_at": null,
+        "next_orchestration_at": "2026-09-16T08:30:00+09:00",
+        "orchestrated_for": null,
+        "orchestration_attempts": 1,
+        "orchestration_day": "2026-09-16",
+        "possible_holiday_warned_for": null,
+        "preflight_day": "2026-09-16",
+        "prev_state": "STREAMER_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
+      },
+      "instant": "2026-09-16T08:25:00+09:00"
+    },
+    {
+      "sleep": 10.0,
+      "logs": [
+        [
+          "DEBUG",
+          "[DAEMON] cycle=%d now=%s state=%s",
+          [
+            2,
+            "2026-09-16 08:26:00",
+            "STREAMER_ACTIVE"
+          ],
+          false
+        ]
+      ],
+      "calls": [
+        [
+          "ensure",
+          "regular",
+          "running"
+        ],
+        [
+          "ensure",
+          "snapshot",
+          "running"
+        ]
+      ],
+      "state": {
+        "aftermarket_circuit_alerted": [],
+        "aftermarket_eligibility_day": null,
+        "aftermarket_plan": [],
+        "aftermarket_plan_day": null,
+        "aftermarket_refresh_day": null,
+        "aftermarket_restarts": 0,
+        "aftermarket_results": {},
+        "anchors_reloaded_for": "2026-09-16",
+        "cycle": 2,
+        "degraded_active": true,
+        "eod_attempted_for": null,
+        "holiday_skip_logged_for": null,
+        "ingest_stale": false,
+        "last_ingest_check": null,
+        "last_snapshot_result": "running",
+        "last_summary": "2026-09-16T08:25:00+09:00",
+        "last_supervisor_result": "running",
+        "next_aftermarket_refresh_at": null,
+        "next_orchestration_at": "2026-09-16T08:30:00+09:00",
+        "orchestrated_for": null,
+        "orchestration_attempts": 1,
+        "orchestration_day": "2026-09-16",
+        "possible_holiday_warned_for": null,
+        "preflight_day": "2026-09-16",
+        "prev_state": "STREAMER_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
+      },
+      "instant": "2026-09-16T08:26:00+09:00"
+    },
+    {
+      "sleep": 10.0,
+      "logs": [
+        [
+          "DEBUG",
+          "[DAEMON] cycle=%d now=%s state=%s",
+          [
+            3,
+            "2026-09-16 08:31:00",
+            "STREAMER_ACTIVE"
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=streamer status=REPLACE_DEGRADED stop_result=%s",
+          [
+            "graceful"
+          ],
+          true
+        ]
+      ],
+      "calls": [
+        [
+          "orchestration",
+          "2026-09-16",
+          true
+        ],
+        [
+          "stop",
+          "regular",
+          15.0
+        ],
+        [
+          "new",
+          "regular",
+          [
+            "<PY>",
+            "-m",
+            "src.cli.main",
+            "collect-stream",
+            "--session-date",
+            "2026-09-16",
+            "--journal-root",
+            "<TMP>/data/l0",
+            "--manifest-path",
+            "<TMP>/data/manifest/2026-09-16.json",
+            "--candidates-path",
+            "<TMP>/data/candidates.json",
+            "--market-map",
+            "<TMP>/data/market_map.json"
+          ]
+        ],
+        [
+          "stop",
+          "snapshot",
+          15.0
+        ],
+        [
+          "new",
+          "snapshot",
+          [
+            "<PY>",
+            "-m",
+            "src.cli.main",
+            "collect-snapshots",
+            "--session-date",
+            "2026-09-16",
+            "--candidates-path",
+            "<TMP>/data/candidates.json"
+          ]
+        ],
+        [
+          "ensure",
+          "regular",
+          "running"
+        ],
+        [
+          "ensure",
+          "snapshot",
+          "running"
+        ]
+      ],
+      "state": {
+        "aftermarket_circuit_alerted": [],
+        "aftermarket_eligibility_day": null,
+        "aftermarket_plan": [],
+        "aftermarket_plan_day": null,
+        "aftermarket_refresh_day": null,
+        "aftermarket_restarts": 0,
+        "aftermarket_results": {},
+        "anchors_reloaded_for": "2026-09-16",
+        "cycle": 3,
+        "degraded_active": false,
+        "eod_attempted_for": null,
+        "holiday_skip_logged_for": null,
+        "ingest_stale": false,
+        "last_ingest_check": null,
+        "last_snapshot_result": "running",
+        "last_summary": "2026-09-16T08:25:00+09:00",
+        "last_supervisor_result": "running",
+        "next_aftermarket_refresh_at": null,
+        "next_orchestration_at": null,
+        "orchestrated_for": "2026-09-16",
+        "orchestration_attempts": 2,
+        "orchestration_day": "2026-09-16",
+        "possible_holiday_warned_for": null,
+        "preflight_day": "2026-09-16",
+        "prev_state": "STREAMER_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
+      },
+      "instant": "2026-09-16T08:31:00+09:00"
+    },
+    {
+      "sleep": 10.0,
+      "logs": [
+        [
+          "DEBUG",
+          "[DAEMON] cycle=%d now=%s state=%s",
+          [
+            4,
+            "2026-09-16 09:10:00",
+            "FULL_ACTIVE"
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=state_change from=%s to=%s cycle=%d",
+          [
+            "STREAMER_ACTIVE",
+            "FULL_ACTIVE",
+            4
+          ],
+          true
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
+          [
+            "FULL_ACTIVE",
+            4,
+            true,
+            0
+          ],
+          false
+        ],
+        [
+          "CRITICAL",
+          "[DAEMON] stage=ingest_watchdog status=STALE date=%s age_s=%s",
+          [
+            "2026-09-16",
+            "none"
+          ],
+          false
+        ]
+      ],
+      "calls": [
+        [
+          "ensure",
+          "regular",
+          "running"
+        ],
+        [
+          "ensure",
+          "snapshot",
+          "running"
+        ]
+      ],
+      "state": {
+        "aftermarket_circuit_alerted": [],
+        "aftermarket_eligibility_day": null,
+        "aftermarket_plan": [],
+        "aftermarket_plan_day": null,
+        "aftermarket_refresh_day": null,
+        "aftermarket_restarts": 0,
+        "aftermarket_results": {},
+        "anchors_reloaded_for": "2026-09-16",
+        "cycle": 4,
+        "degraded_active": false,
+        "eod_attempted_for": null,
+        "holiday_skip_logged_for": null,
+        "ingest_stale": true,
+        "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_snapshot_result": "running",
+        "last_summary": "2026-09-16T09:10:00+09:00",
+        "last_supervisor_result": "running",
+        "next_aftermarket_refresh_at": null,
+        "next_orchestration_at": null,
+        "orchestrated_for": "2026-09-16",
+        "orchestration_attempts": 2,
+        "orchestration_day": "2026-09-16",
+        "possible_holiday_warned_for": null,
+        "preflight_day": "2026-09-16",
+        "prev_state": "FULL_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
+      },
+      "instant": "2026-09-16T09:10:00+09:00"
+    },
+    {
+      "sleep": 10.0,
+      "logs": [
+        [
+          "DEBUG",
+          "[DAEMON] cycle=%d now=%s state=%s",
+          [
+            5,
+            "2026-09-16 15:32:00",
+            "FULL_ACTIVE"
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
+          [
+            "FULL_ACTIVE",
+            5,
+            true,
+            0
+          ],
+          false
+        ],
+        [
+          "WARNING",
+          "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=no_bars_store",
+          [],
+          false
+        ]
+      ],
+      "calls": [
+        [
+          "ensure",
+          "regular",
+          "running"
+        ],
+        [
+          "ensure",
+          "snapshot",
+          "running"
+        ],
+        [
+          "refresh_aftermarket",
+          "2026-09-16",
+          0
+        ]
+      ],
+      "state": {
+        "aftermarket_circuit_alerted": [],
+        "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_plan": [],
+        "aftermarket_plan_day": null,
+        "aftermarket_refresh_day": "2026-09-16",
+        "aftermarket_restarts": 0,
+        "aftermarket_results": {},
+        "anchors_reloaded_for": "2026-09-16",
+        "cycle": 5,
+        "degraded_active": false,
+        "eod_attempted_for": null,
+        "holiday_skip_logged_for": null,
+        "ingest_stale": true,
+        "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_snapshot_result": "running",
+        "last_summary": "2026-09-16T15:32:00+09:00",
+        "last_supervisor_result": "running",
+        "next_aftermarket_refresh_at": null,
+        "next_orchestration_at": null,
+        "orchestrated_for": "2026-09-16",
+        "orchestration_attempts": 2,
+        "orchestration_day": "2026-09-16",
+        "possible_holiday_warned_for": null,
+        "preflight_day": "2026-09-16",
+        "prev_state": "FULL_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
+      },
+      "instant": "2026-09-16T15:32:00+09:00"
+    },
+    {
+      "sleep": 10.0,
+      "logs": [
+        [
+          "DEBUG",
+          "[DAEMON] cycle=%d now=%s state=%s",
+          [
+            6,
+            "2026-09-16 15:45:00",
+            "AFTER_MARKET_ACTIVE"
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=state_change from=%s to=%s cycle=%d",
+          [
+            "FULL_ACTIVE",
+            "AFTER_MARKET_ACTIVE",
+            6
+          ],
+          true
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
+          [
+            "AFTER_MARKET_ACTIVE",
+            6,
+            true,
+            0
+          ],
+          false
+        ]
+      ],
+      "calls": [
+        [
+          "ensure",
+          "regular",
+          "running"
+        ],
+        [
+          "plan_shards",
+          [
+            "005930",
+            "000660"
+          ]
+        ],
+        [
+          "new",
+          "nxt:0",
+          [
+            "<PY>",
+            "-m",
+            "src.cli.main",
+            "collect-aftermarket",
+            "--session-date",
+            "2026-09-16",
+            "--journal-root",
+            "<TMP>/data/l0",
+            "--manifest-path",
+            "<TMP>/data/manifest/aftermarket/2026-09-16.nxt.shard-00.json",
+            "--candidates-path",
+            "<TMP>/data/universe/aftermarket/2026-09-16.json",
+            "--venue",
+            "nxt",
+            "--shard-index",
+            "0",
+            "--credential-slot",
+            "0",
+            "--credential-key-id",
+            "id0",
+            "--symbols",
+            "005930"
+          ]
+        ],
+        [
+          "ensure",
+          "nxt:0",
+          "running"
+        ]
+      ],
+      "state": {
+        "aftermarket_circuit_alerted": [],
+        "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_plan": [
+          {
+            "credential_key_id": "id0",
+            "credential_slot": "0",
+            "shard_index": 0,
+            "streams": [
+              "H0NXCNT0",
+              "H0NXASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "venue": "nxt"
+          },
+          {
+            "credential_key_id": "id1",
+            "credential_slot": "1",
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "000660"
+            ],
+            "venue": "krx"
+          }
+        ],
+        "aftermarket_plan_day": "2026-09-16",
+        "aftermarket_refresh_day": "2026-09-16",
+        "aftermarket_restarts": 0,
+        "aftermarket_results": {
+          "nxt:0": "running"
+        },
+        "anchors_reloaded_for": "2026-09-16",
+        "cycle": 6,
+        "degraded_active": false,
+        "eod_attempted_for": null,
+        "holiday_skip_logged_for": null,
+        "ingest_stale": true,
+        "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_snapshot_result": "running",
+        "last_summary": "2026-09-16T15:45:00+09:00",
+        "last_supervisor_result": "running",
+        "next_aftermarket_refresh_at": null,
+        "next_orchestration_at": null,
+        "orchestrated_for": "2026-09-16",
+        "orchestration_attempts": 2,
+        "orchestration_day": "2026-09-16",
+        "possible_holiday_warned_for": null,
+        "preflight_day": "2026-09-16",
+        "prev_state": "AFTER_MARKET_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
+      },
+      "instant": "2026-09-16T15:45:00+09:00"
+    },
+    {
+      "sleep": 10.0,
+      "logs": [
+        [
+          "DEBUG",
+          "[DAEMON] cycle=%d now=%s state=%s",
+          [
+            7,
+            "2026-09-16 16:05:00",
+            "AFTER_MARKET_ACTIVE"
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
+          [
+            "AFTER_MARKET_ACTIVE",
+            7,
+            true,
+            0
+          ],
+          false
+        ],
+        [
+          "CRITICAL",
+          "[DAEMON] stage=aftermarket_stream status=FAIL reason=circuit_open key=%s",
+          [
+            "nxt:0"
+          ],
+          false
+        ],
+        [
+          "WARNING",
+          "[DAEMON] stage=aftermarket_stream status=RESTARTED key=%s exit_code=%s",
+          [
+            "krx:0",
+            -9
+          ],
+          false
+        ]
+      ],
+      "calls": [
+        [
+          "ensure",
+          "regular",
+          "running"
+        ],
+        [
+          "new",
+          "krx:0",
+          [
+            "<PY>",
+            "-m",
+            "src.cli.main",
+            "collect-aftermarket",
+            "--session-date",
+            "2026-09-16",
+            "--journal-root",
+            "<TMP>/data/l0",
+            "--manifest-path",
+            "<TMP>/data/manifest/aftermarket/2026-09-16.krx.shard-00.json",
+            "--candidates-path",
+            "<TMP>/data/universe/aftermarket/2026-09-16.json",
+            "--venue",
+            "krx",
+            "--shard-index",
+            "0",
+            "--credential-slot",
+            "1",
+            "--credential-key-id",
+            "id1",
+            "--symbols",
+            "000660"
+          ]
+        ],
+        [
+          "ensure",
+          "nxt:0",
+          "circuit_open"
+        ],
+        [
+          "ensure",
+          "krx:0",
+          "restarted"
+        ]
+      ],
+      "state": {
+        "aftermarket_circuit_alerted": [
+          "nxt:0"
+        ],
+        "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_plan": [
+          {
+            "credential_key_id": "id0",
+            "credential_slot": "0",
+            "shard_index": 0,
+            "streams": [
+              "H0NXCNT0",
+              "H0NXASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "venue": "nxt"
+          },
+          {
+            "credential_key_id": "id1",
+            "credential_slot": "1",
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "000660"
+            ],
+            "venue": "krx"
+          }
+        ],
+        "aftermarket_plan_day": "2026-09-16",
+        "aftermarket_refresh_day": "2026-09-16",
+        "aftermarket_restarts": 1,
+        "aftermarket_results": {
+          "krx:0": "restarted",
+          "nxt:0": "circuit_open"
+        },
+        "anchors_reloaded_for": "2026-09-16",
+        "cycle": 7,
+        "degraded_active": false,
+        "eod_attempted_for": null,
+        "holiday_skip_logged_for": null,
+        "ingest_stale": true,
+        "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_snapshot_result": "running",
+        "last_summary": "2026-09-16T16:05:00+09:00",
+        "last_supervisor_result": "running",
+        "next_aftermarket_refresh_at": null,
+        "next_orchestration_at": null,
+        "orchestrated_for": "2026-09-16",
+        "orchestration_attempts": 2,
+        "orchestration_day": "2026-09-16",
+        "possible_holiday_warned_for": null,
+        "preflight_day": "2026-09-16",
+        "prev_state": "AFTER_MARKET_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
+      },
+      "instant": "2026-09-16T16:05:00+09:00"
+    },
+    {
+      "sleep": 60.0,
+      "logs": [
+        [
+          "DEBUG",
+          "[DAEMON] cycle=%d now=%s state=%s",
+          [
+            8,
+            "2026-09-16 20:05:00",
+            "POST_MARKET_EOD"
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=state_change from=%s to=%s cycle=%d",
+          [
+            "AFTER_MARKET_ACTIVE",
+            "POST_MARKET_EOD",
+            8
+          ],
+          true
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
+          [
+            "POST_MARKET_EOD",
+            8,
+            true,
+            0
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=streamer_stop result=%s",
+          [
+            "graceful"
+          ],
+          true
+        ],
+        [
+          "CRITICAL",
+          "[DAEMON] stage=eod_maintenance status=DEGRADED reason=aftermarket_not_ready date=%s",
+          [
+            "2026-09-16"
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=%s",
+          [
+            1,
+            2,
+            3,
+            "DEGRADED"
+          ],
+          true
+        ]
+      ],
+      "calls": [
+        [
+          "stop",
+          "regular",
+          15.0
+        ],
+        [
+          "stop",
+          "snapshot",
+          15.0
+        ],
+        [
+          "stop",
+          "nxt:0",
+          15.0
+        ],
+        [
+          "stop",
+          "krx:0",
+          15.0
+        ],
+        [
+          "housekeeping",
+          "2026-09-16"
+        ],
+        [
+          "digest",
+          "[krx-alpha] EOD 2026-09-16 DEGRADED"
+        ]
+      ],
+      "state": {
+        "aftermarket_circuit_alerted": [],
+        "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_plan": [
+          {
+            "credential_key_id": "id0",
+            "credential_slot": "0",
+            "shard_index": 0,
+            "streams": [
+              "H0NXCNT0",
+              "H0NXASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "venue": "nxt"
+          },
+          {
+            "credential_key_id": "id1",
+            "credential_slot": "1",
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "000660"
+            ],
+            "venue": "krx"
+          }
+        ],
+        "aftermarket_plan_day": "2026-09-16",
+        "aftermarket_refresh_day": "2026-09-16",
+        "aftermarket_restarts": 0,
+        "aftermarket_results": {},
+        "anchors_reloaded_for": "2026-09-16",
+        "cycle": 8,
+        "degraded_active": false,
+        "eod_attempted_for": "2026-09-16",
+        "holiday_skip_logged_for": null,
+        "ingest_stale": true,
+        "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_snapshot_result": null,
+        "last_summary": "2026-09-16T20:05:00+09:00",
+        "last_supervisor_result": null,
+        "next_aftermarket_refresh_at": null,
+        "next_orchestration_at": null,
+        "orchestrated_for": "2026-09-16",
+        "orchestration_attempts": 2,
+        "orchestration_day": "2026-09-16",
+        "possible_holiday_warned_for": null,
+        "preflight_day": "2026-09-16",
+        "prev_state": "POST_MARKET_EOD",
+        "program_sync_day": null,
+        "streamer_restarts": 0
+      },
+      "instant": "2026-09-16T20:05:00+09:00"
+    },
+    {
+      "sleep": 60.0,
+      "logs": [
+        [
+          "DEBUG",
+          "[DAEMON] cycle=%d now=%s state=%s",
+          [
+            9,
+            "2026-09-16 20:06:00",
+            "POST_MARKET_EOD"
+          ],
+          false
+        ]
+      ],
+      "calls": [],
+      "state": {
+        "aftermarket_circuit_alerted": [],
+        "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_plan": [
+          {
+            "credential_key_id": "id0",
+            "credential_slot": "0",
+            "shard_index": 0,
+            "streams": [
+              "H0NXCNT0",
+              "H0NXASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "venue": "nxt"
+          },
+          {
+            "credential_key_id": "id1",
+            "credential_slot": "1",
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "000660"
+            ],
+            "venue": "krx"
+          }
+        ],
+        "aftermarket_plan_day": "2026-09-16",
+        "aftermarket_refresh_day": "2026-09-16",
+        "aftermarket_restarts": 0,
+        "aftermarket_results": {},
+        "anchors_reloaded_for": "2026-09-16",
+        "cycle": 9,
+        "degraded_active": false,
+        "eod_attempted_for": "2026-09-16",
+        "holiday_skip_logged_for": null,
+        "ingest_stale": true,
+        "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_snapshot_result": null,
+        "last_summary": "2026-09-16T20:05:00+09:00",
+        "last_supervisor_result": null,
+        "next_aftermarket_refresh_at": null,
+        "next_orchestration_at": null,
+        "orchestrated_for": "2026-09-16",
+        "orchestration_attempts": 2,
+        "orchestration_day": "2026-09-16",
+        "possible_holiday_warned_for": null,
+        "preflight_day": "2026-09-16",
+        "prev_state": "POST_MARKET_EOD",
+        "program_sync_day": null,
+        "streamer_restarts": 0
+      },
+      "instant": "2026-09-16T20:06:00+09:00"
+    },
+    {
+      "sleep": 1800.0,
+      "logs": [
+        [
+          "DEBUG",
+          "[DAEMON] cycle=%d now=%s state=%s",
+          [
+            10,
+            "2026-09-16 22:00:00",
+            "NIGHT_SLEEP"
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=state_change from=%s to=%s cycle=%d",
+          [
+            "POST_MARKET_EOD",
+            "NIGHT_SLEEP",
+            10
+          ],
+          true
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
+          [
+            "NIGHT_SLEEP",
+            10,
+            false,
+            0
+          ],
+          false
+        ]
+      ],
+      "calls": [],
+      "state": {
+        "aftermarket_circuit_alerted": [],
+        "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_plan": [
+          {
+            "credential_key_id": "id0",
+            "credential_slot": "0",
+            "shard_index": 0,
+            "streams": [
+              "H0NXCNT0",
+              "H0NXASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "venue": "nxt"
+          },
+          {
+            "credential_key_id": "id1",
+            "credential_slot": "1",
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "000660"
+            ],
+            "venue": "krx"
+          }
+        ],
+        "aftermarket_plan_day": "2026-09-16",
+        "aftermarket_refresh_day": "2026-09-16",
+        "aftermarket_restarts": 0,
+        "aftermarket_results": {},
+        "anchors_reloaded_for": "2026-09-16",
+        "cycle": 10,
+        "degraded_active": false,
+        "eod_attempted_for": "2026-09-16",
+        "holiday_skip_logged_for": null,
+        "ingest_stale": true,
+        "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_snapshot_result": null,
+        "last_summary": "2026-09-16T22:00:00+09:00",
+        "last_supervisor_result": null,
+        "next_aftermarket_refresh_at": null,
+        "next_orchestration_at": null,
+        "orchestrated_for": "2026-09-16",
+        "orchestration_attempts": 2,
+        "orchestration_day": "2026-09-16",
+        "possible_holiday_warned_for": null,
+        "preflight_day": "2026-09-16",
+        "prev_state": "NIGHT_SLEEP",
+        "program_sync_day": null,
+        "streamer_restarts": 0
+      },
+      "instant": "2026-09-16T22:00:00+09:00"
+    },
+    {
+      "sleep": 3600.0,
+      "logs": [
+        [
+          "INFO",
+          "[DAEMON] stage=session status=SKIP reason=market_holiday date=%s",
+          [
+            "2026-09-17"
+          ],
+          true
+        ],
+        [
+          "DEBUG",
+          "[DAEMON] cycle=%d now=%s state=%s",
+          [
+            11,
+            "2026-09-17 09:00:00",
+            "FULL_ACTIVE"
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=state_change from=%s to=%s cycle=%d",
+          [
+            "NIGHT_SLEEP",
+            "FULL_ACTIVE",
+            11
+          ],
+          true
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
+          [
+            "FULL_ACTIVE",
+            11,
+            true,
+            0
+          ],
+          false
+        ]
+      ],
+      "calls": [
+        [
+          "stop",
+          "regular",
+          15.0
+        ],
+        [
+          "stop",
+          "snapshot",
+          15.0
+        ],
+        [
+          "stop",
+          "krx:9",
+          15.0
+        ]
+      ],
+      "state": {
+        "aftermarket_circuit_alerted": [
+          "krx:9"
+        ],
+        "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_plan": [
+          {
+            "credential_key_id": "id0",
+            "credential_slot": "0",
+            "shard_index": 0,
+            "streams": [
+              "H0NXCNT0",
+              "H0NXASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "venue": "nxt"
+          },
+          {
+            "credential_key_id": "id1",
+            "credential_slot": "1",
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "000660"
+            ],
+            "venue": "krx"
+          }
+        ],
+        "aftermarket_plan_day": "2026-09-16",
+        "aftermarket_refresh_day": "2026-09-16",
+        "aftermarket_restarts": 0,
+        "aftermarket_results": {},
+        "anchors_reloaded_for": "2026-09-16",
+        "cycle": 11,
+        "degraded_active": false,
+        "eod_attempted_for": "2026-09-16",
+        "holiday_skip_logged_for": "2026-09-17",
+        "ingest_stale": true,
+        "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_snapshot_result": null,
+        "last_summary": "2026-09-17T09:00:00+09:00",
+        "last_supervisor_result": null,
+        "next_aftermarket_refresh_at": null,
+        "next_orchestration_at": null,
+        "orchestrated_for": "2026-09-16",
+        "orchestration_attempts": 2,
+        "orchestration_day": "2026-09-16",
+        "possible_holiday_warned_for": null,
+        "preflight_day": "2026-09-16",
+        "prev_state": "FULL_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
+      },
+      "instant": "2026-09-17T09:00:00+09:00"
+    },
+    {
+      "sleep": 60.0,
+      "logs": [
+        [
+          "DEBUG",
+          "[DAEMON] cycle=%d now=%s state=%s",
+          [
+            12,
+            "2026-09-17 20:05:00",
+            "POST_MARKET_EOD"
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=state_change from=%s to=%s cycle=%d",
+          [
+            "FULL_ACTIVE",
+            "POST_MARKET_EOD",
+            12
+          ],
+          true
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
+          [
+            "POST_MARKET_EOD",
+            12,
+            false,
+            0
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=eod_maintenance status=HOLIDAY deleted_partitions=%d uploaded=%d purged=%d date=%s",
+          [
+            1,
+            2,
+            3,
+            "2026-09-17"
+          ],
+          true
+        ]
+      ],
+      "calls": [
+        [
+          "housekeeping",
+          "2026-09-17"
+        ]
+      ],
+      "state": {
+        "aftermarket_circuit_alerted": [],
+        "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_plan": [
+          {
+            "credential_key_id": "id0",
+            "credential_slot": "0",
+            "shard_index": 0,
+            "streams": [
+              "H0NXCNT0",
+              "H0NXASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "venue": "nxt"
+          },
+          {
+            "credential_key_id": "id1",
+            "credential_slot": "1",
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "000660"
+            ],
+            "venue": "krx"
+          }
+        ],
+        "aftermarket_plan_day": "2026-09-16",
+        "aftermarket_refresh_day": "2026-09-16",
+        "aftermarket_restarts": 0,
+        "aftermarket_results": {},
+        "anchors_reloaded_for": "2026-09-16",
+        "cycle": 12,
+        "degraded_active": false,
+        "eod_attempted_for": "2026-09-17",
+        "holiday_skip_logged_for": "2026-09-17",
+        "ingest_stale": true,
+        "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_snapshot_result": null,
+        "last_summary": "2026-09-17T20:05:00+09:00",
+        "last_supervisor_result": null,
+        "next_aftermarket_refresh_at": null,
+        "next_orchestration_at": null,
+        "orchestrated_for": "2026-09-16",
+        "orchestration_attempts": 2,
+        "orchestration_day": "2026-09-16",
+        "possible_holiday_warned_for": null,
+        "preflight_day": "2026-09-16",
+        "prev_state": "POST_MARKET_EOD",
+        "program_sync_day": null,
+        "streamer_restarts": 0
+      },
+      "instant": "2026-09-17T20:05:00+09:00"
+    },
+    {
+      "sleep": 10.0,
+      "logs": [
+        [
+          "DEBUG",
+          "[DAEMON] cycle=%d now=%s state=%s",
+          [
+            13,
+            "2026-09-18 08:25:00",
+            "STREAMER_ACTIVE"
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=state_change from=%s to=%s cycle=%d",
+          [
+            "POST_MARKET_EOD",
+            "STREAMER_ACTIVE",
+            13
+          ],
+          true
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
+          [
+            "STREAMER_ACTIVE",
+            13,
+            false,
+            0
+          ],
+          false
+        ],
+        [
+          "WARNING",
+          "[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s",
+          [
+            "graceful"
+          ],
+          false
+        ]
+      ],
+      "calls": [
+        [
+          "stop",
+          "regular",
+          15.0
+        ],
+        [
+          "orchestration",
+          "2026-09-18",
+          true
+        ],
+        [
+          "new",
+          "regular",
+          [
+            "<PY>",
+            "-m",
+            "src.cli.main",
+            "collect-stream",
+            "--session-date",
+            "2026-09-18",
+            "--journal-root",
+            "<TMP>/data/l0",
+            "--manifest-path",
+            "<TMP>/data/manifest/2026-09-18.json",
+            "--candidates-path",
+            "<TMP>/data/candidates.json",
+            "--market-map",
+            "<TMP>/data/market_map.json"
+          ]
+        ],
+        [
+          "new",
+          "snapshot",
+          [
+            "<PY>",
+            "-m",
+            "src.cli.main",
+            "collect-snapshots",
+            "--session-date",
+            "2026-09-18",
+            "--candidates-path",
+            "<TMP>/data/candidates.json"
+          ]
+        ],
+        [
+          "ensure",
+          "regular",
+          "running"
+        ],
+        [
+          "ensure",
+          "snapshot",
+          "running"
+        ]
+      ],
+      "state": {
+        "aftermarket_circuit_alerted": [],
+        "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_plan": [
+          {
+            "credential_key_id": "id0",
+            "credential_slot": "0",
+            "shard_index": 0,
+            "streams": [
+              "H0NXCNT0",
+              "H0NXASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "venue": "nxt"
+          },
+          {
+            "credential_key_id": "id1",
+            "credential_slot": "1",
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "000660"
+            ],
+            "venue": "krx"
+          }
+        ],
+        "aftermarket_plan_day": "2026-09-16",
+        "aftermarket_refresh_day": "2026-09-16",
+        "aftermarket_restarts": 0,
+        "aftermarket_results": {},
+        "anchors_reloaded_for": "2026-09-18",
+        "cycle": 13,
+        "degraded_active": false,
+        "eod_attempted_for": "2026-09-17",
+        "holiday_skip_logged_for": "2026-09-17",
+        "ingest_stale": false,
+        "last_ingest_check": null,
+        "last_snapshot_result": "running",
+        "last_summary": "2026-09-18T08:25:00+09:00",
+        "last_supervisor_result": "running",
+        "next_aftermarket_refresh_at": null,
+        "next_orchestration_at": null,
+        "orchestrated_for": "2026-09-18",
+        "orchestration_attempts": 1,
+        "orchestration_day": "2026-09-18",
+        "possible_holiday_warned_for": null,
+        "preflight_day": "2026-09-18",
+        "prev_state": "STREAMER_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
+      },
+      "instant": "2026-09-18T08:25:00+09:00"
+    }
+  ],
+  "log_stage_multiset": [
+    "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=bars_unreadable",
+    "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=no_bars_store",
+    "[DAEMON] stage=aftermarket_plan status=FAIL reason=%s",
+    "[DAEMON] stage=aftermarket_reselection status=FAIL reason=%s next_retry=%s",
+    "[DAEMON] stage=aftermarket_stream status=FAIL reason=circuit_open key=%s",
+    "[DAEMON] stage=aftermarket_stream status=RESTARTED key=%s exit_code=%s",
+    "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=%s",
+    "[DAEMON] stage=eod_maintenance status=DEGRADED reason=aftermarket_not_ready date=%s",
+    "[DAEMON] stage=eod_maintenance status=FAIL reason=session_data_gap date=%s",
+    "[DAEMON] stage=eod_maintenance status=HOLIDAY deleted_partitions=%d uploaded=%d purged=%d date=%s",
+    "[DAEMON] stage=eod_reconciliation status=FAIL error=%s",
+    "[DAEMON] stage=eod_reconciliation status=SKIP reason=calendar_unknown",
+    "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
+    "[DAEMON] stage=ingest_watchdog status=POSSIBLE_HOLIDAY date=%s",
+    "[DAEMON] stage=ingest_watchdog status=RECOVERED date=%s age_s=%d",
+    "[DAEMON] stage=ingest_watchdog status=STALE date=%s age_s=%s",
+    "[DAEMON] stage=program_trades_sync status=FAIL exit_code=%s",
+    "[DAEMON] stage=program_trades_sync status=FAIL exit_code=launch reason=%s",
+    "[DAEMON] stage=program_trades_sync status=FAIL reason=timeout",
+    "[DAEMON] stage=program_trades_sync status=OK exit_code=0",
+    "[DAEMON] stage=program_trades_sync status=STARTED date=%s",
+    "[DAEMON] stage=session status=FAIL reason=candidates_not_ready date=%s attempt=%d next_retry=%s",
+    "[DAEMON] stage=session status=FAIL reason=orchestration_error error=%s",
+    "[DAEMON] stage=session status=SKIP reason=market_holiday date=%s",
+    "[DAEMON] stage=shutdown status=STOPPED signal=%s graceful=%d killed=%d not_running=%d",
+    "[DAEMON] stage=snapshots status=FAIL reason=circuit_open",
+    "[DAEMON] stage=snapshots status=RESTARTED exit_code=%s",
+    "[DAEMON] stage=state_change from=%s to=%s cycle=%d",
+    "[DAEMON] stage=streamer status=DEGRADED reason=orchestration_failed candidates_rev=%d",
+    "[DAEMON] stage=streamer status=FAIL reason=circuit_open",
+    "[DAEMON] stage=streamer status=REPLACE_DEGRADED stop_result=%s",
+    "[DAEMON] stage=streamer status=RESTARTED exit_code=%s restarts=%d",
+    "[DAEMON] stage=streamer status=STARTED",
+    "[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s",
+    "[DAEMON] stage=streamer_stop result=%s"
+  ]
+}

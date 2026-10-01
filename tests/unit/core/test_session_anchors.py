@@ -192,3 +192,23 @@ def test_load_returns_none_when_anchor_path_is_directory(tmp_path) -> None:
     (tmp_path / f"dt={day.isoformat()}.json").mkdir()
 
     assert load_session_anchors(tmp_path, day) is None
+
+
+def test_aftermarket_open_constants_ordered() -> None:
+    import datetime as dt
+
+    from src.core.session_anchors import (
+        STANDARD_AFTER_MARKET_END,
+        STANDARD_KRX_AFTER_MARKET_OPEN,
+        STANDARD_NXT_AFTER_MARKET_OPEN,
+        STANDARD_POST_CLOSING_PRICE_OPEN,
+        STANDARD_REGULAR_CLOSE,
+    )
+
+    assert dt.time(15, 40) == STANDARD_POST_CLOSING_PRICE_OPEN
+    assert dt.time(15, 40) == STANDARD_NXT_AFTER_MARKET_OPEN
+    assert dt.time(16, 0) == STANDARD_KRX_AFTER_MARKET_OPEN
+    assert STANDARD_REGULAR_CLOSE < STANDARD_POST_CLOSING_PRICE_OPEN
+    assert STANDARD_POST_CLOSING_PRICE_OPEN == STANDARD_NXT_AFTER_MARKET_OPEN
+    assert STANDARD_NXT_AFTER_MARKET_OPEN < STANDARD_KRX_AFTER_MARKET_OPEN
+    assert STANDARD_KRX_AFTER_MARKET_OPEN < STANDARD_AFTER_MARKET_END

@@ -16,6 +16,13 @@ from zoneinfo import ZoneInfo
 from src.core.session_anchors import STANDARD_AFTER_MARKET_END
 from src.realtime.kis_sharding import AftermarketShard
 from src.realtime.manifest import SessionManifest
+from src.storage.layout import (
+    L0_JOURNAL_GLOB,
+    L1_REPO_PREFIX,
+    l0_partition_key,
+    l0_partition_relpath,
+    l1_repo_path,
+)
 from src.storage.normalize_worker import run_isolated_normalize
 from src.storage.remote import GDriveArchiver, PurgeStats, RcloneArchiver, RemoteArchiveError, SyncStats
 from src.storage.retention import prune_local_l1, prune_old_journals
@@ -87,14 +94,14 @@ def run_eod_offload(
         raise RemoteArchiveError(
             f"offload verification failed: l1={l1_stats.failed_verification} manifests={manifests_stats.failed_verification}"
         )
-    sizes = arc.remote_file_sizes("l1/") if hasattr(arc, "remote_file_sizes") else {}
+    sizes = arc.remote_file_sizes(L1_REPO_PREFIX) if hasattr(arc, "remote_file_sizes") else {}
     local_root = pathlib.Path(archive_root)
     verified: set[str] = set()
     for pq in sorted(local_root.rglob("*.parquet")):
-        rel = "l1/" + pq.relative_to(local_root).as_posix()
+        rel = l1_repo_path(pq.relative_to(local_root))
         if sizes.get(rel) == pq.stat().st_size:
             verified.add(rel)
-    confirmed = arc.remote_files("l1/")
+    confirmed = arc.remote_files(L1_REPO_PREFIX)
     purged = prune_local_l1(
         archive_root, retain_days=retain_days, reference_date=reference_date, confirmed_remote=confirmed
     )
@@ -353,11 +360,10 @@ def check_session_reconciliation(
     issues: list[str] = []
     if not manifest.exists():
         issues.append("manifest_missing")
-    issues.extend(
-        f"journal_missing:{stream}"
-        for stream in streams
-        if not list((root / vendor / venue / session / stream / f"dt={date.isoformat()}").glob("*.jsonl.zst"))
-    )
+    for stream in streams:
+        key = l0_partition_key(vendor, venue, session, stream, date)
+        if key is None or not list((root / l0_partition_relpath(key)).glob(L0_JOURNAL_GLOB)):
+            issues.append(f"journal_missing:{stream}")
     if manifest.exists():
         try:
             loaded = SessionManifest.load(manifest)

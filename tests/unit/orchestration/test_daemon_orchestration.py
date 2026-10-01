@@ -1838,31 +1838,31 @@ def test_run_session_orchestration_reports_progress_between_stages(tmp_path, mon
     assert len(ticks) >= 2
 
 
-def test_build_data_client_uses_host_pacing_with_configured_lead(tmp_path, monkeypatch) -> None:
-    # Given: 표준 등급 리드를 가진 설정
+def test_build_kis_client_uses_host_pacing_with_configured_rate_and_lead(tmp_path, monkeypatch) -> None:
+    # Given: 실행 설정 속도와 수집기 표준 등급 리드
     import pathlib
 
     from src.brokers.kis.rate import HostPacedRateLimiter
-    from src.core.config import CollectorSettings
+    from src.core.config import CollectorSettings, ExecutionSettings
     from src.orchestration import daemon
 
     cache = pathlib.Path(tmp_path) / "kis-tokens"
     cache.mkdir(parents=True, exist_ok=True)
     (cache / ".host-admission").touch()
+    monkeypatch.setenv("KIS_APP_KEY", "k")
+    monkeypatch.setenv("KIS_APP_SECRET", "s")
+    monkeypatch.setenv("KIS_ACCOUNT_NO", "12345678")
+    monkeypatch.setenv("KIS_ACCOUNT_PRODUCT_CODE", "01")
     monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(cache))
+    collector = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    execution = ExecutionSettings(data_root=collector.paths.root)
 
     # When
-    _, client = daemon._build_data_client(
-        app_key="data-key",
-        app_secret="data-secret",
-        rate_per_s=18.0,
-        timeout_s=5.0,
-        allow_issue=False,
-        max_lead_s=CollectorSettings(data_root=tmp_path).kis_rest_max_lead_s,
-    )
+    client = daemon._build_kis_client(collector.paths)
 
-    # Then: 호스트 공유 리미터가 설정 리드로 묶인다
+    # Then: 호스트 공유 리미터가 실행 속도와 수집기 리드로 묶인다
     limiter = client._transport._limiter
     assert isinstance(limiter, HostPacedRateLimiter)
-    assert limiter._max_lead_s == 1.0
+    assert limiter._interval == 1.0 / execution.rest_rate_per_s
+    assert limiter._max_lead_s == collector.kis_rest_max_lead_s
     assert limiter._state_path.parent == cache

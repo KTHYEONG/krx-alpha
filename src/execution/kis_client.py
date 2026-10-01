@@ -30,7 +30,7 @@ from src.brokers.kis.data import (
     KisRankingRow,
 )
 from src.brokers.kis.http import KisGetTransport
-from src.brokers.kis.rate import HostPacedRateLimiter, RateLimiter
+from src.brokers.kis.rate import Pacer, RateLimiter
 from src.brokers.kis.trading import (
     KIS_LIVE_BASE_URL,
     TR_BALANCE,
@@ -95,7 +95,7 @@ class KisRestClient:
         creds: KisCredentials,
         session: Any,
         token_cache_path: pathlib.Path,
-        limiter: RateLimiter | HostPacedRateLimiter,
+        limiter: Pacer,
         now: Callable[[], dt.datetime],
         timeout_s: float,
         base_url: str = KIS_LIVE_BASE_URL,
@@ -165,9 +165,7 @@ class KisRestClient:
     def _headers(self, tr_id: str, tr_cont: str) -> dict[str, str]:
         return self._get_transport.headers(tr_id, tr_cont)
 
-    def _get(
-        self, path: str, tr_id: str, params: dict[str, str], tr_cont: str = ""
-    ) -> tuple[dict[str, Any], str]:
+    def _get(self, path: str, tr_id: str, params: dict[str, str], tr_cont: str = "") -> tuple[dict[str, Any], str]:
         return self._get_transport.get(path, tr_id, params, tr_cont)
 
     def _get_paged(
@@ -214,9 +212,7 @@ class KisRestClient:
     def get_index_snapshot(self, index_code: str) -> dict[str, object]:
         return self._data.get_index_snapshot(index_code)
 
-    def get_index_minute_bars(
-        self, index_code: str, *, session_date: dt.date
-    ) -> tuple[dict[str, object], ...]:
+    def get_index_minute_bars(self, index_code: str, *, session_date: dt.date) -> tuple[dict[str, object], ...]:
         return self._data.get_index_minute_bars(index_code, session_date=session_date)
 
     def get_stock_minute_bars(
@@ -226,7 +222,5 @@ class KisRestClient:
             symbol, session_date=session_date, session_open=session_open, session_close=session_close
         )
 
-    def get_news_titles(
-        self, *, before: tuple[str, str] | None = None
-    ) -> tuple[dict[str, object], ...]:
+    def get_news_titles(self, *, before: tuple[str, str] | None = None) -> tuple[dict[str, object], ...]:
         return self._data.get_news_titles(before=before)

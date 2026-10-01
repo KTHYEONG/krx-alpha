@@ -13,6 +13,12 @@ import zstandard as zstd
 
 from src.core.errors import KrxAlphaError
 from src.realtime.contracts import MarketSession, MarketVenue
+from src.storage.layout import (
+    L0PartitionKey,
+    l0_journal_file_glob,
+    l0_journal_file_name,
+    l0_partition_relpath,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,18 +57,15 @@ class L0JournalWriter:
         ts = dt.datetime.fromtimestamp(recv_wall_ns / 1_000_000_000, tz=_KST)
         return (
             self._root
-            / self._vendor
-            / self._venue.value
-            / self._session.value
-            / self._stream
-            / f"dt={ts.date().isoformat()}"
-            / (f"{ts.hour:02d}.{self._file_tag}.jsonl.zst" if self._file_tag else f"{ts.hour:02d}.jsonl.zst")
+            / l0_partition_relpath(
+                L0PartitionKey(self._vendor, self._venue, self._session, self._stream, ts.date())
+            )
+            / l0_journal_file_name(ts.hour, self._file_tag)
         )
 
     def owned_files(self, at_ns: int) -> list[pathlib.Path]:
         """Journal files this writer (not sibling shards) wrote for the date of ``at_ns``."""
-        pattern = f"[0-9][0-9].{self._file_tag}.jsonl.zst" if self._file_tag else "[0-9][0-9].jsonl.zst"
-        return sorted(self.partition_path(at_ns).parent.glob(pattern))
+        return sorted(self.partition_path(at_ns).parent.glob(l0_journal_file_glob(self._file_tag)))
 
     def append(
         self,

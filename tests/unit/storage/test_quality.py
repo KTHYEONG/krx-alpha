@@ -1001,3 +1001,113 @@ def test_decode_truncated_kis_quote_is_decode_fail_not_crash() -> None:
     assert summary is not None
     assert summary.decode_fail == 1
 
+
+def _crossed_ls_raw(hotime: int) -> str:
+    import json
+
+    clean_offer = [70100 + k * 100 for k in range(10)]
+    clean_bid = [69900 - k * 100 for k in range(10)]
+    crossed_offer = [69800, *clean_offer[1:]]
+    body = {'shcode': '005930', 'hotime': str(hotime).zfill(6)}
+    for k in range(10):
+        body[f'offerho{k + 1}'] = str(crossed_offer[k])
+        body[f'bidho{k + 1}'] = str(clean_bid[k])
+        body[f'offerrem{k + 1}'] = '100'
+        body[f'bidrem{k + 1}'] = '100'
+    body['totofferrem'] = '1000'
+    body['totbidrem'] = '1000'
+    return json.dumps({'header': {'tr_cd': 'H1_', 'tr_key': '005930'}, 'body': body}, ensure_ascii=False)
+
+
+def _csat_windows():
+    import datetime as dt
+
+    from src.core.session_anchors import AnchorSource, SessionAnchors
+    from src.storage.market_phase import phase_windows_for
+
+    csat = SessionAnchors(
+        date=dt.date(2025, 11, 13),
+        regular_open=dt.time(10, 0),
+        closing_auction_start=dt.time(16, 20),
+        regular_close=dt.time(16, 30),
+        after_market_end=dt.time(20, 0),
+        source=AnchorSource.VENDOR,
+    )
+    return phase_windows_for(csat)
+
+
+def test_phase_exempts_shifted_opening_auction() -> None:
+    import polars as pl
+
+    from src.storage.market_phase import annotate_market_phase
+    from src.storage.quality import decode_and_flag_quotes
+
+    df = pl.DataFrame({
+        'raw': [_crossed_ls_raw(93000)],
+        'tr_id': ['H0STASP0'],
+        'vendor': ['ls'],
+        'venue': ['krx'],
+        'recv_wall_ns': [100],
+    })
+    chunk = annotate_market_phase(df, windows=_csat_windows())
+    assert chunk["market_phase"].to_list() == ["opening_auction"]
+    summary = decode_and_flag_quotes(chunk)
+    assert summary is not None
+    assert summary.crossed_book == 0
+
+
+def test_phase_flags_standard_window_on_shifted_day() -> None:
+    import polars as pl
+
+    from src.storage.market_phase import annotate_market_phase
+    from src.storage.quality import decode_and_flag_quotes
+
+    df = pl.DataFrame({
+        'raw': [_crossed_ls_raw(84500)],
+        'tr_id': ['H0STASP0'],
+        'vendor': ['ls'],
+        'venue': ['krx'],
+        'recv_wall_ns': [100],
+    })
+    chunk = annotate_market_phase(df, windows=_csat_windows())
+    assert chunk["market_phase"].to_list() == ["unclassified"]
+    summary = decode_and_flag_quotes(chunk)
+    assert summary is not None
+    assert summary.crossed_book == 1
+
+
+def test_mixed_vendor_phase_alignment() -> None:
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_quotes
+
+    asks = [70100 + k * 100 for k in range(10)]
+    kis_crossed = _kis_quote_raw(asks=[69800, *asks[1:]])
+    df = pl.DataFrame({
+        'raw': [kis_crossed, _crossed_ls_raw(93000)],
+        'tr_id': ['H0STASP0', 'H0STASP0'],
+        'vendor': ['kis', 'ls'],
+        'market_phase': ['regular', 'opening_auction'],
+        'recv_wall_ns': [100, 200],
+    })
+    summary = decode_and_flag_quotes(df)
+    assert summary is not None
+    assert summary.crossed_book == 1
+
+
+def test_null_phase_not_exempt() -> None:
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_quotes
+
+    df = pl.DataFrame({
+        'raw': [_crossed_ls_raw(93000)],
+        'tr_id': ['H0STASP0'],
+        'vendor': ['ls'],
+        'market_phase': [None],
+        'recv_wall_ns': [100],
+    })
+    summary = decode_and_flag_quotes(df)
+    assert summary is not None
+    assert summary.crossed_book == 1
+

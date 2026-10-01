@@ -17,7 +17,7 @@ from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from src.brokers.kis.rate import HostPacedRateLimiter, RateLimiter
+from src.brokers.kis.rate import Pacer
 from src.execution.contracts import KisApiError
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,7 @@ class KisTokenProvider:
         auth: KisAppAuth,
         session: Any,
         cache_path: pathlib.Path,
-        limiter: RateLimiter | HostPacedRateLimiter,
+        limiter: Pacer,
         now: Callable[[], dt.datetime],
         timeout_s: float,
         base_url: str,
@@ -107,9 +107,7 @@ class KisTokenProvider:
         """유효한 캐시 토큰을 반환하고 무효·만료 임박분은 None으로 fail-closed 처리한다."""
         try:
             cached = json.loads(self._token_cache_path.read_text(encoding="utf-8"))
-            expires_at = dt.datetime.fromisoformat(
-                str(cached.get("expired_at") or cached.get("expires_at"))
-            )
+            expires_at = dt.datetime.fromisoformat(str(cached.get("expired_at") or cached.get("expires_at")))
             if cached.get("app_key") != self._auth.app_key:
                 return None
             token = cached.get("access_token")
@@ -169,14 +167,25 @@ class KisTokenProvider:
         return source
 
     def access_token(self, *, force: bool = False, rejected_token: str | None = None) -> str:
-        """Return a usable token while retaining lock, expiry, and refresh semantics.
+        """Return a bearer token usable for the next KIS request.
 
         Args:
-            force: Bypass the memory and file fast paths and re-resolve under the lock.
-            rejected_token: Token the vendor just refused. A cached token that is
-                valid and different from it is adopted (a peer already rotated
-                the shared cache); the daily-issuance guard only fires when the
-                cache still holds the rejected token.
+            force: Skip the in-memory and file fast paths and re-resolve under the
+                per-key process and file locks. Force does NOT guarantee a newly issued
+                token: a valid cached token different from ``rejected_token`` (a peer
+                such as KCA already rotated the shared cache) is adopted without
+                issuance. With issuance disabled, force raises TOKEN_CACHE without
+                consulting the cache.
+            rejected_token: The exact token the vendor refused on the wire. Pass the
+                token that was sent, never a fresh lookup: a re-lookup may return a
+                peer-rotated token, which would then be treated as rejected and trip
+                the daily-issuance guard. None under force means the in-memory token.
+
+        Raises:
+            KisApiError: TOKEN_CACHE (no usable token, issuance disabled);
+                TOKEN_BACKOFF (inside the issuance backoff with no adoptable cached
+                token); TOKEN_DAILY_LIMIT (cache still holds the rejected token and
+                was issued today, KST); vendor or TRANSPORT codes on failed issuance.
         """
         now = self._now()
         if (
@@ -258,9 +267,9 @@ class KisTokenProvider:
             code = str(body.get("error_code", "TOKEN"))
             self._fail_issue(now, code)
             raise KisApiError(code, str(body.get("error_description", "")))
-        expires_at = dt.datetime.strptime(
-            str(body["access_token_token_expired"]), "%Y-%m-%d %H:%M:%S"
-        ).replace(tzinfo=_KST)
+        expires_at = dt.datetime.strptime(str(body["access_token_token_expired"]), "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=_KST
+        )
         self._token = str(body["access_token"])
         self._token_expires_at = expires_at
         payload = json.dumps(

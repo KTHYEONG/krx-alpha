@@ -47,3 +47,5 @@ LAYER_RANK['src/core/session_anchors.py'] = 0
 LAYER_RANK['src/core/healthcheck.py'] = 0
 LAYER_RANK['src/core/lifecycle.py'] = 0
 LAYER_RANK['src/marketdata/toss_auth.py'] = 1
+LAYER_RANK['src/brokers/kis/stack.py'] = 2
+LAYER_RANK['src/storage/layout.py'] = 2

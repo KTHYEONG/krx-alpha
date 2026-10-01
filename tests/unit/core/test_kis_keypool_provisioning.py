@@ -216,3 +216,10 @@ def test_parse_workstation_assignments_rejects_circular_variable_reference(tmp_p
 
     with pytest.raises(KrxAlphaError, match="circular"):
         parse_workstation_assignments(source, accepted)
+
+
+def test_install_script_targets_remote_env_path() -> None:
+    from src.core.kis_keypool_provisioning import REMOTE_ENV_PATH, REMOTE_INSTALL_SCRIPT
+
+    assert REMOTE_ENV_PATH == "/home/ubuntu/quant-secrets/kis-data.env"
+    assert REMOTE_INSTALL_SCRIPT.count(f'dest="{REMOTE_ENV_PATH}"') == 1

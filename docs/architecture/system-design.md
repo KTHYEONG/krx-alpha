@@ -164,8 +164,8 @@ flowchart TD
 실시간 웹소켓 수신 시 파싱 부하를 배제하고 무손실 원형을 보존합니다:
 * `recv_mono_ns` (단조 시각 - 시스템 경과 ns, 지연 계측용), `recv_wall_ns` (절대 시각 - UTC ns, 시계열 정렬용), `conn_seq` (세션 단조 시퀀스), `conn_id` (연결 고유 식별자), `raw` (수신 원문 페이로드).
 
-#### L1 Normalized Parquet (`data/l1/{vendor}/{stream}/dt=YYYY-MM-DD.parquet`)
-EOD 단계에서 동일 `(conn_id, conn_seq)` 중복을 제거하고 정규화한 데이터셋입니다:
+#### L1 Normalized Parquet (`data/l1/{vendor}/{venue}/{session}/{stream}/dt=YYYY-MM-DD.parquet`)
+EOD 단계에서 동일 `(conn_id, conn_seq)` 중복을 제거하고 정규화한 데이터셋입니다. 레거시 `data/l1/{vendor}/{stream}/...` 파티션도 읽기·오프로드·보존 대상으로 계속 유효합니다:
 
 | 컬럼명 | Polars 타입 | 설명 및 무결성 제약 |
 | :--- | :--- | :--- |

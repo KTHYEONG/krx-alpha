@@ -33,8 +33,8 @@ ACCEPTED_KEYS: tuple[str, ...] = tuple(
     f"KIS_DATA_{slot}_{field}" for slot in DATA_SLOTS for field in DATA_FIELDS
 )
 _ACCEPTED_KEY_SET = frozenset(ACCEPTED_KEYS)
-REMOTE_INSTALL_SCRIPT = """set -euo pipefail
-dest="/home/ubuntu/quant-secrets/kis-data.env"
+REMOTE_INSTALL_SCRIPT = f"""set -euo pipefail
+dest="{REMOTE_ENV_PATH}"
 mkdir -p "$(dirname "$dest")"
 chmod 0700 "$(dirname "$dest")"
 tmp="$(mktemp "$dest.XXXXXX")"
