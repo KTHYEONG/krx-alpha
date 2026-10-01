@@ -48,7 +48,8 @@ class CollectorSettings(BaseSettings):
     data_root: pathlib.Path = DEFAULT_DATA_ROOT
     ntp_host: str = "kr.pool.ntp.org"
     ntp_fallback_hosts: tuple[str, ...] = ("time.google.com", "time.cloudflare.com")
-    max_clock_offset_ns: int = 2_000_000_000
+    # Ceiling enforces the fail-closed clock gate (drift <= 2.0s); env may only tighten it now that streamer children honor it.
+    max_clock_offset_ns: int = Field(default=2_000_000_000, gt=0, le=2_000_000_000)
     vendor: str = "ls"
     streams: tuple[str, ...] = ("H0STCNT0", "H0STASP0")
     ls_capacity_pairs: int = 200

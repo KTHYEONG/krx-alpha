@@ -708,6 +708,10 @@ class DaemonRunner:
 
     The runner keeps state transitions explicit so a retry, holiday, shutdown, and
     EOD cycle cannot accidentally reuse a prior day's process or status.
+    ``program_sync_settings`` is resolved once here (None
+    reads env) so the nightly sync gate and timeout cannot drift between cycles
+    and invalid program-sync env fails at daemon start inside the crash boundary,
+    not mid-evening.
     """
 
     def __init__(
@@ -717,6 +721,7 @@ class DaemonRunner:
         shutdown: threading.Event | None,
         now: Callable[[], dt.datetime],
         sleep: Callable[[float], None],
+        program_sync_settings: TossProgramTradesSettings | None = None,
     ) -> None:
         self._runtime = runtime
         self._shutdown = shutdown
@@ -726,6 +731,9 @@ class DaemonRunner:
         self._paths = runtime.paths
         self._after_cfg = runtime.aftermarket
         self._snapshot_cfg = runtime.snapshot
+        self._program_sync_cfg = (
+            program_sync_settings if program_sync_settings is not None else TossProgramTradesSettings()
+        )
         self._sched = replace(
             runtime.collector.schedule,
             after_market_enabled=runtime.collector.after_market_enabled,
@@ -809,7 +817,7 @@ class DaemonRunner:
         if code is None:
             started = self._children.program_sync_started_at
             if started is not None:
-                timeout_s = TossProgramTradesSettings().sync_timeout_s
+                timeout_s = self._program_sync_cfg.sync_timeout_s
                 if (now - started).total_seconds() > timeout_s:
                     _stop_sync_child(proc, grace_s=10.0)
                     logger.critical("[DAEMON] stage=program_trades_sync status=FAIL reason=timeout")
@@ -837,7 +845,7 @@ class DaemonRunner:
         view = self._gate.view(today, now)
         if view.status is not TradingDayStatus.BUSINESS or view.trading_day is None:
             return
-        sync_settings = TossProgramTradesSettings()
+        sync_settings = self._program_sync_cfg
         if not sync_settings.auto_backfill_enabled:
             return
         cmd = _program_sync_cmd(today, view.trading_day.previous_business_day)

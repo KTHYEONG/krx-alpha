@@ -34,7 +34,7 @@ def _route_for_venue(venue: str) -> StreamRoute:
 
 
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    """'collect-aftermarket' 서브커맨드를 등록한다."""
+    """Register 'collect-aftermarket'. Settings-derived flags default to None so registration reads no env."""
     parser = subparsers.add_parser("collect-aftermarket")
     parser.add_argument("--session-date", required=True)
     parser.add_argument("--journal-root", required=True)
@@ -45,14 +45,19 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--credential-slot", required=True)
     parser.add_argument("--credential-key-id", required=True)
     parser.add_argument("--symbols", required=True)
-    parser.add_argument("--ntp-host", default="kr.pool.ntp.org")
-    parser.add_argument("--max-clock-offset-ns", type=int, default=2_000_000_000)
+    parser.add_argument("--ntp-host", default=None)
+    parser.add_argument("--max-clock-offset-ns", type=int, default=None)
     parser.add_argument("--max-cycles", type=int, default=None)
     parser.add_argument("--degraded-reason", default=None)
     parser.set_defaults(handler=lambda args: asyncio.run(_run_stream(args)))
 
 
 async def _run_stream(args: argparse.Namespace) -> int:
+    """Run one aftermarket venue shard streamer.
+
+    None/absent ``ntp_host``/``max_clock_offset_ns`` resolve from
+    ``runtime.collector``; explicit flags win.
+    """
     runtime = resolve_collector_runtime()
     settings = runtime.collector
     after = runtime.aftermarket
@@ -78,14 +83,18 @@ async def _run_stream(args: argparse.Namespace) -> int:
     anchors = resolve_session_anchors(
         DataPaths(pathlib.Path(str(args.journal_root)).parent).session_calendar_dir, session_date
     )
+    raw_ntp_host = getattr(args, "ntp_host", None)
+    raw_max_offset = getattr(args, "max_clock_offset_ns", None)
+    ntp_host = str(raw_ntp_host) if raw_ntp_host is not None else str(settings.ntp_host)
+    max_clock_offset_ns = int(raw_max_offset) if raw_max_offset is not None else int(settings.max_clock_offset_ns)
     cfg = SessionConfig(
         session_date=session_date,
         journal_root=pathlib.Path(str(args.journal_root)),
         manifest_path=pathlib.Path(str(args.manifest_path)),
         candidates_path=pathlib.Path(str(args.candidates_path)),
-        ntp_host=str(args.ntp_host),
+        ntp_host=ntp_host,
         slot_budget=len(symbols) * len(streams),
-        max_clock_offset_ns=int(args.max_clock_offset_ns),
+        max_clock_offset_ns=max_clock_offset_ns,
         desired_streams=tuple(streams),
         vendor="kis",
         degraded_reason=getattr(args, "degraded_reason", None),
