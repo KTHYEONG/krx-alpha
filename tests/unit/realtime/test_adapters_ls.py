@@ -1,4 +1,5 @@
-def test_ls_adapter_connect_issues_token_and_opens_ws() -> None:
+def test_ls_adapter_connect_issues_token_and_opens_ws(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
     from src.realtime.adapters.ls import LsRealtimeAdapter
 
@@ -40,13 +41,14 @@ def test_ls_adapter_connect_issues_token_and_opens_ws() -> None:
             return _WSCtx(self.ws)
 
     http = _Http()
-    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=http, market_of={'005930': 'KOSPI'})
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=http, market_of={'005930': 'KOSPI'}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
 
     asyncio.run(adapter.connect())
 
     assert http.posts and 'oauth2/token' in http.posts[0]  # noqa: PT018 - verbatim contract skeleton
     assert adapter.name == 'ls'
-def test_ls_adapter_subscribe_normalizes_ack_by_rsp_cd() -> None:
+def test_ls_adapter_subscribe_normalizes_ack_by_rsp_cd(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
     import json
     from src.realtime.adapters.ls import LsRealtimeAdapter
@@ -68,7 +70,7 @@ def test_ls_adapter_subscribe_normalizes_ack_by_rsp_cd() -> None:
         async def close(self):
             self.sent.append('__closed__')
 
-    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'})
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
     adapter._ws = _WS()  # type: ignore[attr-defined]
     adapter._token = 'TOK'  # type: ignore[attr-defined]
 
@@ -76,7 +78,8 @@ def test_ls_adapter_subscribe_normalizes_ack_by_rsp_cd() -> None:
 
     assert out[0] == VendorAck(symbol='005930', stream='H0STCNT0', accepted=True, code='00000')
     assert out[1].accepted is False
-def test_ls_adapter_recv_echoes_pingpong_and_returns_data_frame() -> None:
+def test_ls_adapter_recv_echoes_pingpong_and_returns_data_frame(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
     import json
     import aiohttp
@@ -104,7 +107,7 @@ def test_ls_adapter_recv_echoes_pingpong_and_returns_data_frame() -> None:
             self.sent.append('__closed__')
 
     ws = _WS()
-    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'})
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
     adapter._ws = ws  # type: ignore[attr-defined]
 
     frame = asyncio.run(adapter.recv())
@@ -112,7 +115,8 @@ def test_ls_adapter_recv_echoes_pingpong_and_returns_data_frame() -> None:
     assert ws.sent == [ping]
     assert frame.vendor == 'ls' and frame.symbol == '005930' and frame.stream == 'H0STCNT0'  # noqa: PT018 - verbatim contract skeleton
     assert frame.raw == data and frame.conn_seq == 1 and frame.recv_wall_ns > 0  # noqa: PT018 - verbatim contract skeleton
-def test_ls_adapter_recv_raises_vendor_disconnected_on_close() -> None:
+def test_ls_adapter_recv_raises_vendor_disconnected_on_close(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
     import aiohttp
     import pytest
@@ -132,12 +136,13 @@ def test_ls_adapter_recv_raises_vendor_disconnected_on_close() -> None:
         async def close(self):
             self.closed = True
 
-    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'})
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
     adapter._ws = _WS()  # type: ignore[attr-defined]
 
     with pytest.raises(VendorDisconnected):
         asyncio.run(adapter.recv())
-def test_ls_adapter_subscribe_unknown_market_raises_keyerror() -> None:
+def test_ls_adapter_subscribe_unknown_market_raises_keyerror(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
     import pytest
     from src.realtime.adapters.ls import LsRealtimeAdapter
@@ -150,7 +155,7 @@ def test_ls_adapter_subscribe_unknown_market_raises_keyerror() -> None:
         async def close(self):
             self.closed = True
 
-    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={})
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
     adapter._ws = _WS()  # type: ignore[attr-defined]
     adapter._token = 'TOK'  # type: ignore[attr-defined]
 
@@ -158,7 +163,8 @@ def test_ls_adapter_subscribe_unknown_market_raises_keyerror() -> None:
         asyncio.run(adapter.subscribe([('999999', 'H0STCNT0')]))
 
 
-def test_ls_adapter_recv_echoes_ws_ping() -> None:
+def test_ls_adapter_recv_echoes_ws_ping(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
     import json
     import aiohttp
@@ -182,7 +188,7 @@ def test_ls_adapter_recv_echoes_ws_ping() -> None:
         async def close(self):
             self.closed = True
 
-    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'})
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
     adapter._ws = _WS()  # type: ignore[attr-defined]
 
     frame = asyncio.run(adapter.recv())
@@ -192,7 +198,8 @@ def test_ls_adapter_recv_echoes_ws_ping() -> None:
     assert frame.stream == 'H0STCNT0'
 
 
-def test_ls_adapter_aclose_closes_ws() -> None:
+def test_ls_adapter_aclose_closes_ws(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
     from src.realtime.adapters.ls import LsRealtimeAdapter
 
@@ -202,7 +209,7 @@ def test_ls_adapter_aclose_closes_ws() -> None:
         async def close(self):
             self.closed = True
 
-    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'})
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
     adapter._ws = _WS()  # type: ignore[attr-defined]
 
     asyncio.run(adapter.aclose())
@@ -210,7 +217,8 @@ def test_ls_adapter_aclose_closes_ws() -> None:
     assert adapter._ws.closed is True  # type: ignore[attr-defined]
 
 
-def test_ls_adapter_subscribe_stashes_interleaved_data_frame_instead_of_dropping() -> None:
+def test_ls_adapter_subscribe_stashes_interleaved_data_frame_instead_of_dropping(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
     import json
     from src.realtime.adapters.ls import LsRealtimeAdapter
@@ -229,7 +237,7 @@ def test_ls_adapter_subscribe_stashes_interleaved_data_frame_instead_of_dropping
         async def close(self):
             self.sent.append('__closed__')
 
-    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'})
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
     adapter._ws = _WS()  # type: ignore[attr-defined]
     adapter._token = 'TOK'  # type: ignore[attr-defined]
 
@@ -240,7 +248,8 @@ def test_ls_adapter_subscribe_stashes_interleaved_data_frame_instead_of_dropping
     assert adapter._pending[0].symbol == '000660'  # type: ignore[attr-defined]
 
 
-def test_ls_adapter_recv_drains_pending_before_reading_socket() -> None:
+def test_ls_adapter_recv_drains_pending_before_reading_socket(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
     from src.realtime.adapters.ls import LsRealtimeAdapter
     from src.realtime.contracts import L0Frame
@@ -249,7 +258,7 @@ def test_ls_adapter_recv_drains_pending_before_reading_socket() -> None:
         async def receive(self):
             raise AssertionError('socket must not be read while pending queue is non-empty')
 
-    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'})
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
     adapter._ws = _WS()  # type: ignore[attr-defined]
     stashed = L0Frame('ls', 'H0STCNT0', '000660', '{}', 1, 2, 1, 'ls-1')
     adapter._pending.append(stashed)  # type: ignore[attr-defined]
@@ -259,7 +268,8 @@ def test_ls_adapter_recv_drains_pending_before_reading_socket() -> None:
     assert frame is stashed
 
 
-def test_ls_adapter_recv_skips_late_ack_frame_without_crashing() -> None:
+def test_ls_adapter_recv_skips_late_ack_frame_without_crashing(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
     import json
     import aiohttp
@@ -279,7 +289,7 @@ def test_ls_adapter_recv_skips_late_ack_frame_without_crashing() -> None:
         async def receive(self):
             return self._q.pop(0)
 
-    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'})
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
     adapter._ws = _WS()  # type: ignore[attr-defined]
 
     frame = asyncio.run(adapter.recv())
@@ -287,7 +297,8 @@ def test_ls_adapter_recv_skips_late_ack_frame_without_crashing() -> None:
     assert frame.symbol == '005930'
 
 
-def test_ls_adapter_subscribe_skips_pingpong_before_ack() -> None:
+def test_ls_adapter_subscribe_skips_pingpong_before_ack(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
     import json
     from src.realtime.adapters.ls import LsRealtimeAdapter
@@ -307,7 +318,7 @@ def test_ls_adapter_subscribe_skips_pingpong_before_ack() -> None:
             self.sent.append('__closed__')
 
     ws = _WS()
-    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'})
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
     adapter._ws = ws  # type: ignore[attr-defined]
     adapter._token = 'TOK'  # type: ignore[attr-defined]
 
@@ -317,7 +328,8 @@ def test_ls_adapter_subscribe_skips_pingpong_before_ack() -> None:
     assert ws.sent[1] == ping
 
 
-def test_ls_adapter_assigns_unique_conn_id_per_connect() -> None:
+def test_ls_adapter_assigns_unique_conn_id_per_connect(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     # Given: 동일 어댑터가 두 번 접속(재접속)하며 conn_seq 를 0 으로 리셋한다
     import asyncio
     import json
@@ -361,7 +373,7 @@ def test_ls_adapter_assigns_unique_conn_id_per_connect() -> None:
         def ws_connect(self, url, **kw):
             return _WSCtx(self.ws)
 
-    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=_Http(), market_of={'005930': 'KOSPI'})
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=_Http(), market_of={'005930': 'KOSPI'}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
     payload = {'header': {'tr_cd': 'S3_', 'tr_key': '005930'}}
 
     # When: 두 접속에서 각각 첫 프레임을 만든다
@@ -377,7 +389,8 @@ def test_ls_adapter_assigns_unique_conn_id_per_connect() -> None:
     assert frame2.conn_id.startswith('ls-')
 
 
-def test_ls_adapter_connect_enables_ws_heartbeat() -> None:
+def test_ls_adapter_connect_enables_ws_heartbeat(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
 
     from src.realtime.adapters.ls import LsRealtimeAdapter
@@ -411,14 +424,15 @@ def test_ls_adapter_connect_enables_ws_heartbeat() -> None:
             return _WSCtx()
 
     default_http, custom_http = _Http(), _Http()
-    asyncio.run(LsRealtimeAdapter(app_key="k", app_secret="s", http=default_http, market_of={}).connect())
-    asyncio.run(LsRealtimeAdapter(app_key="k", app_secret="s", http=custom_http, market_of={}, heartbeat_s=3.0).connect())
+    asyncio.run(LsRealtimeAdapter(app_key="k", app_secret="s", http=default_http, market_of={}, token_store=TossTokenStore(ls_token_path(tmp_path, "k"))).connect())
+    asyncio.run(LsRealtimeAdapter(app_key="k", app_secret="s", http=custom_http, market_of={}, heartbeat_s=3.0, token_store=TossTokenStore(ls_token_path(tmp_path, "k"))).connect())
 
     assert default_http.ws_kwargs == [{"heartbeat": 10.0}]
     assert custom_http.ws_kwargs == [{"heartbeat": 3.0}]
 
 
-def test_ls_adapter_connect_maps_vendor_failures_to_vendor_disconnected() -> None:
+def test_ls_adapter_connect_maps_vendor_failures_to_vendor_disconnected(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
 
     import aiohttp
@@ -460,12 +474,13 @@ def test_ls_adapter_connect_maps_vendor_failures_to_vendor_disconnected() -> Non
         ({"error": "invalid_client"}, "connect_failed:KeyError"),
     ]
     for outcome, expected in cases:
-        adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(outcome), market_of={})
+        adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(outcome), market_of={}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
         with pytest.raises(VendorDisconnected, match=expected):
             asyncio.run(adapter.connect())
 
 
-def test_ls_adapter_subscribe_raises_vendor_disconnected_on_ack_timeout() -> None:
+def test_ls_adapter_subscribe_raises_vendor_disconnected_on_ack_timeout(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
 
     import pytest
@@ -481,7 +496,7 @@ def test_ls_adapter_subscribe_raises_vendor_disconnected_on_ack_timeout() -> Non
             await asyncio.sleep(5)
             return "{}"
 
-    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=object(), market_of={"005930": "KOSPI"}, ack_timeout_s=0.05)
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=object(), market_of={"005930": "KOSPI"}, ack_timeout_s=0.05, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
     adapter._ws = _WS()  # type: ignore[attr-defined]
     adapter._token = "TOK"  # type: ignore[attr-defined]
 
@@ -489,7 +504,8 @@ def test_ls_adapter_subscribe_raises_vendor_disconnected_on_ack_timeout() -> Non
         asyncio.run(adapter.subscribe([("005930", "H0STCNT0")]))
 
 
-def test_ls_adapter_subscribe_raises_vendor_disconnected_on_non_text_frame() -> None:
+def test_ls_adapter_subscribe_raises_vendor_disconnected_on_non_text_frame(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
 
     import pytest
@@ -505,7 +521,7 @@ def test_ls_adapter_subscribe_raises_vendor_disconnected_on_non_text_frame() -> 
         async def receive_str(self):
             raise WSMessageTypeError("Received message 257:None is not WSMsgType.TEXT")
 
-    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=object(), market_of={"005930": "KOSPI"})
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=object(), market_of={"005930": "KOSPI"}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
     adapter._ws = _WS()  # type: ignore[attr-defined]
     adapter._token = "TOK"  # type: ignore[attr-defined]
 
@@ -513,7 +529,8 @@ def test_ls_adapter_subscribe_raises_vendor_disconnected_on_non_text_frame() -> 
         asyncio.run(adapter.subscribe([("005930", "H0STCNT0")]))
 
 
-def test_ls_adapter_connect_raises_auth_rejected_on_invalid_app_key() -> None:
+def test_ls_adapter_connect_raises_auth_rejected_on_invalid_app_key(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
 
     import pytest
@@ -546,13 +563,14 @@ def test_ls_adapter_connect_raises_auth_rejected_on_invalid_app_key() -> None:
             raise AssertionError("ws must not open after an auth rejection")
 
     body = {"error_code": "IGW00103", "error_description": "유효하지 않은 AppKey입니다."}
-    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(_Resp(403, body)), market_of={})
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(_Resp(403, body)), market_of={}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
 
     with pytest.raises(VendorAuthRejected, match="auth_rejected:403:IGW00103") as excinfo:
         asyncio.run(adapter.connect())
     assert isinstance(excinfo.value, VendorDisconnected)
 
-def test_ls_adapter_connect_raises_auth_rejected_on_401_without_error_code() -> None:
+def test_ls_adapter_connect_raises_auth_rejected_on_401_without_error_code(tmp_path) -> None:
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
 
     import pytest
@@ -584,7 +602,7 @@ def test_ls_adapter_connect_raises_auth_rejected_on_401_without_error_code() -> 
         def ws_connect(self, url, **kw):
             raise AssertionError("ws must not open after an auth rejection")
 
-    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(_Resp(401, {"error": "unauthorized"})), market_of={})
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(_Resp(401, {"error": "unauthorized"})), market_of={}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
 
     with pytest.raises(VendorAuthRejected, match=r"auth_rejected:401:$"):
         asyncio.run(adapter.connect())

@@ -415,3 +415,73 @@ def test_night_sleep_shortened_while_sync_child_runs(tmp_path, monkeypatch) -> N
 
     # Then: 30분 야간 수면 대신 짧게 깨어나 타임아웃을 제때 점검한다
     assert delay <= PROGRAM_SYNC_POLL_S
+
+
+def test_program_sync_settings_resolved_once(tmp_path, monkeypatch) -> None:
+    # Given: 기본 설정으로 만든 러너, 생성 후 env를 false로 바꿈
+    import datetime as dt
+
+    from src.orchestration import daemon as daemon_mod
+
+    _FakePopen.instances.clear()
+    day = dt.date(2026, 9, 24)
+    now = dt.datetime(2026, 9, 25, 2, 0, tzinfo=_KST)
+    runner = _runner(tmp_path, monkeypatch, now=now)
+    runner._state.eod_attempted_for = day
+    monkeypatch.setattr(runner._gate, "view", lambda today, at: _business_view(day))
+    monkeypatch.setattr(daemon_mod.subprocess, "Popen", _FakePopen)
+    monkeypatch.setenv("KRX_ALPHA_TOSS_PROGRAM_AUTO_BACKFILL_ENABLED", "false")
+
+    # When: EOD 이후 영업일에 launch 시도
+    runner._maybe_launch_program_sync(now)
+
+    # Then: 생성 시점 스냅샷이 지배하므로 자식이 실행된다
+    assert len(_FakePopen.instances) == 1
+
+
+def test_injected_program_sync_settings_honored(tmp_path, monkeypatch, caplog) -> None:
+    # Given: 주입된 timeout 60s와 3시간째 도는 자식
+    import datetime as dt
+    import logging
+    import pathlib
+
+    from src.core.config import CollectorSettings, TossProgramTradesSettings, resolve_collector_runtime
+    from src.orchestration.daemon import DaemonRunner
+
+    now = dt.datetime(2026, 9, 25, 2, 0, tzinfo=_KST)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    runtime = resolve_collector_runtime(collector=settings)
+    runner = DaemonRunner(
+        runtime=runtime,
+        shutdown=threading.Event(),
+        now=lambda: now,
+        sleep=lambda s: None,
+        program_sync_settings=TossProgramTradesSettings(sync_timeout_s=60),
+    )
+    proc = _FakePopen(["sync"], exit_code=None)
+    runner._children.program_sync = proc
+    runner._children.program_sync_started_at = now - dt.timedelta(hours=3)
+
+    # When
+    with caplog.at_level(logging.CRITICAL):
+        runner._poll_program_sync(now)
+
+    # Then: 자식 종료 + timeout 보고
+    assert proc.terminated is True
+    assert runner._children.program_sync is None
+    assert "status=FAIL reason=timeout" in caplog.text
+
+
+def test_invalid_program_sync_env_fails_at_construction(tmp_path, monkeypatch) -> None:
+    # Given: 0인 sync timeout env
+    import datetime as dt
+
+    import pytest
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("KRX_ALPHA_TOSS_PROGRAM_SYNC_TIMEOUT_S", "0")
+    now = dt.datetime(2026, 9, 25, 2, 0, tzinfo=_KST)
+
+    # When / Then: 러너 생성 시점에 fail-closed
+    with pytest.raises(ValidationError):
+        _runner(tmp_path, monkeypatch, now=now)

@@ -171,6 +171,17 @@ def _find_test_files(py_files: list[str]) -> tuple[list[str], list[str]]:
                 test_files.append(cand)
                 found = True
                 break
+        # Split suites (tests/unit/<pkg>/test_<mod>_<topic>.py) cover the same module, so
+        # diff coverage must run them too or lines tested only there read as uncovered.
+        split_dir = f"tests/unit/{sub_path}" if sub_path else "tests/unit"
+        split_prefix = f"test_{mod_name[:-3]}_" if mod_name.endswith(".py") else ""
+        if split_prefix and os.path.isdir(split_dir):
+            split_tests = sorted(
+                f"{split_dir}/{p}" for p in os.listdir(split_dir) if p.startswith(split_prefix) and p.endswith(".py")
+            )
+            if split_tests:
+                test_files.extend(t for t in split_tests if t not in test_files)
+                found = True
         if not found and nested_dir and os.path.isdir(nested_dir):
             nested_tests = sorted(
                 f"tests/unit/{sub_path}/{mod_name[:-3]}/{p}"

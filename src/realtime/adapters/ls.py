@@ -10,8 +10,7 @@ from typing import Any
 
 import aiohttp
 
-from src.core.config import KisTokenSettings
-from src.marketdata.toss_token_store import IssuedToken, TossTokenStore, ls_token_path
+from src.marketdata.toss_token_store import IssuedToken, TossTokenStore
 from src.realtime.contracts import L0Frame, VendorAck, VendorAuthRejected, VendorDisconnected
 
 LS_TOKEN_URL = "https://openapi.ls-sec.co.kr:8080/oauth2/token"  # noqa: S105 - public endpoint, not a secret
@@ -38,14 +37,21 @@ class LsRealtimeAdapter:
         app_secret: str,
         http: Any,
         market_of: Mapping[str, str],
+        token_store: TossTokenStore,
         streams: tuple[str, ...] = ("H0STCNT0", "H0STASP0"),
         capacity_pairs: int = 200,
         token_url: str = LS_TOKEN_URL,
         ws_url: str = LS_WS_URL,
         heartbeat_s: float = 10.0,
         ack_timeout_s: float = 10.0,
-        token_store: TossTokenStore | None = None,
     ) -> None:
+        """Bind one LS websocket session to a host-shared token store.
+
+        ``token_store`` is required: whether LS reissuance invalidates live tokens is
+        unverified, so every process holding the same app key shares one store
+        (single issuer) rather than risk revoking a peer's session, and the adapter
+        must not resolve its location from ambient env.
+        """
         self.name = "ls"
         self.capacity_pairs = capacity_pairs
         self._app_key = app_key
@@ -57,11 +63,7 @@ class LsRealtimeAdapter:
         self._ws_url = ws_url
         self._heartbeat_s = heartbeat_s
         self._ack_timeout_s = ack_timeout_s
-        self._token_store = (
-            token_store
-            if token_store is not None
-            else TossTokenStore(ls_token_path(KisTokenSettings().token_cache_dir, app_key))
-        )
+        self._token_store = token_store
         self._ws: Any = None
         self._token: str | None = None
         self._seq = 0
