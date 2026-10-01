@@ -23,6 +23,27 @@ KRX_STREAMS: tuple[str, str] = ("H0STCNT0", "H0STASP0")
 NXT_STREAMS: tuple[str, str] = ("H0NXCNT0", "H0NXASP0")
 
 
+def _is_pingpong(raw: str) -> bool:
+    """Return True when ``raw`` is a KIS application-level heartbeat frame.
+
+    KIS sends ``{"header": {"tr_id": "PINGPONG", ...}}`` on idle sockets and
+    drops the session unless the identical text is echoed back. Only JSON
+    objects whose ``header.tr_id`` equals ``"PINGPONG"`` qualify; non-JSON,
+    non-object or header-less payloads return False so callers keep their
+    fail-closed handling of unknown frames.
+    """
+    try:
+        obj = json.loads(raw)
+    except ValueError:
+        return False
+    if not isinstance(obj, dict):
+        return False
+    header = obj.get("header")
+    if not isinstance(header, dict):
+        return False
+    return str(header.get("tr_id", "")) == "PINGPONG"
+
+
 def _expected_streams(route: StreamRoute) -> tuple[str, str]:
     return NXT_STREAMS if route.venue == MarketVenue.NXT else KRX_STREAMS
 
@@ -107,14 +128,24 @@ class KisRealtimeAdapter:
             if raw[:1] in ("0", "1") and "|" in raw:
                 self._pending.extend(self._parse_envelope(raw))
                 continue
-            try:
-                header = json.loads(raw).get("header", {})
-            except ValueError:
-                header = {}
-            if isinstance(header, dict) and str(header.get("tr_id", "")) == "PINGPONG":
-                await self._ws.send_str(raw)
+            if _is_pingpong(raw):
+                await self._echo_pingpong(raw)
                 continue
             return self._parse_ack(raw, symbol, stream)
+
+    async def _echo_pingpong(self, raw: str) -> None:
+        """Echo a heartbeat frame verbatim.
+
+        Raises:
+            VendorDisconnected: ``pingpong_echo_failed:<ExcType>`` when the socket
+                write fails (``OSError``, incl. aiohttp
+                ``ClientConnectionResetError``), so the streamer takes its normal
+                reconnect path instead of crashing on a raw transport error.
+        """
+        try:
+            await self._ws.send_str(raw)
+        except OSError as exc:
+            raise VendorDisconnected(f"pingpong_echo_failed:{type(exc).__name__}") from exc
 
     def _parse_ack(self, raw: str, symbol: str, stream: str) -> VendorAck:  # pragma: no cover - exercised only via live subscribe path
         try:
@@ -173,15 +204,27 @@ class KisRealtimeAdapter:
         return frames
 
     async def recv(self) -> L0Frame:
+        """Return the next market-data frame of this connection.
+
+        Heartbeats are answered and consumed inside the call; they never reach
+        the pending queue, never advance ``conn_seq`` and are never recorded to
+        L0. Any other frame without the ``|`` envelope still raises
+        ``VendorDisconnected("unknown_frame:<first 32 chars>")`` (fail-closed).
+        """
         if self._pending:
             return self._pending.pop(0)
         if self._conn_id == "":
             self._conn_id = f"kis-{time.time_ns()}"
-        raw = await self._ws.receive_str()
-        if "|" not in raw: raise VendorDisconnected(f"unknown_frame:{raw[:32]}")  # noqa: E701
-        frames = self._parse_envelope(raw)
-        self._pending.extend(frames[1:])
-        return frames[0]
+        while True:
+            raw = await self._ws.receive_str()
+            if "|" not in raw:
+                if _is_pingpong(raw):
+                    await self._echo_pingpong(raw)
+                    continue
+                raise VendorDisconnected(f"unknown_frame:{raw[:32]}")
+            frames = self._parse_envelope(raw)
+            self._pending.extend(frames[1:])
+            return frames[0]
 
     async def aclose(self) -> None:  # pragma: no cover - live WebSocket close path
         if self._ws is not None:

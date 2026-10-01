@@ -19,6 +19,7 @@ import zstandard as zstd
 
 from src.core.config import DataQualitySettings
 from src.core.errors import KrxAlphaError
+from src.storage.layout import L0_JOURNAL_GLOB, route_for_l0_partition
 from src.storage.market_phase import MARKET_PHASE_METADATA_KEY, MARKET_PHASE_WINDOWS, PhaseWindow, annotate_market_phase
 from src.storage.quality import (
     DqStatus,
@@ -155,12 +156,11 @@ def normalize_l0_partition(
         L1NormalizationError: Source decode, schema, write, or finalization failed.
     """
     part = pathlib.Path(part_dir)
-    stream_name = part.parent.name
-    session_name = part.parent.parent.name
-    is_routed_partition = session_name in {"regular", "krx_after", "nxt_after"}
-    legacy_venue = "krx" if not is_routed_partition else part.parent.parent.parent.name
-    legacy_session = "regular" if not is_routed_partition else session_name
-    zst_files = sorted(part.glob("*.jsonl.zst"))
+    route = route_for_l0_partition(part)
+    stream_name = route.stream
+    legacy_venue = route.venue
+    legacy_session = route.session.value
+    zst_files = sorted(part.glob(L0_JOURNAL_GLOB))
     if not zst_files:
         raise L1NormalizationError(f"no .zst files in {part}")
     if work_root is None:

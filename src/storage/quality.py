@@ -11,6 +11,7 @@ from enum import StrEnum
 import polars as pl
 
 from src.core.config import DataQualitySettings
+from src.storage.market_phase import MarketPhase
 from src.storage.quality_kis import decode_kis_quotes, decode_kis_ticks
 from src.storage.quality_ls import decode_ls_quotes, decode_ls_ticks
 
@@ -31,7 +32,8 @@ _QUOTE_LEVELS: int = 10
 _QUOTE_CHUNK_ROWS: int = 20_000
 _TICK_CHUNK_ROWS: int = 20_000
 _BUCKET_HASH_SEED: int = 0x9E3779B1
-_AUCTION_WINDOWS: tuple[tuple[int, int], ...] = ((83000, 90000), (152000, 153000))
+_LEGACY_AUCTION_HOTIME_WINDOWS: tuple[tuple[int, int], ...] = ((83000, 90000), (152000, 153000))
+_AUCTION_PHASES: tuple[str, ...] = (MarketPhase.OPENING_AUCTION.value, MarketPhase.CLOSING_AUCTION.value)
 _KIS_TICK_MIN_FIELDS: int = 17
 _KIS_TICK_SYMBOL: int = 0
 _KIS_TICK_PRICE: int = 2
@@ -376,6 +378,24 @@ def sum_quote_summaries(summaries: Sequence[QuoteQualitySummary]) -> QuoteQualit
     )
 
 
+def _auction_exemption(columns: Sequence[str]) -> pl.Expr:
+    """Boolean expression marking rows whose crossed book is a legal auction state.
+
+    During call auctions bids and offers may overlap until the uncross, so
+    crossed books there are not data defects. ``market_phase`` (attached by
+    ``annotate_market_phase`` with the partition's anchor-shifted windows) is
+    authoritative when present. Frames without it (direct callers, ad-hoc
+    reads of pre-2026-09-17 L1 files) fall back to the fixed standard-day
+    ``hotime`` windows. Null phases are treated as non-auction.
+    """
+    if "market_phase" in columns:
+        return pl.col("market_phase").is_in(_AUCTION_PHASES).fill_null(False)
+    in_auction = pl.lit(False)
+    for lo, hi in _LEGACY_AUCTION_HOTIME_WINDOWS:
+        in_auction = in_auction | ((pl.col("hotime") >= lo) & (pl.col("hotime") < hi))
+    return in_auction
+
+
 def _flag_quote_invariants(frame: pl.DataFrame) -> pl.DataFrame:
     offer_cols = [f"offerho{k}" for k in range(1, _QUOTE_LEVELS + 1)]
     bid_cols = [f"bidho{k}" for k in range(1, _QUOTE_LEVELS + 1)]
@@ -388,9 +408,7 @@ def _flag_quote_invariants(frame: pl.DataFrame) -> pl.DataFrame:
     neg_rem = pl.lit(False)
     for c in rem_cols:
         neg_rem = neg_rem | (pl.col(c) < 0)
-    in_auction = pl.lit(False)
-    for lo, hi in _AUCTION_WINDOWS:
-        in_auction = in_auction | ((pl.col("hotime") >= lo) & (pl.col("hotime") < hi))
+    in_auction = _auction_exemption(frame.columns)
     top_offer_sum = sum((pl.col(c) for c in [f"offerrem{k}" for k in range(1, _QUOTE_LEVELS + 1)]), start=pl.lit(0))
     top_bid_sum = sum((pl.col(c) for c in [f"bidrem{k}" for k in range(1, _QUOTE_LEVELS + 1)]), start=pl.lit(0))
     return frame.with_columns(
@@ -420,11 +438,18 @@ def decode_and_flag_quotes(df: pl.DataFrame, *, chunk_rows: int = _QUOTE_CHUNK_R
     for offset in range(0, quotes.height, chunk_rows):
         chunk = quotes.slice(offset, chunk_rows)
         kis, ls = _split_kis_ls(chunk)
+        has_phase = "market_phase" in chunk.columns
         frames: list[pl.DataFrame] = []
         if kis.height > 0:
-            frames.append(_decode_kis_quote_frame(kis))
+            decoded_kis = _decode_kis_quote_frame(kis)
+            if has_phase:
+                decoded_kis = decoded_kis.with_columns(kis["market_phase"])
+            frames.append(decoded_kis)
         if ls.height > 0:
-            frames.append(_decode_ls_quote_chunk(ls))
+            decoded_ls = _decode_ls_quote_chunk(ls)
+            if has_phase:
+                decoded_ls = decoded_ls.with_columns(ls["market_phase"])
+            frames.append(decoded_ls)
         frame = pl.concat(frames) if len(frames) > 1 else frames[0]
         flagged = _flag_quote_invariants(frame)
         decode_fail += int(flagged["dq_decode_fail"].sum())

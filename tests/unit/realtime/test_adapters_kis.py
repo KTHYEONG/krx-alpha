@@ -146,6 +146,7 @@ def test_kis_websocket_lease_exclusive_and_adapter_lifecycle(tmp_path) -> None:
 
 def test_kis_adapter_acquires_lease_before_approval_and_releases_on_close(tmp_path) -> None:
     import asyncio
+
     import pytest
     from src.realtime.adapters.kis import KisRealtimeAdapter
     from src.realtime.contracts import MarketSession, MarketVenue, VendorAuthRejected
@@ -203,3 +204,131 @@ def test_kis_adapter_acquires_lease_before_approval_and_releases_on_close(tmp_pa
         await follower.release()
 
     asyncio.run(run())
+
+
+def _nxt_adapter(ws) -> object:
+    from src.realtime.adapters.kis import KisRealtimeAdapter
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import StreamRoute
+
+    adapter = KisRealtimeAdapter(app_key='k', app_secret='s', http=object(), route=StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER), allowed_streams=('H0NXCNT0', 'H0NXASP0'), capacity_pairs=4)
+    adapter._ws = ws
+    return adapter
+
+
+def test_recv_echoes_pingpong_then_returns_data() -> None:
+    import asyncio
+    import json
+
+    pingpong_raw = json.dumps({"header": {"tr_id": "PINGPONG"}})
+
+    class Ws:
+        def __init__(self):
+            self.sent: list[str] = []
+            self._replies = iter([pingpong_raw, '0|H0NXCNT0|001|005930^154001^a^b'])
+
+        async def send_str(self, payload):
+            self.sent.append(payload)
+
+        async def receive_str(self):
+            return next(self._replies)
+
+    ws = Ws()
+    adapter = _nxt_adapter(ws)
+    frame = asyncio.run(adapter.recv())
+
+    assert frame.conn_seq == 1
+    assert ws.sent == [pingpong_raw]
+    assert adapter._pending == []
+
+
+def test_recv_consumes_consecutive_pingpongs() -> None:
+    import asyncio
+    import json
+
+    pingpong_raw = json.dumps({"header": {"tr_id": "PINGPONG"}})
+
+    class Ws:
+        def __init__(self):
+            self.sent: list[str] = []
+            self._replies = iter([pingpong_raw, pingpong_raw, pingpong_raw, '0|H0NXCNT0|001|005930^154001^a^b'])
+
+        async def send_str(self, payload):
+            self.sent.append(payload)
+
+        async def receive_str(self):
+            return next(self._replies)
+
+    ws = Ws()
+    adapter = _nxt_adapter(ws)
+    frame = asyncio.run(adapter.recv())
+
+    assert ws.sent == [pingpong_raw] * 3
+    assert frame.conn_seq == 1
+
+
+def test_recv_still_fails_closed_on_unknown_json() -> None:
+    import asyncio
+
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    class Ws:
+        async def receive_str(self):
+            return '{"header":{"tr_id":"H0NXCNT0"},"body":{"rt_cd":"0"}}'
+
+        async def send_str(self, payload):
+            raise AssertionError("nothing sent")
+
+    adapter = _nxt_adapter(Ws())
+    with pytest.raises(VendorDisconnected, match="unknown_frame"):
+        asyncio.run(adapter.recv())
+
+
+def test_recv_fails_closed_on_non_json_and_non_object() -> None:
+    import asyncio
+
+    import pytest
+
+    from src.realtime.adapters.kis import _is_pingpong
+    from src.realtime.contracts import VendorDisconnected
+
+    assert _is_pingpong("hello") is False
+    assert _is_pingpong("[1]") is False
+    assert _is_pingpong('{"header":"x"}') is False
+
+    for raw in ("hello", "[1]"):
+        class Ws:
+            def __init__(self, payload):
+                self._payload = payload
+
+            async def receive_str(self):
+                return self._payload
+
+        adapter = _nxt_adapter(Ws(raw))
+        with pytest.raises(VendorDisconnected, match="unknown_frame"):
+            asyncio.run(adapter.recv())
+
+
+def test_echo_failure_becomes_disconnect() -> None:
+    import asyncio
+    import json
+
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    pingpong_raw = json.dumps({"header": {"tr_id": "PINGPONG"}})
+
+    class Ws:
+        async def receive_str(self):
+            return pingpong_raw
+
+        async def send_str(self, payload):
+            raise ConnectionResetError("reset")
+
+    adapter = _nxt_adapter(Ws())
+    with pytest.raises(VendorDisconnected, match="pingpong_echo_failed:ConnectionResetError") as excinfo:
+        asyncio.run(adapter.recv())
+    assert isinstance(excinfo.value.__cause__, ConnectionResetError)

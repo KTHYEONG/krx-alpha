@@ -14,7 +14,11 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from src.core.observability import EVENT
-from src.core.session_anchors import SessionAnchors
+from src.core.session_anchors import (
+    STANDARD_KRX_AFTER_MARKET_OPEN,
+    STANDARD_NXT_AFTER_MARKET_OPEN,
+    SessionAnchors,
+)
 from src.realtime.contracts import (
     L0Frame,
     MarketVenue,
@@ -31,11 +35,6 @@ logger = logging.getLogger(__name__)
 SILENCE_LIMIT_S: float = 30.0
 OUTAGE_CRITICAL_S: float = 300.0
 AUTH_BACKOFF_MAX_S: float = 300.0
-STANDARD_REGULAR_OPEN: dt.time = dt.time(9, 0)
-STANDARD_REGULAR_CLOSE: dt.time = dt.time(15, 30)
-STANDARD_NXT_AFTER_OPEN: dt.time = dt.time(15, 40)
-STANDARD_KRX_AFTER_OPEN: dt.time = dt.time(16, 0)
-STANDARD_AFTER_CLOSE: dt.time = dt.time(20, 0)
 _KST = ZoneInfo("Asia/Seoul")
 
 
@@ -54,9 +53,9 @@ def aftermarket_silence_limit_s(
 ) -> float | None:
     venue = route.venue if hasattr(route, "venue") else route
     if MarketVenue(venue) == MarketVenue.NXT:
-        open_t = anchors.shift_post_close(STANDARD_NXT_AFTER_OPEN)
+        open_t = anchors.shift_post_close(STANDARD_NXT_AFTER_MARKET_OPEN)
     else:
-        open_t = anchors.shift_post_close(STANDARD_KRX_AFTER_OPEN)
+        open_t = anchors.shift_post_close(STANDARD_KRX_AFTER_MARKET_OPEN)
     if open_t <= now.astimezone(_KST).time() < anchors.after_market_end:
         return limit_s
     return None

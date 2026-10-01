@@ -11,6 +11,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from typing import Protocol
 
 from src.core.errors import KrxAlphaError
 
@@ -25,8 +26,14 @@ HOST_ADMISSION_MARKER: str = ".host-admission"
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
+class Pacer(Protocol):
+    """Blocking admission gate a KIS REST caller passes before every vendor request (data GET, order POST, token issuance). Production stacks use `HostPacedRateLimiter` so admission is shared host-wide with KCA over the protocol state file; `RateLimiter` is process-private and only valid where no other process shares the app key (tests)."""
+
+    def acquire(self) -> None: ...
+
+
 class RateLimiter:
-    """토큰버킷 대체: 요청 간 최소 간격을 보장한다."""
+    """Process-private minimum-interval pacer. Not host-safe: it ignores the shared state file, so it must never pace a production app key."""
 
     def __init__(
         self,
@@ -57,9 +64,7 @@ def _in_container() -> bool:
     return os.path.exists("/.dockerenv")
 
 
-def host_state_path(
-    cache_dir: pathlib.Path, vendor: str, credential: str, scope: str | None = None
-) -> pathlib.Path:
+def host_state_path(cache_dir: pathlib.Path, vendor: str, credential: str, scope: str | None = None) -> pathlib.Path:
     """Return the protocol pacing path under the shared cache directory.
 
     Args:

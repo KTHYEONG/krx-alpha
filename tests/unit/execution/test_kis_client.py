@@ -1631,3 +1631,199 @@ def test_forced_refresh_with_same_token_keeps_daily_limit(tmp_path) -> None:
 
     with pytest.raises(KisApiError, match="TOKEN_DAILY_LIMIT"):
         client.access_token(force=True, rejected_token="same-as-rejected")
+
+
+def test_classify_kis_retry_table() -> None:
+    from src.brokers.kis.http import MAX_SAFE_RETRIES, KisRetryDecision, classify_kis_retry
+
+    for code in ("EGW00201",):
+        for retries in (0, MAX_SAFE_RETRIES):
+            for refreshed in (False, True):
+                decision = classify_kis_retry(code, retries=retries, refreshed=refreshed)
+                if retries < MAX_SAFE_RETRIES:
+                    assert decision is KisRetryDecision.RETRY_RATE_LIMITED
+                else:
+                    assert decision is KisRetryDecision.FINAL
+    for code in ("EGW00121", "EGW00123"):
+        for retries in (0, MAX_SAFE_RETRIES):
+            for refreshed in (False, True):
+                decision = classify_kis_retry(code, retries=retries, refreshed=refreshed)
+                if not refreshed:
+                    assert decision is KisRetryDecision.RETRY_AFTER_TOKEN_REFRESH
+                else:
+                    assert decision is KisRetryDecision.FINAL
+    for code in ("MCA00000", ""):
+        for retries in (0, MAX_SAFE_RETRIES):
+            for refreshed in (False, True):
+                assert classify_kis_retry(code, retries=retries, refreshed=refreshed) is KisRetryDecision.FINAL
+
+
+def _stack_transport(tmp_path, clock, session, cache_token="token-B", issued_at=None):
+    import datetime as dt
+    import json
+
+    from src.brokers.kis.auth import KisAppAuth, KisTokenProvider
+    from src.brokers.kis.http import KisGetTransport
+    from src.execution.kis_client import RateLimiter
+
+    issued = issued_at if issued_at is not None else clock.current
+    cache = tmp_path / "kis_token.json"
+    cache.write_text(json.dumps({
+        "access_token": cache_token,
+        "expired_at": (clock.current + dt.timedelta(hours=20)).isoformat(),
+        "app_key": "app-key",
+        "issued_at": issued.isoformat(),
+    }), encoding="utf-8")
+    auth = KisAppAuth(app_key="app-key", app_secret="app-secret")
+    limiter = RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None)
+    tokens = KisTokenProvider(auth=auth, session=session, cache_path=cache, limiter=limiter,
+                              now=clock, timeout_s=5.0, base_url="https://test", allow_issue=True)
+    transport = KisGetTransport(auth=auth, tokens=tokens, session=session, limiter=limiter,
+                                timeout_s=5.0, base_url="https://test")
+    return transport, tokens, limiter
+
+
+def test_get_rejects_sent_token_not_relookup(tmp_path) -> None:
+    import datetime as dt
+
+    from src.brokers.kis.auth import _TOKEN_REFRESH_MARGIN
+    from tests.unit.execution.fakes import FakeResponse, FakeSession, FixedClock, T0
+
+    clock = FixedClock(T0)
+    expired = FakeResponse({"rt_cd": "1", "msg_cd": "EGW00123", "msg1": "expired"})
+    ok = FakeResponse({"rt_cd": "0", "msg_cd": "MCA00000", "msg1": "ok", "output1": []}, headers={"tr_cont": "D"})
+    session = FakeSession([expired, ok])
+    transport, tokens, _ = _stack_transport(tmp_path, clock, session)
+    tokens._token = "token-A"
+    tokens._token_expires_at = T0 + _TOKEN_REFRESH_MARGIN + dt.timedelta(seconds=1)
+    orig_get = session.get
+
+    def _advancing_get(url, **kwargs):
+        resp = orig_get(url, **kwargs)
+        clock.advance(2)
+        return resp
+
+    session.get = _advancing_get  # type: ignore[method-assign]
+    body, _ = transport.get("/uapi/test", "TR", {})
+    assert body["rt_cd"] == "0"
+    assert session.calls[1]["headers"]["authorization"] == "Bearer token-B"
+    assert not [c for c in session.calls if c["method"] == "POST"]
+
+
+def test_post_rejects_sent_token_not_relookup(tmp_path) -> None:
+    import datetime as dt
+
+    from src.brokers.kis.auth import _TOKEN_REFRESH_MARGIN
+    from src.brokers.kis.trading import KisTradingClient
+    from src.execution.contracts import OutcomeKind
+    from tests.unit.execution.fakes import FakeResponse, FakeSession, FixedClock, T0, accepted_body, make_creds
+
+    clock = FixedClock(T0)
+    expired = FakeResponse({"rt_cd": "1", "msg_cd": "EGW00123", "msg1": "expired"})
+    session = FakeSession([expired, accepted_body()])
+    transport, tokens, limiter = _stack_transport(tmp_path, clock, session)
+    tokens._token = "token-A"
+    tokens._token_expires_at = T0 + _TOKEN_REFRESH_MARGIN + dt.timedelta(seconds=1)
+    trading = KisTradingClient(transport=transport, session=session, credentials=make_creds(),
+                               limiter=limiter, timeout_s=5.0, base_url="https://test")
+    orig_post = session.post
+
+    def _advancing_post(url, **kwargs):
+        resp = orig_post(url, **kwargs)
+        if len([c for c in session.calls if c["method"] == "POST"]) == 1:
+            clock.advance(2)
+        return resp
+
+    session.post = _advancing_post  # type: ignore[method-assign]
+    outcome = trading.post_order("TTTC0012U", {"PDNO": "005930"})
+    assert outcome.kind is OutcomeKind.ACCEPTED
+    posts = [c for c in session.calls if c["method"] == "POST"]
+    assert len(posts) == 2
+    assert posts[1]["headers"]["authorization"] == "Bearer token-B"
+
+
+def test_expired_twice_is_final(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import FakeResponse, FakeSession, FixedClock, T0, token_response
+
+    clock = FixedClock(T0)
+    expired = FakeResponse({"rt_cd": "1", "msg_cd": "EGW00123", "msg1": "expired"})
+    session = FakeSession([expired, token_response("2026-09-12 09:00:00", token="tok-new"), expired])
+    transport, tokens, _ = _stack_transport(
+        tmp_path, clock, session, cache_token="token-A",
+        issued_at=T0 - dt.timedelta(days=1),
+    )
+    tokens._token = "token-A"
+    tokens._token_expires_at = T0 + dt.timedelta(hours=20)
+    with pytest.raises(KisApiError) as excinfo:
+        transport.get("/uapi/test", "TR", {})
+    assert excinfo.value.msg_cd == "EGW00123"
+    assert len([c for c in session.calls if "/oauth2/tokenP" in c["url"]]) == 1
+
+
+def test_post_shared_retry_budget(tmp_path) -> None:
+    import requests
+
+    from src.brokers.kis.trading import KisTradingClient
+    from src.execution.contracts import OutcomeKind
+    from tests.unit.execution.fakes import FakeResponse, FakeSession, FixedClock, T0, make_creds
+
+    clock = FixedClock(T0)
+    limited = FakeResponse({"rt_cd": "1", "msg_cd": "EGW00201", "msg1": "limited"})
+    session = FakeSession([requests.ConnectTimeout(), limited, limited])
+    transport, _, limiter = _stack_transport(tmp_path, clock, session)
+    trading = KisTradingClient(transport=transport, session=session, credentials=make_creds(),
+                               limiter=limiter, timeout_s=5.0, base_url="https://test")
+    outcome = trading.post_order("TTTC0012U", {"PDNO": "005930"})
+    assert outcome.kind is OutcomeKind.REJECTED
+    assert outcome.code == "EGW00201"
+    assert len([c for c in session.calls if c["method"] == "POST"]) == 3
+
+
+def test_authorized_headers_match_headers(tmp_path) -> None:
+    from tests.unit.execution.fakes import make_client
+
+    client, _, _ = make_client(tmp_path, [])
+    transport = client._get_transport
+    headers, token = transport.authorized_headers("TR", "N")
+    assert headers == transport.headers("TR", "N")
+    assert token == headers["authorization"].removeprefix("Bearer ")
+
+
+def test_get_wraps_token_acquisition_failure_as_transport_error() -> None:
+    # Given: 토큰 발급 응답의 만료 시각 형식이 깨져 ValueError 를 내는 토큰 공급자
+    import pytest
+
+    from src.brokers.kis.auth import KisAppAuth
+    from src.brokers.kis.http import KisGetTransport
+    from src.execution.contracts import KisApiError
+
+    class _BrokenTokens:
+        def access_token(self, *, force: bool = False, rejected_token: str | None = None) -> str:
+            raise ValueError("time data 'bad' does not match format")
+
+    class _NoPace:
+        def acquire(self) -> None:
+            pass
+
+    class _NoNetwork:
+        def get(self, *args, **kwargs):
+            raise AssertionError("no request may be sent without a token")
+
+    transport = KisGetTransport(
+        auth=KisAppAuth(app_key="k", app_secret="s"),
+        tokens=_BrokenTokens(),  # type: ignore[arg-type]
+        session=_NoNetwork(),
+        limiter=_NoPace(),
+        timeout_s=5.0,
+        base_url="https://example.invalid",
+    )
+
+    # When / Then: 호출자가 처리하는 KisApiError(TRANSPORT) 로 표면화된다
+    with pytest.raises(KisApiError) as exc_info:
+        transport.get("/path", "TR", {})
+    assert exc_info.value.msg_cd == "TRANSPORT"

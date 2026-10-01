@@ -2,18 +2,35 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Any
 
 import requests
 
 from src.brokers.kis.auth import KisAppAuth, KisTokenProvider, TokenSource
-from src.brokers.kis.rate import HostPacedRateLimiter, RateLimiter
+from src.brokers.kis.rate import Pacer
 from src.execution.contracts import KisApiError
 
 _RATE_LIMIT_CODES: frozenset[str] = frozenset({"EGW00201"})
 _EXPIRED_TOKEN_CODES: frozenset[str] = frozenset({"EGW00121", "EGW00123"})
-_MAX_SAFE_RETRIES = 2
+MAX_SAFE_RETRIES: int = 2
+"""Retry budget for requests the vendor provably did not execute."""
 _MAX_PAGES = 100
+
+
+class KisRetryDecision(StrEnum):
+    RETRY_RATE_LIMITED = "retry_rate_limited"
+    RETRY_AFTER_TOKEN_REFRESH = "retry_after_token_refresh"  # noqa: S105 - retry decision label, not a secret
+    FINAL = "final"
+
+
+def classify_kis_retry(msg_cd: str, *, retries: int, refreshed: bool) -> KisRetryDecision:
+    """Classify a KIS response code into the shared safe-retry decision. Rate-limit codes retry while `retries < MAX_SAFE_RETRIES`; expired-token codes retry once (`refreshed` False). Everything else is FINAL and the caller applies its own success/failure semantics (GET raises, order POST classifies REJECTED/UNKNOWN). `retries` is the caller's total retry count, so a caller may share one budget across transport and rate-limit retries."""
+    if msg_cd in _RATE_LIMIT_CODES and retries < MAX_SAFE_RETRIES:
+        return KisRetryDecision.RETRY_RATE_LIMITED
+    if msg_cd in _EXPIRED_TOKEN_CODES and not refreshed:
+        return KisRetryDecision.RETRY_AFTER_TOKEN_REFRESH
+    return KisRetryDecision.FINAL
 
 
 class KisGetTransport:
@@ -25,7 +42,7 @@ class KisGetTransport:
         auth: KisAppAuth,
         tokens: KisTokenProvider,
         session: Any,
-        limiter: RateLimiter | HostPacedRateLimiter,
+        limiter: Pacer,
         timeout_s: float,
         base_url: str,
     ) -> None:
@@ -36,21 +53,29 @@ class KisGetTransport:
         self._timeout_s = timeout_s
         self._base_url = base_url
 
-    def headers(self, tr_id: str, tr_cont: str = "") -> dict[str, str]:
-        """Build authenticated KIS request headers without logging secrets."""
+    def authorized_headers(self, tr_id: str, tr_cont: str = "") -> tuple[dict[str, str], str]:
+        """Build signed KIS headers and return the bearer token embedded in them. The returned token is the only valid `rejected_token` for a later refresh: re-reading the provider after a refusal can observe a peer-rotated token."""
         token = self._tokens.access_token()
-        return {
-            "content-type": "application/json; charset=utf-8",
-            "authorization": f"Bearer {token}",
-            "appkey": self._auth.app_key,
-            "appsecret": self._auth.app_secret,
-            "tr_id": tr_id,
-            "custtype": "P",
-            "tr_cont": tr_cont,
-        }
+        return (
+            {
+                "content-type": "application/json; charset=utf-8",
+                "authorization": f"Bearer {token}",
+                "appkey": self._auth.app_key,
+                "appsecret": self._auth.app_secret,
+                "tr_id": tr_id,
+                "custtype": "P",
+                "tr_cont": tr_cont,
+            },
+            token,
+        )
 
-    def refresh_token(self, rejected_token: str | None = None) -> str:
-        """Force a token refresh for unsafe POST retry paths."""
+    def headers(self, tr_id: str, tr_cont: str = "") -> dict[str, str]:
+        """Signed KIS headers (secrets are never logged); see `authorized_headers`."""
+        headers, _ = self.authorized_headers(tr_id, tr_cont)
+        return headers
+
+    def refresh_token(self, rejected_token: str) -> str:
+        """Resolve a replacement after the vendor refused `rejected_token` (the token returned by `authorized_headers`). May adopt a peer-rotated cached token instead of issuing."""
         return self._tokens.access_token(force=True, rejected_token=rejected_token)
 
     def ensure_token(self) -> TokenSource:
@@ -62,7 +87,10 @@ class KisGetTransport:
         return self._tokens.access_token(force=force, rejected_token=rejected_token)
 
     def get(
-        self, path: str, tr_id: str, params: dict[str, str],
+        self,
+        path: str,
+        tr_id: str,
+        params: dict[str, str],
         tr_cont: str = "",
     ) -> tuple[dict[str, Any], str]:
         """Fetch one KIS page with bounded safe retries and token refresh."""
@@ -71,9 +99,10 @@ class KisGetTransport:
         while True:
             self._limiter.acquire()
             try:
+                sent_headers, sent_token = self.authorized_headers(tr_id, tr_cont)
                 resp = self._session.get(
                     self._base_url + path,
-                    headers=self.headers(tr_id, tr_cont),
+                    headers=sent_headers,
                     params=params,
                     timeout=self._timeout_s,
                 )
@@ -81,12 +110,12 @@ class KisGetTransport:
             except (requests.RequestException, ValueError) as exc:
                 raise KisApiError("TRANSPORT", type(exc).__name__) from exc
             msg_cd = str(body.get("msg_cd", ""))
-            if msg_cd in _RATE_LIMIT_CODES and retries < _MAX_SAFE_RETRIES:
+            decision = classify_kis_retry(msg_cd, retries=retries, refreshed=refreshed)
+            if decision is KisRetryDecision.RETRY_RATE_LIMITED:
                 retries += 1
                 continue
-            if msg_cd in _EXPIRED_TOKEN_CODES and not refreshed:
-                rejected = self._tokens.access_token()
-                self._tokens.access_token(force=True, rejected_token=rejected)
+            if decision is KisRetryDecision.RETRY_AFTER_TOKEN_REFRESH:
+                self.refresh_token(sent_token)
                 refreshed = True
                 continue
             if body.get("rt_cd") != "0":
@@ -94,7 +123,10 @@ class KisGetTransport:
             return body, str(resp.headers.get("tr_cont", ""))
 
     def get_paged(
-        self, path: str, tr_id: str, params: dict[str, str],
+        self,
+        path: str,
+        tr_id: str,
+        params: dict[str, str],
         list_key: str = "output1",
     ) -> list[dict[str, Any]]:
         """Follow KIS continuation headers within the existing page cap."""

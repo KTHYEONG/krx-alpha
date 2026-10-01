@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 STANDARD_REGULAR_OPEN: dt.time = dt.time(9, 0)
 STANDARD_CLOSING_AUCTION: dt.time = dt.time(15, 20)
 STANDARD_REGULAR_CLOSE: dt.time = dt.time(15, 30)
+STANDARD_POST_CLOSING_PRICE_OPEN: dt.time = dt.time(15, 40)
+STANDARD_NXT_AFTER_MARKET_OPEN: dt.time = dt.time(15, 40)
+STANDARD_KRX_AFTER_MARKET_OPEN: dt.time = dt.time(16, 0)
+# The two 15:40 constants are distinct exchange rules that coincide, kept separate so one can move without the other.
 STANDARD_AFTER_MARKET_END: dt.time = dt.time(20, 0)
 MAX_SESSION_SHIFT: dt.timedelta = dt.timedelta(hours=3)
 

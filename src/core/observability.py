@@ -10,9 +10,6 @@ from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from typing import IO
 
 from src.core.alerts import (
-    _ACTION_HINTS as _ACTION_HINTS,
-)
-from src.core.alerts import (
     _REASON_LABELS as _REASON_LABELS,
 )
 from src.core.alerts import (
@@ -45,16 +42,12 @@ LOG_FILE_BACKUPS: int = 5
 _MANAGED_ATTR = "_krx_alpha_managed"
 _LISTENERS: list[QueueListener] = []
 
-_format_ts = format_record_timestamp
-_format_exc = format_record_exception
-
 __all__ = [
     "ALERT_COOLDOWN_S",
     "ALERT_DAILY_CAP",
     "EVENT",
     "LOG_FILE_BACKUPS",
     "LOG_FILE_MAX_BYTES",
-    "_ACTION_HINTS",
     "_REASON_LABELS",
     "_STAGE_LABELS",
     "EmailAlertHandler",

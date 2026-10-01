@@ -2,6 +2,7 @@
 
 import datetime as dt
 import html
+import inspect
 import logging
 import re
 import smtplib
@@ -70,19 +71,24 @@ _REASON_LABELS: dict[str, str] = {
     "quarantine_exists": "격리 대상 중복",
 }
 
-_ACTION_HINTS: dict[str, str] = {
-    "auth_expired": "rclone config reconnect gdrive: (VPS에서 Google Drive 재인증)",
-    "circuit_open": "증권사 API/소켓 상태 확인 및 docker compose restart krx-collector",
-    "remote_error": "VPS 네트워크 상태 및 원격 스토리지 가용성 점검",
-    "size_mismatch": "로컬 및 원격 데이터 파일 손상 여부 확인",
-    "stale": "실시간 데이터 수신 상태 및 세션 점검",
-    "rclone_settings_missing": ".env 내 rclone 관련 환경변수 설정 확인",
-    "no_bars_store": "일봉 데이터 파켓 파일 존재 여부 확인",
-    "candidates_not_ready": "유니버스 선정 및 일봉 데이터 상태 확인 (docker compose restart krx-collector)",
-    "auth_rejected": "증권사 API 키 및 계좌 설정 유효성 확인",
-    "session_data_gap": "당일 수집 저널 및 일봉 데이터 누락 여부 확인",
-    "maintenance_error": "VPS 디스크 공간 및 권한 확인 (docker compose logs -n 100 krx-collector)",
-}
+
+def _accepts_html_body(sender: Callable[..., None]) -> bool:
+    """Whether ``sender`` can bind ``(subject, body, html_body=...)``.
+
+    Decided from the call signature, not by trial: a trial call that catches
+    ``TypeError`` cannot tell a binding mismatch from a ``TypeError`` raised
+    inside a sender that already transmitted, which would mask sender bugs or
+    send the alert twice. Unintrospectable callables are treated as plain-text
+    senders because ``(subject, body)`` is the minimal sender contract.
+    """
+    try:
+        sig = inspect.signature(sender)
+    except (ValueError, TypeError):
+        return False
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+    return "html_body" in sig.parameters
 
 
 def _call_sender(
@@ -92,12 +98,10 @@ def _call_sender(
     *,
     html_body: str | None = None,
 ) -> None:
-    if html_body:
-        try:
-            sender(subject, body, html_body=html_body)
-            return
-        except TypeError:
-            pass
+    """Invoke ``sender`` exactly once, with ``html_body`` only when it can bind it."""
+    if html_body and _accepts_html_body(sender):
+        sender(subject, body, html_body=html_body)
+        return
     sender(subject, body)
 
 

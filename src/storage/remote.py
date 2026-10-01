@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 import logging
 import pathlib
-import re
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -16,43 +14,9 @@ from typing import Any
 
 from src.core.config import RcloneArchiveSettings
 from src.core.errors import KrxAlphaError
+from src.storage.layout import L0_REPO_PREFIX, L1_REPO_PREFIX, l0_partition_for_l1, l1_repo_path
 
 logger = logging.getLogger(__name__)
-
-_L1_DT_RE = re.compile(r"^dt=(\d{4}-\d{2}-\d{2})\.parquet$")
-
-
-def l0_partition_for_l1(repo_path: str) -> str | None:
-    """Map a remote L1 object path to the remote L0 partition directory it supersedes.
-
-    Why: L1 parquet retains every raw L0 frame losslessly, so once an L1 object is
-    verified remotely its L0 journal partition is redundant offsite.
-
-    Args:
-        repo_path: Remote-relative posix path, e.g. "l1/ls/krx/regular/H0STASP0/dt=2026-09-18.parquet".
-
-    Returns:
-        "l0/<parent>/dt=YYYY-MM-DD" for journal-backed L1 objects; None for snapshot
-        datasets ("l1/snapshot/..."), non-"l1/" paths, or names not matching "dt=YYYY-MM-DD.parquet".
-    """
-    if not repo_path.startswith("l1/"):
-        return None
-    rest = repo_path[len("l1/") :]
-    if rest == "snapshot" or rest.startswith("snapshot/"):
-        return None
-    if "/" not in rest:
-        return None
-    parent, _, name = rest.rpartition("/")
-    if not parent:
-        return None
-    match = _L1_DT_RE.match(name)
-    if match is None:
-        return None
-    try:
-        dt.date.fromisoformat(match.group(1))
-    except ValueError:
-        return None
-    return f"l0/{parent}/{name[: -len('.parquet')]}"
 
 
 class RemoteArchiveError(KrxAlphaError):
@@ -127,8 +91,7 @@ class GDriveArchiver:
                 self._progress()
 
     def repo_path_for(self, archive_root: pathlib.Path, local_parquet: pathlib.Path) -> str:
-        rel = pathlib.Path(local_parquet).relative_to(archive_root).as_posix()
-        return f"l1/{rel}"
+        return l1_repo_path(pathlib.Path(local_parquet).relative_to(archive_root))
 
     def manifest_repo_path_for(self, manifest_root: pathlib.Path, local_json: pathlib.Path) -> str:
         rel = pathlib.Path(local_json).relative_to(manifest_root).as_posix()
@@ -207,7 +170,7 @@ class GDriveArchiver:
 
     def sync_l1_tree(self, local_root: pathlib.Path, *, progress: Callable[[], None] | None = None) -> SyncStats:
         root = pathlib.Path(local_root)
-        sizes = self.remote_file_sizes("l1/")
+        sizes = self.remote_file_sizes(L1_REPO_PREFIX)
         stats = SyncStats()
         for pq in sorted(root.rglob("*.parquet")):
             try:
@@ -284,10 +247,10 @@ class GDriveArchiver:
         base = pathlib.Path(journal_root)
         for l0_dir in l0_dirs:
             try:
-                if not l0_dir.startswith("l0/"):
+                if not l0_dir.startswith(L0_REPO_PREFIX):
                     continue
                 try:
-                    if (base / l0_dir[len("l0/") :]).exists():
+                    if (base / l0_dir[len(L0_REPO_PREFIX) :]).exists():
                         stats.skipped_local_present += 1
                         continue
                     dest = f"{self._remote_name}:{self._remote_path}/{l0_dir}"

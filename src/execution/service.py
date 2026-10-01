@@ -8,11 +8,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from src.brokers.kis.auth import KisAppAuth, KisTokenProvider, kis_token_cache_path
-from src.brokers.kis.data import KisDataClient
-from src.brokers.kis.http import KisGetTransport
-from src.brokers.kis.rate import HostPacedRateLimiter, kis_state_path
-from src.brokers.kis.trading import KIS_LIVE_BASE_URL, KisTradingClient
+from src.brokers.kis.auth import KisAppAuth
+from src.brokers.kis.stack import build_kis_rest_stack
 from src.core.config import ExecutionMode, ExecutionSettings, KisCredentials, KisTokenSettings
 from src.execution.contracts import AccountCheckError, KisApiError, OrderGateway
 from src.execution.gateways import LiveGateway, PaperGateway
@@ -35,48 +32,25 @@ def build_order_manager(
 ) -> OrderManager:
     """실계좌 자기검증 후 모드별 게이트웨이로 매니저를 조립한다.
 
-    The pacing clock is wall time (epoch seconds): the host state file is
-    shared with every process on the host, so a monotonic clock would corrupt
-    the shared booking ledger.
+    The pacing clock is wall time (see `build_kis_rest_stack`).
     """
     paths = settings.paths
     journal = OrderJournal(root=paths.order_journal_dir, mode=settings.mode, now=now)
     token_settings = KisTokenSettings()
-    limiter = HostPacedRateLimiter(
-        kis_state_path(token_settings.token_cache_dir, creds.kis_app_key),
-        settings.rest_rate_per_s,
+    stack = build_kis_rest_stack(
+        auth=KisAppAuth(app_key=creds.kis_app_key, app_secret=creds.kis_app_secret),
+        cache_dir=token_settings.token_cache_dir,
+        session=session,
+        now=now,
+        rate_per_s=settings.rest_rate_per_s,
         max_lead_s=settings.rest_max_lead_s,
+        timeout_s=settings.request_timeout_s,
+        allow_issue=token_settings.allow_issue,
         clock=clock,
         sleep=sleep,
     )
-    auth = KisAppAuth(app_key=creds.kis_app_key, app_secret=creds.kis_app_secret)
-    tokens = KisTokenProvider(
-        auth=auth,
-        session=session,
-        cache_path=kis_token_cache_path(token_settings.token_cache_dir, creds.kis_app_key),
-        limiter=limiter,
-        now=now,
-        timeout_s=settings.request_timeout_s,
-        base_url=KIS_LIVE_BASE_URL,
-        allow_issue=token_settings.allow_issue,
-    )
-    transport = KisGetTransport(
-        auth=auth,
-        tokens=tokens,
-        session=session,
-        limiter=limiter,
-        timeout_s=settings.request_timeout_s,
-        base_url=KIS_LIVE_BASE_URL,
-    )
-    quotes = KisDataClient(transport=transport)
-    trading = KisTradingClient(
-        transport=transport,
-        session=session,
-        credentials=creds,
-        limiter=limiter,
-        timeout_s=settings.request_timeout_s,
-        base_url=KIS_LIVE_BASE_URL,
-    )
+    quotes = stack.data
+    trading = stack.trading_client(creds)
     try:
         holdings = trading.get_holdings()
     except KisApiError as exc:

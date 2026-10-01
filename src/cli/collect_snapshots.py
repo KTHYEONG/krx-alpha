@@ -12,10 +12,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from src.brokers.kis.auth import KisAppAuth, KisTokenProvider, kis_token_cache_path
-from src.brokers.kis.data import KisDataClient
-from src.brokers.kis.http import KisGetTransport
-from src.brokers.kis.rate import HostPacedRateLimiter, kis_state_path
+from src.brokers.kis.auth import KisAppAuth
+from src.brokers.kis.stack import build_kis_rest_stack
 from src.core.config import KisTokenSettings, resolve_collector_runtime
 from src.core.errors import MissingCredentialsError
 from src.core.session_anchors import resolve_session_anchors
@@ -49,31 +47,17 @@ def run(args: argparse.Namespace) -> int:
     if cred is None:
         raise MissingCredentialsError(f"no data credential for slot {settings.kis_data_slot}")
     token_settings = KisTokenSettings()
-    auth = KisAppAuth(app_key=cred.app_key, app_secret=cred.app_secret)
-    limiter = HostPacedRateLimiter(
-        kis_state_path(token_settings.token_cache_dir, cred.app_key),
-        settings.rest_rate_per_s,
-        max_lead_s=settings.rest_max_lead_s,
-    )
-    tokens = KisTokenProvider(
-        auth=auth,
+    stack = build_kis_rest_stack(
+        auth=KisAppAuth(app_key=cred.app_key, app_secret=cred.app_secret),
+        cache_dir=token_settings.token_cache_dir,
         session=requests,
-        cache_path=kis_token_cache_path(token_settings.token_cache_dir, cred.app_key),
-        limiter=limiter,
         now=lambda: dt.datetime.now(_KST),
+        rate_per_s=settings.rest_rate_per_s,
+        max_lead_s=settings.rest_max_lead_s,
         timeout_s=settings.request_timeout_s,
-        base_url="https://openapi.koreainvestment.com:9443",
         allow_issue=token_settings.allow_issue,
     )
-    transport = KisGetTransport(
-        auth=auth,
-        tokens=tokens,
-        session=requests,
-        limiter=limiter,
-        timeout_s=settings.request_timeout_s,
-        base_url="https://openapi.koreainvestment.com:9443",
-    )
-    client = KisDataClient(transport=transport)
+    client = stack.data
     try:
         data = read_candidates(pathlib.Path(str(args.candidates_path)))
     except CandidateFileError as exc:

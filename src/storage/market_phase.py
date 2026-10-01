@@ -10,7 +10,15 @@ from typing import TypeVar
 
 import polars as pl
 
-from src.core.session_anchors import SessionAnchors
+from src.core.session_anchors import (
+    STANDARD_AFTER_MARKET_END,
+    STANDARD_CLOSING_AUCTION,
+    STANDARD_KRX_AFTER_MARKET_OPEN,
+    STANDARD_NXT_AFTER_MARKET_OPEN,
+    STANDARD_POST_CLOSING_PRICE_OPEN,
+    STANDARD_REGULAR_OPEN,
+    SessionAnchors,
+)
 from src.realtime.contracts import MarketVenue
 
 FrameT = TypeVar("FrameT", pl.DataFrame, pl.LazyFrame)
@@ -58,12 +66,12 @@ STREAM_EVENT_KIND: Mapping[str, EventKind] = {
 
 MARKET_PHASE_WINDOWS: tuple[PhaseWindow, ...] = (
     PhaseWindow(MarketVenue.KRX, EventKind.TRADE, dt.time(8, 30), dt.time(8, 40), MarketPhase.PRE_MARKET_CLOSING_PRICE),
-    PhaseWindow(MarketVenue.KRX, None, dt.time(8, 30), dt.time(9, 0), MarketPhase.OPENING_AUCTION),
-    PhaseWindow(MarketVenue.KRX, None, dt.time(9, 0), dt.time(15, 20), MarketPhase.REGULAR),
-    PhaseWindow(MarketVenue.KRX, None, dt.time(15, 20), dt.time(15, 40), MarketPhase.CLOSING_AUCTION),
-    PhaseWindow(MarketVenue.KRX, None, dt.time(15, 40), dt.time(16, 0), MarketPhase.POST_MARKET_CLOSING_PRICE),
-    PhaseWindow(MarketVenue.KRX, None, dt.time(16, 0), dt.time(20, 0), MarketPhase.AFTERMARKET),
-    PhaseWindow(MarketVenue.NXT, None, dt.time(15, 40), dt.time(20, 0), MarketPhase.AFTERMARKET),
+    PhaseWindow(MarketVenue.KRX, None, dt.time(8, 30), STANDARD_REGULAR_OPEN, MarketPhase.OPENING_AUCTION),
+    PhaseWindow(MarketVenue.KRX, None, STANDARD_REGULAR_OPEN, STANDARD_CLOSING_AUCTION, MarketPhase.REGULAR),
+    PhaseWindow(MarketVenue.KRX, None, STANDARD_CLOSING_AUCTION, STANDARD_POST_CLOSING_PRICE_OPEN, MarketPhase.CLOSING_AUCTION),
+    PhaseWindow(MarketVenue.KRX, None, STANDARD_POST_CLOSING_PRICE_OPEN, STANDARD_KRX_AFTER_MARKET_OPEN, MarketPhase.POST_MARKET_CLOSING_PRICE),
+    PhaseWindow(MarketVenue.KRX, None, STANDARD_KRX_AFTER_MARKET_OPEN, STANDARD_AFTER_MARKET_END, MarketPhase.AFTERMARKET),
+    PhaseWindow(MarketVenue.NXT, None, STANDARD_NXT_AFTER_MARKET_OPEN, STANDARD_AFTER_MARKET_END, MarketPhase.AFTERMARKET),
 )
 
 _TRADE_STREAMS: tuple[str, ...] = tuple(s for s, k in STREAM_EVENT_KIND.items() if k is EventKind.TRADE)
@@ -95,10 +103,10 @@ def phase_windows_for(anchors: SessionAnchors) -> tuple[PhaseWindow, ...]:
         PhaseWindow(MarketVenue.KRX, EventKind.TRADE, anchors.shift_pre_open(dt.time(8, 30)), anchors.shift_pre_open(dt.time(8, 40)), MarketPhase.PRE_MARKET_CLOSING_PRICE),
         PhaseWindow(MarketVenue.KRX, None, anchors.shift_pre_open(dt.time(8, 30)), anchors.regular_open, MarketPhase.OPENING_AUCTION),
         PhaseWindow(MarketVenue.KRX, None, anchors.regular_open, anchors.closing_auction_start, MarketPhase.REGULAR),
-        PhaseWindow(MarketVenue.KRX, None, anchors.closing_auction_start, anchors.shift_post_close(dt.time(15, 40)), MarketPhase.CLOSING_AUCTION),
-        PhaseWindow(MarketVenue.KRX, None, anchors.shift_post_close(dt.time(15, 40)), anchors.shift_post_close(dt.time(16, 0)), MarketPhase.POST_MARKET_CLOSING_PRICE),
-        PhaseWindow(MarketVenue.KRX, None, anchors.shift_post_close(dt.time(16, 0)), anchors.after_market_end, MarketPhase.AFTERMARKET),
-        PhaseWindow(MarketVenue.NXT, None, anchors.shift_post_close(dt.time(15, 40)), anchors.after_market_end, MarketPhase.AFTERMARKET),
+        PhaseWindow(MarketVenue.KRX, None, anchors.closing_auction_start, anchors.shift_post_close(STANDARD_POST_CLOSING_PRICE_OPEN), MarketPhase.CLOSING_AUCTION),
+        PhaseWindow(MarketVenue.KRX, None, anchors.shift_post_close(STANDARD_POST_CLOSING_PRICE_OPEN), anchors.shift_post_close(STANDARD_KRX_AFTER_MARKET_OPEN), MarketPhase.POST_MARKET_CLOSING_PRICE),
+        PhaseWindow(MarketVenue.KRX, None, anchors.shift_post_close(STANDARD_KRX_AFTER_MARKET_OPEN), anchors.after_market_end, MarketPhase.AFTERMARKET),
+        PhaseWindow(MarketVenue.NXT, None, anchors.shift_post_close(STANDARD_NXT_AFTER_MARKET_OPEN), anchors.after_market_end, MarketPhase.AFTERMARKET),
     )
 
 
