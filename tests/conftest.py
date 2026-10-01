@@ -25,7 +25,8 @@ for _key, _val in (
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PROJECT_TMP = PROJECT_ROOT / "tmp" / "pytest"
+# xdist 워커마다 독립 임시 루트를 쓴다: 먼저 끝난 워커의 세션 정리가 공유 폴더를 지우면 실행 중인 워커가 FileNotFoundError로 깨진다.
+PROJECT_TMP = PROJECT_ROOT / "tmp" / "pytest" / os.environ.get("PYTEST_XDIST_WORKER", "main")
 
 
 @pytest.fixture(scope="session", autouse=True)
