@@ -219,3 +219,26 @@ def test_read_candidate_snapshot_reports_unreadable_file_as_corrupt(tmp_path) ->
             path, expected_session_date=dt.date(2026, 9, 16),
             expected_session='aftermarket', max_candidates=40,
         )
+
+
+def test_read_candidate_snapshot_truncates_overflow_to_rank_prefix(tmp_path, caplog) -> None:
+    # Given: 60행 스냅샷과 40개 용량
+    import logging
+
+    from src.universe.ipc import read_candidate_snapshot, write_candidate_snapshot
+
+    symbols = tuple(f"{i + 1:06d}" for i in range(60))
+    snapshot = _snapshot_with_symbols(symbols)
+    path = tmp_path / "aftermarket.json"
+    write_candidate_snapshot(path, snapshot)
+
+    # When
+    with caplog.at_level(logging.WARNING, logger="src.universe.ipc"):
+        got = read_candidate_snapshot(
+            path, expected_session_date=snapshot.session_date, expected_session="aftermarket", max_candidates=40
+        )
+
+    # Then: 상위 40위만 남고 경고가 기록된다
+    assert [row["symbol"] for row in got.candidates] == list(symbols[:40])
+    assert got.selected_count == 40
+    assert any("TRUNCATED" in rec.message and "kept=40" in rec.message for rec in caplog.records)

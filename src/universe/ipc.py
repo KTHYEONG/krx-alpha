@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
 import pathlib
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from typing import Any
 
 from src.core.errors import KrxAlphaError
 from src.core.symbols import is_krx_short_code
+
+logger = logging.getLogger(__name__)
 
 
 class CandidateFileError(KrxAlphaError):
@@ -68,6 +71,16 @@ def read_candidate_snapshot(
     expected_session: str,
     max_candidates: int,
 ) -> CandidateSnapshot:
+    """Read and validate a candidate snapshot for one session.
+
+    A snapshot holding more than ``max_candidates`` rows is truncated to the
+    top ``max_candidates`` by rank with a ``status=TRUNCATED`` warning, so a
+    lowered capacity setting degrades coverage instead of halting collection.
+
+    Raises:
+        CandidateFileError: When the file is missing, unparsable, or violates
+            the session, count, rank, or symbol invariants.
+    """
     try:
         text = pathlib.Path(path).read_text(encoding="utf-8")
     except FileNotFoundError as exc:
@@ -102,12 +115,21 @@ def read_candidate_snapshot(
             or selected_count != len(rows)
             or eligible_count < selected_count
             or max_candidates < 1
-            or len(rows) > max_candidates
             or len(set(symbols)) != len(symbols)
             or any(not is_krx_short_code(symbol) for symbol in symbols)
             or sorted(ranks) != list(range(1, len(rows) + 1))
         ):
             raise ValueError(f"invalid candidate snapshot: {path}")
+        if len(rows) > max_candidates:
+            ordered = sorted(rows, key=lambda row: int(row["rank"]))
+            dropped = len(rows) - max_candidates
+            logger.warning(
+                "[DATA] stage=candidate_snapshot status=TRUNCATED kept=%d dropped=%d",
+                max_candidates,
+                dropped,
+            )
+            rows = ordered[:max_candidates]
+            selected_count = len(rows)
         return CandidateSnapshot(schema_version=int(schema_version), rev=int(rev), session_date=session_date, session=session, generated_at=generated_at, source_asof=source_asof, effective_from=effective_from, policy_version=policy_version, capacity=capacity, eligible_count=eligible_count, selected_count=selected_count, candidates=tuple(rows))
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise CandidateFileError(f"corrupt candidate snapshot: {path}") from exc
