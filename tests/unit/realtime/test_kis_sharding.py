@@ -10,16 +10,17 @@ def test_load_kis_data_credentials_rejects_primary_or_duplicate_key() -> None:
         load_kis_data_credentials(env)
 
 
-def test_plan_aftermarket_shards_full_coverage_and_key_shortage() -> None:
-    import pytest
-    from src.core.errors import SlotBudgetExceededError
+def test_plan_aftermarket_shards_full_coverage_and_key_shortage(caplog) -> None:
+    import logging
     from src.realtime.kis_sharding import KisDataCredential, plan_aftermarket_shards
     keys = tuple(KisDataCredential(str(i), f'key{i}', 'secret', f'hts{i}', f'id{i}') for i in range(4))
     symbols = tuple(f'{i:06d}' for i in range(40))
     plan = plan_aftermarket_shards(symbols=symbols, credentials=keys, pair_capacity_per_connection=41, krx_streams=('H0STCNT0','H0STASP0'), nxt_streams=('H0NXCNT0','H0NXASP0'))
     assert [(x.venue.value,x.shard_index,len(x.symbols),x.credential_slot) for x in plan] == [('nxt',0,20,'0'),('nxt',1,20,'1'),('krx',0,20,'2'),('krx',1,20,'3')]
-    with pytest.raises(SlotBudgetExceededError, match=r'required=4.*available=3'):
-        plan_aftermarket_shards(symbols=symbols, credentials=keys[:3], pair_capacity_per_connection=41, krx_streams=('H0STCNT0','H0STASP0'), nxt_streams=('H0NXCNT0','H0NXASP0'))
+    with caplog.at_level(logging.WARNING, logger="src.realtime.kis_sharding"):
+        short = plan_aftermarket_shards(symbols=symbols, credentials=keys[:3], pair_capacity_per_connection=41, krx_streams=('H0STCNT0','H0STASP0'), nxt_streams=('H0NXCNT0','H0NXASP0'))
+    assert [(x.venue.value,x.shard_index,len(x.symbols),x.credential_slot) for x in short] == [('nxt',0,20,'0'),('krx',0,20,'1')]
+    assert any("status=TRUNCATED" in rec.message and "kept=20" in rec.message and "dropped=20" in rec.message for rec in caplog.records)
 
 
 def test_load_kis_data_credentials_validates_all_branches() -> None:
@@ -60,3 +61,34 @@ def test_plan_aftermarket_shards_rejects_empty_duplicate_and_tiny_capacity() -> 
         plan_aftermarket_shards(symbols=("005930", "005930"), credentials=keys, pair_capacity_per_connection=41, krx_streams=("H0STCNT0", "H0STASP0"), nxt_streams=("H0NXCNT0", "H0NXASP0"))
     with pytest.raises(SlotBudgetExceededError, match="capacity"):
         plan_aftermarket_shards(symbols=("005930",), credentials=keys, pair_capacity_per_connection=1, krx_streams=("H0STCNT0", "H0STASP0"), nxt_streams=("H0NXCNT0", "H0NXASP0"))
+
+
+def test_plan_aftermarket_shards_overflow_keeps_top_ranked_symbols(caplog) -> None:
+    # Given: 60개 순위 종목, 40개 용량, 2개 키
+    import logging
+
+    from src.realtime.kis_sharding import KisDataCredential, plan_aftermarket_shards
+
+    keys = tuple(KisDataCredential(str(i), f'key{i}', 'secret', f'hts{i}', f'id{i}') for i in range(2))
+    symbols = tuple(f'{i:06d}' for i in range(60))
+
+    # When
+    with caplog.at_level(logging.WARNING, logger="src.realtime.kis_sharding"):
+        plan = plan_aftermarket_shards(symbols=symbols, credentials=keys, pair_capacity_per_connection=80, krx_streams=('H0STCNT0','H0STASP0'), nxt_streams=('H0NXCNT0','H0NXASP0'))
+
+    # Then: 1..40위만 담고 dropped=20이 기록된다
+    covered = [symbol for shard in plan for symbol in shard.symbols]
+    assert covered[:40] == list(symbols[:40])
+    assert len(plan) == 2
+    assert any("status=TRUNCATED" in rec.message and "kept=40" in rec.message and "dropped=20" in rec.message for rec in caplog.records)
+
+
+def test_plan_aftermarket_shards_raises_when_nothing_fits() -> None:
+    # Given: 샤드 1개도 배정할 수 없는 키 풀
+    import pytest
+
+    from src.core.errors import SlotBudgetExceededError
+    from src.realtime.kis_sharding import plan_aftermarket_shards
+
+    with pytest.raises(SlotBudgetExceededError, match=r"required=2.*available=0"):
+        plan_aftermarket_shards(symbols=("005930",), credentials=(), pair_capacity_per_connection=41, krx_streams=("H0STCNT0", "H0STASP0"), nxt_streams=("H0NXCNT0", "H0NXASP0"))

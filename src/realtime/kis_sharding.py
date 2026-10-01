@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 from src.core.config import kis_data_env
 from src.core.errors import KrxAlphaError, SlotBudgetExceededError
 from src.realtime.contracts import MarketVenue
+
+logger = logging.getLogger(__name__)
 
 
 def credential_key_id_for(app_key: str) -> str:
@@ -76,7 +79,17 @@ def plan_aftermarket_shards(
     krx_streams: tuple[str, str],
     nxt_streams: tuple[str, str],
 ) -> tuple[AftermarketShard, ...]:
-    """후보 순서를 보존해 NXT 샤드 then KRX 샤드로 고정 배정한다 (키 부족·축소 수집 거부)."""
+    """Assign candidates in rank order to NXT shards, then KRX shards.
+
+    When credentials cannot cover every symbol, the plan keeps the longest
+    rank-ordered prefix that fits and logs ``status=TRUNCATED``; the lowest-ranked
+    symbols are dropped rather than aborting the whole aftermarket session.
+
+    Raises:
+        KrxAlphaError: On empty or duplicate symbols.
+        SlotBudgetExceededError: When capacity cannot hold one symbol or the
+            credentials cannot cover even the top-ranked symbol.
+    """
     ordered = tuple(symbols)
     if not ordered:
         raise KrxAlphaError("empty aftermarket symbols")
@@ -93,7 +106,23 @@ def plan_aftermarket_shards(
     required = nxt_shard_count + krx_shard_count
     available = len(credentials)
     if required > available:
-        raise SlotBudgetExceededError(f"aftermarket shards required={required} available={available}")
+        kept = len(ordered)
+        while kept > 0:
+            shards_for_kept = (kept + nxt_per_shard - 1) // nxt_per_shard + (kept + krx_per_shard - 1) // krx_per_shard
+            if shards_for_kept <= available:
+                break
+            kept -= 1
+        if kept < 1:
+            raise SlotBudgetExceededError(f"aftermarket shards required={required} available={available}")
+        dropped = len(ordered) - kept
+        logger.warning(
+            "[DATA] stage=aftermarket_plan status=TRUNCATED kept=%d dropped=%d",
+            kept,
+            dropped,
+        )
+        ordered = ordered[:kept]
+        nxt_shard_count = (len(ordered) + nxt_per_shard - 1) // nxt_per_shard
+        krx_shard_count = (len(ordered) + krx_per_shard - 1) // krx_per_shard
     keys = list(credentials)
     plan: list[AftermarketShard] = []
     for index in range(nxt_shard_count):
