@@ -570,3 +570,28 @@ def test_selection_lookback_calendar_days_defaults_and_floor() -> None:
     assert CollectorSettings().selection_lookback_calendar_days == 150
     with pytest.raises(ValidationError):
         CollectorSettings(selection_lookback_calendar_days=99)
+
+
+def test_broker_admission_leads_have_typed_defaults() -> None:
+    # Given / When / Then: 등급별 리드 기본값 (critical=None, standard=1.0, bulk=0.25)
+    from src.core.config import (
+        CollectorSettings,
+        ExecutionSettings,
+        SnapshotSettings,
+        TossProgramTradesSettings,
+    )
+
+    assert ExecutionSettings().rest_max_lead_s is None
+    assert SnapshotSettings().rest_max_lead_s == 1.0
+    assert CollectorSettings().kis_rest_max_lead_s == 1.0
+    assert TossProgramTradesSettings().rest_max_lead_s == 0.25
+
+
+def test_execution_settings_rejects_non_positive_rest_lead() -> None:
+    # Given / When / Then: 크리티컬 리드는 None이거나 양수다
+    import pytest
+
+    from src.core.config import ExecutionSettings
+
+    with pytest.raises(ValueError, match="positive"):
+        ExecutionSettings(rest_max_lead_s=0.0)

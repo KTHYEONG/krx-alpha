@@ -17,7 +17,7 @@ from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from src.brokers.kis.rate import RateLimiter
+from src.brokers.kis.rate import HostPacedRateLimiter, RateLimiter
 from src.execution.contracts import KisApiError
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,7 @@ class KisTokenProvider:
         auth: KisAppAuth,
         session: Any,
         cache_path: pathlib.Path,
-        limiter: RateLimiter,
+        limiter: RateLimiter | HostPacedRateLimiter,
         now: Callable[[], dt.datetime],
         timeout_s: float,
         base_url: str,
@@ -168,8 +168,16 @@ class KisTokenProvider:
         _, source = self._issue_token_and_report(now, reuse_valid=True)
         return source
 
-    def access_token(self, *, force: bool = False) -> str:
-        """Return a usable token while retaining lock, expiry, and refresh semantics."""
+    def access_token(self, *, force: bool = False, rejected_token: str | None = None) -> str:
+        """Return a usable token while retaining lock, expiry, and refresh semantics.
+
+        Args:
+            force: Bypass the memory and file fast paths and re-resolve under the lock.
+            rejected_token: Token the vendor just refused. A cached token that is
+                valid and different from it is adopted (a peer already rotated
+                the shared cache); the daily-issuance guard only fires when the
+                cache still holds the rejected token.
+        """
         now = self._now()
         if (
             not force
@@ -187,23 +195,33 @@ class KisTokenProvider:
             raise KisApiError("TOKEN_CACHE", "token cache missing/expired and issuance disabled")
         if self._backoff_active(now):
             hit = self._read_valid_token(now)
-            if hit is not None:
+            if hit is not None and (rejected_token is None or hit[0] != rejected_token):
                 self._token, self._token_expires_at = hit
                 return self._token
             raise KisApiError("TOKEN_BACKOFF", "token issuance failed recently; backing off")
-        return self._issue_token(now, reuse_valid=not force)
+        if rejected_token is None:
+            rejected_token = self._token
+        return self._issue_token(now, reuse_valid=not force, rejected_token=rejected_token)
 
-    def _issue_token(self, now: dt.datetime, *, reuse_valid: bool) -> str:
+    def _issue_token(self, now: dt.datetime, *, reuse_valid: bool, rejected_token: str | None = None) -> str:
         """per-key lock으로 캐시를 재검사한 뒤 atomic 0600 write로 발급한다 (당일 재발급은 force도 거부)."""
-        token, _ = self._issue_token_and_report(now, reuse_valid=reuse_valid)
+        token, _ = self._issue_token_and_report(now, reuse_valid=reuse_valid, rejected_token=rejected_token)
         return token
 
-    def _issue_token_and_report(self, now: dt.datetime, *, reuse_valid: bool) -> tuple[str, TokenSource]:
+    def _issue_token_and_report(
+        self, now: dt.datetime, *, reuse_valid: bool, rejected_token: str | None = None
+    ) -> tuple[str, TokenSource]:
         with _token_file_lock(self._token_cache_path), _lock_for_token_cache(self._token_cache_path):
-            cached = self._read_valid_token(now) if reuse_valid else None
-            if cached is not None:
-                self._token, self._token_expires_at = cached
-                return self._token, TokenSource.CACHE
+            if reuse_valid:
+                cached = self._read_valid_token(now)
+                if cached is not None:
+                    self._token, self._token_expires_at = cached
+                    return self._token, TokenSource.CACHE
+            elif rejected_token is not None:
+                cached = self._read_valid_token(now)
+                if cached is not None and cached[0] != rejected_token:
+                    self._token, self._token_expires_at = cached
+                    return self._token, TokenSource.CACHE
             if self._cached_issue_day() == now.astimezone(_KST).date():
                 raise KisApiError("TOKEN_DAILY_LIMIT", "token already issued today (KST)")
             return self._issue_token_unlocked(now), TokenSource.ISSUED

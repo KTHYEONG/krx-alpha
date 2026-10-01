@@ -30,7 +30,7 @@ from src.brokers.kis.data import (
     KisRankingRow,
 )
 from src.brokers.kis.http import KisGetTransport
-from src.brokers.kis.rate import RateLimiter
+from src.brokers.kis.rate import HostPacedRateLimiter, RateLimiter
 from src.brokers.kis.trading import (
     KIS_LIVE_BASE_URL,
     TR_BALANCE,
@@ -95,7 +95,7 @@ class KisRestClient:
         creds: KisCredentials,
         session: Any,
         token_cache_path: pathlib.Path,
-        limiter: RateLimiter,
+        limiter: RateLimiter | HostPacedRateLimiter,
         now: Callable[[], dt.datetime],
         timeout_s: float,
         base_url: str = KIS_LIVE_BASE_URL,
@@ -158,9 +158,9 @@ class KisRestClient:
         """
         return self._tokens.ensure_token()
 
-    def access_token(self, *, force: bool = False) -> str:
+    def access_token(self, *, force: bool = False, rejected_token: str | None = None) -> str:
         """캐시 토큰을 반환하고 만료 임박 시에만 재발급한다."""
-        return self._tokens.access_token(force=force)
+        return self._tokens.access_token(force=force, rejected_token=rejected_token)
 
     def _headers(self, tr_id: str, tr_cont: str) -> dict[str, str]:
         return self._get_transport.headers(tr_id, tr_cont)

@@ -18,25 +18,15 @@ from src.marketdata.partitioned_store import (
     scan_month_partitions,
     upsert_month_partitions,
 )
+from src.marketdata.toss_auth import TOSS_TRANSIENT_EXCEPTIONS, is_auth_rejection, is_invalid_token_envelope
 
 TOSS_PROGRAM_TRADES_URL_TEMPLATE: str = "https://openapi.tossinvest.com/api/v1/stocks/{symbol}/program-trades"
 TOSS_PROGRAM_TRADES_PAGE_COUNT: int = 100
 
-# 연결 리셋/타임아웃은 벤더 측 일시 장애로 재시도하면 대개 회복된다(실측: 2026-09-17
-# 전체 백필 중 ConnectionResetError 4건 전량 재실행으로 복구). 반면 HTTPError(4xx/5xx,
-# raise_for_status 발생분)는 URL 자체의 응답이므로 같은 요청을 반복해도 결과가 같아
-# 재시도 대상에서 제외한다(실측: 상장폐지 종목의 404는 재시도해도 그대로 404).
-_TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
-    requests.exceptions.ConnectionError,
-    requests.exceptions.Timeout,
-    requests.exceptions.ChunkedEncodingError,
-)
-
-
 @retry(
     stop=stop_after_attempt(3),
     wait=retry_wait_seconds,
-    retry=retry_if_exception_type(_TRANSIENT_EXCEPTIONS),
+    retry=retry_if_exception_type(TOSS_TRANSIENT_EXCEPTIONS),
     reraise=True,
 )
 def _send_program_trades_request(sess: Any, url: str, headers: dict[str, str], params: dict[str, str]) -> Any:
@@ -58,6 +48,10 @@ PROGRAM_TRADE_HISTORY_SCHEMA: dict[str, type[pl.DataType]] = {
 
 class TossProgramTradesError(KrxAlphaError):
     """Toss program-trade fetch/backfill fail-closed signal (auth, transport, or schema violation)."""
+
+
+class _TossProgramTradesAuthRejected(TossProgramTradesError):  # noqa: N818 - internal retry signal, surfaced as TossProgramTradesError
+    """Vendor auth rejection (HTTP 401 or invalid-token envelope) warranting one rotation."""
 
 
 def _parse_int(value: object) -> int:
@@ -103,8 +97,14 @@ def fetch_program_trades_page(
     try:
         resp = _send_program_trades_request(sess, url, {"Authorization": f"Bearer {access_token}"}, params)
         body = resp.json()
+    except requests.HTTPError as exc:
+        if is_auth_rejection(exc):
+            raise _TossProgramTradesAuthRejected(f"toss program-trades auth rejected for {symbol}") from exc
+        raise TossProgramTradesError(f"toss program-trades request failed for {symbol}: {exc}") from exc
     except requests.RequestException as exc:
         raise TossProgramTradesError(f"toss program-trades request failed for {symbol}: {exc}") from exc
+    if is_invalid_token_envelope(body):
+        raise _TossProgramTradesAuthRejected(f"toss program-trades auth rejected for {symbol}: invalid-token")
     try:
         result = body["result"]
         records = result["records"]

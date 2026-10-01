@@ -482,3 +482,90 @@ def test_backfill_program_trades_history_uses_one_page_when_gap_fits(monkeypatch
     # Then: 더 오래된 페이지는 요청하지 않고 신규 날짜만 반환한다
     assert len(calls) == 1
     assert [r["date"] for r in out] == [dt.date(2026, 9, 18) + dt.timedelta(days=i) for i in range(8)]
+
+
+def test_fetch_program_trades_page_raises_auth_rejected_on_401() -> None:
+    # Given: 401을 돌려주는 세션
+    import requests
+
+    import pytest
+
+    from src.marketdata.toss_program_trades import _TossProgramTradesAuthRejected
+
+    class _Resp:
+        status_code = 401
+
+        def raise_for_status(self) -> None:
+            err = requests.HTTPError("401 Unauthorized")
+            err.response = self
+            raise err
+
+        def json(self) -> dict:
+            raise AssertionError("no body on 401")
+
+    class _Session:
+        def get(self, url: str, **kwargs: object) -> _Resp:
+            return _Resp()
+
+    # When / Then: 회전 신호로 표면화된다
+    with pytest.raises(_TossProgramTradesAuthRejected):
+        tpt.fetch_program_trades_page("005930", access_token="stale", session=_Session())
+
+
+def test_fetch_program_trades_page_wraps_non_401_http_error() -> None:
+    # Given: 500을 돌려주는 세션
+    import requests
+
+    import pytest
+
+    class _Resp:
+        status_code = 500
+
+        def raise_for_status(self) -> None:
+            err = requests.HTTPError("500 Server Error")
+            err.response = self
+            raise err
+
+        def json(self) -> dict:
+            raise AssertionError("no body on 500")
+
+    class _Session:
+        def get(self, url: str, **kwargs: object) -> _Resp:
+            return _Resp()
+
+    # When / Then: 일반 전송 실패로 표면화된다
+    with pytest.raises(TossProgramTradesError, match="request failed"):
+        tpt.fetch_program_trades_page("005930", access_token="tok", session=_Session())
+
+
+def test_fetch_program_trades_page_raises_auth_rejected_on_invalid_token_envelope() -> None:
+    # Given: invalid-token 봉투를 돌려주는 세션
+    import pytest
+
+    from src.marketdata.toss_program_trades import _TossProgramTradesAuthRejected
+
+    session = _Session({"error": {"code": "invalid-token", "message": "stale"}})
+
+    # When / Then
+    with pytest.raises(_TossProgramTradesAuthRejected):
+        tpt.fetch_program_trades_page("005930", access_token="stale", session=session)
+
+
+def test_fetch_program_trades_page_rejects_non_mapping_body() -> None:
+    # Given: 리스트 본문을 돌려주는 세션
+    import pytest
+
+    class _ListResp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list:
+            return ["not", "a", "mapping"]
+
+    class _ListSession:
+        def get(self, url: str, **kwargs: object) -> _ListResp:
+            return _ListResp()
+
+    # When / Then: 봉투 위반으로 표면화된다
+    with pytest.raises(TossProgramTradesError, match="envelope invalid"):
+        tpt.fetch_program_trades_page("005930", access_token="tok", session=_ListSession())

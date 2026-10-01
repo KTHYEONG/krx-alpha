@@ -490,3 +490,206 @@ def test_parse_session_anchors_rejects_out_of_order_vendor_times() -> None:
     }
 
     assert parse_session_anchors(dt.date(2026, 10, 1), integrated) is None
+
+
+def _auth_rejecting_session(kind: str, calls: list):
+    import requests
+
+    business = {
+        "result": {
+            "today": {"date": "2026-09-14", "integrated": {"regularMarket": {"startTime": "2026-09-14T09:00:00.000+09:00"}}},
+            "previousBusinessDay": {"date": "2026-09-11", "integrated": {}},
+            "nextBusinessDay": {"date": "2026-09-15", "integrated": {}},
+        }
+    }
+
+    class _Resp:
+        def __init__(self, body):
+            self._body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._body
+
+    class _Session:
+        def __init__(self):
+            self.tokens = 0
+
+        def post(self, url, **kw):
+            self.tokens += 1
+            calls.append(("token", self.tokens))
+            return _Resp({"access_token": f"tok-{self.tokens}"})
+
+        def get(self, url, **kw):
+            auth = kw.get("headers", {}).get("Authorization", "")
+            if kind == "always-401":
+                err = requests.HTTPError("401 Unauthorized")
+                err.response = type("R", (), {"status_code": 401})()
+                raise err
+            if kind == "once-401" and auth == "Bearer tok-1":
+                err = requests.HTTPError("401 Unauthorized")
+                err.response = type("R", (), {"status_code": 401})()
+                raise err
+            if kind == "invalid-token" and auth == "Bearer tok-1":
+                return _Resp({"error": {"code": "invalid-token", "message": "stale"}})
+            return _Resp(business)
+
+    return _Session()
+
+
+def test_fetch_trading_day_rotates_once_on_401_and_retries(tmp_path) -> None:
+    # Given: 첫 토큰으로 401이 나는 세션과 격리된 저장소
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import fetch_trading_day
+    from src.marketdata.toss_token_store import TossTokenStore, toss_token_path
+
+    calls: list = []
+    session = _auth_rejecting_session("once-401", calls)
+    store = TossTokenStore(toss_token_path(tmp_path, "k"))
+
+    # When
+    out = fetch_trading_day(dt.date(2026, 9, 14), app_key="k", app_secret="s", session=session, token_store=store)
+
+    # Then: 1회 회전 후 같은 요청을 재시도하고 oauth는 2회 호출된다
+    assert out.date == dt.date(2026, 9, 14)
+    assert calls == [("token", 1), ("token", 2)]
+    assert store.read().access_token == "tok-2"
+    assert store.read().generation == 2
+
+
+def test_fetch_trading_day_reuses_stored_token_without_issuance(tmp_path) -> None:
+    # Given: 저장소가 이미 유효한 B를 쥐고 있는 세션
+    import datetime as dt
+    import json
+
+    from src.marketdata.toss_calendar import fetch_trading_day
+    from src.marketdata.toss_token_store import TossTokenStore, toss_token_path
+
+    path = toss_token_path(tmp_path, "k")
+    path.write_text(json.dumps({
+        "schema_version": 1, "access_token": "tok-B", "issued_at": "2026-09-14T00:00:00+09:00",
+        "expires_at": None, "generation": 5,
+    }), encoding="utf-8")
+
+    business = {
+        "result": {
+            "today": {"date": "2026-09-14", "integrated": {"regularMarket": {"startTime": "2026-09-14T09:00:00.000+09:00"}}},
+            "previousBusinessDay": {"date": "2026-09-11", "integrated": {}},
+            "nextBusinessDay": {"date": "2026-09-15", "integrated": {}},
+        }
+    }
+
+    class _Resp:
+        def __init__(self, body):
+            self._body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._body
+
+    class _PeerSession:
+        def post(self, url, **kw):
+            raise AssertionError("stored token is usable; must not issue")
+
+        def get(self, url, **kw):
+            assert kw["headers"]["Authorization"] == "Bearer tok-B"
+            return _Resp(business)
+
+    # When: 저장소 토큰으로 곧바로 조회한다
+    store = TossTokenStore(path)
+    out = fetch_trading_day(
+        dt.date(2026, 9, 14), app_key="k", app_secret="s", session=_PeerSession(), token_store=store
+    )
+
+    # Then: 발급 없이 조회하고 세대가 유지된다
+    assert out.previous_business_day == dt.date(2026, 9, 11)
+    assert store.read().generation == 5
+
+
+def test_fetch_trading_day_second_rejection_raises(tmp_path) -> None:
+    # Given: 항상 401인 세션
+    import datetime as dt
+
+    import pytest
+
+    from src.marketdata.toss_calendar import TossCalendarError, fetch_trading_day
+
+    calls: list = []
+    session = _auth_rejecting_session("always-401", calls)
+
+    # When / Then: 두 번째 거부도 기존 TossCalendarError로 표면화된다
+    with pytest.raises(TossCalendarError):
+        fetch_trading_day(dt.date(2026, 9, 14), app_key="k", app_secret="s", session=session, cache_dir=tmp_path)
+    assert calls == [("token", 1), ("token", 2)]
+
+
+def test_fetch_trading_day_retries_once_on_invalid_token_envelope(tmp_path) -> None:
+    # Given: 첫 토큰에 invalid-token 봉투를 돌려주는 세션
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import fetch_trading_day
+    from src.marketdata.toss_token_store import TossTokenStore, toss_token_path
+
+    calls: list = []
+    session = _auth_rejecting_session("invalid-token", calls)
+    store = TossTokenStore(toss_token_path(tmp_path, "k"))
+
+    # When
+    out = fetch_trading_day(dt.date(2026, 9, 14), app_key="k", app_secret="s", session=session, token_store=store)
+
+    # Then: 회전 후 재시도가 성공한다
+    assert out.date == dt.date(2026, 9, 14)
+    assert calls == [("token", 1), ("token", 2)]
+    assert store.read().access_token == "tok-2"
+
+
+def test_issue_access_token_with_non_mapping_body_raises() -> None:
+    # Given: 리스트 본문을 돌려주는 토큰 세션
+    import pytest
+
+    from src.marketdata.toss_calendar import TossCalendarError, issue_access_token
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return ["not", "a", "mapping"]
+
+    class _Session:
+        def post(self, url, **kw):
+            return _Resp()
+
+    # When / Then
+    with pytest.raises(TossCalendarError, match="missing access_token"):
+        issue_access_token(app_key="k", app_secret="s", session=_Session())
+
+
+def test_fetch_trading_day_does_not_resend_401_before_rotation(tmp_path) -> None:
+    # Given: 항상 401인 세션의 GET 호출 횟수 감시
+    import datetime as dt
+
+    import pytest
+
+    from src.marketdata.toss_calendar import TossCalendarError, fetch_trading_day
+
+    calls: list = []
+    session = _auth_rejecting_session("always-401", calls)
+    gets: list[str] = []
+    original_get = session.get
+
+    def _counting_get(url, **kw):
+        gets.append(url)
+        return original_get(url, **kw)
+
+    session.get = _counting_get
+
+    # When / Then: 4xx 는 재전송 없이 회전 1회 후 바로 실패한다
+    with pytest.raises(TossCalendarError):
+        fetch_trading_day(dt.date(2026, 9, 14), app_key="k", app_secret="s", session=session, cache_dir=tmp_path)
+    assert len(gets) == 2

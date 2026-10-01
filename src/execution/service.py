@@ -11,7 +11,7 @@ from typing import Any
 from src.brokers.kis.auth import KisAppAuth, KisTokenProvider, kis_token_cache_path
 from src.brokers.kis.data import KisDataClient
 from src.brokers.kis.http import KisGetTransport
-from src.brokers.kis.rate import RateLimiter
+from src.brokers.kis.rate import HostPacedRateLimiter, kis_state_path
 from src.brokers.kis.trading import KIS_LIVE_BASE_URL, KisTradingClient
 from src.core.config import ExecutionMode, ExecutionSettings, KisCredentials, KisTokenSettings
 from src.execution.contracts import AccountCheckError, KisApiError, OrderGateway
@@ -30,14 +30,25 @@ def build_order_manager(
     creds: KisCredentials,
     session: Any,
     now: Callable[[], dt.datetime],
-    clock: Callable[[], float] = time.monotonic,
+    clock: Callable[[], float] = time.time,
     sleep: Callable[[float], None] = time.sleep,
 ) -> OrderManager:
-    """실계좌 자기검증 후 모드별 게이트웨이로 매니저를 조립한다."""
+    """실계좌 자기검증 후 모드별 게이트웨이로 매니저를 조립한다.
+
+    The pacing clock is wall time (epoch seconds): the host state file is
+    shared with every process on the host, so a monotonic clock would corrupt
+    the shared booking ledger.
+    """
     paths = settings.paths
     journal = OrderJournal(root=paths.order_journal_dir, mode=settings.mode, now=now)
-    limiter = RateLimiter(settings.rest_rate_per_s, clock=clock, sleep=sleep)
     token_settings = KisTokenSettings()
+    limiter = HostPacedRateLimiter(
+        kis_state_path(token_settings.token_cache_dir, creds.kis_app_key),
+        settings.rest_rate_per_s,
+        max_lead_s=settings.rest_max_lead_s,
+        clock=clock,
+        sleep=sleep,
+    )
     auth = KisAppAuth(app_key=creds.kis_app_key, app_secret=creds.kis_app_secret)
     tokens = KisTokenProvider(
         auth=auth,

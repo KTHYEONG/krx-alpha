@@ -409,3 +409,251 @@ def test_forward_sync_excludes_delisted_symbols_from_targets_and_staleness(tmp_p
     assert calls == ["005930"]
     assert result.tracked == ("005930",)
     assert result.stale_symbols == ()
+
+
+def test_forward_sync_rotates_once_on_auth_rejection_then_retries(tmp_path, monkeypatch) -> None:
+    # Given: 첫 조회가 인증 거부되는 벤더
+    import datetime as dt
+
+    from src.marketdata import program_trade_service as service
+    from src.marketdata.toss_program_trades import _TossProgramTradesAuthRejected
+
+    store = tmp_path / "program_trades"
+    _seed(store, {"005930": [dt.date(2026, 9, 17)]})
+    tokens: list[str] = []
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: tokens.append("oauth") or f"tok-{len(tokens)}")
+    attempts: list[str] = []
+
+    def _flaky_history(symbol: str, **kwargs) -> tuple:
+        attempts.append(kwargs["access_token"])
+        if len(attempts) == 1:
+            raise _TossProgramTradesAuthRejected("stale token")
+        return (_pt_row(symbol, dt.date(2026, 9, 18)),)
+
+    monkeypatch.setattr(service, "backfill_program_trades_history", _flaky_history)
+
+    # When
+    result = service.sync_program_trades_forward(
+        store_root=store,
+        session_date=dt.date(2026, 9, 25),
+        complete_through=dt.date(2026, 9, 24),
+        candidate_symbols=(),
+        lookback_days=120,
+        app_key="k",
+        app_secret="s",
+        rate_per_s=1000.0,
+    )
+
+    # Then: 같은 요청이 회전된 토큰으로 1회 재시도되고 oauth는 2회 호출된다
+    assert attempts == ["tok-1", "tok-2"]
+    assert tokens == ["oauth", "oauth"]
+    assert result.symbols_ok == 1
+
+
+def test_forward_sync_second_rejection_raises(tmp_path, monkeypatch) -> None:
+    # Given: 계속 거부되는 벤더
+    import datetime as dt
+
+    import pytest
+
+    from src.marketdata import program_trade_service as service
+    from src.marketdata.toss_program_trades import TossProgramTradesError, _TossProgramTradesAuthRejected
+
+    store = tmp_path / "program_trades"
+    _seed(store, {"005930": [dt.date(2026, 9, 17)]})
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: "tok")
+    monkeypatch.setattr(
+        service,
+        "backfill_program_trades_history",
+        lambda symbol, **kwargs: (_ for _ in ()).throw(_TossProgramTradesAuthRejected("stale")),
+    )
+
+    # When / Then: 두 번째 거부는 기존 TossProgramTradesError로 표면화된다
+    with pytest.raises(TossProgramTradesError):
+        service.sync_program_trades_forward(
+            store_root=store,
+            session_date=dt.date(2026, 9, 25),
+            complete_through=dt.date(2026, 9, 24),
+            candidate_symbols=(),
+            lookback_days=120,
+            app_key="k",
+            app_secret="s",
+            rate_per_s=1000.0,
+        )
+
+
+def test_backfill_rejects_non_positive_rate_before_any_call(tmp_path, monkeypatch) -> None:
+    # Given: 토큰 발급 감시
+    import datetime as dt
+
+    import pytest
+
+    from src.marketdata import program_trade_service as service
+
+    calls: list[str] = []
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: calls.append("token") or "tok")
+
+    # When / Then
+    with pytest.raises(ValueError, match="positive"):
+        service.backfill_program_trades(
+            store_path=tmp_path / "program_trades",
+            symbols=("005930",),
+            min_date=dt.date(2026, 9, 1),
+            app_key="k",
+            app_secret="s",
+            rate_per_s=0.0,
+        )
+    assert calls == []
+
+
+def test_forward_sync_rotation_issuance_failure_wraps(tmp_path, monkeypatch) -> None:
+    # Given: 거부 후 회전 발급마저 실패하는 벤더
+    import datetime as dt
+
+    import pytest
+
+    from src.marketdata import program_trade_service as service
+    from src.marketdata.toss_calendar import TossCalendarError
+    from src.marketdata.toss_program_trades import TossProgramTradesError, _TossProgramTradesAuthRejected
+
+    store = tmp_path / "program_trades"
+    _seed(store, {"005930": [dt.date(2026, 9, 17)]})
+    calls: list[str] = []
+
+    def _issue(**kwargs: object) -> str:
+        calls.append("oauth")
+        if len(calls) == 1:
+            return "tok-1"
+        raise TossCalendarError("auth down")
+
+    monkeypatch.setattr(service, "issue_access_token", _issue)
+    monkeypatch.setattr(
+        service,
+        "backfill_program_trades_history",
+        lambda symbol, **kwargs: (_ for _ in ()).throw(_TossProgramTradesAuthRejected("stale")),
+    )
+
+    # When / Then: 회전 발급 실패는 TossProgramTradesError로 표면화된다
+    with pytest.raises(TossProgramTradesError, match="token issuance"):
+        service.sync_program_trades_forward(
+            store_root=store,
+            session_date=dt.date(2026, 9, 25),
+            complete_through=dt.date(2026, 9, 24),
+            candidate_symbols=(),
+            lookback_days=120,
+            app_key="k",
+            app_secret="s",
+            rate_per_s=1000.0,
+        )
+
+
+def test_backfill_rotates_once_on_auth_rejection_then_retries(tmp_path, monkeypatch) -> None:
+    # Given: 첫 조회가 인증 거부되는 벤더
+    import datetime as dt
+
+    from src.marketdata import program_trade_service as service
+    from src.marketdata.toss_program_trades import _TossProgramTradesAuthRejected
+
+    tokens: list[str] = []
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: tokens.append("oauth") or f"tok-{len(tokens)}")
+    attempts: list[str] = []
+
+    def _flaky_history(symbol: str, **kwargs) -> tuple:
+        attempts.append(kwargs["access_token"])
+        if len(attempts) == 1:
+            raise _TossProgramTradesAuthRejected("stale token")
+        return (_pt_row(symbol, dt.date(2026, 9, 18)),)
+
+    monkeypatch.setattr(service, "backfill_program_trades_history", _flaky_history)
+    monkeypatch.setattr(service, "append_program_trades", lambda *a, **k: 1)
+
+    # When
+    result = service.backfill_program_trades(
+        store_path=tmp_path / "program_trades",
+        symbols=("005930",),
+        min_date=dt.date(2026, 9, 1),
+        app_key="k",
+        app_secret="s",
+        rate_per_s=1000.0,
+    )
+
+    # Then: 같은 요청이 회전된 토큰으로 1회 재시도된다
+    assert attempts == ["tok-1", "tok-2"]
+    assert result.symbols_ok == 1
+
+
+def test_forward_sync_skips_symbol_failing_after_rotation_and_keeps_others(tmp_path, monkeypatch) -> None:
+    # Given: 005930 은 회전 후 재시도에서 404, 000660 은 정상
+    from src.marketdata import program_trade_service as service
+    from src.marketdata.toss_program_trades import (
+        TossProgramTradesError,
+        _TossProgramTradesAuthRejected,
+        program_trade_coverage,
+    )
+
+    store = tmp_path / "program_trades"
+    _seed(store, {"005930": [dt.date(2026, 9, 17)], "000660": [dt.date(2026, 9, 17)]})
+    issued = iter(["tok-1", "tok-2"])
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: next(issued))
+
+    def _fetch(symbol, *, access_token, min_date, **kwargs):
+        if symbol == "005930":
+            if access_token == "tok-1":
+                raise _TossProgramTradesAuthRejected("stale")
+            raise TossProgramTradesError("404 delisted")
+        return _range_rows(symbol, min_date, dt.date(2026, 9, 25))
+
+    monkeypatch.setattr(service, "backfill_program_trades_history", _fetch)
+
+    # When
+    out = service.sync_program_trades_forward(
+        store_root=store,
+        session_date=dt.date(2026, 9, 25),
+        complete_through=dt.date(2026, 9, 24),
+        candidate_symbols=(),
+        lookback_days=120,
+        app_key="k",
+        app_secret="s",
+        rate_per_s=1000.0,
+        cache_dir=tmp_path / "cache",
+    )
+
+    # Then: 실패 종목만 SKIP 되고 다른 종목 행은 저장된다
+    assert (out.symbols_ok, out.symbols_failed) == (1, 1)
+    assert program_trade_coverage(store, ("000660",))["000660"][1] == dt.date(2026, 9, 25)
+
+
+def test_backfill_aborts_when_rotation_issuance_fails(tmp_path, monkeypatch) -> None:
+    # Given: 첫 발급은 성공, 회전 발급은 실패
+    import pytest
+
+    from src.marketdata import program_trade_service as service
+    from src.marketdata.toss_calendar import TossCalendarError
+    from src.marketdata.toss_program_trades import TossProgramTradesError, _TossProgramTradesAuthRejected
+
+    issued = iter(["tok-1"])
+
+    def _issue(**kwargs):
+        try:
+            return next(issued)
+        except StopIteration:
+            raise TossCalendarError("issuance down") from None
+
+    monkeypatch.setattr(service, "issue_access_token", _issue)
+    monkeypatch.setattr(
+        service,
+        "backfill_program_trades_history",
+        lambda symbol, **kwargs: (_ for _ in ()).throw(_TossProgramTradesAuthRejected("stale")),
+    )
+
+    # When / Then: 자격 증명 장애는 종목 SKIP 이 아니라 실행 전체 중단이다
+    with pytest.raises(TossProgramTradesError, match="token issuance failed"):
+        service.backfill_program_trades(
+            store_path=tmp_path / "program_trades",
+            symbols=("005930", "000660"),
+            min_date=dt.date(2026, 9, 1),
+            app_key="k",
+            app_secret="s",
+            rate_per_s=1000.0,
+            cache_dir=tmp_path / "cache",
+        )

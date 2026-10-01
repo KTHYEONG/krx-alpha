@@ -7,7 +7,7 @@ from typing import Any
 import requests
 
 from src.brokers.kis.auth import KisAppAuth, KisTokenProvider, TokenSource
-from src.brokers.kis.rate import RateLimiter
+from src.brokers.kis.rate import HostPacedRateLimiter, RateLimiter
 from src.execution.contracts import KisApiError
 
 _RATE_LIMIT_CODES: frozenset[str] = frozenset({"EGW00201"})
@@ -25,7 +25,7 @@ class KisGetTransport:
         auth: KisAppAuth,
         tokens: KisTokenProvider,
         session: Any,
-        limiter: RateLimiter,
+        limiter: RateLimiter | HostPacedRateLimiter,
         timeout_s: float,
         base_url: str,
     ) -> None:
@@ -49,17 +49,17 @@ class KisGetTransport:
             "tr_cont": tr_cont,
         }
 
-    def refresh_token(self) -> str:
+    def refresh_token(self, rejected_token: str | None = None) -> str:
         """Force a token refresh for unsafe POST retry paths."""
-        return self._tokens.access_token(force=True)
+        return self._tokens.access_token(force=True, rejected_token=rejected_token)
 
     def ensure_token(self) -> TokenSource:
         """Ensure a valid token exists (preflight entry point for data stacks)."""
         return self._tokens.ensure_token()
 
-    def access_token(self, *, force: bool = False) -> str:
+    def access_token(self, *, force: bool = False, rejected_token: str | None = None) -> str:
         """Return a usable token, refreshing only when expiring."""
-        return self._tokens.access_token(force=force)
+        return self._tokens.access_token(force=force, rejected_token=rejected_token)
 
     def get(
         self, path: str, tr_id: str, params: dict[str, str],
@@ -85,7 +85,8 @@ class KisGetTransport:
                 retries += 1
                 continue
             if msg_cd in _EXPIRED_TOKEN_CODES and not refreshed:
-                self._tokens.access_token(force=True)
+                rejected = self._tokens.access_token()
+                self._tokens.access_token(force=True, rejected_token=rejected)
                 refreshed = True
                 continue
             if body.get("rt_cd") != "0":

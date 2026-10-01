@@ -12,8 +12,9 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
-from tenacity import retry, retry_if_exception_type, stop_after_attempt
+from tenacity import retry, retry_if_exception, stop_after_attempt
 
+from src.core.config import KisTokenSettings
 from src.core.errors import KrxAlphaError
 from src.core.session_anchors import (
     STANDARD_AFTER_MARKET_END,
@@ -22,13 +23,23 @@ from src.core.session_anchors import (
     SessionAnchors,
 )
 from src.marketdata.krx_bars import retry_wait_seconds
+from src.marketdata.toss_auth import is_auth_rejection, is_client_error, is_invalid_token_envelope
+from src.marketdata.toss_token_store import IssuedToken, TossTokenStore, toss_token_path
 
 TOSS_TOKEN_URL: str = "https://openapi.tossinvest.com/oauth2/token"  # noqa: S105 - public endpoint, not a secret
 TOSS_CALENDAR_URL: str = "https://openapi.tossinvest.com/api/v1/market-calendar/KR"
+TOSS_STOCK_TRADING_TREND_GROUP: str = "STOCK_TRADING_TREND"
+"""Toss rate group scoping the shared program-trades pacing file."""
+TOSS_STOCK_TRADING_TREND_RATE_PER_S: float = 10.0
+"""Documented vendor contract rate for the STOCK_TRADING_TREND group."""
 
 
 class TossCalendarError(KrxAlphaError):
     """Toss 캘린더 인증 실패/전송 실패/봉투 스키마 위반 fail-closed 신호."""
+
+
+class _TossAuthRejected(TossCalendarError):  # noqa: N818 - internal retry signal, surfaced as TossCalendarError
+    """Vendor auth rejection (HTTP 401 or invalid-token envelope) warranting one rotation."""
 
 
 @dataclass(frozen=True)
@@ -103,7 +114,7 @@ def parse_session_anchors(day: dt.date, integrated: Mapping[str, Any] | None) ->
 @retry(
     stop=stop_after_attempt(3),
     wait=retry_wait_seconds,
-    retry=retry_if_exception_type(requests.RequestException),
+    retry=retry_if_exception(lambda exc: isinstance(exc, requests.RequestException) and not is_client_error(exc)),
     reraise=True,
 )
 def _send(session: Any, method: str, url: str, **kwargs: Any) -> Any:
@@ -114,9 +125,14 @@ def _send(session: Any, method: str, url: str, **kwargs: Any) -> Any:
 
 def _send_toss(session: Any, method: str, url: str, **kwargs: Any) -> Any:
     try:
-        return _send(session, method, url, **kwargs)
+        body = _send(session, method, url, **kwargs)
     except requests.RequestException as exc:
+        if is_auth_rejection(exc):
+            raise _TossAuthRejected(f"toss auth rejected for {url}") from exc
         raise TossCalendarError(f"toss request failed for {url}: {exc}") from exc
+    if is_invalid_token_envelope(body):
+        raise _TossAuthRejected(f"toss auth rejected for {url}: invalid-token")
+    return body
 
 
 def issue_access_token(*, app_key: str, app_secret: str, session: Any | None = None) -> str:
@@ -136,9 +152,13 @@ def issue_access_token(*, app_key: str, app_secret: str, session: Any | None = N
     return str(token)
 
 
-def fetch_trading_day(ref_date: dt.date, *, app_key: str, app_secret: str, session: Any | None = None) -> TradingDay:
-    sess = session if session is not None else requests
-    token = issue_access_token(app_key=app_key, app_secret=app_secret, session=sess)
+def _resolve_toss_cache_dir(cache_dir: pathlib.Path | None) -> pathlib.Path:
+    if cache_dir is not None:
+        return pathlib.Path(cache_dir)
+    return KisTokenSettings().token_cache_dir
+
+
+def _fetch_with_token(sess: Any, ref_date: dt.date, token: str) -> TradingDay:
     body = _send_toss(
         sess,
         "get",
@@ -169,6 +189,40 @@ def fetch_trading_day(ref_date: dt.date, *, app_key: str, app_secret: str, sessi
             next_business_day, next_integrated if isinstance(next_integrated, Mapping) or next_integrated is None else None
         ),
     )
+
+
+def fetch_trading_day(
+    ref_date: dt.date,
+    *,
+    app_key: str,
+    app_secret: str,
+    session: Any | None = None,
+    cache_dir: pathlib.Path | None = None,
+    token_store: TossTokenStore | None = None,
+) -> TradingDay:
+    """Fetch the trading-day envelope with a host-shared Toss token.
+
+    Every issuance goes through the shared token store so concurrent KRX and
+    KCA processes never revoke each other's live token. A 401 or
+    ``invalid-token`` response rotates once via the store and retries the same
+    request once; a second rejection raises.
+    """
+    sess = session if session is not None else requests
+    store = (
+        token_store
+        if token_store is not None
+        else TossTokenStore(toss_token_path(_resolve_toss_cache_dir(cache_dir), app_key))
+    )
+
+    def _issue() -> IssuedToken:
+        return IssuedToken(issue_access_token(app_key=app_key, app_secret=app_secret, session=sess), None)
+
+    token = store.get_or_issue(_issue)
+    try:
+        return _fetch_with_token(sess, ref_date, token)
+    except _TossAuthRejected:
+        rotated = store.replace_rejected(token, _issue)
+        return _fetch_with_token(sess, ref_date, rotated)
 
 def save_trading_day_cache(path: pathlib.Path, day: TradingDay) -> None:
     target = pathlib.Path(path)
