@@ -308,3 +308,14 @@ def test_apply_skips_targets_outside_data(monkeypatch) -> None:
 
     assert cleanup_mod.main(["--apply"]) == 0
     assert all(args[1] not in ("purge", "deletefile") for args in calls)
+
+
+def test_no_layout_literals() -> None:
+    import ast
+    import pathlib
+
+    tree = ast.parse((pathlib.Path(__file__).resolve().parents[3] / "src/cli/gdrive_cleanup.py").read_text(encoding="utf-8"))
+    forbidden = ("l0/", "l1/", "quarantine/")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            assert not any(node.value == p or node.value.startswith(p) for p in forbidden)

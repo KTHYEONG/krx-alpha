@@ -11,7 +11,7 @@ from enum import StrEnum
 import polars as pl
 
 from src.core.config import DataQualitySettings
-from src.storage.market_phase import MarketPhase
+from src.storage.market_phase import _VALID_HHMMSS_RE, MarketPhase
 from src.storage.quality_kis import decode_kis_quotes, decode_kis_ticks
 from src.storage.quality_ls import decode_ls_quotes, decode_ls_ticks
 
@@ -378,22 +378,36 @@ def sum_quote_summaries(summaries: Sequence[QuoteQualitySummary]) -> QuoteQualit
     )
 
 
-def _auction_exemption(columns: Sequence[str]) -> pl.Expr:
-    """Boolean expression marking rows whose crossed book is a legal auction state.
-
-    During call auctions bids and offers may overlap until the uncross, so
-    crossed books there are not data defects. ``market_phase`` (attached by
-    ``annotate_market_phase`` with the partition's anchor-shifted windows) is
-    authoritative when present. Frames without it (direct callers, ad-hoc
-    reads of pre-2026-09-17 L1 files) fall back to the fixed standard-day
-    ``hotime`` windows. Null phases are treated as non-auction.
-    """
-    if "market_phase" in columns:
-        return pl.col("market_phase").is_in(_AUCTION_PHASES).fill_null(False)
+def _legacy_hotime_auction() -> pl.Expr:
     in_auction = pl.lit(False)
     for lo, hi in _LEGACY_AUCTION_HOTIME_WINDOWS:
         in_auction = in_auction | ((pl.col("hotime") >= lo) & (pl.col("hotime") < hi))
     return in_auction
+
+
+def _auction_exemption(columns: Sequence[str]) -> pl.Expr:
+    """Boolean expression marking rows whose crossed book is a legal auction state.
+
+    During call auctions bids and offers may overlap until the uncross, so crossed books there are not
+    data defects. ``market_phase`` (attached by ``annotate_market_phase`` with the partition's
+    anchor-shifted windows) is authoritative when the phase was derived from a known event time.
+    The fixed standard-day ``hotime`` windows apply instead to: frames without ``market_phase``
+    (direct callers, pre-2026-09-17 L1 reads); rows whose phase is null; and ``unclassified`` rows
+    whose ``exchange_event_time`` is absent or not a valid ``HHMMSS``. An ``unclassified`` row with a
+    valid event time lies outside every window of its day (e.g. a standard window on a shifted day)
+    and is never exempt.
+    """
+    legacy = _legacy_hotime_auction()
+    if "market_phase" not in columns:
+        return legacy
+    phase = pl.col("market_phase")
+    if "exchange_event_time" in columns:
+        event = pl.col("exchange_event_time")
+        unknown_time = event.is_null() | (~event.str.contains(_VALID_HHMMSS_RE).fill_null(False))
+    else:
+        unknown_time = pl.lit(True)
+    fallback = (phase.is_null() | (phase.eq(MarketPhase.UNCLASSIFIED.value).fill_null(False) & unknown_time)) & legacy
+    return phase.is_in(_AUCTION_PHASES).fill_null(False) | fallback
 
 
 def _flag_quote_invariants(frame: pl.DataFrame) -> pl.DataFrame:
@@ -438,17 +452,17 @@ def decode_and_flag_quotes(df: pl.DataFrame, *, chunk_rows: int = _QUOTE_CHUNK_R
     for offset in range(0, quotes.height, chunk_rows):
         chunk = quotes.slice(offset, chunk_rows)
         kis, ls = _split_kis_ls(chunk)
-        has_phase = "market_phase" in chunk.columns
+        carried = [c for c in ("market_phase", "exchange_event_time") if c in chunk.columns]
         frames: list[pl.DataFrame] = []
         if kis.height > 0:
             decoded_kis = _decode_kis_quote_frame(kis)
-            if has_phase:
-                decoded_kis = decoded_kis.with_columns(kis["market_phase"])
+            if carried:
+                decoded_kis = decoded_kis.with_columns(kis.select(carried).get_columns())
             frames.append(decoded_kis)
         if ls.height > 0:
             decoded_ls = _decode_ls_quote_chunk(ls)
-            if has_phase:
-                decoded_ls = decoded_ls.with_columns(ls["market_phase"])
+            if carried:
+                decoded_ls = decoded_ls.with_columns(ls.select(carried).get_columns())
             frames.append(decoded_ls)
         frame = pl.concat(frames) if len(frames) > 1 else frames[0]
         flagged = _flag_quote_invariants(frame)

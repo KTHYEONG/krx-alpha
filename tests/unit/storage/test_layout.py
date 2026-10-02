@@ -526,3 +526,51 @@ def test_null_fill_parity(tmp_path) -> None:
         assert frame.height == 1
         assert frame["venue"].to_list() == [venue]
         assert frame["session"].to_list() == [session]
+
+
+def test_day_glob_byte_identical() -> None:
+    from src.storage.layout import l0_day_journal_glob
+
+    assert l0_day_journal_glob("ls", dt.date(2026, 9, 14)) == "ls/**/dt=2026-09-14/*.jsonl.zst"
+
+
+def test_quarantine_mapping() -> None:
+    import pytest
+
+    from src.storage.layout import quarantine_repo_path_for_l0
+
+    assert (
+        quarantine_repo_path_for_l0("l0/ls/H0STASP0/dt=2026-09-18/09.jsonl.zst")
+        == "quarantine/ls/H0STASP0/dt=2026-09-18/09.jsonl.zst"
+    )
+    with pytest.raises(ValueError, match="does not start with"):
+        quarantine_repo_path_for_l0("l1/x")
+
+
+def test_deletion_gate_parity_all_shapes_deleted(tmp_path) -> None:
+    from src.storage.retention import prune_old_journals
+
+    journal_root = tmp_path / "l0"
+    archive_root = tmp_path / "l1"
+    parts = _expired_tree(journal_root, archive_root, "2026-09-01")
+    oracle = _oracle_rels(journal_root, archive_root)
+    assert oracle[str(parts["root"])] == "l1/dt=2026-09-01.parquet"
+    for part in parts.values():
+        rel_parent = part.relative_to(journal_root).parent
+        out_path = archive_root / rel_parent / f"{part.name}.parquet"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(b"pq")
+
+    stats = prune_old_journals(
+        journal_root,
+        archive_root=archive_root,
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 10),
+        verified_remote_l1=set(oracle.values()),
+        normalize=False,
+    )
+
+    for part in parts.values():
+        assert not part.exists()
+    assert stats.deleted == 6
+    assert stats.failed == 0

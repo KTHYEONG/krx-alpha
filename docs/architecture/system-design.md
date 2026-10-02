@@ -126,7 +126,7 @@ flowchart TD
     subgraph S2 ["⚡ Stage 2: 실시간 스트리밍 (08:50 ~ 15:40 / 20:00 KST)"]
         CAND_IPC --> CLOCK_GATE["NTP Clock Gate<br/>(오프셋 < 2.0s 검증)"]:::intraday
         CLOCK_GATE --> STREAM_LOOP["RealtimeStreamer<br/>(LS 180쌍 + KIS 애프터마켓)"]:::intraday
-        STREAM_LOOP --> L0_STORE[("data/l0/.../HH.jsonl.zst<br/>Append-Only 무손실 저널)")]:::intraday
+        STREAM_LOOP --> L0_STORE[("data/l0/{vendor}/{venue}/{session}/{stream}/dt=YYYY-MM-DD/HH[.sN].jsonl.zst<br/>Append-Only 무손실 저널)")]:::intraday
     end
 
     subgraph S3 ["🌙 Stage 3: EOD 정규화 & DQ 배리어 (15:40 / 20:00 KST)"]
@@ -160,8 +160,8 @@ flowchart TD
 
 ### 5.1 3-Tier Storage Schemas
 
-#### L0 Raw Tick Frame (`L0Frame`)
-실시간 웹소켓 수신 시 파싱 부하를 배제하고 무손실 원형을 보존합니다:
+#### L0 Raw Tick Frame (`L0Frame`, `data/l0/{vendor}/{venue}/{session}/{stream}/dt=YYYY-MM-DD/HH[.sN].jsonl.zst`)
+실시간 웹소켓 수신 시 파싱 부하를 배제하고 무손실 원형을 보존합니다. 시간 단위 파일이며 `.sN`은 소유 샤드 태그입니다. 레거시 `data/l0/{vendor}/{stream}/dt=...` 파티션도 정규화·보존 대상으로 유효합니다:
 * `recv_mono_ns` (단조 시각 - 시스템 경과 ns, 지연 계측용), `recv_wall_ns` (절대 시각 - UTC ns, 시계열 정렬용), `conn_seq` (세션 단조 시퀀스), `conn_id` (연결 고유 식별자), `raw` (수신 원문 페이로드).
 
 #### L1 Normalized Parquet (`data/l1/{vendor}/{venue}/{session}/{stream}/dt=YYYY-MM-DD.parquet`)
