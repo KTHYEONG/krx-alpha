@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from src.core.config import RcloneArchiveSettings
-from src.storage.remote import l0_partition_for_l1
+from src.storage.layout import L0_REPO_PREFIX, L1_REPO_PREFIX, l0_partition_for_l1, quarantine_repo_path_for_l0
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ def build_cleanup_plan(
     by_path: dict[str, int] = {obj.path: obj.size for obj in objects}
     l1_evidence: dict[str, str] = {}
     for obj in objects:
-        if obj.size <= 0 or not obj.path.startswith("l1/"):
+        if obj.size <= 0 or not obj.path.startswith(L1_REPO_PREFIX):
             continue
         mapped = l0_partition_for_l1(obj.path)
         if mapped is None:
@@ -76,9 +76,9 @@ def build_cleanup_plan(
         )
         covered_l0.update(obj.path for obj in files)
     for obj in objects:
-        if not obj.path.startswith("l0/") or obj.path in covered_l0:
+        if not obj.path.startswith(L0_REPO_PREFIX) or obj.path in covered_l0:
             continue
-        counterpart = "quarantine/" + obj.path[len("l0/") :]
+        counterpart = quarantine_repo_path_for_l0(obj.path)
         if counterpart in by_path and by_path[counterpart] == obj.size:
             candidates.append(
                 CleanupCandidate(
@@ -112,10 +112,10 @@ def build_cleanup_plan(
     candidate_targets = {item.target for item in candidates}
     kept: list[tuple[str, str]] = []
     for obj in objects:
-        if obj.path.startswith("l0/"):
+        if obj.path.startswith(L0_REPO_PREFIX):
             if obj.path in covered_l0:
                 continue
-            counterpart = "quarantine/" + obj.path[len("l0/") :]
+            counterpart = quarantine_repo_path_for_l0(obj.path)
             if counterpart in by_path:
                 kept.append((obj.path, "quarantine_size_mismatch"))
             else:
@@ -194,7 +194,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     failures = 0
     for item in candidates:
         if not (
-            item.target.startswith("l0/")
+            item.target.startswith(L0_REPO_PREFIX)
             or item.target.startswith("manifest/")
             or item.target.startswith("work/")
         ):
@@ -217,7 +217,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if result.returncode != 0:
             logger.error("[DATA] stage=gdrive_cleanup status=FAIL target=%s", item.target)
             failures += 1
-    for base in ("l0", "manifest", "work"):
+    for base in (L0_REPO_PREFIX.removesuffix("/"), "manifest", "work"):
         subprocess.run(  # noqa: S603 - fixed rclone argv without shell
             ["rclone", "rmdirs", f"{remote}/{base}", "--leave-root"],  # noqa: S607
             capture_output=True,

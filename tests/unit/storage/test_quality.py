@@ -1111,3 +1111,98 @@ def test_null_phase_not_exempt() -> None:
     assert summary is not None
     assert summary.crossed_book == 1
 
+
+
+def _closing_auction_frame(hotimes: list[int]):
+    import polars as pl
+
+    return pl.DataFrame({
+        'raw': [_crossed_ls_raw(h) for h in hotimes],
+        'tr_id': ['H0STASP0'] * len(hotimes),
+        'vendor': ['ls'] * len(hotimes),
+        'venue': ['krx'] * len(hotimes),
+        'recv_wall_ns': [100 + i for i in range(len(hotimes))],
+    })
+
+
+def test_closing_auction_phase_boundary() -> None:
+    import polars as pl  # noqa: F401 - symmetry with sibling tests
+
+    from src.storage.market_phase import annotate_market_phase
+    from src.storage.quality import decode_and_flag_quotes
+
+    hotimes = [151959, 152000, 152959, 153000, 153959, 154000]
+    chunk = annotate_market_phase(_closing_auction_frame(hotimes))
+    assert chunk["market_phase"].to_list() == [
+        "regular",
+        "closing_auction",
+        "closing_auction",
+        "closing_auction",
+        "closing_auction",
+        "post_closing_price",
+    ]
+    summary = decode_and_flag_quotes(chunk)
+    assert summary is not None
+    assert summary.crossed_book == 2
+
+
+def test_closing_auction_legacy_boundary() -> None:
+    from src.storage.quality import decode_and_flag_quotes
+
+    summary = decode_and_flag_quotes(_closing_auction_frame([151959, 152000, 152959, 153000, 153959, 154000]))
+    assert summary is not None
+    assert summary.crossed_book == 4
+
+
+def test_unclassified_unknown_time_falls_back() -> None:
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_quotes
+
+    df = pl.DataFrame({
+        'raw': [_crossed_ls_raw(84500)],
+        'tr_id': ['H0STASP0'],
+        'vendor': ['ls'],
+        'market_phase': ['unclassified'],
+        'exchange_event_time': [''],
+        'recv_wall_ns': [100],
+    })
+    summary = decode_and_flag_quotes(df)
+    assert summary is not None
+    assert summary.crossed_book == 0
+
+
+def test_unclassified_with_valid_event_time_is_not_exempt() -> None:
+    # 유효한 체결 시각이 있는데도 어느 구간에도 속하지 않은 행은 고정 창으로 면제하면 안 된다.
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_quotes
+
+    df = pl.DataFrame({
+        'raw': [_crossed_ls_raw(84500)],
+        'tr_id': ['H0STASP0'],
+        'vendor': ['ls'],
+        'market_phase': ['unclassified'],
+        'exchange_event_time': ['084500'],
+        'recv_wall_ns': [100],
+    })
+    summary = decode_and_flag_quotes(df)
+    assert summary is not None
+    assert summary.crossed_book == 1
+
+
+def test_null_phase_falls_back() -> None:
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_quotes
+
+    df = pl.DataFrame({
+        'raw': [_crossed_ls_raw(152500)],
+        'tr_id': ['H0STASP0'],
+        'vendor': ['ls'],
+        'market_phase': [None],
+        'recv_wall_ns': [100],
+    })
+    summary = decode_and_flag_quotes(df)
+    assert summary is not None
+    assert summary.crossed_book == 0

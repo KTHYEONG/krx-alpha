@@ -18,6 +18,7 @@ from src.realtime.contracts import MarketSession, MarketVenue
 
 L1_REPO_PREFIX: Final[str] = "l1/"
 L0_REPO_PREFIX: Final[str] = "l0/"
+QUARANTINE_REPO_PREFIX: Final[str] = "quarantine/"
 L0_JOURNAL_GLOB: Final[str] = "*.jsonl.zst"
 
 _L1_DT_RE = re.compile(r"^dt=(\d{4}-\d{2}-\d{2})\.parquet$")
@@ -134,6 +135,26 @@ def l1_repo_path(l1_relpath: pathlib.PurePath) -> str:
     return L1_REPO_PREFIX + pathlib.PurePosixPath(l1_relpath).as_posix()
 
 
+def l0_day_journal_glob(vendor: str, day: dt.date) -> str:
+    """Recursive glob (relative to the journal root) matching every journal file of `vendor` on `day`.
+
+    Matches routed, legacy and empty-stream shapes alike because `**` spans the venue/session/stream
+    segments; liveness probes must not miss any shape.
+    """
+    return f"{vendor}/**/dt={day.isoformat()}/{L0_JOURNAL_GLOB}"
+
+
+def quarantine_repo_path_for_l0(repo_path: str) -> str:
+    """Map a remote L0 object path to its remote quarantine counterpart (`l0/<rel>` -> `quarantine/<rel>`).
+
+    Raises:
+        ValueError: `repo_path` does not start with `L0_REPO_PREFIX`.
+    """
+    if not repo_path.startswith(L0_REPO_PREFIX):
+        raise ValueError(f"repo_path does not start with {L0_REPO_PREFIX!r}: {repo_path!r}")
+    return QUARANTINE_REPO_PREFIX + repo_path[len(L0_REPO_PREFIX) :]
+
+
 def l0_partition_for_l1(repo_path: str) -> str | None:
     """Map a remote L1 object path to the remote L0 partition directory it supersedes.
 
@@ -147,9 +168,9 @@ def l0_partition_for_l1(repo_path: str) -> str | None:
         "l0/<parent>/dt=YYYY-MM-DD" for journal-backed L1 objects; None for snapshot
         datasets ("l1/snapshot/..."), non-"l1/" paths, or names not matching "dt=YYYY-MM-DD.parquet".
     """
-    if not repo_path.startswith("l1/"):
+    if not repo_path.startswith(L1_REPO_PREFIX):
         return None
-    rest = repo_path[len("l1/") :]
+    rest = repo_path[len(L1_REPO_PREFIX) :]
     if rest == "snapshot" or rest.startswith("snapshot/"):
         return None
     if "/" not in rest:
@@ -164,4 +185,4 @@ def l0_partition_for_l1(repo_path: str) -> str | None:
         dt.date.fromisoformat(match.group(1))
     except ValueError:
         return None
-    return f"l0/{parent}/{name[: -len('.parquet')]}"
+    return f"{L0_REPO_PREFIX}{parent}/{name[: -len('.parquet')]}"
