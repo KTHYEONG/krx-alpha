@@ -46,9 +46,20 @@ custtype: P
 *(Inquire: `custtype: P`. Order TRs use exact live vs paper `tr_id` prefixes).*
 
 ### 1.4 Rate Limit & Concurrency Invariants
-* **Rate Limiter:** `AsyncRateLimiter(max_rate=18.0, time_period=1.0)` (18 req/s).
-* **Concurrency:** `asyncio.Semaphore(10)`.
-* **Throttling Handling:** HTTP 429 or `msg1` containing `"초당 거래건수"` triggers exponential sleep `0.5 * (attempt + 1)`s.
+* **Rate Limiter:** Every KIS REST request (data GET, order POST, token issuance) passes a
+  `HostPacedRateLimiter` (`src/brokers/kis/rate.py`) assembled by `build_kis_rest_stack`
+  (`src/brokers/kis/stack.py`). Admission is host-wide: the pacing ledger
+  `kis_state_path(cache_dir, app_key)` (`tps_<sha256(app_key)[:12]>.state` in the token cache dir) is a
+  protocol file shared with KCA under `fcntl` lock, so all host consumers of one app key share one
+  `KIS_REST_RATE_PER_S` = 18 req/s budget and must configure the same rate. In a container the cache dir
+  must carry `.host-admission`, else `HostPacingNotSharedError` (fail-closed).
+* **Caller Classes:** Critical order execution books without a lead bound
+  (`ExecutionSettings.rest_max_lead_s=None`); daemon data (`CollectorSettings.kis_rest_max_lead_s`) and
+  snapshot collection (`SnapshotSettings.rest_max_lead_s`) book only within their lead (default 1.0 s), so a
+  critical arrival waits at most that lead.
+* **Concurrency:** Synchronous; requests are serialized by the pacer (no in-process semaphore).
+* **Throttling Handling:** `msg_cd` `EGW00201` retries through the pacer up to `MAX_SAFE_RETRIES` (2)
+  (`classify_kis_retry`, `src/brokers/kis/http.py`); no fixed sleep.
 
 ### 1.5 Market Division Codes (`FID_COND_MRKT_DIV_CODE`)
 * `J`: KRX (KOSPI/KOSDAQ)

@@ -12,10 +12,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from src.brokers.kis.auth import KisAppAuth
-from src.brokers.kis.stack import build_kis_rest_stack
+from src.brokers.kis.stack import build_kis_data_slot_stack
 from src.core.config import KisTokenSettings, resolve_collector_runtime
-from src.core.errors import MissingCredentialsError
 from src.core.session_anchors import resolve_session_anchors
 from src.marketdata.snapshot_plan import shift_snapshot_settings
 from src.marketdata.snapshot_service import run_snapshot_session
@@ -42,21 +40,8 @@ def run(args: argparse.Namespace) -> int:
     session_date = dt.date.fromisoformat(str(args.session_date))
     runtime = resolve_collector_runtime()
     settings = runtime.snapshot
-    credentials = load_kis_data_credentials()
-    cred = next((c for c in credentials if c.slot == settings.kis_data_slot), None)
-    if cred is None:
-        raise MissingCredentialsError(f"no data credential for slot {settings.kis_data_slot}")
-    token_settings = KisTokenSettings()
-    stack = build_kis_rest_stack(
-        auth=KisAppAuth(app_key=cred.app_key, app_secret=cred.app_secret),
-        cache_dir=token_settings.token_cache_dir,
-        session=requests,
-        now=lambda: dt.datetime.now(_KST),
-        rate_per_s=settings.rest_rate_per_s,
-        max_lead_s=settings.rest_max_lead_s,
-        timeout_s=settings.request_timeout_s,
-        allow_issue=token_settings.allow_issue,
-    )
+    stack, _ = build_kis_data_slot_stack(snapshot=settings, credentials=load_kis_data_credentials(),
+                                         token_settings=KisTokenSettings(), session=requests, now=lambda: dt.datetime.now(_KST))
     client = stack.data
     try:
         data = read_candidates(pathlib.Path(str(args.candidates_path)))

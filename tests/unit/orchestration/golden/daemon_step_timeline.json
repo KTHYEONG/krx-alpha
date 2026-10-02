@@ -1503,6 +1503,7 @@
     "[DAEMON] stage=streamer status=DEGRADED reason=orchestration_failed candidates_rev=%d",
     "[DAEMON] stage=streamer status=FAIL reason=circuit_open",
     "[DAEMON] stage=streamer status=REPLACE_DEGRADED stop_result=%s",
+    "[DAEMON] stage=child_ownership status=REPLACE_LIVE slot=%s stop_result=%s",
     "[DAEMON] stage=streamer status=RESTARTED exit_code=%s restarts=%d",
     "[DAEMON] stage=streamer status=STARTED",
     "[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s",

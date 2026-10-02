@@ -20,7 +20,7 @@ import requests
 
 from src.brokers.kis.auth import KisAppAuth, kis_app_key_fingerprint
 from src.brokers.kis.data import KisDataClient
-from src.brokers.kis.stack import build_kis_rest_stack
+from src.brokers.kis.stack import build_kis_data_slot_stack, build_kis_rest_stack
 from src.core.calendar import SessionState, calc_sleep_seconds, get_target_state, schedule_for
 from src.core.config import (
     CollectorRuntime,
@@ -85,6 +85,7 @@ from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreake
 from src.orchestration.trading_day_gate import TradingDayGate, TradingDayStatus, TradingDayView
 from src.realtime.contracts import MarketSession, MarketVenue
 from src.realtime.kis_sharding import AftermarketShard, load_kis_data_credentials, plan_aftermarket_shards
+from src.storage.layout import l0_day_journal_glob
 from src.storage.remote import RemoteArchiveError
 from src.storage.retention import check_disk_watermark
 from src.storage.snapshot_store import SnapshotStore
@@ -113,7 +114,7 @@ def _shifted_time(base: dt.time, offset: dt.timedelta) -> dt.time:
 
 
 def _journal_age_s(journal_root: pathlib.Path, vendor: str, day: dt.date, now: dt.datetime) -> float | None:
-    files = list(journal_root.glob(f"{vendor}/**/dt={day.isoformat()}/*.jsonl.zst"))
+    files = list(journal_root.glob(l0_day_journal_glob(vendor, day)))
     if not files:
         return None
     return now.timestamp() - max(f.stat().st_mtime for f in files)
@@ -151,24 +152,9 @@ def _build_snapshot_preflight_client(
 ) -> tuple[KisDataClient, str]:
     """collect-snapshots와 동일한 규칙으로 데이터 슬롯 KIS 클라이언트를 생성한다."""
     snapshot_cfg = snapshot_settings if snapshot_settings is not None else SnapshotSettings()
-    credentials = load_kis_data_credentials()
-    cred = next((c for c in credentials if c.slot == snapshot_cfg.kis_data_slot), None)
-    if cred is None:
-        raise MissingCredentialsError(f"no data credential for slot {snapshot_cfg.kis_data_slot}")
-    token_settings = KisTokenSettings()
-    return (
-        build_kis_rest_stack(
-            auth=KisAppAuth(cred.app_key, cred.app_secret),
-            cache_dir=token_settings.token_cache_dir,
-            session=requests,
-            now=lambda: dt.datetime.now(_KST),
-            rate_per_s=snapshot_cfg.rest_rate_per_s,
-            max_lead_s=snapshot_cfg.rest_max_lead_s,
-            timeout_s=snapshot_cfg.request_timeout_s,
-            allow_issue=token_settings.allow_issue,
-        ).data,
-        cred.key_id,
-    )
+    stack, key_id = build_kis_data_slot_stack(snapshot=snapshot_cfg, credentials=load_kis_data_credentials(),
+                                              token_settings=KisTokenSettings(), session=requests, now=lambda: dt.datetime.now(_KST))
+    return stack.data, key_id
 
 
 def _client_app_key(client: object) -> str:
@@ -647,6 +633,15 @@ class DaemonChildren:
     aftermarket: dict[str, ProcessSupervisor] = field(default_factory=dict)
     program_sync: Any | None = None
     program_sync_started_at: dt.datetime | None = None
+    degraded_regular: ProcessSupervisor | None = None
+
+    @property
+    def regular_is_degraded(self) -> bool:
+        """True iff the current regular supervisor is the one installed in degraded mode.
+
+        Derived by identity, so clearing or replacing `regular` can never leave a stale degraded flag.
+        """
+        return self.regular is not None and self.degraded_regular is self.regular
 
 
 def _program_sync_cmd(session_date: dt.date, complete_through: dt.date) -> list[str]:
@@ -687,6 +682,8 @@ class DaemonRunner:
     and invalid program-sync env fails at daemon start inside the crash boundary,
     not mid-evening.
     """
+
+    _REPLACE_LIVE_LOG = "[DAEMON] stage=child_ownership status=REPLACE_LIVE slot=%s stop_result=%s"
 
     def __init__(
         self,
@@ -974,7 +971,7 @@ class DaemonRunner:
     def _stop_holiday_children(self) -> None:
         ch = self._children
         if ch.regular is not None:
-            self._stop_regular_streamer(reset_degraded=True)
+            self._stop_regular_streamer()
         self._stop_snapshot_child()
         self._stop_aftermarket_children(clear_circuit_alerts=False)
 
@@ -996,13 +993,13 @@ class DaemonRunner:
         st = self._state
         ch = self._children
         if ch.regular is not None:
-            stale_stop = self._stop_regular_streamer(reset_degraded=False)
+            stale_stop = self._stop_regular_streamer()
             logger.warning("[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s", stale_stop)
         self._stop_snapshot_child()
         st.orchestration_day = today
         st.next_orchestration_at = None
         st.orchestration_attempts = 0
-        st.degraded_active = False
+        self._sync_degraded_mirror()
         st.last_ingest_check = None
         st.ingest_stale = False
         st.next_aftermarket_refresh_at = None
@@ -1049,6 +1046,83 @@ class DaemonRunner:
             else:
                 self._handle_orchestration_failure(now, today)
 
+    def _sync_degraded_mirror(self) -> None:
+        self._state.degraded_active = self._children.regular_is_degraded
+
+    def _install_regular(self, cmd: list[str], *, degraded: bool) -> None:
+        """Install a new regular streamer supervisor, stopping any predecessor first.
+
+        A degraded predecessor is an expected replacement (REPLACE_DEGRADED, INFO event). Any other
+        non-None predecessor is an ownership-invariant breach: it is still stopped (never dropped, since a
+        dropped supervisor's child keeps writing the same L0 journal and escapes shutdown) and logged
+        CRITICAL as REPLACE_LIVE. The successor is constructed only after the predecessor stop returns.
+        Resets `last_supervisor_result` and refreshes the `degraded_active` mirror.
+        """
+        ch = self._children
+        st = self._state
+        predecessor = ch.regular
+        if predecessor is not None:
+            stop_result = predecessor.stop(timeout_s=15.0)
+            if ch.regular_is_degraded:
+                logger.info(
+                    "[DAEMON] stage=streamer status=REPLACE_DEGRADED stop_result=%s",
+                    stop_result,
+                    extra=EVENT,
+                )
+            else:
+                logger.critical(
+                    self._REPLACE_LIVE_LOG,
+                    "regular",
+                    stop_result,
+                )
+        ch.regular = ProcessSupervisor(
+            cmd=cmd,
+            breaker=RestartCircuitBreaker(),
+        )
+        ch.degraded_regular = ch.regular if degraded else None
+        st.last_supervisor_result = None
+        self._sync_degraded_mirror()
+
+    def _install_snapshot(self, cmd: list[str], *, replaces_degraded: bool) -> None:
+        """Install a new snapshot supervisor, stopping any predecessor first.
+
+        A predecessor is silently stopped when `replaces_degraded` (it belongs to the degraded session
+        being upgraded); otherwise it is stopped and logged CRITICAL as REPLACE_LIVE. Resets
+        `last_snapshot_result`.
+        """
+        ch = self._children
+        st = self._state
+        predecessor = ch.snapshot
+        if predecessor is not None:
+            stop_result = predecessor.stop(timeout_s=15.0)
+            if not replaces_degraded:
+                logger.critical(
+                    self._REPLACE_LIVE_LOG,
+                    "snapshot",
+                    stop_result,
+                )
+        ch.snapshot = ProcessSupervisor(
+            cmd=cmd,
+            breaker=RestartCircuitBreaker(),
+        )
+        st.last_snapshot_result = None
+
+    def _install_aftermarket(self, key: str, cmd: list[str]) -> None:
+        """Install the aftermarket supervisor for `key`, stopping and CRITICAL-logging any predecessor."""
+        ch = self._children
+        predecessor = ch.aftermarket.get(key)
+        if predecessor is not None:
+            stop_result = predecessor.stop(timeout_s=15.0)
+            logger.critical(
+                self._REPLACE_LIVE_LOG,
+                f"aftermarket:{key}",
+                stop_result,
+            )
+        ch.aftermarket[key] = ProcessSupervisor(
+            cmd=cmd,
+            breaker=RestartCircuitBreaker(),
+        )
+
     def _start_ready_children(self, today: dt.date) -> None:
         st = self._state
         ch = self._children
@@ -1056,27 +1130,10 @@ class DaemonRunner:
         snapshot_cfg = self._snapshot_cfg
         st.orchestrated_for = today
         st.next_orchestration_at = None
-        if ch.regular is not None and st.degraded_active:
-            stop_result = ch.regular.stop(timeout_s=15.0)
-            logger.info(
-                "[DAEMON] stage=streamer status=REPLACE_DEGRADED stop_result=%s",
-                stop_result,
-                extra=EVENT,
-            )
-        ch.regular = ProcessSupervisor(
-            cmd=_stream_cmd(today, paths, degraded_reason=None),
-            breaker=RestartCircuitBreaker(),
-        )
-        st.degraded_active = False
-        st.last_supervisor_result = None
+        replacing_degraded = ch.regular_is_degraded
+        self._install_regular(_stream_cmd(today, paths, degraded_reason=None), degraded=False)
         if snapshot_cfg.enabled:
-            if ch.snapshot is not None:
-                ch.snapshot.stop(timeout_s=15.0)
-            ch.snapshot = ProcessSupervisor(
-                cmd=_snapshot_cmd(today, paths),
-                breaker=RestartCircuitBreaker(),
-            )
-            st.last_snapshot_result = None
+            self._install_snapshot(_snapshot_cmd(today, paths), replaces_degraded=replacing_degraded)
 
     def _handle_orchestration_failure(self, now: dt.datetime, today: dt.date) -> None:
         """Schedule the next orchestration retry and start a degraded streamer from recent candidates.
@@ -1101,18 +1158,12 @@ class DaemonRunner:
         if ch.regular is None:
             rev = _degraded_candidates_rev(paths.candidates, today, max_age_days=cfg.degraded_candidates_max_age_days)
             if rev is not None:
-                ch.regular = ProcessSupervisor(
-                    cmd=_stream_cmd(today, paths, degraded_reason="orchestration_failed"),
-                    breaker=RestartCircuitBreaker(),
+                self._install_regular(
+                    _stream_cmd(today, paths, degraded_reason="orchestration_failed"),
+                    degraded=True,
                 )
                 if snapshot_cfg.enabled and ch.snapshot is None:
-                    ch.snapshot = ProcessSupervisor(
-                        cmd=_snapshot_cmd(today, paths),
-                        breaker=RestartCircuitBreaker(),
-                    )
-                    st.last_snapshot_result = None
-                st.degraded_active = True
-                st.last_supervisor_result = None
+                    self._install_snapshot(_snapshot_cmd(today, paths), replaces_degraded=False)
                 logger.critical(
                     "[DAEMON] stage=streamer status=DEGRADED reason=orchestration_failed candidates_rev=%d",
                     rev,
@@ -1315,10 +1366,7 @@ class DaemonRunner:
             if shard.venue in due:
                 supervisor_key = f"{shard.venue.value}:{shard.shard_index}"
                 if supervisor_key not in ch.aftermarket:
-                    ch.aftermarket[supervisor_key] = ProcessSupervisor(
-                        cmd=_aftermarket_stream_cmd(today, paths, shard=shard),
-                        breaker=RestartCircuitBreaker(),
-                    )
+                    self._install_aftermarket(supervisor_key, _aftermarket_stream_cmd(today, paths, shard=shard))
         for supervisor_key, sup in ch.aftermarket.items():
             result = sup.ensure_running()
             st.aftermarket_results[supervisor_key] = result
@@ -1345,7 +1393,7 @@ class DaemonRunner:
         st = self._state
         ch = self._children
         if ch.regular is not None:
-            result = self._stop_regular_streamer(reset_degraded=True)
+            result = self._stop_regular_streamer()
             logger.info("[DAEMON] stage=streamer_stop result=%s", result, extra=EVENT)
         self._stop_snapshot_child()
         ref_day = now.astimezone(_KST).date()
@@ -1499,20 +1547,20 @@ class DaemonRunner:
         logger.warning("[DAEMON] stage=eod_reconciliation status=SKIP reason=calendar_unknown")
         return True, False
 
-    def _stop_regular_streamer(self, *, reset_degraded: bool) -> str:
+    def _stop_regular_streamer(self) -> str:
         """Stop the regular streamer and clear its supervision state; return the supervisor stop result.
 
-        Precondition: `self._children.regular is not None` (callers keep the guard because each site
-        logs the result differently). `degraded_active` is cleared only when `reset_degraded`, matching
-        the non-uniform per-site contract.
+        Precondition: `self._children.regular is not None` (callers keep the guard because each site logs
+        the result differently). Clears `regular`, `degraded_regular`, `last_supervisor_result` and
+        refreshes the `degraded_active` mirror.
         """
         child = self._children.regular
         assert child is not None
         result = child.stop(timeout_s=15.0)
         self._children.regular = None
+        self._children.degraded_regular = None
         self._state.last_supervisor_result = None
-        if reset_degraded:
-            self._state.degraded_active = False
+        self._sync_degraded_mirror()
         return result
 
     def _stop_snapshot_child(self) -> None:
