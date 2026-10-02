@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import pathlib
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,7 +14,9 @@ from src.brokers.kis.data import KisDataClient
 from src.brokers.kis.http import KisGetTransport
 from src.brokers.kis.rate import HostPacedRateLimiter, kis_state_path
 from src.brokers.kis.trading import KIS_LIVE_BASE_URL, KisTradingClient
-from src.core.config import KisCredentials
+from src.core.config import KisCredentials, KisTokenSettings, SnapshotSettings
+from src.core.errors import MissingCredentialsError
+from src.realtime.kis_sharding import KisDataCredential
 
 
 @dataclass(frozen=True)
@@ -112,3 +114,42 @@ def build_kis_rest_stack(
         timeout_s=timeout_s,
         base_url=base_url,
     )
+
+
+def build_kis_data_slot_stack(
+    *,
+    snapshot: SnapshotSettings,
+    credentials: Sequence[KisDataCredential],
+    token_settings: KisTokenSettings,
+    session: Any,
+    now: Callable[[], dt.datetime],
+) -> tuple[KisRestStack, str]:
+    """Assemble the account-free REST stack for the snapshot data slot.
+
+    Selects the credential whose ``slot`` equals ``snapshot.kis_data_slot`` and builds it
+    with the snapshot pacing (``rest_rate_per_s``, ``rest_max_lead_s``) and
+    ``request_timeout_s``, the token cache directory and ``allow_issue`` from
+    ``token_settings``. Credentials and settings are explicit so the builder never reads
+    environment settings.
+
+    Returns:
+        The stack and the selected credential's ``key_id`` (app-key fingerprint).
+
+    Raises:
+        MissingCredentialsError: No credential for the configured slot.
+        ValueError: Non-positive rate/lead or empty app key (from build_kis_rest_stack).
+    """
+    cred = next((c for c in credentials if c.slot == snapshot.kis_data_slot), None)
+    if cred is None:
+        raise MissingCredentialsError(f"no data credential for slot {snapshot.kis_data_slot}")
+    stack = build_kis_rest_stack(
+        auth=KisAppAuth(cred.app_key, cred.app_secret),
+        cache_dir=token_settings.token_cache_dir,
+        session=session,
+        now=now,
+        rate_per_s=snapshot.rest_rate_per_s,
+        max_lead_s=snapshot.rest_max_lead_s,
+        timeout_s=snapshot.request_timeout_s,
+        allow_issue=token_settings.allow_issue,
+    )
+    return stack, cred.key_id

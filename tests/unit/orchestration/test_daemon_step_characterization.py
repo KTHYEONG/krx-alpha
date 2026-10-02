@@ -496,14 +496,11 @@ def test_eod_reset_set_once_per_date(tmp_path, monkeypatch, caplog) -> None:
     assert not any(c[0] == "digest" for c in second_calls)
 
 
-def test_ready_replace_without_degraded_does_not_stop(tmp_path, monkeypatch, caplog) -> None:
+def test_ready_replace_live_non_degraded_stops_and_alerts(tmp_path, monkeypatch, caplog) -> None:
     harness = _TimelineHarness(monkeypatch, tmp_path, holidays=set(), orch_outcomes=[True])
     try:
         old = daemon_mod.ProcessSupervisor(cmd=["old"], breaker=None)
         harness.runner._children.regular = old
-        stopped: list[float] = []
-        old.stop = lambda *, timeout_s=15.0: stopped.append(timeout_s) or "graceful"  # type: ignore[method-assign]
-        harness.runner.state.degraded_active = False
         harness.runner.state.orchestration_day = D
         harness.runner.state.orchestrated_for = None
         harness.calls.clear()
@@ -511,9 +508,150 @@ def test_ready_replace_without_degraded_does_not_stop(tmp_path, monkeypatch, cap
             harness.runner.step(dt.datetime(2026, 9, 16, 8, 25, tzinfo=KST))
     finally:
         harness.close()
-    assert stopped == []
+    stops = [c[2] for c in harness.calls if c[0] == "stop" and c[1] == "regular"]
+    assert stops == [15.0]
     assert harness.runner.children.regular is not old
+    live = [r for r in caplog.records if "REPLACE_LIVE" in r.getMessage()]
+    assert len(live) == 1
+    assert live[0].levelno == logging.CRITICAL
+    assert "slot=regular" in live[0].getMessage()
     assert not any("REPLACE_DEGRADED" in r.getMessage() for r in caplog.records)
+    stop_idx = next(i for i, c in enumerate(harness.calls) if c[0] == "stop" and c[1] == "regular")
+    new_idx = next(i for i, c in enumerate(harness.calls) if c[0] == "new" and c[1] == "regular")
+    assert stop_idx < new_idx
+
+
+def test_ready_replace_live_snapshot_alerts(tmp_path, monkeypatch, caplog) -> None:
+    harness = _TimelineHarness(monkeypatch, tmp_path, holidays=set(), orch_outcomes=[True])
+    try:
+        harness.runner._children.regular = daemon_mod.ProcessSupervisor(cmd=["old"], breaker=None)
+        harness.runner._children.snapshot = daemon_mod.ProcessSupervisor(cmd=["collect-snapshots"], breaker=None)
+        harness.runner.state.orchestration_day = D
+        harness.runner.state.orchestrated_for = None
+        harness.calls.clear()
+        with caplog.at_level(logging.DEBUG, logger=daemon_mod.logger.name):
+            harness.runner.step(dt.datetime(2026, 9, 16, 8, 25, tzinfo=KST))
+    finally:
+        harness.close()
+    stop_idx = next(i for i, c in enumerate(harness.calls) if c[0] == "stop" and c[1] == "snapshot")
+    new_idx = next(i for i, c in enumerate(harness.calls) if c[0] == "new" and c[1] == "snapshot")
+    assert stop_idx < new_idx
+    snap_live = [r for r in caplog.records if "REPLACE_LIVE" in r.getMessage() and "slot=snapshot" in r.getMessage()]
+    assert len(snap_live) == 1
+    assert snap_live[0].levelno == logging.CRITICAL
+
+
+def test_degraded_upgrade_silent_snapshot_replace(tmp_path, monkeypatch, caplog) -> None:
+    from src.universe.ipc import write_candidates
+
+    harness = _TimelineHarness(monkeypatch, tmp_path, holidays=set(), orch_outcomes=[False, True])
+    try:
+        harness.runner._paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+        write_candidates(
+            harness.runner._paths.candidates,
+            [{"symbol": "005930", "selection_reasons": ["limit_up"]}],
+            rev=20260915,
+        )
+        with caplog.at_level(logging.DEBUG, logger=daemon_mod.logger.name):
+            harness.step(dt.datetime(2026, 9, 16, 8, 25, tzinfo=KST))
+            assert harness.runner.state.degraded_active is True
+            harness.step(dt.datetime(2026, 9, 16, 8, 31, tzinfo=KST))
+    finally:
+        harness.close()
+    degraded = [r for r in caplog.records if "REPLACE_DEGRADED" in r.getMessage()]
+    assert len(degraded) == 1
+    assert degraded[0].levelno == logging.INFO
+    assert getattr(degraded[0], "krx_event", False) is True
+    assert not any("REPLACE_LIVE" in r.getMessage() for r in caplog.records)
+    assert harness.runner.state.degraded_active is False
+
+
+def test_degraded_derived_by_identity(tmp_path, monkeypatch) -> None:
+    from src.universe.ipc import write_candidates
+
+    def _fresh_harness(mp: pytest.MonkeyPatch, outcomes: list[bool], holidays: set[dt.date]) -> _TimelineHarness:
+        h = _TimelineHarness(mp, tmp_path, holidays=holidays, orch_outcomes=outcomes)
+        h.runner._paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+        write_candidates(
+            h.runner._paths.candidates,
+            [{"symbol": "005930", "selection_reasons": ["limit_up"]}],
+            rev=20260915,
+        )
+        h.runner._install_regular(["collect-stream", "--session-date", "2026-09-16"], degraded=True)
+        h.runner._install_snapshot(["collect-snapshots", "--session-date", "2026-09-16"], replaces_degraded=False)
+        assert h.runner.children.regular_is_degraded is True
+        assert h.runner.state.degraded_active is True
+        h.calls.clear()
+        return h
+
+    holiday_h = _fresh_harness(monkeypatch, [], {D})
+    try:
+        holiday_h.step(dt.datetime(2026, 9, 16, 9, 0, tzinfo=KST))
+    finally:
+        holiday_h.close()
+    assert holiday_h.runner.children.regular_is_degraded is False
+    assert holiday_h.runner.children.degraded_regular is None
+    assert holiday_h.runner.state.degraded_active is False
+
+    eod_h = _fresh_harness(monkeypatch, [], set())
+    try:
+        eod_h.step(dt.datetime(2026, 9, 16, 20, 5, tzinfo=KST))
+    finally:
+        eod_h.close()
+    assert eod_h.runner.children.regular_is_degraded is False
+    assert eod_h.runner.children.degraded_regular is None
+    assert eod_h.runner.state.degraded_active is False
+
+    rollover_h = _fresh_harness(monkeypatch, [False], set())
+    try:
+        rollover_h.runner.state.orchestration_day = D - dt.timedelta(days=1)
+        rollover_h.runner._paths.candidates.unlink()
+        rollover_h.step(dt.datetime(2026, 9, 16, 8, 25, tzinfo=KST))
+    finally:
+        rollover_h.close()
+    assert rollover_h.runner.children.regular_is_degraded is False
+    assert rollover_h.runner.children.degraded_regular is None
+    assert rollover_h.runner.state.degraded_active is False
+
+
+def test_injected_degraded_mirror_ignored_for_decision(tmp_path, monkeypatch, caplog) -> None:
+    harness = _TimelineHarness(monkeypatch, tmp_path, holidays=set(), orch_outcomes=[True])
+    try:
+        old = daemon_mod.ProcessSupervisor(cmd=["old"], breaker=None)
+        harness.runner._children.regular = old
+        harness.runner.state.degraded_active = True
+        harness.runner.state.orchestration_day = D
+        harness.runner.state.orchestrated_for = None
+        harness.calls.clear()
+        with caplog.at_level(logging.DEBUG, logger=daemon_mod.logger.name):
+            harness.runner.step(dt.datetime(2026, 9, 16, 8, 25, tzinfo=KST))
+    finally:
+        harness.close()
+    live = [r for r in caplog.records if "REPLACE_LIVE" in r.getMessage()]
+    assert len(live) == 1
+    assert "slot=regular" in live[0].getMessage()
+    assert not any("REPLACE_DEGRADED" in r.getMessage() for r in caplog.records)
+
+
+def test_aftermarket_key_reinstall_stops(tmp_path, monkeypatch, caplog) -> None:
+    harness = _TimelineHarness(monkeypatch, tmp_path, holidays=set(), orch_outcomes=[])
+    try:
+        cmd = ["collect-aftermarket", "--venue", "krx", "--shard-index", "0"]
+        harness.calls.clear()
+        with caplog.at_level(logging.DEBUG, logger=daemon_mod.logger.name):
+            harness.runner._install_aftermarket("krx:0", cmd)
+            first = harness.runner.children.aftermarket["krx:0"]
+            harness.runner._install_aftermarket("krx:0", cmd)
+    finally:
+        harness.close()
+    stops = [c for c in harness.calls if c[0] == "stop" and c[1] == "krx:0"]
+    assert len(stops) == 1
+    assert stops[0][2] == 15.0
+    assert harness.runner.children.aftermarket["krx:0"] is not first
+    live = [r for r in caplog.records if "REPLACE_LIVE" in r.getMessage()]
+    assert len(live) == 1
+    assert live[0].levelno == logging.CRITICAL
+    assert "slot=aftermarket:krx:0" in live[0].getMessage()
 
 
 def test_log_format_literal_multiset() -> None:

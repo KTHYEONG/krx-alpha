@@ -256,3 +256,86 @@ def test_trading_client_rejects_foreign_app_key(tmp_path) -> None:
     # When / Then: an account client is never bound to another key's token/pacer
     with pytest.raises(ValueError, match="app key"):
         stack.trading_client(creds)
+
+
+def _slot_credential(slot: str, key: str):
+    from src.realtime.kis_sharding import KisDataCredential
+
+    return KisDataCredential(slot=slot, app_key=key, app_secret=f"{key}-secret", hts_id="hts", key_id=f"kid-{slot}")
+
+
+def test_data_slot_picks_configured_slot(tmp_path) -> None:
+    # Given: 슬롯 1/2 가짜 자격증명과 스냅샷 슬롯 2 지정
+    from src.brokers.kis.auth import kis_token_cache_path
+    from src.brokers.kis.stack import build_kis_data_slot_stack
+    from src.core.config import KisTokenSettings, SnapshotSettings
+
+    cache = tmp_path / "cache"
+    cache.mkdir(parents=True)
+    (cache / ".host-admission").touch()
+    token_settings = KisTokenSettings(token_cache_dir=cache, allow_issue=False)
+    creds = (_slot_credential("1", "key-one"), _slot_credential("2", "key-two"))
+
+    # When: 데이터 슬롯 스택을 조립한다
+    stack, key_id = build_kis_data_slot_stack(
+        snapshot=SnapshotSettings(kis_data_slot="2"),
+        credentials=creds,
+        token_settings=token_settings,
+        session=_FakeSession([]),
+        now=lambda: T0,
+    )
+
+    # Then: 슬롯 2 키로 구성되고 토큰 경로는 명시 설정 디렉터리를 따른다
+    assert stack.app_key == "key-two"
+    assert key_id == "kid-2"
+    assert stack.tokens._token_cache_path == kis_token_cache_path(cache, "key-two")
+    assert stack.tokens._allow_token_issue is token_settings.allow_issue
+
+
+def test_data_slot_missing_fails_closed(tmp_path) -> None:
+    # Given: 설정 슬롯에 해당하는 자격증명이 없음
+    import pytest
+
+    from src.brokers.kis.stack import build_kis_data_slot_stack
+    from src.core.config import KisTokenSettings, SnapshotSettings
+    from src.core.errors import MissingCredentialsError
+
+    cache = tmp_path / "cache"
+    cache.mkdir(parents=True)
+    token_settings = KisTokenSettings(token_cache_dir=cache, allow_issue=False)
+
+    # When / Then: 슬롯을 포함한 MissingCredentialsError, 파일 생성 없음
+    with pytest.raises(MissingCredentialsError, match="9"):
+        build_kis_data_slot_stack(
+            snapshot=SnapshotSettings(kis_data_slot="9"),
+            credentials=(_slot_credential("1", "key-one"),),
+            token_settings=token_settings,
+            session=_FakeSession([]),
+            now=lambda: T0,
+        )
+    assert list(cache.iterdir()) == []
+
+
+def test_data_slot_no_env_read(tmp_path, monkeypatch) -> None:
+    # Given: 환경 토큰 캐시 디렉터리가 다른 곳을 가리킴
+    from src.brokers.kis.stack import build_kis_data_slot_stack
+    from src.core.config import KisTokenSettings, SnapshotSettings
+
+    elsewhere = tmp_path / "elsewhere"
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(elsewhere))
+    cache = tmp_path / "cache"
+    cache.mkdir(parents=True)
+    (cache / ".host-admission").touch()
+
+    # When: 명시 설정으로 데이터 슬롯 스택을 조립한다
+    stack, _ = build_kis_data_slot_stack(
+        snapshot=SnapshotSettings(kis_data_slot="1"),
+        credentials=(_slot_credential("1", "key-one"),),
+        token_settings=KisTokenSettings(token_cache_dir=cache, allow_issue=False),
+        session=_FakeSession([]),
+        now=lambda: T0,
+    )
+
+    # Then: 경로는 인자에서만 유도된다
+    assert stack.tokens._token_cache_path.parent == cache
+    assert not elsewhere.exists()

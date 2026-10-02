@@ -170,22 +170,23 @@ class KisTokenProvider:
         """Return a bearer token usable for the next KIS request.
 
         Args:
-            force: Skip the in-memory and file fast paths and re-resolve under the
-                per-key process and file locks. Force does NOT guarantee a newly issued
-                token: a valid cached token different from ``rejected_token`` (a peer
-                such as KCA already rotated the shared cache) is adopted without
-                issuance. With issuance disabled, force raises TOKEN_CACHE without
-                consulting the cache.
+            force: Skip the in-memory and file fast paths and re-resolve. Force does NOT
+                guarantee a newly issued token: a valid cached token different from
+                ``rejected_token`` (a peer such as KCA already rotated the shared cache) is
+                adopted without issuance. With issuance disabled, force re-reads the shared
+                cache (lock-free, like the non-force path) and adopts only such a token;
+                otherwise it raises TOKEN_CACHE.
             rejected_token: The exact token the vendor refused on the wire. Pass the
                 token that was sent, never a fresh lookup: a re-lookup may return a
                 peer-rotated token, which would then be treated as rejected and trip
                 the daily-issuance guard. None under force means the in-memory token.
 
         Raises:
-            KisApiError: TOKEN_CACHE (no usable token, issuance disabled);
-                TOKEN_BACKOFF (inside the issuance backoff with no adoptable cached
-                token); TOKEN_DAILY_LIMIT (cache still holds the rejected token and
-                was issued today, KST); vendor or TRANSPORT codes on failed issuance.
+            KisApiError: TOKEN_CACHE (issuance disabled and no valid cached token, or the
+                cache still holds the rejected token); TOKEN_BACKOFF (inside the issuance
+                backoff with no adoptable cached token); TOKEN_DAILY_LIMIT (cache still holds
+                the rejected token and was issued today, KST); vendor or TRANSPORT codes on
+                failed issuance.
         """
         now = self._now()
         if (
@@ -201,6 +202,12 @@ class KisTokenProvider:
                 self._token, self._token_expires_at = hit
                 return self._token
         if not self._allow_token_issue:
+            if force:
+                effective_rejected = rejected_token if rejected_token is not None else self._token
+                hit = self._read_valid_token(now)
+                if hit is not None and (effective_rejected is None or hit[0] != effective_rejected):
+                    self._token, self._token_expires_at = hit
+                    return self._token
             raise KisApiError("TOKEN_CACHE", "token cache missing/expired and issuance disabled")
         if self._backoff_active(now):
             hit = self._read_valid_token(now)

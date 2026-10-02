@@ -1827,3 +1827,173 @@ def test_get_wraps_token_acquisition_failure_as_transport_error() -> None:
     with pytest.raises(KisApiError) as exc_info:
         transport.get("/path", "TR", {})
     assert exc_info.value.msg_cd == "TRANSPORT"
+
+
+def test_consumer_force_adopts_peer_rotated_token(tmp_path) -> None:
+    # Given: 발급 금지 + 메모리 "old", 피어가 캐시를 유효 "peer-new" 로 회전시킴
+    import datetime as dt
+    import json
+    from zoneinfo import ZoneInfo
+
+    from src.execution.kis_client import KisRestClient, RateLimiter
+    from tests.unit.execution.fakes import FixedClock, make_creds
+
+    kst = ZoneInfo("Asia/Seoul")
+    now = dt.datetime(2026, 9, 15, 9, 0, tzinfo=kst)
+    cache = tmp_path / "token.json"
+
+    def _write(token: str) -> None:
+        cache.write_text(json.dumps({
+            "access_token": token,
+            "expired_at": (now + dt.timedelta(hours=20)).isoformat(),
+            "app_key": "app-key",
+            "issued_at": now.isoformat(),
+        }), encoding="utf-8")
+
+    class _Session:
+        def post(self, *args, **kwargs):
+            raise AssertionError("consumer must not issue")
+
+    _write("old")
+    client = KisRestClient(
+        creds=make_creds(), session=_Session(), token_cache_path=cache,
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=FixedClock(now), timeout_s=5.0, allow_token_issue=False,
+    )
+    assert client.ensure_token() is not None
+    _write("peer-new")
+
+    # When / Then: 강제 조회가 피어 토큰을 채택하고 이후 호출도 유지된다
+    assert client.access_token(force=True, rejected_token="old") == "peer-new"
+    assert client.access_token() == "peer-new"
+
+
+def test_consumer_force_rejects_same_token(tmp_path) -> None:
+    # Given: 발급 금지 + 캐시가 거부된 토큰 그대로 유지
+    import datetime as dt
+    import json
+
+    import pytest
+    from zoneinfo import ZoneInfo
+
+    from src.execution.contracts import KisApiError
+    from src.execution.kis_client import KisRestClient, RateLimiter
+    from tests.unit.execution.fakes import FixedClock, make_creds
+
+    kst = ZoneInfo("Asia/Seoul")
+    now = dt.datetime(2026, 9, 15, 9, 0, tzinfo=kst)
+    cache = tmp_path / "token.json"
+    cache.write_text(json.dumps({
+        "access_token": "stuck",
+        "expired_at": (now + dt.timedelta(hours=20)).isoformat(),
+        "app_key": "app-key",
+        "issued_at": now.isoformat(),
+    }), encoding="utf-8")
+
+    class _Session:
+        def post(self, *args, **kwargs):
+            raise AssertionError("must not issue")
+
+    client = KisRestClient(
+        creds=make_creds(), session=_Session(), token_cache_path=cache,
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=FixedClock(now), timeout_s=5.0, allow_token_issue=False,
+    )
+
+    # When / Then: TOKEN_CACHE, HTTP 없음
+    with pytest.raises(KisApiError, match="TOKEN_CACHE"):
+        client.access_token(force=True, rejected_token="stuck")
+
+
+def test_consumer_force_none_uses_in_memory_token(tmp_path) -> None:
+    # Given: 발급 금지 + 메모리 토큰과 캐시 토큰이 동일
+    import datetime as dt
+    import json
+
+    import pytest
+    from zoneinfo import ZoneInfo
+
+    from src.execution.contracts import KisApiError
+    from src.execution.kis_client import KisRestClient, RateLimiter
+    from tests.unit.execution.fakes import FixedClock, make_creds
+
+    kst = ZoneInfo("Asia/Seoul")
+    now = dt.datetime(2026, 9, 15, 9, 0, tzinfo=kst)
+    cache = tmp_path / "token.json"
+    cache.write_text(json.dumps({
+        "access_token": "same",
+        "expired_at": (now + dt.timedelta(hours=20)).isoformat(),
+        "app_key": "app-key",
+        "issued_at": now.isoformat(),
+    }), encoding="utf-8")
+
+    class _Session:
+        def post(self, *args, **kwargs):
+            raise AssertionError("must not issue")
+
+    client = KisRestClient(
+        creds=make_creds(), session=_Session(), token_cache_path=cache,
+        limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+        now=FixedClock(now), timeout_s=5.0, allow_token_issue=False,
+    )
+    assert client.ensure_token() is not None
+
+    # When / Then: 메모리 토큰이 거부 토큰으로 간주되어 TOKEN_CACHE
+    with pytest.raises(KisApiError, match="TOKEN_CACHE"):
+        client.access_token(force=True)
+
+
+def test_consumer_force_fail_closed_on_bad_cache(tmp_path) -> None:
+    # Given: 발급 금지 + 결함 캐시 3종 (없음 / app_key 불일치 / 리프레시 마진 내 만료)
+    import datetime as dt
+    import json
+
+    import pytest
+    from zoneinfo import ZoneInfo
+
+    from src.execution.contracts import KisApiError
+    from src.execution.kis_client import KisRestClient, RateLimiter
+    from tests.unit.execution.fakes import FixedClock, make_creds
+
+    kst = ZoneInfo("Asia/Seoul")
+    now = dt.datetime(2026, 9, 15, 9, 0, tzinfo=kst)
+
+    class _Session:
+        def post(self, *args, **kwargs):
+            raise AssertionError("must not issue")
+
+    def _client_for(cache: object) -> object:
+        return KisRestClient(
+            creds=make_creds(), session=_Session(), token_cache_path=cache,  # type: ignore[arg-type]
+            limiter=RateLimiter(1000.0, clock=lambda: 0.0, sleep=lambda s: None),
+            now=FixedClock(now), timeout_s=5.0, allow_token_issue=False,
+        )
+
+    missing = _client_for(tmp_path / "missing.json")
+    with pytest.raises(KisApiError, match="TOKEN_CACHE"):
+        missing.access_token(force=True, rejected_token="x")  # type: ignore[union-attr]
+    assert missing._tokens._token is None  # type: ignore[union-attr]
+
+    wrong = tmp_path / "wrong.json"
+    wrong.write_text(json.dumps({
+        "access_token": "tok",
+        "expired_at": (now + dt.timedelta(hours=20)).isoformat(),
+        "app_key": "other",
+        "issued_at": now.isoformat(),
+    }), encoding="utf-8")
+    wrong_client = _client_for(wrong)
+    with pytest.raises(KisApiError, match="TOKEN_CACHE"):
+        wrong_client.access_token(force=True, rejected_token="x")  # type: ignore[union-attr]
+    assert wrong_client._tokens._token is None  # type: ignore[union-attr]
+
+    expiring = tmp_path / "expiring.json"
+    expiring.write_text(json.dumps({
+        "access_token": "tok",
+        "expired_at": (now + dt.timedelta(minutes=5)).isoformat(),
+        "app_key": "app-key",
+        "issued_at": (now - dt.timedelta(hours=1)).isoformat(),
+    }), encoding="utf-8")
+    expiring_client = _client_for(expiring)
+    with pytest.raises(KisApiError, match="TOKEN_CACHE"):
+        expiring_client.access_token(force=True, rejected_token="x")  # type: ignore[union-attr]
+    assert expiring_client._tokens._token is None  # type: ignore[union-attr]
