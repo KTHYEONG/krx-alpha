@@ -75,20 +75,21 @@ _REASON_LABELS: dict[str, str] = {
 def _accepts_html_body(sender: Callable[..., None]) -> bool:
     """Whether ``sender`` can bind ``(subject, body, html_body=...)``.
 
-    Decided from the call signature, not by trial: a trial call that catches
-    ``TypeError`` cannot tell a binding mismatch from a ``TypeError`` raised
-    inside a sender that already transmitted, which would mask sender bugs or
-    send the alert twice. Unintrospectable callables are treated as plain-text
-    senders because ``(subject, body)`` is the minimal sender contract.
+    Decided by ``inspect.Signature.bind`` on placeholder arguments, not by a trial call: a trial call
+    that catches ``TypeError`` cannot tell a binding mismatch from a ``TypeError`` raised inside a
+    sender that already transmitted. A positional-only ``html_body`` cannot bind by keyword, so such a
+    sender receives plain text instead of failing the alert. Unintrospectable callables are treated as
+    plain-text senders because ``(subject, body)`` is the minimal sender contract.
     """
     try:
         sig = inspect.signature(sender)
     except (ValueError, TypeError):
         return False
-    for param in sig.parameters.values():
-        if param.kind == inspect.Parameter.VAR_KEYWORD:
-            return True
-    return "html_body" in sig.parameters
+    try:
+        sig.bind("subject", "body", html_body=None)
+    except TypeError:
+        return False
+    return True
 
 
 def _call_sender(

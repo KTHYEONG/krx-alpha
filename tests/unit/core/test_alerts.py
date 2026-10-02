@@ -158,3 +158,29 @@ def test_unintrospectable_sender_falls_back_plain(monkeypatch) -> None:
     _call_sender(_plain, "s", "b", html_body="<p>")
 
     assert calls == [("s", "b")]
+
+
+def test_positional_only_html_sender_gets_plain() -> None:
+    from src.core.alerts import _call_sender
+
+    calls: list[tuple] = []
+
+    def _sender(subject, body, html_body=None, /):
+        calls.append((subject, body, html_body))
+
+    _call_sender(_sender, "s", "b", html_body="<p>")
+
+    assert calls == [("s", "b", None)]
+
+
+def test_keyword_only_html_sender_gets_html() -> None:
+    from src.core.alerts import _call_sender
+
+    calls: list[tuple] = []
+
+    def _sender(subject, body, *, html_body=None):
+        calls.append((subject, body, html_body))
+
+    _call_sender(_sender, "s", "b", html_body="<p>")
+
+    assert calls == [("s", "b", "<p>")]
