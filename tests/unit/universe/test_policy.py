@@ -126,7 +126,7 @@ def test_select_universe_tags_all_matching_reasons():
     })
 
     # When
-    result = select_universe(compute_selection_features(bars), decision)
+    result = select_universe(compute_selection_features(bars), decision, slot_budget=100)
 
     # Then: 네 조건 태그가 모두 기록된다
     assert result.height == 1
@@ -156,7 +156,7 @@ def test_select_universe_applies_liquidity_floor():
     })
 
     # When
-    result = select_universe(compute_selection_features(bars), decision)
+    result = select_universe(compute_selection_features(bars), decision, slot_budget=100)
 
     # Then: 유동성 미달 종목은 제외된다
     assert result["symbol"].to_list() == ["000002"]
@@ -185,35 +185,39 @@ def test_select_universe_raises_on_lookahead_rows():
 
     # When / Then: 조용히 잘라내지 않고 lookahead 로 실패한다
     with pytest.raises(ValueError, match="lookahead"):
-        select_universe(compute_selection_features(bars), decision)
+        select_universe(compute_selection_features(bars), decision, slot_budget=100)
 
 
-def test_select_universe_raises_when_slot_budget_exceeded():
-    # Given: 슬롯 예산(2)보다 많은 3종목이 조건을 만족
+def test_select_universe_truncates_when_slot_budget_exceeded():
+    # Given: 슬롯 예산(2)보다 많은 3종목이 조건을 만족 (거래대금 차등)
     import datetime as dt
 
     import polars as pl
-    import pytest
 
-    from src.universe.policy import SlotBudgetExceededError, compute_selection_features, select_universe
+    from src.universe.policy import compute_selection_features, select_universe, select_universe_detailed
 
     n = 60
     base = dt.date(2026, 1, 5)
     decision = base + dt.timedelta(days=n - 1)
     symbols = ["000001", "000002", "000003"]
+    tvs = [300.0, 200.0, 100.0]
     bars = pl.DataFrame({
         "date": [base + dt.timedelta(days=i) for i in range(n)] * len(symbols),
         "symbol": [s for s in symbols for _ in range(n)],
         "close": ([1000.0] * (n - 1) + [1300.0]) * len(symbols),
         "volume": [1000] * (n * len(symbols)),
-        "trade_value_100m": ([100.0] * (n - 1) + [1000.0]) * len(symbols),
+        "trade_value_100m": [v for tv in tvs for v in ([100.0] * (n - 1) + [tv])],
         "daily_change_pct": ([0.0] * (n - 1) + [29.9]) * len(symbols),
     })
     featured = compute_selection_features(bars)
 
-    # When / Then: 무음 절단 대신 예외로 실패한다
-    with pytest.raises(SlotBudgetExceededError):
-        select_universe(featured, decision, slot_budget=2)
+    # When: 예산 초과는 예외가 아니라 거래대금 하위 절단이다
+    detailed = select_universe_detailed(featured, decision, slot_budget=2)
+    result = select_universe(featured, decision, slot_budget=2)
+
+    # Then: 상위 2종목만 유지되고 최저 거래대금 종목이 탈락한다
+    assert result["symbol"].to_list() == ["000001", "000002"]
+    assert detailed.dropped["symbol"].to_list() == ["000003"]
 
 
 def test_select_universe_volsurge_false_without_sufficient_history():
@@ -237,7 +241,7 @@ def test_select_universe_volsurge_false_without_sufficient_history():
     })
 
     # When: 이력 부족으로 tv_ratio / close_max_60 이 null
-    result = select_universe(compute_selection_features(bars), decision)
+    result = select_universe(compute_selection_features(bars), decision, slot_budget=100)
 
     # Then: null 조건은 False 로 닫혀 volsurge/newhigh60 로 선정되지 않는다
     assert result.height == 0
@@ -263,16 +267,16 @@ def test_select_universe_raises_on_missing_feature_columns():
 
     # When / Then: 결측 피처 컬럼명을 담은 ValueError 로 fail-closed
     with pytest.raises(ValueError, match="tv_ratio"):
-        select_universe(bars, dt.date(2026, 1, 5))
+        select_universe(bars, dt.date(2026, 1, 5), slot_budget=100)
 
 
-def test_select_universe_accepts_44_candidates_with_default_budget() -> None:
+def test_select_universe_accepts_44_candidates_with_explicit_budget() -> None:
     # Given: 2026-09-09 결정일에 상한가 조건을 만족하는 44개 종목 (9/10 08:20 장애 재현)
     import datetime as dt
 
     import polars as pl
 
-    from src.universe.policy import DEEP_SLOT_BUDGET, compute_selection_features, select_universe
+    from src.universe.policy import compute_selection_features, select_universe
 
     n = 60
     base = dt.date(2026, 1, 5)
@@ -288,11 +292,10 @@ def test_select_universe_accepts_44_candidates_with_default_budget() -> None:
     })
     featured = compute_selection_features(bars)
 
-    # When: slot_budget 인자를 생략해 기본값(DEEP_SLOT_BUDGET)을 사용한다
-    result = select_universe(featured, decision)
+    # When: 명시 예산 100으로 선정한다
+    result = select_universe(featured, decision, slot_budget=100)
 
-    # Then: 기본 예산이 90으로 상향되어 44종목 전부가 예외 없이 선정된다
-    assert DEEP_SLOT_BUDGET == 90
+    # Then: 44종목 전부가 예외 없이 선정된다
     assert result.height == 44
     assert sorted(result["symbol"].to_list()) == sorted(symbols)
 
@@ -333,7 +336,7 @@ def test_select_universe_excludes_preferred_spac_managed_and_caution_sections():
         ("000005", "보통주", "투자주의환기종목(소속부없음)"),
     ])
 
-    result = select_universe(compute_selection_features(bars), dt.date(2026, 3, 3))
+    result = select_universe(compute_selection_features(bars), dt.date(2026, 3, 3), slot_budget=100)
 
     assert result["symbol"].to_list() == ["000001"]
 
@@ -341,10 +344,9 @@ def test_select_universe_excludes_preferred_spac_managed_and_caution_sections():
 def test_select_universe_excludes_before_slot_budget_check():
     import datetime as dt
 
-    import pytest
+    import polars as pl
 
-    from src.core.errors import SlotBudgetExceededError
-    from src.universe.policy import compute_selection_features, select_universe
+    from src.universe.policy import compute_selection_features, select_universe, select_universe_detailed
 
     bars = _selection_bars([
         ("000001", "보통주", ""),
@@ -355,11 +357,16 @@ def test_select_universe_excludes_before_slot_budget_check():
     result = select_universe(compute_selection_features(bars), dt.date(2026, 3, 3), slot_budget=1)
 
     assert result["symbol"].to_list() == ["000001"]
-    with pytest.raises(SlotBudgetExceededError):
-        select_universe(compute_selection_features(_selection_bars([
-            ("000001", "보통주", ""),
-            ("000002", "보통주", ""),
-        ])), dt.date(2026, 3, 3), slot_budget=1)
+    # Two qualifying commons with distinct trade values: truncation keeps the higher-tv one.
+    tv_bars = pl.DataFrame([
+        {"date": dt.date(2026, 3, 2), "symbol": "000001", "close": 1000.0, "volume": 1000, "trade_value_100m": 100.0, "daily_change_pct": 0.0, "section": "", "stock_cert_kind": "보통주"},
+        {"date": dt.date(2026, 3, 3), "symbol": "000001", "close": 1300.0, "volume": 1000, "trade_value_100m": 900.0, "daily_change_pct": 29.9, "section": "", "stock_cert_kind": "보통주"},
+        {"date": dt.date(2026, 3, 2), "symbol": "000002", "close": 1000.0, "volume": 1000, "trade_value_100m": 100.0, "daily_change_pct": 0.0, "section": "", "stock_cert_kind": "보통주"},
+        {"date": dt.date(2026, 3, 3), "symbol": "000002", "close": 1300.0, "volume": 1000, "trade_value_100m": 100.0, "daily_change_pct": 29.9, "section": "", "stock_cert_kind": "보통주"},
+    ])
+    detailed = select_universe_detailed(compute_selection_features(tv_bars), dt.date(2026, 3, 3), slot_budget=1)
+    assert detailed.selected["symbol"].to_list() == ["000001"]
+    assert detailed.dropped["symbol"].to_list() == ["000002"]
 
 
 def test_select_universe_keeps_rows_with_unknown_class():
@@ -369,7 +376,7 @@ def test_select_universe_keeps_rows_with_unknown_class():
 
     bars = _selection_bars([("000001", None, None)])
 
-    result = select_universe(compute_selection_features(bars), dt.date(2026, 3, 3))
+    result = select_universe(compute_selection_features(bars), dt.date(2026, 3, 3), slot_budget=100)
 
     assert result["symbol"].to_list() == ["000001"]
 
@@ -430,7 +437,7 @@ def test_newhigh60_adjusts_for_bonus_issue_base_price():
     event = featured.filter(pl.col("date") == decision)
 
     assert event["close_max_60"].to_list() == [3150.0]
-    result = select_universe(featured, decision)
+    result = select_universe(featured, decision, slot_budget=100)
     assert "newhigh60" in result["selection_reasons"].to_list()[0]
 
 
@@ -448,7 +455,7 @@ def test_newhigh60_rejects_false_high_after_reverse_split():
     event = featured.filter(pl.col("date") == decision)
 
     assert event["close_max_60"].to_list() == [2000.0]
-    result = select_universe(featured, decision)
+    result = select_universe(featured, decision, slot_budget=100)
     reasons = result["selection_reasons"].to_list()[0]
     assert "surge10" in reasons
     assert "newhigh60" not in reasons
@@ -640,7 +647,7 @@ def test_close_max_60_keeps_genuine_high_on_forward_split_without_base_price():
     event = featured.filter(pl.col("date") == featured["date"].max())
 
     assert event["close_max_60"].to_list() == [2120.0]
-    result = select_universe(featured, featured["date"].max())
+    result = select_universe(featured, featured["date"].max(), slot_budget=100)
     assert "newhigh60" in result["selection_reasons"].to_list()[0]
 
 
@@ -767,3 +774,215 @@ def test_close_max_60_is_causal_with_implied_events_under_future_perturbation():
     after = compute_selection_features(_frame([5200.0, 5300.0, 5400.0])).filter(pl.col("date") <= decision)
 
     assert before["close_max_60"].to_list() == after["close_max_60"].to_list()
+
+
+def _featured_limit_up(entries, *, n: int = 60):
+    """Synthetic featured bars: 60 days, limit-up (or given change) on decision day.
+
+    entries: list of (symbol, trade_value_100m, change_pct) for the decision day.
+    """
+    import datetime as dt
+
+    import polars as pl
+
+    from src.universe.policy import compute_selection_features
+
+    base = dt.date(2026, 1, 5)
+    decision = base + dt.timedelta(days=n - 1)
+    by_symbol = {symbol: (tv, change) for symbol, tv, change in entries}
+    symbols = [symbol for symbol, _, _ in entries]
+    bars = pl.DataFrame({
+        "date": [base + dt.timedelta(days=i) for i in range(n)] * len(symbols),
+        "symbol": [s for s in symbols for _ in range(n)],
+        "close": ([1000.0] * (n - 1) + [1300.0]) * len(symbols),
+        "volume": [1000] * (n * len(symbols)),
+        "trade_value_100m": [v for s in symbols for v in ([100.0] * (n - 1) + [by_symbol[s][0]])],
+        "daily_change_pct": [v for s in symbols for v in ([0.0] * (n - 1) + [by_symbol[s][1]])],
+    })
+    return compute_selection_features(bars), decision
+
+
+def test_select_universe_exact_at_budget_has_no_truncation(caplog) -> None:
+    import logging
+
+    from src.universe.policy import select_universe_detailed
+
+    featured, decision = _featured_limit_up([
+        ("000001", 300.0, 29.9), ("000002", 200.0, 29.9), ("000003", 100.0, 29.9),
+    ])
+
+    with caplog.at_level(logging.WARNING, logger="src.universe.policy"):
+        result = select_universe_detailed(featured, decision, slot_budget=3)
+
+    assert result.selected["symbol"].to_list() == ["000001", "000002", "000003"]
+    assert result.dropped.height == 0
+    assert not any("TRUNCATED" in rec.message for rec in caplog.records)
+
+
+def test_select_universe_budget_plus_one_drops_lowest_trade_value() -> None:
+    from src.universe.policy import select_universe_detailed
+
+    featured, decision = _featured_limit_up([
+        ("000001", 300.0, 29.9), ("000002", 500.0, 29.9),
+        ("000003", 100.0, 29.9), ("000004", 400.0, 29.9),
+    ])
+
+    result = select_universe_detailed(featured, decision, slot_budget=3)
+
+    assert result.selected["symbol"].to_list() == ["000001", "000002", "000004"]
+    assert result.dropped["symbol"].to_list() == ["000003"]
+
+
+def test_select_universe_ties_resolved_by_symbol_ascending() -> None:
+    from src.universe.policy import select_universe_detailed
+
+    featured, decision = _featured_limit_up([
+        ("000003", 200.0, 29.9), ("000001", 200.0, 29.9), ("000002", 200.0, 29.9),
+    ])
+
+    result = select_universe_detailed(featured, decision, slot_budget=2)
+
+    assert result.selected["symbol"].to_list() == ["000001", "000002"]
+    assert result.dropped["symbol"].to_list() == ["000003"]
+
+
+def test_select_universe_deterministic_under_row_shuffle() -> None:
+    import polars as pl
+    from polars.testing import assert_frame_equal
+
+    from src.universe.policy import compute_selection_features, select_universe_detailed
+
+    import datetime as dt
+
+    n = 60
+    base = dt.date(2026, 1, 5)
+    symbols = [f"{i:06d}" for i in range(8)]
+    tvs = [100.0 + i * 37.0 for i in range(8)]
+    bars = pl.DataFrame({
+        "date": [base + dt.timedelta(days=i) for i in range(n)] * len(symbols),
+        "symbol": [s for s in symbols for _ in range(n)],
+        "close": ([1000.0] * (n - 1) + [1300.0]) * len(symbols),
+        "volume": [1000] * (n * len(symbols)),
+        "trade_value_100m": [v for tv in tvs for v in ([100.0] * (n - 1) + [tv])],
+        "daily_change_pct": ([0.0] * (n - 1) + [29.9]) * len(symbols),
+    })
+    decision = base + dt.timedelta(days=n - 1)
+    reference = select_universe_detailed(compute_selection_features(bars), decision, slot_budget=5)
+    for seed in (1, 7, 42):
+        shuffled = bars.sample(fraction=1.0, shuffle=True, seed=seed)
+        got = select_universe_detailed(compute_selection_features(shuffled), decision, slot_budget=5)
+        assert_frame_equal(got.selected, reference.selected)
+        assert_frame_equal(got.dropped, reference.dropped)
+
+
+def test_select_universe_dropped_is_exact_complement() -> None:
+    from src.universe.policy import select_universe_detailed
+
+    entries = [(f"{i:06d}", 100.0 + i * 11.0, 29.9) for i in range(10)]
+    featured, decision = _featured_limit_up(entries)
+
+    full = select_universe_detailed(featured, decision, slot_budget=100)
+    assert full.dropped.height == 0
+    qualifying = set(full.selected["symbol"].to_list())
+
+    result = select_universe_detailed(featured, decision, slot_budget=6)
+
+    kept = result.selected["symbol"].to_list()
+    dropped = result.dropped["symbol"].to_list()
+    assert set(kept) & set(dropped) == set()
+    assert set(kept) | set(dropped) == qualifying
+    tv_by_symbol = dict(zip(result.selected["symbol"].to_list(), result.selected["trade_value_100m"].to_list(), strict=True))
+    tv_by_symbol.update(zip(dropped, result.dropped["trade_value_100m"].to_list(), strict=True))
+    assert all(tv_by_symbol[s] <= min(tv_by_symbol[s] for s in kept) for s in dropped)
+    priority = sorted(qualifying, key=lambda s: (-tv_by_symbol[s], s))
+    assert dropped == [s for s in priority if s in set(dropped)]
+
+
+def test_select_universe_budget_below_one_raises_value_error() -> None:
+    import pytest
+
+    from src.universe.policy import select_universe_detailed
+
+    featured, decision = _featured_limit_up([("000001", 100.0, 1.0)])
+
+    for budget in (0, -1):
+        with pytest.raises(ValueError, match="slot_budget"):
+            select_universe_detailed(featured, decision, slot_budget=budget)
+
+
+def test_select_universe_empty_selection_is_valid() -> None:
+    from src.universe.policy import select_universe_detailed
+
+    featured, decision = _featured_limit_up([("000001", 100.0, 1.0), ("000002", 100.0, 0.5)])
+
+    result = select_universe_detailed(featured, decision, slot_budget=100)
+
+    expected_columns = ["decision_date", "symbol", "selection_reasons", "daily_change_pct", "trade_value_100m", "tv_ratio"]
+    assert result.selected.height == 0
+    assert result.dropped.height == 0
+    assert result.selected.columns == expected_columns
+    assert result.dropped.columns == expected_columns
+
+
+def test_select_universe_replay_108_to_100(caplog) -> None:
+    import logging
+
+    from src.universe.policy import DROPPED_LOG_SAMPLE, select_universe_detailed
+
+    entries = [
+        (f"{i:06d}", 60.0 + (i * 53.0) % 900.0, 29.9 if i % 2 == 0 else 12.0)
+        for i in range(108)
+    ]
+    featured, decision = _featured_limit_up(entries)
+
+    with caplog.at_level(logging.WARNING, logger="src.universe.policy"):
+        result = select_universe_detailed(featured, decision, slot_budget=100)
+
+    assert result.selected.height == 100
+    assert result.dropped.height == 8
+    untruncated = select_universe_detailed(featured, decision, slot_budget=200)
+    ref = {row["symbol"]: row for row in untruncated.selected.to_dicts()}
+    for row in result.selected.to_dicts():
+        expected = ref[row["symbol"]]
+        assert row["selection_reasons"] == expected["selection_reasons"]
+        assert row["daily_change_pct"] == expected["daily_change_pct"]
+        assert row["trade_value_100m"] == expected["trade_value_100m"]
+        assert row["tv_ratio"] == expected["tv_ratio"]
+    warnings = [rec for rec in caplog.records if "TRUNCATED" in rec.message]
+    assert len(warnings) == 1
+    message = warnings[0].message
+    assert "kept=100" in message
+    assert "dropped=8" in message
+    head = message.split("dropped_head=")[1]
+    head_symbols = head.split(",")
+    assert len(head_symbols) >= 1
+    assert len(head_symbols) <= DROPPED_LOG_SAMPLE
+
+
+def test_select_universe_non_finite_trade_value_ranks_last() -> None:
+    from src.universe.policy import select_universe_detailed
+
+    featured, decision = _featured_limit_up([
+        ("000001", 500.0, 29.9), ("000002", 300.0, 29.9),
+        ("000003", 200.0, 29.9), ("000004", float("nan"), 29.9),
+    ])
+
+    result = select_universe_detailed(featured, decision, slot_budget=3)
+
+    assert result.selected["symbol"].to_list() == ["000001", "000002", "000003"]
+    assert result.dropped["symbol"].to_list() == ["000004"]
+
+
+def test_select_universe_compatibility_wrapper() -> None:
+    from polars.testing import assert_frame_equal
+
+    from src.universe.policy import select_universe, select_universe_detailed
+
+    featured, decision = _featured_limit_up([
+        ("000002", 200.0, 29.9), ("000001", 400.0, 29.9), ("000003", 100.0, 29.9),
+    ])
+
+    assert_frame_equal(
+        select_universe(featured, decision, slot_budget=2),
+        select_universe_detailed(featured, decision, slot_budget=2).selected,
+    )

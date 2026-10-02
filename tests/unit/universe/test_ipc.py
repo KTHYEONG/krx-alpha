@@ -242,3 +242,37 @@ def test_read_candidate_snapshot_truncates_overflow_to_rank_prefix(tmp_path, cap
     assert [row["symbol"] for row in got.candidates] == list(symbols[:40])
     assert got.selected_count == 40
     assert any("TRUNCATED" in rec.message and "kept=40" in rec.message for rec in caplog.records)
+
+
+def test_emit_candidates_records_dropped_symbols_in_order(tmp_path) -> None:
+    from src.universe.ipc import emit_candidates, read_candidates
+
+    rows = [
+        {"symbol": "000001", "selection_reasons": ["limit_up"]},
+        {"symbol": "000002", "selection_reasons": ["surge10"]},
+    ]
+    path = tmp_path / "candidates.json"
+
+    n = emit_candidates(path, rows, rev=20260908, dropped_symbols=("000003", "000004"))
+
+    assert n == len(rows)
+    got = read_candidates(path)
+    assert got is not None
+    assert got["dropped_count"] == 2
+    assert list(got["dropped_symbols"]) == ["000003", "000004"]
+    assert [c["symbol"] for c in got["candidates"]] == ["000001", "000002"]
+
+
+def test_emit_candidates_without_dropped_symbols_round_trips_legacy(tmp_path) -> None:
+    from src.universe.ipc import emit_candidates, read_candidates
+
+    rows = [{"symbol": "005930", "selection_reasons": ["limit_up"]}]
+    path = tmp_path / "candidates.json"
+
+    assert emit_candidates(path, rows, rev=7) == 1
+    got = read_candidates(path)
+    assert got is not None
+    assert got["rev"] == 7
+    assert [c["symbol"] for c in got["candidates"]] == ["005930"]
+    assert got["dropped_count"] == 0
+    assert list(got["dropped_symbols"]) == []

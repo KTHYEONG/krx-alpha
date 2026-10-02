@@ -80,7 +80,7 @@ def test_symbol_and_pair_budgets_are_distinct_named_settings() -> None:
     assert settings.ls_capacity_pairs == 200
     assert settings.subscription_pair_budget == 200
     assert settings.subscription_symbol_budget == 100
-    assert settings.universe_slot_budget == 90
+    assert settings.universe_slot_budget == 100
 
 
 def test_subscription_pair_budget_admits_full_universe_across_streams() -> None:
@@ -108,16 +108,16 @@ def test_subscription_pair_budget_admits_full_universe_across_streams() -> None:
         SubscriptionRegistry(slot_budget=settings.universe_slot_budget).plan(desired)
 
 
-def test_universe_slot_budget_default_stays_within_technical_capacity_margin() -> None:
-    # Given: 기본 설정
+def test_universe_slot_budget_default_derived_from_technical_capacity() -> None:
+    # Given: 기본 설정 (env 미지정)
     from src.core.config import CollectorSettings
 
     settings = CollectorSettings()
 
-    # When / Then: 90은 과거 선정분포가 아니라 실측 기술 상한(100) 아래 10종목 마진으로 설정된다
-    assert settings.universe_slot_budget == 90
+    # When / Then: 미지정 시 기술 용량(ls_capacity_pairs // 스트림 수)에서 유도된다
+    assert settings.universe_slot_budget == 100
     assert settings.subscription_symbol_budget == 100
-    assert settings.subscription_symbol_budget - settings.universe_slot_budget == 10
+    assert settings.universe_slot_budget == settings.subscription_symbol_budget
     assert settings.universe_slot_budget <= settings.subscription_symbol_budget
 
 
@@ -135,6 +135,39 @@ def test_universe_slot_budget_exceeding_technical_capacity_raises_fail_closed() 
     # And: 상한 이하는 정상 생성된다
     ok = CollectorSettings(universe_slot_budget=100)
     assert ok.universe_slot_budget == 100
+
+    # And: 축소된 기술 용량에서는 51도 초과로 거부된다
+    with pytest.raises(SlotBudgetExceededError, match="universe_slot_budget"):
+        CollectorSettings(ls_capacity_pairs=100, universe_slot_budget=51)
+
+
+def test_universe_slot_budget_derivation_follows_streams_and_capacity() -> None:
+    from src.core.config import CollectorSettings
+
+    assert CollectorSettings(ls_capacity_pairs=150, streams=("A", "B", "C")).universe_slot_budget == 50
+    assert CollectorSettings(ls_capacity_pairs=100).universe_slot_budget == 50
+
+
+def test_universe_slot_budget_explicit_value_and_env_override(monkeypatch) -> None:
+    from src.core.config import CollectorSettings
+
+    monkeypatch.delenv("KRX_ALPHA_UNIVERSE_SLOT_BUDGET", raising=False)
+    assert CollectorSettings(universe_slot_budget=90).universe_slot_budget == 90
+
+    monkeypatch.setenv("KRX_ALPHA_UNIVERSE_SLOT_BUDGET", "90")
+    assert CollectorSettings().universe_slot_budget == 90
+
+
+def test_universe_slot_budget_explicit_non_positive_rejected() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import CollectorSettings
+
+    with pytest.raises(ValidationError):
+        CollectorSettings(universe_slot_budget=0)
+    with pytest.raises(ValidationError):
+        CollectorSettings(universe_slot_budget=-1)
 
 def test_execution_settings_default_paper_and_live_requires_arming(monkeypatch) -> None:
     # Given: 실행 관련 env 전부 제거
@@ -316,6 +349,19 @@ def test_aftermarket_settings_require_verified_capacity_when_enabled(monkeypatch
     assert AftermarketSettings().enabled is False
     with pytest.raises(ValidationError):
         AftermarketSettings(enabled=True)
+
+
+def test_aftermarket_silence_limit_default_env_override_and_bounds(monkeypatch):
+    import pytest
+    from pydantic import ValidationError
+    from src.core.config import AftermarketSettings
+    monkeypatch.delenv('KRX_ALPHA_AFTERMARKET_SILENCE_LIMIT_S', raising=False)
+    assert AftermarketSettings().silence_limit_s == 10.0
+    monkeypatch.setenv('KRX_ALPHA_AFTERMARKET_SILENCE_LIMIT_S', '7.5')
+    assert AftermarketSettings().silence_limit_s == 7.5
+    monkeypatch.setenv('KRX_ALPHA_AFTERMARKET_SILENCE_LIMIT_S', '0')
+    with pytest.raises(ValidationError):
+        AftermarketSettings()
 
 
 def _clear_snapshot_env(monkeypatch) -> None:

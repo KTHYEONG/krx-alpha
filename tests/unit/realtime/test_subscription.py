@@ -41,8 +41,8 @@ def test_subscription_over_budget_raises_slot_budget_exceeded():
     # Given: 슬롯 예산 2, desired 페어 3개
     import pytest
 
+    from src.core.errors import SlotBudgetExceededError
     from src.realtime.subscription import SubscriptionRegistry
-    from src.universe.policy import SlotBudgetExceededError
 
     reg = SubscriptionRegistry(slot_budget=2)
 

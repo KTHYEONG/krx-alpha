@@ -331,3 +331,165 @@ def test_plan_universe_windowed_selection_equals_full_history_selection(tmp_path
         full_features.sort("symbol").select(["symbol", "tv_median_20", "close_max_60", "tv_ratio"]),
         window_features.sort("symbol").select(["symbol", "tv_median_20", "close_max_60", "tv_ratio"]),
     )
+
+
+def _seed_tv_bars(root: object, entries: list[tuple]) -> object:
+    import datetime as dt
+
+    import polars as pl
+
+    n = 60
+    base = dt.date(2026, 1, 5)
+    by_symbol = {symbol: (tv, change) for symbol, tv, change in entries}
+    symbols = [symbol for symbol, _, _ in entries]
+    _seed_bars(root, pl.DataFrame({
+        "date": [base + dt.timedelta(days=i) for i in range(n)] * len(symbols),
+        "symbol": [s for s in symbols for _ in range(n)],
+        "close": ([1000.0] * (n - 1) + [1300.0]) * len(symbols),
+        "volume": [1000] * (n * len(symbols)),
+        "trade_value_100m": [v for s in symbols for v in ([100.0] * (n - 1) + [by_symbol[s][0]])],
+        "daily_change_pct": [v for s in symbols for v in ([0.0] * (n - 1) + [by_symbol[s][1]])],
+    }))
+    return base + dt.timedelta(days=n - 1)
+
+
+def _five_symbol_entries() -> list[tuple]:
+    return [
+        ("000001", 500.0, 29.9),
+        ("000002", 400.0, 29.9),
+        ("000003", 300.0, 29.9),
+        ("000004", 200.0, 29.9),
+        ("000005", 100.0, 29.9),
+    ]
+
+
+def test_plan_universe_propagates_policy_dropped(tmp_path) -> None:
+    import polars as pl
+
+    from src.universe.service import plan_universe
+
+    bars_root = tmp_path / "bars"
+    decision = _seed_tv_bars(bars_root, _five_symbol_entries())
+
+    result = plan_universe(
+        bars_root=bars_root,
+        decision_date=decision,
+        lookback_calendar_days=150,
+        out_path=tmp_path / "universe.parquet",
+        slot_budget=3,
+        candidates_path=tmp_path / "candidates.json",
+    )
+
+    assert result.selected == 3
+    assert result.dropped == 2
+    assert result.dropped_symbols == ("000004", "000005")
+    assert pl.read_parquet(tmp_path / "universe.parquet").height == 3
+
+
+def test_plan_universe_candidates_artifact_consistent(tmp_path) -> None:
+    import polars as pl
+
+    from src.universe.ipc import read_candidates
+    from src.universe.service import plan_universe
+
+    bars_root = tmp_path / "bars"
+    decision = _seed_tv_bars(bars_root, _five_symbol_entries())
+
+    result = plan_universe(
+        bars_root=bars_root,
+        decision_date=decision,
+        lookback_calendar_days=150,
+        out_path=tmp_path / "universe.parquet",
+        slot_budget=3,
+        candidates_path=tmp_path / "candidates.json",
+    )
+
+    stored = read_candidates(tmp_path / "candidates.json")
+    assert stored is not None
+    assert stored["dropped_count"] == 2
+    assert list(stored["dropped_symbols"]) == ["000004", "000005"]
+    parquet_symbols = pl.read_parquet(tmp_path / "universe.parquet")["symbol"].to_list()
+    assert [c["symbol"] for c in stored["candidates"]] == parquet_symbols
+    assert {c["symbol"] for c in stored["candidates"]} & set(stored["dropped_symbols"]) == set()
+    assert all("rank" not in c for c in stored["candidates"])
+    assert result.candidates_emitted == 3
+
+
+def test_plan_universe_no_drop_writes_empty_dropped_keys(tmp_path) -> None:
+    from src.universe.ipc import read_candidates
+    from src.universe.service import plan_universe
+
+    bars_root = tmp_path / "bars"
+    decision = _seed_tv_bars(bars_root, _five_symbol_entries())
+
+    result = plan_universe(
+        bars_root=bars_root,
+        decision_date=decision,
+        lookback_calendar_days=150,
+        out_path=tmp_path / "universe.parquet",
+        slot_budget=5,
+        candidates_path=tmp_path / "candidates.json",
+    )
+
+    assert result.dropped == 0
+    assert result.dropped_symbols == ()
+    stored = read_candidates(tmp_path / "candidates.json")
+    assert stored is not None
+    assert stored["dropped_count"] == 0
+    assert list(stored["dropped_symbols"]) == []
+
+
+def test_plan_universe_status_exclusion_not_counted_as_dropped(tmp_path) -> None:
+    import polars as pl
+
+    from src.universe.service import plan_universe
+
+    bars_root = tmp_path / "bars"
+    decision = _seed_tv_bars(bars_root, [
+        ("000001", 500.0, 29.9),
+        ("000002", 400.0, 29.9),
+        ("000003", 300.0, 29.9),
+        ("000004", 100.0, 29.9),
+    ])
+    source = _FakeStatusSource({"000001": True, "000002": False, "000003": False, "000004": False})
+
+    result = plan_universe(
+        bars_root=bars_root,
+        decision_date=decision,
+        lookback_calendar_days=150,
+        out_path=tmp_path / "universe.parquet",
+        slot_budget=3,
+        candidates_path=tmp_path / "candidates.json",
+        session_date=decision,
+        status_source=source,
+    )
+
+    assert result.dropped == 1
+    assert result.dropped_symbols == ("000004",)
+    assert result.status_excluded == 1
+    assert result.selected == 2
+    assert pl.read_parquet(tmp_path / "universe.parquet")["symbol"].to_list() == ["000002", "000003"]
+
+
+def test_plan_universe_budget_below_one_surfaces_value_error(tmp_path) -> None:
+    import pytest
+
+    from src.universe.service import plan_universe
+
+    bars_root = tmp_path / "bars"
+    decision = _seed_tv_bars(bars_root, _five_symbol_entries())
+    out_path = tmp_path / "universe.parquet"
+    candidates_path = tmp_path / "candidates.json"
+
+    with pytest.raises(ValueError, match="slot_budget"):
+        plan_universe(
+            bars_root=bars_root,
+            decision_date=decision,
+            lookback_calendar_days=150,
+            out_path=out_path,
+            slot_budget=0,
+            candidates_path=candidates_path,
+        )
+
+    assert not out_path.exists()
+    assert not candidates_path.exists()

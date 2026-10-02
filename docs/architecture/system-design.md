@@ -9,13 +9,13 @@
 ## 1. System Goals & Invariant Principles
 
 ### System Goals
-1. **무손실 고빈도 틱 수집**: 리테일 브로커(LS증권) WebSocket 한도 내에서 일일 단타 유니버스(최대 90종목, 180 스트림 쌍)의 실시간 체결(`H0STCNT0`) 및 10단계 호가(`H0STASP0`)를 원형 손실 없이 L0 저널(JSONL.zst)에 append-only로 수집.
+1. **무손실 고빈도 틱 수집**: 리테일 브로커(LS증권) WebSocket 한도 내에서 일일 단타 유니버스(최대 100종목, 200 스트림 쌍)의 실시간 체결(`H0STCNT0`) 및 10단계 호가(`H0STASP0`)를 원형 손실 없이 L0 저널(JSONL.zst)에 append-only로 수집.
 2. **사후 정합성 배리어 & 원격 이중화**: EOD(장마감) 배치 단계에서 틱 보존법칙, 호가 사다리 단조성, 시계열 역행 검증을 수행하고 L1 Parquet로 변환한 뒤, Google Drive(rclone) 영구 이중화 및 바이트 대사를 거쳐 로컬 스토리지를 자율 순환(offload-before-delete).
 3. **안전한 실계좌 섀도 주문집행**: KIS(한국투자증권) 실계좌 OpenAPI와 연동하되, 실전 전송(Live) 전 단계에서 실제 10단계 호가 잔량을 소진하는 모의체결(`paper_l10_sweep_v1`)과 실전 직전 바디 직렬화 저널링(`paper_would_send`)을 통해 주문 누출 위험 0% 보장.
 4. **결정론적 아키텍처 불변식 보장**: 코드베이스 내 순환 의존 0건, 상위 레이어 역참조 0건, `src/core/config.py` 외부 파일시스템 경로 리터럴 및 환경변수 접근 0건을 pytest AST 파싱으로 기계적 강제.
 
 ### Non-Goals (시스템 경계 한정)
-* **전종목 실시간 틱 수집**: 국내 주식 전종목(2,500+)의 동시 수집은 증권사 웹소켓 세션 한도(LS 100종목/200쌍, KIS 41쌍)상 불가능하므로, 당일 모멘텀/유동성 90종목으로 한정합니다.
+* **전종목 실시간 틱 수집**: 국내 주식 전종목(2,500+)의 동시 수집은 증권사 웹소켓 세션 한도(LS 100종목/200쌍, KIS 41쌍)상 불가능하므로, 당일 모멘텀/유동성 종목(최대 100종목, 초과분은 거래대금 하위부터 절단)으로 한정합니다.
 * **장중 동적 종목 교체**: 웹소켓 재구독 경합 및 프레임 유실을 방지하기 위해 당일 유니버스는 08:20에 확정 후 장 마감까지 고정합니다.
 * **프로덕션 백테스터 엔진 구현**: 본 인프라는 무손실 수집 파이프라인과 OMS 코어에 집중하며, 백테스터는 산출된 L1 Parquet를 소비하는 독립 계층으로 분리합니다.
 
@@ -120,7 +120,7 @@ flowchart TD
         TOSS_CAL["Toss Calendar Gate<br/>(영업일 검증)"]:::premarket -->|영업일 확인| BARS_INGEST["KRX Bars Ingestor<br/>(90% 행수 절단 검증)"]:::premarket
         BARS_INGEST --> BARS_STORE[("data/bars/daily.parquet")]:::premarket
         BARS_STORE --> UNIV_PLAN["Universe Policy<br/>(4대 모멘텀 + 50억 유동성)"]:::premarket
-        UNIV_PLAN --> CAND_IPC[("data/candidates.json<br/>최대 90종목 슬롯 예산)")]:::premarket
+        UNIV_PLAN --> CAND_IPC[("data/candidates.json<br/>최대 100종목 슬롯 예산, 초과 시 거래대금 상위 절단)")]:::premarket
     end
 
     subgraph S2 ["⚡ Stage 2: 실시간 스트리밍 (08:50 ~ 15:40 / 20:00 KST)"]
