@@ -24,8 +24,8 @@ services:
       - KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION=41
       # NXT 프리마켓(08:00~08:50) 단일 WS 커넥션. 스냅샷 REST=슬롯 2, k-closing-alpha 15:20 결정창 REST=슬롯 1·5(KIS_DECISION_SHARD_SLOTS=1,5).
       # 슬롯 5는 결정창(15:20)에만 REST로 쓰이고 프리마켓과 시간대·채널(WS)이 겹치지 않는다 (2026-10-03 VPS 실측).
-      # V1·V2 검증 후 ENABLED=true 로 전환
-      - KRX_ALPHA_PREMARKET_ENABLED=false
+      # 2026-10-06 첫 영업일부터 시험 수집 (V2 미검증, 실패는 프리마켓 자식에 한정)
+      - KRX_ALPHA_PREMARKET_ENABLED=true
       - KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT=5
       - KRX_ALPHA_PREMARKET_PAIR_CAPACITY_PER_CONNECTION=41
     volumes:
