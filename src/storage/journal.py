@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import os
 import pathlib
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -94,6 +95,20 @@ class L0JournalWriter:
         })
 
     def flush(self) -> int:
+        """Append buffered records as one zstd frame per partition file.
+
+        After each write the partition file mtime is set to the newest
+        ``recv_wall_ns`` written to it. Flush time can trail reception by a whole
+        silence limit (final flush after a watchdog), and restart-gap and ingest-age
+        consumers read mtime as "last durable reception", so mtime must carry data
+        time, not write time.
+
+        The stamp never moves a file's mtime backwards, and a stamping failure is
+        logged without failing the flush (the records are already written).
+
+        Raises:
+            JournalWriteError: the write failed (``OSError``).
+        """
         if not self._buffer:
             return 0
         groups: dict[pathlib.Path, list[dict[str, Any]]] = {}
@@ -106,10 +121,23 @@ class L0JournalWriter:
                 part.parent.mkdir(parents=True, exist_ok=True)
                 payload = "\n".join(json.dumps(r, ensure_ascii=False) for r in recs) + "\n"
                 frame = zstd.ZstdCompressor(level=self._compress_level).compress(payload.encode("utf-8"))
+                previous_mtime_ns = part.stat().st_mtime_ns if part.exists() else 0
                 with open(part, "ab") as fh:
                     fh.write(frame)
+                self._stamp_reception_time(part, max(previous_mtime_ns, *(int(rec["recv_wall_ns"]) for rec in recs)))
         except OSError as exc:
             logger.critical("[DATA] stage=journal_flush status=FAIL reason=%s", str(exc))
             raise JournalWriteError(str(exc)) from exc
         self._buffer.clear()
         return count
+
+    @staticmethod
+    def _stamp_reception_time(part: pathlib.Path, mtime_ns: int) -> None:
+        """Best-effort mtime stamp; the records are already durable, so a failure must not abort the flush.
+
+        Raising here would leave the buffer uncleared and a retry would append the same records twice.
+        """
+        try:
+            os.utime(part, ns=(mtime_ns, mtime_ns))
+        except OSError as exc:
+            logger.warning("[DATA] stage=journal_flush status=MTIME_STAMP_FAIL reason=%s", str(exc))

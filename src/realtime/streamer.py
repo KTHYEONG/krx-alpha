@@ -20,6 +20,7 @@ from src.core.session_anchors import (
     SessionAnchors,
 )
 from src.realtime.contracts import (
+    HeartbeatProbe,
     L0Frame,
     MarketVenue,
     VendorAck,
@@ -33,6 +34,8 @@ from src.storage.journal import JournalWriteError
 logger = logging.getLogger(__name__)
 
 SILENCE_LIMIT_S: float = 30.0
+# Bounds watchdog re-arm latency after a watch window opens; 1 Hz wakeups are negligible vs tick rate.
+SILENCE_POLL_INTERVAL_S: float = 1.0
 OUTAGE_CRITICAL_S: float = 300.0
 AUTH_BACKOFF_MAX_S: float = 300.0
 _KST = ZoneInfo("Asia/Seoul")
@@ -109,6 +112,15 @@ class SessionFrameSink:
 
 
 class RealtimeStreamer:
+    """Reconnect/flush loop driving one vendor adapter into one frame sink.
+
+    Outage start is the ``recv_wall_ns`` of the last frame received by this
+    streamer (any connection), or the wall time ``run_forever`` began if no frame
+    was ever received, for every non-``"stopped"`` reason. An already-open outage
+    keeps its start. The closing gap passed to ``note_gap`` is clamped so
+    ``start <= end``.
+    """
+
     def __init__(
         self,
         *,
@@ -118,17 +130,21 @@ class RealtimeStreamer:
         flush_every: int = 200,
         flush_interval_s: float = 1.0,
         silence_limit: Callable[[], float | None] | None = None,
+        silence_poll_interval_s: float = SILENCE_POLL_INTERVAL_S,
         backoff_max_s: float = 60.0,
         rng: Callable[[], float] = random.random,
         wall_ns: Callable[[], int] = time.time_ns,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
+        if silence_poll_interval_s <= 0:
+            raise ValueError(f"silence_poll_interval_s must be positive, got {silence_poll_interval_s}")
         self._adapter = adapter
         self._sink = sink
         self._replay_pairs = replay_pairs
         self._flush_every = flush_every
         self._flush_interval_s = flush_interval_s
         self._silence_limit = silence_limit
+        self._silence_poll_interval_s = silence_poll_interval_s
         self._backoff_max_s = backoff_max_s
         self._rng = rng
         self._wall_ns = wall_ns
@@ -138,11 +154,31 @@ class RealtimeStreamer:
         self._outage_alerted: bool = False
         self._last_pump_frames: int = 0
         self._last_disconnect_detail: str | None = None
+        self._last_frame_wall_ns: int | None = None
+        self._last_pingpong: tuple[int, int | None] | None = None
+
+    def _snapshot_pingpong(self) -> tuple[int, int | None] | None:
+        adapter = self._adapter
+        if not isinstance(adapter, HeartbeatProbe):
+            return None
+        return (adapter.pingpong_count, adapter.last_pingpong_wall_ns)
+
+    def _disconnect_log_fields(self) -> tuple[str, str, str]:
+        now_ns = self._wall_ns()
+
+        def _age(at_ns: int | None) -> str:
+            return "na" if at_ns is None else f"{(now_ns - at_ns) / 1e9:.2f}"
+
+        if self._last_pingpong is None:
+            return (_age(self._last_frame_wall_ns), "na", "na")
+        count, last_pingpong_ns = self._last_pingpong
+        return (_age(self._last_frame_wall_ns), _age(last_pingpong_ns), str(count))
 
     def _close_outage(self, end_ns: int, *, recovered: bool) -> None:
         if self._outage is None:
             return
         start_ns, reason = self._outage
+        end_ns = max(start_ns, end_ns)
         symbols = sorted({s for s, _ in self._replay_pairs})
         for sym in symbols:
             self._sink.note_gap(sym, start_ns, end_ns, reason)
@@ -163,6 +199,23 @@ class RealtimeStreamer:
         self._outage = None
 
     async def pump(self, stop: asyncio.Event) -> str:
+        """Run one connection until stop, vendor failure, or silence watchdog.
+
+        Silence is measured on the injected monotonic clock from the later of the
+        last frame received on this connection, subscribe completion, and the
+        moment the watchdog became armed (limit None -> value), so a window
+        opening after a long legitimate quiet period does not fire immediately.
+        The limit is re-evaluated at least every ``silence_poll_interval_s``; the
+        watchdog therefore arms within one poll interval of window open and fires
+        no later than ``limit`` (+ scheduler jitter) after the silence baseline.
+
+        A single ``adapter.recv()`` task stays in flight across poll wakeups and is
+        cancelled only on return (stop, watchdog, failure): cancelling a pending
+        recv may discard a frame already read from the socket but not yet returned.
+
+        Returns:
+            "stopped" | "watchdog" | "disconnect" | "auth_rejected".
+        """
         frames = 0
         try:
             await self._adapter.connect()
@@ -184,29 +237,49 @@ class RealtimeStreamer:
                     ",".join(sorted({a.code for a in acks if not a.accepted})),
                 )
             last_flush = self._monotonic()
-            while not stop.is_set():
-                limit = self._silence_limit() if self._silence_limit is not None else None
-                recv_task = asyncio.ensure_future(self._adapter.recv())
-                stop_task = asyncio.ensure_future(stop.wait())
-                done, pending = await asyncio.wait(
-                    {recv_task, stop_task}, timeout=limit, return_when=asyncio.FIRST_COMPLETED
-                )
-                for p in pending:
-                    p.cancel()
-                for p in pending:
+            silent_since = last_flush
+            armed = False
+            recv_task = asyncio.ensure_future(self._adapter.recv())
+            stop_task = asyncio.ensure_future(stop.wait())
+            try:
+                while not stop.is_set():
+                    limit = self._silence_limit() if self._silence_limit is not None else None
+                    timeout = self._silence_poll_interval_s
+                    if limit is None:
+                        armed = False
+                    else:
+                        if not armed:
+                            # Window just opened: an arming baseline later than the last
+                            # frame or subscribe keeps a long legitimate quiet period
+                            # from tripping the watchdog on the first poll after it opens.
+                            silent_since = self._monotonic()
+                            armed = True
+                        remaining = limit - (self._monotonic() - silent_since)
+                        if remaining <= 0:
+                            return "watchdog"
+                        timeout = min(timeout, remaining)
+                    done, _ = await asyncio.wait(
+                        {recv_task, stop_task}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if recv_task in done:
+                        frame = recv_task.result()
+                        recv_task = asyncio.ensure_future(self._adapter.recv())
+                        if frames == 0:
+                            self._close_outage(frame.recv_wall_ns, recovered=True)
+                        self._sink.record(frame)
+                        self._last_frame_wall_ns = frame.recv_wall_ns
+                        frames += 1
+                        silent_since = self._monotonic()
+                        if frames % self._flush_every == 0 or self._monotonic() - last_flush >= self._flush_interval_s:
+                            self._sink.flush()
+                            last_flush = self._monotonic()
+            finally:
+                # Cancelling a pending recv may discard a frame already read from the
+                # socket, so it happens only once pump is returning for good.
+                for pending in (recv_task, stop_task):
+                    pending.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
-                        await p
-                if not done:
-                    return "watchdog"
-                if recv_task in done:
-                    frame = recv_task.result()
-                    if frames == 0:
-                        self._close_outage(frame.recv_wall_ns, recovered=True)
-                    self._sink.record(frame)
-                    frames += 1
-                    if frames % self._flush_every == 0 or self._monotonic() - last_flush >= self._flush_interval_s:
-                        self._sink.flush()
-                        last_flush = self._monotonic()
+                        await pending
             return "stopped"
         except VendorAuthRejected as exc:
             self._last_disconnect_detail = str(exc)
@@ -216,6 +289,7 @@ class RealtimeStreamer:
             return "disconnect"
         finally:
             self._last_pump_frames = frames
+            self._last_pingpong = self._snapshot_pingpong()
             try:
                 self._sink.flush()
             except (JournalWriteError, OSError) as flush_exc:
@@ -231,6 +305,7 @@ class RealtimeStreamer:
         sleep: Any = None,
     ) -> None:
         cycle = 0
+        run_start_ns = self._wall_ns()
         while not stop.is_set():
             reason = await self.pump(stop)
             cycle += 1
@@ -240,15 +315,19 @@ class RealtimeStreamer:
                 self._failures = 0
             self._failures += 1
             if self._outage is None:
-                self._outage = (self._wall_ns(), reason)
+                # Opening at the last frame's reception time, not the trigger time,
+                # keeps every recorded gap covering the real no-data interval.
+                self._outage = (self._last_frame_wall_ns if self._last_frame_wall_ns is not None else run_start_ns, reason)
             cap = AUTH_BACKOFF_MAX_S if reason == "auth_rejected" else self._backoff_max_s
             delay = min(cap, backoff_s * 2 ** (self._failures - 1)) * (0.5 + self._rng() / 2)
             logger.warning(
-                "[DATA] stage=stream_disconnect reason=%s frames=%d consecutive_failures=%d backoff_s=%.2f",
+                "[DATA] stage=stream_disconnect reason=%s frames=%d consecutive_failures=%d backoff_s=%.2f "
+                "last_frame_age_s=%s last_pingpong_age_s=%s pingpongs=%s",
                 reason,
                 self._last_pump_frames,
                 self._failures,
                 delay,
+                *self._disconnect_log_fields(),
             )
             if not self._outage_alerted:
                 outage_s = (self._wall_ns() - self._outage[0]) / 1e9

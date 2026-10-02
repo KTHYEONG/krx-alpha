@@ -106,3 +106,95 @@ def test_journal_partitions_aftermarket_route_and_metadata(tmp_path):
     payload = zstd.ZstdDecompressor().decompress(path.read_bytes()).decode()
     row = json.loads(payload)
     assert ('/nxt/nxt_after/H0NXCNT0/' in path.as_posix(), row['venue'], row['session'], row['exchange_event_time']) == (True, 'nxt', 'nxt_after', '154001')
+
+
+def test_journal_flush_stamps_mtime_with_newest_recv_not_write_time(tmp_path):
+    # 재시작 공백·수신 나이 소비자는 mtime 을 "마지막 내구 수신" 으로 읽으므로 데이터 시각이어야 한다.
+    from src.storage.journal import L0JournalWriter
+
+    writer = L0JournalWriter(root=tmp_path, vendor="kis", stream="H0STCNT0")
+    t1 = 1_735_954_200_000_000_000
+    t2 = t1 + 5
+    writer.append(raw="a", recv_mono_ns=1, recv_wall_ns=t1, conn_id="c", conn_seq=1)
+    writer.append(raw="b", recv_mono_ns=2, recv_wall_ns=t2, conn_id="c", conn_seq=2)
+
+    writer.flush()
+
+    part = writer.partition_path(t1)
+    assert part.stat().st_mtime_ns == t2
+
+
+def test_journal_flush_stamps_each_partition_with_its_own_newest_recv(tmp_path):
+    from src.storage.journal import L0JournalWriter
+
+    writer = L0JournalWriter(root=tmp_path, vendor="kis", stream="H0STCNT0")
+    h10 = 1_735_954_200_000_000_000
+    h11 = h10 + 3_600_000_000_000
+    writer.append(raw="a", recv_mono_ns=1, recv_wall_ns=h10, conn_id="c", conn_seq=1)
+    writer.append(raw="b", recv_mono_ns=2, recv_wall_ns=h10 + 10, conn_id="c", conn_seq=2)
+    writer.append(raw="c", recv_mono_ns=3, recv_wall_ns=h11, conn_id="c", conn_seq=3)
+
+    writer.flush()
+
+    assert writer.partition_path(h10).stat().st_mtime_ns == h10 + 10
+    assert writer.partition_path(h11).stat().st_mtime_ns == h11
+
+
+def test_journal_empty_flush_leaves_partition_mtime_untouched(tmp_path):
+    import os
+
+    from src.storage.journal import L0JournalWriter
+
+    writer = L0JournalWriter(root=tmp_path, vendor="kis", stream="H0STCNT0")
+    wall_ns = 1_735_954_200_000_000_000
+    writer.append(raw="a", recv_mono_ns=1, recv_wall_ns=wall_ns, conn_id="c", conn_seq=1)
+    writer.flush()
+    part = writer.partition_path(wall_ns)
+    frozen_ns = wall_ns + 999
+    os.utime(part, ns=(frozen_ns, frozen_ns))
+
+    assert writer.flush() == 0
+    assert part.stat().st_mtime_ns == frozen_ns
+
+
+def test_journal_flush_survives_mtime_stamp_failure_without_duplicating_records(tmp_path, monkeypatch, caplog):
+    # 레코드는 이미 기록됐으므로 mtime 보정 실패가 flush 를 실패시키면 재시도가 같은 레코드를 중복 append 한다.
+    import json
+    import logging
+    import os
+
+    import zstandard as zstd
+
+    from src.storage.journal import L0JournalWriter
+
+    writer = L0JournalWriter(root=tmp_path, vendor="kis", stream="H0STCNT0")
+    t1 = 1_735_954_200_000_000_000
+    writer.append(raw="a", recv_mono_ns=1, recv_wall_ns=t1, conn_id="c", conn_seq=1)
+
+    def _boom(*args, **kwargs):
+        raise OSError("utime denied")
+
+    monkeypatch.setattr(os, "utime", _boom)
+    with caplog.at_level(logging.WARNING):
+        assert writer.flush() == 1
+    assert writer.flush() == 0
+
+    with open(writer.partition_path(t1), "rb") as fh:
+        payload = zstd.ZstdDecompressor().stream_reader(fh).read().decode()
+    assert [json.loads(line)["raw"] for line in payload.splitlines()] == ["a"]
+    assert any("MTIME_STAMP_FAIL" in r.getMessage() for r in caplog.records)
+
+
+def test_journal_flush_never_moves_partition_mtime_backwards(tmp_path):
+    from src.storage.journal import L0JournalWriter
+
+    writer = L0JournalWriter(root=tmp_path, vendor="kis", stream="H0STCNT0")
+    t_late = 1_735_954_200_000_000_000
+    t_early = t_late - 1_000_000_000
+    writer.append(raw="a", recv_mono_ns=1, recv_wall_ns=t_late, conn_id="c", conn_seq=1)
+    writer.flush()
+    writer.append(raw="b", recv_mono_ns=2, recv_wall_ns=t_early, conn_id="c", conn_seq=2)
+
+    writer.flush()
+
+    assert writer.partition_path(t_late).stat().st_mtime_ns == t_late

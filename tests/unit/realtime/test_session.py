@@ -846,3 +846,42 @@ def test_restart_gap_ignores_sibling_shard_journal_writes(tmp_path) -> None:
     # 같은 파티션을 쓰는 형제 shard 의 최신 쓰기가 재시작 공백을 0 으로 줄이지 않는다.
     assert own_file != sibling_file
     assert last_journal_write_ns({("nxt", "nxt_after", "H0NXCNT0"): own}, at_ns) == own_last
+
+
+def test_restart_gap_starts_at_last_received_frame_not_last_flush(tmp_path, monkeypatch) -> None:
+    # watchdog 뒤 최종 flush 는 수신보다 늦게 기록되므로, 재시작 공백의 시작점은 flush 시각이 아니다.
+    import datetime as dt
+
+    import src.realtime.session as session_mod
+    from src.realtime.session import bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", lambda host, *, client=None: 0)
+    day = dt.date(2026, 9, 14)
+    journal_root = tmp_path / "l0"
+    manifest_path = tmp_path / "s.json"
+    candidates_path = tmp_path / "c.json"
+    write_candidates(candidates_path, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
+
+    def _cfg():
+        return _bootstrap_config(session_date=day, journal_root=journal_root,
+                                 manifest_path=manifest_path, candidates_path=candidates_path)
+
+    bootstrap_session(_cfg(), now_ns=_kst_ns(2026, 9, 14, 9, 0))
+
+    recv_ns = _kst_ns(2026, 9, 14, 10, 0)
+    flush_ns = recv_ns + 30_000_000_000
+    import os
+
+    journal_file = journal_root / "ls" / "krx" / "regular" / "H0STCNT0" / "dt=2026-09-14" / "09.jsonl.zst"
+    journal_file.parent.mkdir(parents=True, exist_ok=True)
+    journal_file.write_bytes(b"x")
+    os.utime(journal_file, ns=(flush_ns, flush_ns))
+
+    session = bootstrap_session(_cfg(), now_ns=recv_ns + 60_000_000_000)
+
+    assert len(session.manifest.gaps) == 1
+    gap = session.manifest.gaps[0]
+    assert (gap["reason"], gap["gap_start_ns"], gap["gap_end_ns"]) == (
+        "restart", flush_ns, recv_ns + 60_000_000_000,
+    )

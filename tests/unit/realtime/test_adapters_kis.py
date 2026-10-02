@@ -332,3 +332,80 @@ def test_echo_failure_becomes_disconnect() -> None:
     with pytest.raises(VendorDisconnected, match="pingpong_echo_failed:ConnectionResetError") as excinfo:
         asyncio.run(adapter.recv())
     assert isinstance(excinfo.value.__cause__, ConnectionResetError)
+
+
+def test_pingpong_telemetry_counts_receipts_before_echo(caplog) -> None:
+    # 하트비트 수신 사실은 echo 성공 여부와 무관하게 관측 가능해야 한다.
+    import asyncio
+    import json
+    import logging
+    import time
+
+    from src.realtime.contracts import HeartbeatProbe
+
+    pingpong_raw = json.dumps({"header": {"tr_id": "PINGPONG"}})
+
+    class Ws:
+        def __init__(self):
+            self._replies = iter([pingpong_raw, pingpong_raw, '0|H0NXCNT0|001|005930^154001^a^b'])
+
+        async def send_str(self, payload):
+            return None
+
+        async def receive_str(self):
+            return next(self._replies)
+
+    with caplog.at_level(logging.DEBUG):
+        before_ns = time.time_ns()
+        adapter = _nxt_adapter(Ws())
+        assert isinstance(adapter, HeartbeatProbe)
+        frame = asyncio.run(adapter.recv())
+        after_ns = time.time_ns()
+
+    assert adapter.pingpong_count == 2
+    assert before_ns <= adapter.last_pingpong_wall_ns <= after_ns
+    assert frame.conn_seq == 1
+
+    heartbeats = [r for r in caplog.records if "stage=kis_pingpong" in r.getMessage()]
+    assert len(heartbeats) == 2
+    assert {r.levelno for r in heartbeats} == {logging.DEBUG}
+    assert {r.getMessage().split("count=")[-1] for r in heartbeats} == {"1", "2"}
+    assert all(pingpong_raw not in r.getMessage() for r in caplog.records)
+
+
+def test_pingpong_telemetry_counts_failed_echo() -> None:
+    import asyncio
+    import json
+
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    pingpong_raw = json.dumps({"header": {"tr_id": "PINGPONG"}})
+
+    class Ws:
+        async def receive_str(self):
+            return pingpong_raw
+
+        async def send_str(self, payload):
+            raise OSError("reset")
+
+    adapter = _nxt_adapter(Ws())
+    with pytest.raises(VendorDisconnected, match="pingpong_echo_failed"):
+        asyncio.run(adapter.recv())
+    assert adapter.pingpong_count == 1
+
+
+def test_kis_adapter_uses_nxt_route_for_probe_assertion() -> None:
+    from src.realtime.adapters.kis import KisRealtimeAdapter
+    from src.realtime.contracts import HeartbeatProbe, MarketSession, MarketVenue
+    from src.realtime.session import StreamRoute
+
+    adapter = KisRealtimeAdapter(
+        app_key="k", app_secret="s", http=object(),
+        route=StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER),
+        allowed_streams=("H0NXCNT0", "H0NXASP0"), capacity_pairs=4,
+    )
+
+    assert isinstance(adapter, HeartbeatProbe)
+    assert (adapter.pingpong_count, adapter.last_pingpong_wall_ns) == (0, None)

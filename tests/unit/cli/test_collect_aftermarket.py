@@ -9,14 +9,16 @@ def test_collect_aftermarket_builds_nxt_kis_route(monkeypatch, tmp_path):
     class FakeAdapter:
         def __init__(self, **kwargs): captured.update(kwargs)
     class FakeStreamer:
-        def __init__(self, **kwargs): captured['replay_pairs'] = kwargs['replay_pairs']
+        def __init__(self, **kwargs):
+            captured['replay_pairs'] = kwargs['replay_pairs']
+            captured['silence_limit'] = kwargs['silence_limit']
         async def run_forever(self, *args, **kwargs): return None
     monkeypatch.setattr(collect_aftermarket, 'KisRealtimeAdapter', FakeAdapter)
     monkeypatch.setattr(collect_aftermarket, 'RealtimeStreamer', FakeStreamer)
     monkeypatch.setattr(collect_aftermarket, 'load_kis_data_credentials', lambda: (KisDataCredential('1','k','s','h','fp1'),))
     from src.core.config import CollectorRuntime
     _collector = type('Settings', (), {'after_market_enabled': True, 'subscription_pair_budget': 4, 'ntp_fallback_hosts': (), 'min_free_disk_gb': 3.0, 'journal_retain_days': 3})()
-    _after = type('Aftermarket', (), {'nxt_streams': ('H0NXCNT0', 'H0NXASP0'), 'krx_streams': ('H0STCNT0', 'H0STASP0'), 'pair_capacity_per_connection': 4, 'max_symbols': 40, 'enabled': True})()
+    _after = type('Aftermarket', (), {'nxt_streams': ('H0NXCNT0', 'H0NXASP0'), 'krx_streams': ('H0STCNT0', 'H0STASP0'), 'pair_capacity_per_connection': 4, 'max_symbols': 40, 'enabled': True, 'silence_limit_s': 10.0})()
     _snapshot = type('Snapshot', (), {})()
     _runtime = CollectorRuntime(collector=_collector, aftermarket=_after, snapshot=_snapshot, paths=type('P', (), {})())
     monkeypatch.setattr(collect_aftermarket, 'resolve_collector_runtime', lambda **kw: _runtime)
@@ -32,6 +34,60 @@ def test_collect_aftermarket_builds_nxt_kis_route(monkeypatch, tmp_path):
     assert {stream for _, stream in captured['replay_pairs']} == {'H0NXCNT0', 'H0NXASP0'}
 
 
+def test_collect_aftermarket_passes_configured_silence_limit_to_window(monkeypatch, tmp_path):
+    # 애프터마켓 침묵 한계는 하드코딩 30s 가 아니라 AftermarketSettings 값을 따라야 한다.
+    import argparse
+    import asyncio
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.cli import collect_aftermarket
+    from src.realtime.kis_sharding import KisDataCredential
+    from src.universe.ipc import CandidateSnapshot, write_candidate_snapshot
+
+    recorded = {}
+
+    class FakeAdapter:
+        def __init__(self, **kwargs):
+            return None
+
+    class FakeStreamer:
+        def __init__(self, **kwargs):
+            recorded['silence_limit'] = kwargs['silence_limit']
+
+        async def run_forever(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(collect_aftermarket, 'KisRealtimeAdapter', FakeAdapter)
+    monkeypatch.setattr(collect_aftermarket, 'RealtimeStreamer', FakeStreamer)
+    monkeypatch.setattr(collect_aftermarket, 'load_kis_data_credentials', lambda: (KisDataCredential('1', 'k', 's', 'h', 'fp1'),))
+    monkeypatch.setattr(
+        collect_aftermarket, 'aftermarket_silence_limit_s',
+        lambda *a, **kw: recorded.update(kw) or None,
+    )
+
+    from src.core.config import CollectorRuntime
+    _collector = type('Settings', (), {'after_market_enabled': True, 'subscription_pair_budget': 4, 'ntp_fallback_hosts': (), 'min_free_disk_gb': 3.0, 'journal_retain_days': 3})()
+    _after = type('Aftermarket', (), {'nxt_streams': ('H0NXCNT0', 'H0NXASP0'), 'krx_streams': ('H0STCNT0', 'H0STASP0'), 'pair_capacity_per_connection': 4, 'max_symbols': 40, 'enabled': True, 'silence_limit_s': 7.5})()
+    _runtime = CollectorRuntime(collector=_collector, aftermarket=_after, snapshot=type('Snapshot', (), {})(), paths=type('P', (), {})())
+    monkeypatch.setattr(collect_aftermarket, 'resolve_collector_runtime', lambda **kw: _runtime)
+    monkeypatch.setattr(collect_aftermarket, 'bootstrap_session', lambda cfg: type('S', (), {'replay_pairs': lambda self: [('005930', 'H0NXCNT0')], 'persist': lambda self: None})())
+
+    stamp = dt.datetime(2026, 9, 15, 15, 31, tzinfo=ZoneInfo('Asia/Seoul'))
+    write_candidate_snapshot(tmp_path / 'candidates.json', CandidateSnapshot(
+        schema_version=1, rev=20260915, session_date=stamp.date(), session='aftermarket',
+        generated_at=stamp, source_asof=stamp, effective_from=stamp, policy_version='aftermarket_v1',
+        capacity=1, eligible_count=1, selected_count=1,
+        candidates=({'symbol': '005930', 'rank': 1, 'source_ranks': {'trade_amount': 1}, 'metrics': {'trade_value_krw': 1, 'change_pct': 1.0}, 'selection_reasons': ['trade_amount']},),
+    ))
+    args = argparse.Namespace(session_date='2026-09-15', journal_root=str(tmp_path / 'l0'), manifest_path=str(tmp_path / 'nxt.json'), candidates_path=str(tmp_path / 'candidates.json'), venue='nxt', shard_index=0, credential_slot='1', credential_key_id='fp1', symbols='005930', ntp_host='x', max_clock_offset_ns=2, max_cycles=1, degraded_reason=None)
+
+    asyncio.run(collect_aftermarket._run_stream(args))
+    recorded['silence_limit']()
+
+    assert recorded['limit_s'] == 7.5
+
+
 def test_collect_aftermarket_rejects_missing_verified_capacity(monkeypatch, tmp_path):
     import argparse
     import asyncio
@@ -44,7 +100,7 @@ def test_collect_aftermarket_rejects_missing_verified_capacity(monkeypatch, tmp_
     monkeypatch.setattr(collect_aftermarket, 'load_kis_data_credentials', lambda: (KisDataCredential('1','k','s','h','fp1'),))
     from src.core.config import CollectorRuntime
     _collector = type('Settings', (), {'after_market_enabled': True, 'subscription_pair_budget': 4, 'ntp_fallback_hosts': (), 'min_free_disk_gb': 3.0, 'journal_retain_days': 3})()
-    _after = type('Aftermarket', (), {'nxt_streams': ('H0NXCNT0', 'H0NXASP0'), 'krx_streams': ('H0STCNT0', 'H0STASP0'), 'pair_capacity_per_connection': None, 'max_symbols': 40, 'enabled': True})()
+    _after = type('Aftermarket', (), {'nxt_streams': ('H0NXCNT0', 'H0NXASP0'), 'krx_streams': ('H0STCNT0', 'H0STASP0'), 'pair_capacity_per_connection': None, 'max_symbols': 40, 'enabled': True, 'silence_limit_s': 10.0})()
     _snapshot = type('Snapshot', (), {})()
     _runtime = CollectorRuntime(collector=_collector, aftermarket=_after, snapshot=_snapshot, paths=type('P', (), {})())
     monkeypatch.setattr(collect_aftermarket, 'resolve_collector_runtime', lambda **kw: _runtime)
