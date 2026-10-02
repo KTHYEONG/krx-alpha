@@ -36,3 +36,20 @@ def test_extra_env_forwarded() -> None:
     )
     assert res.returncode == 0
     assert res.stdout.strip() == "x"
+
+
+def test_compose_change_selects_deployment_contract_test() -> None:
+    verify = _load_verify()
+    assert verify._contract_tests(["docker-compose.yml"]) == ["tests/unit/core/test_deployment_config.py"]
+
+
+def test_config_change_selects_deployment_and_architecture_contracts() -> None:
+    verify = _load_verify()
+    selected = verify._contract_tests(["src/core/config.py"])
+    assert "tests/unit/core/test_deployment_config.py" in selected
+    assert "tests/architecture" in selected
+
+
+def test_unrelated_change_selects_no_contract_tests() -> None:
+    verify = _load_verify()
+    assert verify._contract_tests(["README.md", "tests/unit/core/test_paths.py"]) == []

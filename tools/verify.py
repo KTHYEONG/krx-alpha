@@ -149,6 +149,26 @@ def _check_scaffolding_leaks(py_files: list[str]) -> list[JsonDiag]:
 # ---------------------------------------------------------------------------
 
 
+# Repo-wide contracts that cross file types (compose env, layering, vocabulary). Diff-scoped
+# source->test mapping cannot see them, so a change that can break one always runs it.
+_CONTRACT_TRIGGERS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        ("docker-compose.yml", "Dockerfile", "deploy/", ".github/", "src/core/config.py", "src/core/paths.py"),
+        ("tests/unit/core/test_deployment_config.py",),
+    ),
+    (("src/",), ("tests/architecture",)),
+)
+
+
+def _contract_tests(changed: list[str]) -> list[str]:
+    """Repo-contract tests that must run for ``changed`` regardless of source->test mapping."""
+    selected: list[str] = []
+    for triggers, tests in _CONTRACT_TRIGGERS:
+        if any(f == t or f.startswith(t) for f in changed for t in triggers):
+            selected.extend(t for t in tests if os.path.exists(t) and t not in selected)
+    return selected
+
+
 def _find_test_files(py_files: list[str]) -> tuple[list[str], list[str]]:
     """Find direct unit tests corresponding to modified source files.
 
@@ -328,6 +348,7 @@ def main() -> None:
 
 
     # 1. File discovery from git if not explicitly passed
+    all_changed: list[str] = list(args.files)
     if not args.files:
         try:
             diff_res = subprocess.run(
@@ -336,6 +357,7 @@ def main() -> None:
                 text=True,
                 timeout=10,
             )
+            all_changed = [line[3:].strip() for line in diff_res.stdout.splitlines() if "D" not in line[:2]]
             git_files = [
                 line[3:].strip()
                 for line in diff_res.stdout.splitlines()
@@ -350,7 +372,8 @@ def main() -> None:
             args.files = []
 
     py_files = [f for f in args.files if f.endswith(".py")]
-    if not py_files:
+    contract_tests = _contract_tests(all_changed)
+    if not py_files and not contract_tests:
         print("ALLCHECKS:PASS | No modified .py files detected")
         sys.exit(0)
 
@@ -396,6 +419,7 @@ def main() -> None:
 
     # 4. Direct Test Discovery
     test_files, unmapped = _find_test_files(py_files)
+    test_files = sorted(dict.fromkeys([*test_files, *contract_tests]))
     if not test_files:
         if unmapped:
             diags = [
