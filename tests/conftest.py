@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import os
-import shutil
 import socket
 import tempfile
+import time
 from collections.abc import Generator
 from pathlib import Path
+
+from tests.tmp_isolation import (
+    PYTEST_TMP_BASE_NAME,
+    STALE_RUN_ROOT_AGE,
+    prune_stale_run_roots,
+    release_run_tmp_root,
+    resolve_run_id,
+    run_tmp_root,
+)
 
 # 다중 프로젝트 및 로컬 동시성 환경 리소스 안전 가드:
 # Polars, NumPy, OpenBLAS, MKL, Numba 등이 8코어 머신에서 스레드를 과도하게 점유하지 못하도록 상한선 강제
@@ -25,19 +34,22 @@ for _key, _val in (
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_RUN_ID = resolve_run_id(os.environ)
+PROJECT_TMP_BASE = PROJECT_ROOT / "tmp" / PYTEST_TMP_BASE_NAME
 # xdist 워커마다 독립 임시 루트를 쓴다: 먼저 끝난 워커의 세션 정리가 공유 폴더를 지우면 실행 중인 워커가 FileNotFoundError로 깨진다.
-PROJECT_TMP = PROJECT_ROOT / "tmp" / "pytest" / os.environ.get("PYTEST_XDIST_WORKER", "main")
+PROJECT_TMP = run_tmp_root(PROJECT_TMP_BASE, _RUN_ID, os.environ.get("PYTEST_XDIST_WORKER", "main"))
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _pin_tmp_root() -> Generator[None, None, None]:
     """외부 /tmp 사용을 차단하고 저장소 내부 tmp/ 로 강제하며, 세션 종료 시 임시 파일을 정리한다."""
+    prune_stale_run_roots(PROJECT_TMP_BASE, now=time.time(), max_age=STALE_RUN_ROOT_AGE, keep=PROJECT_TMP)
     PROJECT_TMP.mkdir(parents=True, exist_ok=True)
     for var in ("TMPDIR", "TEMP", "TMP"):
         os.environ[var] = str(PROJECT_TMP)
     tempfile.tempdir = str(PROJECT_TMP)
     yield
-    shutil.rmtree(PROJECT_TMP, ignore_errors=True)
+    release_run_tmp_root(PROJECT_TMP)
 
 
 @pytest.fixture(scope="session")
