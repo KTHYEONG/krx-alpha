@@ -16,8 +16,8 @@ def test_plan_fills_primary_vendor_with_all_symbol_stream_pairs() -> None:
     assert out == {'ls': [('000660', 'H0STASP0'), ('000660', 'H0STCNT0'), ('005930', 'H0STASP0'), ('005930', 'H0STCNT0')]}
 def test_plan_raises_slot_budget_exceeded_when_primary_capacity_too_small() -> None:
     import pytest
+    from src.core.errors import SlotBudgetExceededError
     from src.realtime.contracts import SubscriptionPlanner, VendorCapacity
-    from src.universe.policy import SlotBudgetExceededError
 
     planner = SubscriptionPlanner(streams=('H0STCNT0', 'H0STASP0'))
 

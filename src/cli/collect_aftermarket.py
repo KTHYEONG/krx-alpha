@@ -132,7 +132,7 @@ async def _run_stream(args: argparse.Namespace) -> int:
             adapter=adapter,
             sink=SessionFrameSink(session=session),
             replay_pairs=pairs,
-            silence_limit=lambda: aftermarket_silence_limit_s(dt.datetime.now(dt.UTC), route=route, anchors=anchors),
+            silence_limit=lambda: aftermarket_silence_limit_s(dt.datetime.now(dt.UTC), route=route, anchors=anchors, limit_s=after.silence_limit_s),
         )
         await streamer.run_forever(stop, max_cycles=getattr(args, "max_cycles", None))
     finally:

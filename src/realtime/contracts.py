@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from src.core.errors import KrxAlphaError, SlotBudgetExceededError
 
 __all__ = [
+    "HeartbeatProbe",
     "L0Frame",
     "MarketSession",
     "MarketVenue",
@@ -78,6 +79,19 @@ class VendorAdapter(Protocol):
     async def subscribe(self, pairs: list[tuple[str, str]]) -> list[VendorAck]: ...
     async def recv(self) -> L0Frame: ...
     async def aclose(self) -> None: ...
+
+
+@runtime_checkable
+class HeartbeatProbe(Protocol):
+    """Optional adapter telemetry for vendor application-level heartbeats.
+
+    Diagnostic only: heartbeats prove the control channel is alive, never that
+    market data flows, so the streamer must not treat them as liveness.
+    Counters are per connection and reset on ``connect``.
+    """
+
+    pingpong_count: int
+    last_pingpong_wall_ns: int | None
 
 
 class SubscriptionPlanner:

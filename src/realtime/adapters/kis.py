@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any
 
@@ -15,6 +16,8 @@ from src.realtime.contracts import (
 )
 from src.realtime.kis_lease import KisWebSocketLease
 from src.realtime.session import StreamRoute
+
+logger = logging.getLogger(__name__)
 
 KIS_WS_URL = "ws://ops.koreainvestment.com:21000"
 KIS_APPROVAL_URL = "https://openapi.koreainvestment.com:9443/oauth2/Approval"
@@ -80,6 +83,8 @@ class KisRealtimeAdapter:
         self._seq = 0
         self._conn_id = ""
         self._pending: list[L0Frame] = []
+        self.pingpong_count: int = 0
+        self.last_pingpong_wall_ns: int | None = None
 
     async def connect(self) -> None:  # pragma: no cover - live KIS approval/WebSocket boundary (G0-gated, needs production credentials)
         if self._lease is not None:
@@ -100,6 +105,8 @@ class KisRealtimeAdapter:
         self._seq = 0
         self._conn_id = f"kis-{time.time_ns()}"
         self._pending = []
+        self.pingpong_count = 0
+        self.last_pingpong_wall_ns = None
 
     async def subscribe(self, pairs: list[tuple[str, str]]) -> list[VendorAck]:  # pragma: no cover - live KIS subscribe/ACK boundary (G0-gated)
         if len(pairs) > self.capacity_pairs:
@@ -136,12 +143,21 @@ class KisRealtimeAdapter:
     async def _echo_pingpong(self, raw: str) -> None:
         """Echo a heartbeat frame verbatim.
 
+        Records receipt (count, wall time) before echoing, so a failed echo is
+        still visible in telemetry. Emits one DEBUG
+        ``[DATA] stage=kis_pingpong conn_id=<id> count=<n>`` per heartbeat.
+
         Raises:
             VendorDisconnected: ``pingpong_echo_failed:<ExcType>`` when the socket
                 write fails (``OSError``, incl. aiohttp
                 ``ClientConnectionResetError``), so the streamer takes its normal
                 reconnect path instead of crashing on a raw transport error.
         """
+        self.pingpong_count += 1
+        self.last_pingpong_wall_ns = time.time_ns()
+        logger.debug(
+            "[DATA] stage=kis_pingpong conn_id=%s count=%d", self._conn_id, self.pingpong_count
+        )
         try:
             await self._ws.send_str(raw)
         except OSError as exc:
