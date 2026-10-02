@@ -112,6 +112,12 @@ class DataPaths:
         venue_s = str(getattr(venue, "value", venue))
         return self.manifest_dir / "aftermarket" / f"{day.isoformat()}.{venue_s}.shard-{shard_index:02d}.json"
 
+    def premarket_candidates(self, day: dt.date) -> pathlib.Path:
+        return self.universe_dir / "premarket" / f"{day.isoformat()}.json"
+
+    def premarket_manifest_path(self, day: dt.date) -> pathlib.Path:
+        return self.manifest_dir / "premarket" / f"{day.isoformat()}.nxt.shard-00.json"
+
     @property
     def execution_dir(self) -> pathlib.Path:
         return self.root / "execution"

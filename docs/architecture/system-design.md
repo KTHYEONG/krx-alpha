@@ -66,7 +66,7 @@ flowchart TB
 
 ## 3. 24/7 Daemon Lifecycle & Session State Machine
 
-데몬(`src/orchestration/daemon.py`)은 캘린더 모듈(`src/core/calendar.py`)의 `SessionSchedule` 단일 진실천(SSOT)에 따라 KST 기준 상태를 순환 전이합니다.
+데몬(`src/orchestration/daemon.py`)은 캘린더 모듈(`src/core/calendar.py`)의 `SessionSchedule` 단일 진실천(SSOT)에 따라 KST 기준 상태를 순환 전이합니다. NXT 프리마켓 수집기는 `SessionState` 머신 바깥의 직교 슈퍼바이저로, 매 데몬 주기마다 평가되는 기본 비활성 스케줄이다.
 
 ```mermaid
 stateDiagram-v2
@@ -190,6 +190,7 @@ EOD 단계에서 동일 `(conn_id, conn_seq)` 중복을 제거하고 정규화�
 | **KRX** | **장후 시간외종가** | `15:40 ~ 16:00` | 당일 종가(15:30) 기준 단일가 |
 | **KRX** | **애프터마켓** | `16:00 ~ 20:00` | 접속매매 (Continuous) |
 | **NXT** | **애프터마켓** | `15:40 ~ 20:00` | 대체거래소 접속매매 |
+| **NXT** | **프리마켓** | `08:00 ~ 08:50` | 대체거래소 접속매매 |
 
 > **용어 불변식 규칙:** 위 표의 두 정규 종가 토큰(`장전 시간외종가`, `장후 시간외종가`) 이외의 모호한 레거시 세션 어휘(단독 사용)는 저장소 전역 AST 검증(`test_terminology.py`)으로 금지되며, 영문 표기는 반드시 `aftermarket`으로 통일합니다.
 

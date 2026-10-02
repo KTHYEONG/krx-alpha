@@ -1997,3 +1997,60 @@ def test_consumer_force_fail_closed_on_bad_cache(tmp_path) -> None:
     with pytest.raises(KisApiError, match="TOKEN_CACHE"):
         expiring_client.access_token(force=True, rejected_token="x")  # type: ignore[union-attr]
     assert expiring_client._tokens._token is None  # type: ignore[union-attr]
+
+
+def test_default_ranking_venue_is_krx(tmp_path) -> None:
+    from tests.unit.execution.fakes import FakeResponse, make_client
+
+    amount = FakeResponse({'rt_cd': '0', 'msg_cd': '0', 'msg1': 'ok', 'output': [{'mksc_shrn_iscd': '005930', 'prdy_ctrt': '1.25', 'acml_tr_pbmn': '123'}]})
+    client, session, _ = make_client(tmp_path, [amount])
+
+    client.get_trade_amount_ranking()
+
+    assert session.calls[0]['params']['FID_COND_MRKT_DIV_CODE'] == 'J'
+
+
+def test_nx_ranking_sends_nx_with_other_params_unchanged(tmp_path) -> None:
+    from tests.unit.execution.fakes import FakeResponse, make_client
+
+    def _body() -> FakeResponse:
+        return FakeResponse({'rt_cd': '0', 'msg_cd': '0', 'msg1': 'ok', 'output': [{'mksc_shrn_iscd': '005930', 'prdy_ctrt': '1.25', 'acml_tr_pbmn': '123'}]})
+
+    client_j, session_j, _ = make_client(tmp_path / 'j', [_body()])
+    client_j.get_trade_amount_ranking()
+    client_nx, session_nx, _ = make_client(tmp_path / 'nx', [_body()])
+    client_nx.get_trade_amount_ranking(market_div='NX')
+
+    assert session_nx.calls[0]['params']['FID_COND_MRKT_DIV_CODE'] == 'NX'
+    assert {k: v for k, v in session_nx.calls[0]['params'].items() if k != 'FID_COND_MRKT_DIV_CODE'} == {
+        k: v for k, v in session_j.calls[0]['params'].items() if k != 'FID_COND_MRKT_DIV_CODE'
+    }
+
+    def _fluct_body() -> FakeResponse:
+        return FakeResponse({'rt_cd': '0', 'msg_cd': '0', 'msg1': 'ok', 'output': [{'stck_shrn_iscd': '005930', 'prdy_ctrt': '1.25'}]})
+
+    fclient_j, fsession_j, _ = make_client(tmp_path / 'fj', [_fluct_body()])
+    fclient_j.get_fluctuation_ranking()
+    fclient_nx, fsession_nx, _ = make_client(tmp_path / 'fnx', [_fluct_body()])
+    fclient_nx.get_fluctuation_ranking(market_div='NX')
+
+    assert fsession_nx.calls[0]['params']['FID_COND_MRKT_DIV_CODE'] == 'NX'
+    assert {k: v for k, v in fsession_nx.calls[0]['params'].items() if k != 'FID_COND_MRKT_DIV_CODE'} == {
+        k: v for k, v in fsession_j.calls[0]['params'].items() if k != 'FID_COND_MRKT_DIV_CODE'
+    }
+
+
+def test_unsupported_venue_code_rejected_before_any_request(tmp_path) -> None:
+    import pytest
+
+    from tests.unit.execution.fakes import FakeResponse, make_client
+
+    body = FakeResponse({'rt_cd': '0', 'msg_cd': '0', 'msg1': 'ok', 'output': [{'mksc_shrn_iscd': '005930', 'prdy_ctrt': '1.25', 'acml_tr_pbmn': '123'}]})
+    client, session, _ = make_client(tmp_path, [body])
+
+    with pytest.raises(ValueError, match='market_div'):
+        client.get_trade_amount_ranking(market_div='UN')
+    with pytest.raises(ValueError, match='market_div'):
+        client.get_fluctuation_ranking(market_div='UN')
+
+    assert session.calls == []

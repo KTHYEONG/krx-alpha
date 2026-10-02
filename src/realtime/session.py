@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from src.core.calendar import SessionSchedule, SessionState, calc_sleep_seconds, get_target_state
 from src.core.config import DataPaths
-from src.core.session_anchors import resolve_session_anchors
+from src.core.session_anchors import STANDARD_NXT_PREMARKET_END, resolve_session_anchors
 from src.realtime.clock import ClockUnsyncedError, measure_ntp_offset_ns
 from src.realtime.contracts import MarketSession, MarketVenue
 from src.realtime.kis_sharding import AftermarketShard
@@ -203,7 +203,12 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
             anchors = resolve_session_anchors(
                 DataPaths(cfg.journal_root.parent).session_calendar_dir, cfg.session_date
             )
-            close_at = dt.datetime.combine(cfg.session_date, anchors.after_market_end, tzinfo=_KST)
+            if cfg.route.session is MarketSession.NXT_PRE:
+                close_at = dt.datetime.combine(
+                    cfg.session_date, anchors.shift_pre_open(STANDARD_NXT_PREMARKET_END), tzinfo=_KST
+                )
+            else:
+                close_at = dt.datetime.combine(cfg.session_date, anchors.after_market_end, tzinfo=_KST)
             expected_close_ns = int(close_at.timestamp() * 1_000_000_000)
         manifest = SessionManifest(
             session_date=cfg.session_date,

@@ -1482,3 +1482,40 @@ def test_watchdog_rearms_after_window_closes_and_reopens() -> None:
 
     assert reason == "watchdog"
     assert elapsed >= 0.65
+
+
+def test_premarket_silence_watchdog_arms_only_in_premarket_window() -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.realtime.streamer import premarket_silence_limit_s
+
+    kst = ZoneInfo("Asia/Seoul")
+    anchors = standard_session_anchors(dt.date(2026, 10, 2))
+
+    assert premarket_silence_limit_s(dt.datetime(2026, 10, 2, 7, 59, 59, tzinfo=kst), anchors=anchors) is None
+    assert premarket_silence_limit_s(dt.datetime(2026, 10, 2, 8, 0, 0, tzinfo=kst), anchors=anchors) == 30.0
+    assert premarket_silence_limit_s(dt.datetime(2026, 10, 2, 8, 49, 59, tzinfo=kst), anchors=anchors) == 30.0
+    assert premarket_silence_limit_s(dt.datetime(2026, 10, 2, 8, 50, 0, tzinfo=kst), anchors=anchors) is None
+
+
+def test_premarket_window_follows_open_shift() -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.core.session_anchors import AnchorSource, SessionAnchors
+    from src.realtime.streamer import premarket_silence_limit_s
+
+    kst = ZoneInfo("Asia/Seoul")
+    anchors = SessionAnchors(
+        date=dt.date(2025, 11, 13),
+        regular_open=dt.time(10, 0),
+        closing_auction_start=dt.time(16, 20),
+        regular_close=dt.time(16, 30),
+        after_market_end=dt.time(20, 0),
+        source=AnchorSource.VENDOR,
+    )
+
+    assert premarket_silence_limit_s(dt.datetime(2025, 11, 13, 8, 30, tzinfo=kst), anchors=anchors) is None
+    assert premarket_silence_limit_s(dt.datetime(2025, 11, 13, 9, 30, tzinfo=kst), anchors=anchors) == 30.0

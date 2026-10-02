@@ -92,3 +92,91 @@ def test_plan_aftermarket_shards_raises_when_nothing_fits() -> None:
 
     with pytest.raises(SlotBudgetExceededError, match=r"required=2.*available=0"):
         plan_aftermarket_shards(symbols=("005930",), credentials=(), pair_capacity_per_connection=41, krx_streams=("H0STCNT0", "H0STASP0"), nxt_streams=("H0NXCNT0", "H0NXASP0"))
+
+
+def test_premarket_single_shard_uses_configured_slot_only() -> None:
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import KisDataCredential, plan_premarket_shard
+
+    keys = tuple(KisDataCredential(str(i), f"key{i}", "secret", f"hts{i}", f"id{i}") for i in range(1, 6))
+
+    shard = plan_premarket_shard(
+        symbols=("005930", "000660"), credentials=keys, credential_slot="5",
+        pair_capacity_per_connection=41, nxt_streams=("H0NXCNT0", "H0NXASP0"),
+    )
+
+    assert shard.venue is MarketVenue.NXT
+    assert shard.shard_index == 0
+    assert shard.streams == ("H0NXCNT0", "H0NXASP0")
+    assert shard.credential_slot == "5"
+    assert shard.credential_key_id == "id5"
+    assert shard.symbols == ("005930", "000660")
+
+
+def test_premarket_truncation_keeps_rank_ordered_prefix(caplog) -> None:
+    import logging
+
+    from src.realtime.kis_sharding import KisDataCredential, plan_premarket_shard
+
+    keys = (KisDataCredential("5", "key5", "secret", "hts5", "id5"),)
+    symbols = tuple(f"{index:06d}" for index in range(30))
+
+    with caplog.at_level(logging.WARNING, logger="src.realtime.kis_sharding"):
+        shard = plan_premarket_shard(
+            symbols=symbols, credentials=keys, credential_slot="5",
+            pair_capacity_per_connection=41, nxt_streams=("H0NXCNT0", "H0NXASP0"),
+        )
+
+    assert shard.symbols == symbols[:20]
+    assert len(shard.symbols) * 2 <= 41
+    assert any("status=TRUNCATED" in rec.message for rec in caplog.records)
+
+
+def test_premarket_capacity_below_one_symbol_fails() -> None:
+    import pytest
+
+    from src.core.errors import SlotBudgetExceededError
+    from src.realtime.kis_sharding import KisDataCredential, plan_premarket_shard
+
+    keys = (KisDataCredential("5", "key5", "secret", "hts5", "id5"),)
+
+    with pytest.raises(SlotBudgetExceededError, match="capacity"):
+        plan_premarket_shard(
+            symbols=("005930",), credentials=keys, credential_slot="5",
+            pair_capacity_per_connection=1, nxt_streams=("H0NXCNT0", "H0NXASP0"),
+        )
+
+
+def test_premarket_unknown_slot_fails_closed() -> None:
+    import pytest
+
+    from src.core.errors import MissingCredentialsError
+    from src.realtime.kis_sharding import KisDataCredential, plan_premarket_shard
+
+    keys = (KisDataCredential("5", "key5", "secret", "hts5", "id5"),)
+
+    with pytest.raises(MissingCredentialsError, match="slot"):
+        plan_premarket_shard(
+            symbols=("005930",), credentials=keys, credential_slot="9",
+            pair_capacity_per_connection=41, nxt_streams=("H0NXCNT0", "H0NXASP0"),
+        )
+
+
+def test_premarket_empty_or_duplicate_symbols_fail() -> None:
+    import pytest
+
+    from src.core.errors import KrxAlphaError
+    from src.realtime.kis_sharding import KisDataCredential, plan_premarket_shard
+
+    keys = (KisDataCredential("5", "key5", "secret", "hts5", "id5"),)
+
+    with pytest.raises(KrxAlphaError, match="empty"):
+        plan_premarket_shard(
+            symbols=(), credentials=keys, credential_slot="5",
+            pair_capacity_per_connection=41, nxt_streams=("H0NXCNT0", "H0NXASP0"),
+        )
+    with pytest.raises(KrxAlphaError, match="duplicate"):
+        plan_premarket_shard(
+            symbols=("005930", "005930"), credentials=keys, credential_slot="5",
+            pair_capacity_per_connection=41, nxt_streams=("H0NXCNT0", "H0NXASP0"),
+        )

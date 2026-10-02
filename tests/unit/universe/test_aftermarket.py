@@ -181,3 +181,75 @@ def test_refresh_aftermarket_candidates_round_trips_alphanumeric_symbol(tmp_path
 
     assert [row['symbol'] for row in snapshot.candidates] == ['0007J0']
     assert read_candidate_snapshot(out, expected_session_date=generated.date(), expected_session='aftermarket', max_candidates=40) == snapshot
+
+
+def test_defaults_preserve_aftermarket_snapshots() -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.execution.kis_client import KisRankingRow
+    from src.universe.aftermarket import build_aftermarket_snapshot
+
+    generated = dt.datetime(2026, 9, 16, 15, 31, tzinfo=ZoneInfo('Asia/Seoul'))
+    kwargs: dict = {
+        'session_date': generated.date(),
+        'generated_at': generated,
+        'trade_amount_rows': (
+            KisRankingRow(symbol='000660', rank=1, change_pct=3.0, trade_value_krw=900_000_000_000),
+            KisRankingRow(symbol='005930', rank=2, change_pct=1.0, trade_value_krw=800_000_000_000),
+        ),
+        'fluctuation_rows': (
+            KisRankingRow(symbol='123456', rank=1, change_pct=29.9, trade_value_krw=10_000_000_000),
+            KisRankingRow(symbol='000660', rank=2, change_pct=3.0, trade_value_krw=900_000_000_000),
+        ),
+        'capacity': 2,
+    }
+
+    snapshot = build_aftermarket_snapshot(**kwargs)
+
+    assert snapshot.session == 'aftermarket'
+    assert snapshot.effective_from == generated
+    assert [row['symbol'] for row in snapshot.candidates] == ['123456', '000660']
+    assert [row['rank'] for row in snapshot.candidates] == [1, 2]
+
+
+def test_session_and_effective_from_propagate() -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.universe.aftermarket import build_aftermarket_snapshot
+
+    generated = dt.datetime(2026, 9, 16, 15, 31, tzinfo=ZoneInfo('Asia/Seoul'))
+    effective = dt.datetime(2026, 9, 17, 8, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+    rows = _aftermarket_rows(('005930', '000660', '123456'))
+
+    snapshot = build_aftermarket_snapshot(
+        session_date=dt.date(2026, 9, 17), generated_at=generated,
+        trade_amount_rows=rows, fluctuation_rows=rows, capacity=2,
+        session='premarket', effective_from=effective,
+    )
+
+    assert snapshot.session == 'premarket'
+    assert snapshot.effective_from == effective
+    assert snapshot.rev == 20260917
+    assert [row['symbol'] for row in snapshot.candidates] == ['005930', '000660']
+
+
+def test_effective_time_before_generation_is_rejected() -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    import pytest
+
+    from src.execution.kis_client import KisRankingRow
+    from src.universe.aftermarket import AftermarketUniverseError, build_aftermarket_snapshot
+
+    generated = dt.datetime(2026, 9, 16, 15, 31, tzinfo=ZoneInfo('Asia/Seoul'))
+    row = KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=1)
+
+    with pytest.raises(AftermarketUniverseError, match='invalid aftermarket source'):
+        build_aftermarket_snapshot(
+            session_date=generated.date(), generated_at=generated,
+            trade_amount_rows=(row,), fluctuation_rows=(row,), capacity=40,
+            effective_from=generated - dt.timedelta(seconds=1),
+        )

@@ -46,6 +46,7 @@ from src.core.observability import EVENT, configure_logging, send_digest, shutdo
 from src.core.session_anchors import (
     STANDARD_KRX_AFTER_MARKET_OPEN,
     STANDARD_NXT_AFTER_MARKET_OPEN,
+    STANDARD_NXT_PREMARKET_OPEN,
     AnchorSource,
     SessionAnchors,
     resolve_session_anchors,
@@ -81,10 +82,22 @@ from src.orchestration.eod import (
     run_eod_offload,
     run_eod_remote_l0_purge,
 )
+from src.orchestration.premarket import (
+    premarket_collection_due,
+    premarket_eod_report,
+    premarket_pool_due,
+    premarket_stream_cmd,
+    premarket_wake_cap_s,
+)
 from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker, stop_supervisors
 from src.orchestration.trading_day_gate import TradingDayGate, TradingDayStatus, TradingDayView
 from src.realtime.contracts import MarketSession, MarketVenue
-from src.realtime.kis_sharding import AftermarketShard, load_kis_data_credentials, plan_aftermarket_shards
+from src.realtime.kis_sharding import (
+    AftermarketShard,
+    load_kis_data_credentials,
+    plan_aftermarket_shards,
+    plan_premarket_shard,
+)
 from src.storage.layout import l0_day_journal_glob
 from src.storage.remote import RemoteArchiveError
 from src.storage.retention import check_disk_watermark
@@ -92,6 +105,7 @@ from src.storage.snapshot_store import SnapshotStore
 from src.universe.aftermarket import AftermarketUniverseError, refresh_aftermarket_candidates
 from src.universe.ipc import CandidateFileError, read_candidate_snapshot, read_candidates
 from src.universe.policy import ineligible_security_symbols
+from src.universe.premarket import premarket_pool_ready, refresh_premarket_pool
 from src.universe.service import UniversePlanResult as UniversePlanResult
 from src.universe.service import plan_universe
 
@@ -152,8 +166,13 @@ def _build_snapshot_preflight_client(
 ) -> tuple[KisDataClient, str]:
     """collect-snapshots와 동일한 규칙으로 데이터 슬롯 KIS 클라이언트를 생성한다."""
     snapshot_cfg = snapshot_settings if snapshot_settings is not None else SnapshotSettings()
-    stack, key_id = build_kis_data_slot_stack(snapshot=snapshot_cfg, credentials=load_kis_data_credentials(),
-                                              token_settings=KisTokenSettings(), session=requests, now=lambda: dt.datetime.now(_KST))
+    stack, key_id = build_kis_data_slot_stack(
+        snapshot=snapshot_cfg,
+        credentials=load_kis_data_credentials(),
+        token_settings=KisTokenSettings(),
+        session=requests,
+        now=lambda: dt.datetime.now(_KST),
+    )
     return stack.data, key_id
 
 
@@ -624,6 +643,12 @@ class DaemonState:
     aftermarket_results: dict[str, str] = field(default_factory=dict)
     aftermarket_circuit_alerted: set[str] = field(default_factory=set)
     aftermarket_restarts: int = 0
+    premarket_pool_day: dt.date | None = None
+    next_premarket_pool_at: dt.datetime | None = None
+    premarket_pool_failed_day: dt.date | None = None
+    premarket_plan_day: dt.date | None = None
+    premarket_shard: AftermarketShard | None = None
+    premarket_circuit_alerted_day: dt.date | None = None
 
 
 @dataclass
@@ -631,6 +656,7 @@ class DaemonChildren:
     regular: ProcessSupervisor | None = None
     snapshot: ProcessSupervisor | None = None
     aftermarket: dict[str, ProcessSupervisor] = field(default_factory=dict)
+    premarket: ProcessSupervisor | None = None
     program_sync: Any | None = None
     program_sync_started_at: dt.datetime | None = None
     degraded_regular: ProcessSupervisor | None = None
@@ -702,6 +728,7 @@ class DaemonRunner:
         self._paths = runtime.paths
         self._after_cfg = runtime.aftermarket
         self._snapshot_cfg = runtime.snapshot
+        self._premarket_cfg = runtime.premarket
         self._program_sync_cfg = (
             program_sync_settings if program_sync_settings is not None else TossProgramTradesSettings()
         )
@@ -754,6 +781,8 @@ class DaemonRunner:
         targets.extend(self._children.aftermarket.values())
         if self._children.snapshot is not None:
             targets.append(self._children.snapshot)
+        if self._children.premarket is not None:
+            targets.append(self._children.premarket)
         sync = self._children.program_sync
         sync_running = sync is not None and sync.poll() is None
         # 모든 자식에 먼저 SIGTERM 을 보내 대기를 겹쳐야 compose 30s 유예 안에 끝난다 (순차 대기 시 최대 40s).
@@ -859,6 +888,12 @@ class DaemonRunner:
             sleep_sec = self._step_post_market_eod(now, day, anchors)
         else:  # NIGHT_SLEEP
             sleep_sec = min(calc_sleep_seconds(now, self._sched.streamer_start), 1800.0)
+        if self._premarket_cfg.enabled:
+            self._supervise_premarket(now, anchors)
+            self._maybe_refresh_premarket_pool(now, anchors)
+            cap = premarket_wake_cap_s(now, anchors=anchors, start_lead_s=self._premarket_cfg.start_lead_s)
+            if cap is not None:
+                sleep_sec = min(sleep_sec, cap)
         self._poll_program_sync(now)
         self._maybe_launch_program_sync(now)
         if self._children.program_sync is not None:
@@ -1384,6 +1419,194 @@ class DaemonRunner:
                 )
                 st.aftermarket_circuit_alerted.add(supervisor_key)
 
+    def _maybe_refresh_premarket_pool(self, now: dt.datetime, anchors: SessionAnchors) -> None:
+        """Build the next business day's premarket pool once per business evening.
+
+        Runs only when enabled and ``premarket_pool_due``; needs a BUSINESS view of today with a resolved
+        ``next_business_day``. Skips (INFO, marks done) when the next day's anchors are shifted or a valid
+        pool for the target already exists, so restarts are idempotent. Vendor/file failures retry every
+        ``pool_retry_s``; the first failure per source day logs WARNING, later retries DEBUG. Never raises.
+        """
+        cfg = self._premarket_cfg
+        if not cfg.enabled:
+            return
+        st = self._state
+        paths = self._paths
+        today = now.astimezone(_KST).date()
+        target: dt.date | None = None
+        try:
+            if st.premarket_pool_day == today:
+                return
+            if st.next_premarket_pool_at is not None and now < st.next_premarket_pool_at:
+                return
+            if not premarket_pool_due(now, anchors=anchors, settle_s=cfg.pool_settle_s):
+                return
+            view = self._gate.view(today, now)
+            if view.status is not TradingDayStatus.BUSINESS or view.trading_day is None:
+                return
+            target = view.trading_day.next_business_day
+            next_anchors = view.trading_day.next_anchors
+            if next_anchors is None:
+                next_anchors = resolve_session_anchors(paths.session_calendar_dir, target)
+            if next_anchors.open_shift != dt.timedelta(0):
+                st.premarket_pool_day = today
+                logger.info(
+                    "[DATA] stage=premarket_pool status=SKIP reason=shifted_next_day target=%s",
+                    target.isoformat(),
+                )
+                return
+            if premarket_pool_ready(
+                paths.premarket_candidates(target), target_date=target, max_candidates=cfg.max_symbols
+            ):
+                st.premarket_pool_day = today
+                logger.info(
+                    "[DATA] stage=premarket_pool status=SKIP reason=pool_ready target=%s",
+                    target.isoformat(),
+                )
+                return
+            effective_from = dt.datetime.combine(target, STANDARD_NXT_PREMARKET_OPEN, tzinfo=_KST) - dt.timedelta(
+                seconds=cfg.start_lead_s
+            )
+            excluded = self._aftermarket_excluded_symbols(today)
+            snapshot = refresh_premarket_pool(
+                target_date=target,
+                generated_at=now,
+                effective_from=effective_from,
+                client=_build_kis_client(paths),
+                out_path=paths.premarket_candidates(target),
+                capacity=cfg.max_symbols,
+                excluded_symbols=excluded,
+            )
+            st.premarket_pool_day = today
+            st.next_premarket_pool_at = None
+            logger.info(
+                "[DATA] stage=premarket_pool status=OK target=%s symbols=%d",
+                target.isoformat(),
+                len(snapshot.candidates),
+            )
+        except (KrxAlphaError, KisApiError, OSError, ValueError) as exc:
+            st.next_premarket_pool_at = now + dt.timedelta(seconds=cfg.pool_retry_s)
+            label = target.isoformat() if target is not None else "unknown"
+            if st.premarket_pool_failed_day != today:
+                st.premarket_pool_failed_day = today
+                logger.warning(
+                    "[DATA] stage=premarket_pool status=FAIL reason=%s target=%s next_retry=%s",
+                    str(exc),
+                    label,
+                    st.next_premarket_pool_at.isoformat(),
+                )
+            else:
+                logger.debug(
+                    "[DATA] stage=premarket_pool status=FAIL reason=%s target=%s next_retry=%s",
+                    str(exc),
+                    label,
+                    st.next_premarket_pool_at.isoformat(),
+                )
+
+    def _ensure_premarket_plan(self, today: dt.date) -> None:
+        """Once per date: read today's pool and plan the single shard; no pool/invalid pool → shard None with one ERROR log naming the reason."""
+        st = self._state
+        if st.premarket_plan_day == today:
+            return
+        st.premarket_plan_day = today
+        cfg = self._premarket_cfg
+        paths = self._paths
+        try:
+            snapshot = read_candidate_snapshot(
+                paths.premarket_candidates(today),
+                expected_session_date=today,
+                expected_session="premarket",
+                max_candidates=cfg.max_symbols,
+            )
+            st.premarket_shard = plan_premarket_shard(
+                symbols=tuple(str(row["symbol"]) for row in snapshot.candidates),
+                credentials=load_kis_data_credentials(),
+                credential_slot=str(cfg.credential_slot),
+                pair_capacity_per_connection=int(cfg.pair_capacity_per_connection or 0),
+                nxt_streams=cfg.nxt_streams,
+            )
+        except (KrxAlphaError, OSError, ValueError) as exc:
+            st.premarket_shard = None
+            logger.error(
+                "[DATA] stage=premarket_plan status=SKIP reason=%s date=%s",
+                str(exc),
+                today.isoformat(),
+            )
+
+    def _supervise_premarket(self, now: dt.datetime, anchors: SessionAnchors) -> None:
+        """Start, supervise and stop the premarket child; never raises and never touches any other child."""
+        try:
+            cfg = self._premarket_cfg
+            if not cfg.enabled:
+                return
+            st = self._state
+            ch = self._children
+            paths = self._paths
+            today = now.astimezone(_KST).date()
+            due = premarket_collection_due(now, anchors=anchors, start_lead_s=cfg.start_lead_s)
+            if due:
+                view = self._gate.view(today, now)
+                if view.status is TradingDayStatus.HOLIDAY:
+                    due = False
+            if not due:
+                self._stop_premarket_child()
+                return
+            self._ensure_premarket_plan(today)
+            shard = st.premarket_shard
+            if shard is None:
+                return
+            if ch.premarket is None:
+                ch.premarket = ProcessSupervisor(
+                    cmd=premarket_stream_cmd(today, paths, shard=shard),
+                    breaker=RestartCircuitBreaker(),
+                )
+            result = ch.premarket.ensure_running()
+            if result == "restarted":
+                logger.warning(
+                    "[DATA] stage=premarket_stream status=RESTARTED exit_code=%s",
+                    ch.premarket.last_exit_code,
+                )
+            elif result == "circuit_open" and st.premarket_circuit_alerted_day != today:
+                st.premarket_circuit_alerted_day = today
+                logger.critical(
+                    "[DATA] stage=premarket_stream status=FAIL reason=circuit_open date=%s",
+                    today.isoformat(),
+                )
+        except (KrxAlphaError, KisApiError, OSError, ValueError) as exc:
+            logger.warning("[DATA] stage=premarket_supervise status=FAIL reason=%s", str(exc))
+
+    def _stop_premarket_child(self) -> None:
+        """Graceful stop (15 s) and removal of the premarket supervisor."""
+        ch = self._children
+        if ch.premarket is None:
+            return
+        ch.premarket.stop(timeout_s=15.0)
+        ch.premarket = None
+
+    def _log_premarket_eod(self, ref_day: dt.date) -> None:
+        cfg = self._premarket_cfg
+        if not cfg.enabled:
+            return
+        st = self._state
+        paths = self._paths
+        if st.premarket_plan_day != ref_day or st.premarket_shard is None:
+            logger.info(
+                "[DATA] stage=premarket_eod status=SKIPPED date=%s accepted=%d planned=%d",
+                ref_day.isoformat(),
+                0,
+                0,
+            )
+            return
+        report = premarket_eod_report(paths.premarket_manifest_path(ref_day), date=ref_day)
+        status = "OK" if report.closed else "NOT_CLOSED"
+        logger.info(
+            "[DATA] stage=premarket_eod status=%s date=%s accepted=%d planned=%d",
+            status,
+            ref_day.isoformat(),
+            report.accepted_pairs,
+            report.planned_pairs,
+        )
+
     def _step_post_market_eod(self, now: dt.datetime, day: TradingDayView | None, anchors: SessionAnchors) -> float:
         """Stop session children and run EOD maintenance once per KST date; return 60.0 s.
 
@@ -1440,6 +1663,7 @@ class DaemonRunner:
         cfg = self._cfg
         paths = self._paths
         aftermarket_blocked = self._aftermarket_eod_blocked(now, ref_day, anchors)
+        self._log_premarket_eod(ref_day)
         housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=lambda: self._maybe_ping(time.monotonic()))
         reconcile_ok, reconciled = self._reconcile_regular_session(ref_day, day, anchors)
         backup_missing, backup_ok, host_backup = _check_backup(

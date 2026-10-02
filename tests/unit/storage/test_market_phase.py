@@ -241,3 +241,91 @@ def test_default_calls_preserve_existing_labels() -> None:
         assert classify_market_phase(MarketVenue.KRX, event_time, kind) == classify_market_phase(MarketVenue.KRX, event_time, kind, windows=MARKET_PHASE_WINDOWS)
     frame = _frame([{"raw": _body("H0STCNT0", "100000"), "venue": "krx", "stream": "H0STCNT0", "exchange_event_time": "100000"}])
     assert annotate_market_phase(frame).equals(annotate_market_phase(frame, windows=MARKET_PHASE_WINDOWS))
+
+
+def test_nxt_premarket_window_is_half_open() -> None:
+    from src.storage.market_phase import classify_market_phase
+
+    assert classify_market_phase(MarketVenue.NXT, "075959", EventKind.TRADE) is MarketPhase.UNCLASSIFIED
+    assert classify_market_phase(MarketVenue.NXT, "080000", EventKind.TRADE) is MarketPhase.PREMARKET
+    assert classify_market_phase(MarketVenue.NXT, "084959", EventKind.QUOTE) is MarketPhase.PREMARKET
+    assert classify_market_phase(MarketVenue.NXT, "085000", EventKind.TRADE) is MarketPhase.UNCLASSIFIED
+
+
+def test_krx_events_never_premarket() -> None:
+    from src.storage.market_phase import classify_market_phase
+
+    assert classify_market_phase(MarketVenue.KRX, "080000", EventKind.TRADE) is not MarketPhase.PREMARKET
+    assert classify_market_phase(MarketVenue.KRX, "083500", EventKind.QUOTE) is not MarketPhase.PREMARKET
+
+
+def test_premarket_windows_follow_open_shift() -> None:
+    from src.storage.market_phase import MarketPhase, phase_windows_for
+
+    windows = phase_windows_for(_csat_windows_anchor_shifted())
+    premarket = [w for w in windows if w.phase is MarketPhase.PREMARKET]
+
+    assert len(premarket) == 1
+    assert (premarket[0].start, premarket[0].end) == (dt.time(9, 0), dt.time(9, 50))
+
+
+def _csat_windows_anchor_shifted():
+    from src.core.session_anchors import AnchorSource, SessionAnchors
+
+    return SessionAnchors(
+        date=dt.date(2025, 11, 13),
+        regular_open=dt.time(10, 0),
+        closing_auction_start=dt.time(16, 20),
+        regular_close=dt.time(16, 30),
+        after_market_end=dt.time(20, 0),
+        source=AnchorSource.VENDOR,
+    )
+
+
+def test_vectorized_and_scalar_classifiers_agree_on_premarket() -> None:
+    from src.storage.market_phase import classify_market_phase
+
+    rows = [
+        {"raw": _body("H0NXCNT0", "075959"), "venue": "nxt", "stream": "H0NXCNT0", "exchange_event_time": "075959"},
+        {"raw": _body("H0NXCNT0", "080000"), "venue": "nxt", "stream": "H0NXCNT0", "exchange_event_time": "080000"},
+        {"raw": _body("H0NXASP0", "084959"), "venue": "nxt", "stream": "H0NXASP0", "exchange_event_time": "084959"},
+        {"raw": _body("H0NXCNT0", "085000"), "venue": "nxt", "stream": "H0NXCNT0", "exchange_event_time": "085000"},
+        {"raw": _body("H0STCNT0", "080000"), "venue": "krx", "stream": "H0STCNT0", "exchange_event_time": "080000"},
+        {"raw": _body("H0STASP0", "083500"), "venue": "krx", "stream": "H0STASP0", "exchange_event_time": "083500"},
+    ]
+    out = annotate_market_phase(_frame(rows))
+
+    for row in out.iter_rows(named=True):
+        kind = EventKind.TRADE if str(row["stream"]).endswith("CNT0") else EventKind.QUOTE
+        assert row["market_phase"] == classify_market_phase(MarketVenue(row["venue"]), str(row["exchange_event_time"]), kind).value
+
+
+def test_premarket_quotes_are_not_auction_exempt() -> None:
+    import json
+
+    import polars as pl
+
+    from src.storage.market_phase import annotate_market_phase
+    from src.storage.quality import decode_and_flag_quotes
+
+    clean_offer = [70100 + k * 100 for k in range(10)]
+    clean_bid = [69900 - k * 100 for k in range(10)]
+    body = {"shcode": "005930", "hotime": "080000"}
+    for k in range(10):
+        body[f"offerho{k + 1}"] = str([69800, *clean_offer[1:]][k])
+        body[f"bidho{k + 1}"] = str(clean_bid[k])
+        body[f"offerrem{k + 1}"] = "100"
+        body[f"bidrem{k + 1}"] = "100"
+    body["totofferrem"] = "1000"
+    body["totbidrem"] = "1000"
+    raw = json.dumps({"header": {"tr_cd": "H1_", "tr_key": "005930"}, "body": body})
+    chunk = annotate_market_phase(pl.DataFrame([{
+        "raw": raw, "tr_id": "H0NXASP0", "vendor": "ls",
+        "venue": "nxt", "stream": "H0NXASP0", "exchange_event_time": "080000",
+        "recv_wall_ns": 100,
+    }]))
+
+    assert chunk["market_phase"].to_list() == ["premarket"]
+    summary = decode_and_flag_quotes(chunk)
+    assert summary is not None
+    assert summary.crossed_book == 1

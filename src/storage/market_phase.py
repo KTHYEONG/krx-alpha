@@ -15,6 +15,8 @@ from src.core.session_anchors import (
     STANDARD_CLOSING_AUCTION,
     STANDARD_KRX_AFTER_MARKET_OPEN,
     STANDARD_NXT_AFTER_MARKET_OPEN,
+    STANDARD_NXT_PREMARKET_END,
+    STANDARD_NXT_PREMARKET_OPEN,
     STANDARD_POST_CLOSING_PRICE_OPEN,
     STANDARD_REGULAR_OPEN,
     SessionAnchors,
@@ -40,6 +42,7 @@ class MarketPhase(StrEnum):
     CLOSING_AUCTION = "closing_auction"
     POST_MARKET_CLOSING_PRICE = "post_closing_price"
     AFTERMARKET = "aftermarket"
+    PREMARKET = "premarket"
     UNCLASSIFIED = "unclassified"
 
 
@@ -71,6 +74,7 @@ MARKET_PHASE_WINDOWS: tuple[PhaseWindow, ...] = (
     PhaseWindow(MarketVenue.KRX, None, STANDARD_CLOSING_AUCTION, STANDARD_POST_CLOSING_PRICE_OPEN, MarketPhase.CLOSING_AUCTION),
     PhaseWindow(MarketVenue.KRX, None, STANDARD_POST_CLOSING_PRICE_OPEN, STANDARD_KRX_AFTER_MARKET_OPEN, MarketPhase.POST_MARKET_CLOSING_PRICE),
     PhaseWindow(MarketVenue.KRX, None, STANDARD_KRX_AFTER_MARKET_OPEN, STANDARD_AFTER_MARKET_END, MarketPhase.AFTERMARKET),
+    PhaseWindow(MarketVenue.NXT, None, STANDARD_NXT_PREMARKET_OPEN, STANDARD_NXT_PREMARKET_END, MarketPhase.PREMARKET),
     PhaseWindow(MarketVenue.NXT, None, STANDARD_NXT_AFTER_MARKET_OPEN, STANDARD_AFTER_MARKET_END, MarketPhase.AFTERMARKET),
 )
 
@@ -94,6 +98,7 @@ def phase_windows_for(anchors: SessionAnchors) -> tuple[PhaseWindow, ...]:
     """Shift the contracted phase table by session anchors.
 
     Boundary mapping (each boundary of ``MARKET_PHASE_WINDOWS`` classified once):
+    08:00 and 08:50 (NXT premarket, before 09:00, pre-open) use ``shift_pre_open``;
     08:30 and 08:40 (before 09:00, pre-open) use ``shift_pre_open``;
     09:00 maps to ``regular_open``; 15:20 maps to ``closing_auction_start``;
     15:40 and 16:00 (at or after 15:30 and before 20:00, post-close) use
@@ -106,6 +111,7 @@ def phase_windows_for(anchors: SessionAnchors) -> tuple[PhaseWindow, ...]:
         PhaseWindow(MarketVenue.KRX, None, anchors.closing_auction_start, anchors.shift_post_close(STANDARD_POST_CLOSING_PRICE_OPEN), MarketPhase.CLOSING_AUCTION),
         PhaseWindow(MarketVenue.KRX, None, anchors.shift_post_close(STANDARD_POST_CLOSING_PRICE_OPEN), anchors.shift_post_close(STANDARD_KRX_AFTER_MARKET_OPEN), MarketPhase.POST_MARKET_CLOSING_PRICE),
         PhaseWindow(MarketVenue.KRX, None, anchors.shift_post_close(STANDARD_KRX_AFTER_MARKET_OPEN), anchors.after_market_end, MarketPhase.AFTERMARKET),
+        PhaseWindow(MarketVenue.NXT, None, anchors.shift_pre_open(STANDARD_NXT_PREMARKET_OPEN), anchors.shift_pre_open(STANDARD_NXT_PREMARKET_END), MarketPhase.PREMARKET),
         PhaseWindow(MarketVenue.NXT, None, anchors.shift_post_close(STANDARD_NXT_AFTER_MARKET_OPEN), anchors.after_market_end, MarketPhase.AFTERMARKET),
     )
 

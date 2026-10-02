@@ -885,3 +885,63 @@ def test_restart_gap_starts_at_last_received_frame_not_last_flush(tmp_path, monk
     assert (gap["reason"], gap["gap_start_ns"], gap["gap_end_ns"]) == (
         "restart", flush_ns, recv_ns + 60_000_000_000,
     )
+
+
+def test_premarket_manifest_closes_at_window_end(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    import src.realtime.session as session_mod
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import SessionConfig, StreamRoute, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", lambda host, *, client=None: 0)
+    day = dt.date(2026, 10, 2)
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
+    cfg = SessionConfig(
+        session_date=day, journal_root=tmp_path / "l0", manifest_path=tmp_path / "s.json",
+        candidates_path=cp, ntp_host="h", slot_budget=40, max_clock_offset_ns=2_000_000_000,
+        desired_streams=("H0NXCNT0", "H0NXASP0"), vendor="kis",
+        route=StreamRoute(MarketVenue.NXT, MarketSession.NXT_PRE),
+    )
+
+    session = bootstrap_session(cfg, now_ns=1)
+
+    expected = int(dt.datetime(2026, 10, 2, 8, 50, tzinfo=ZoneInfo("Asia/Seoul")).timestamp() * 1_000_000_000)
+    assert session.manifest.expected_close_ns == expected
+    assert session.manifest.expected_close_ns > 0
+
+
+def test_aftermarket_manifest_close_unchanged(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    import src.realtime.session as session_mod
+    from src.core.session_anchors import resolve_session_anchors
+    from src.core.config import DataPaths
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import SessionConfig, StreamRoute, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", lambda host, *, client=None: 0)
+    day = dt.date(2026, 10, 2)
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
+
+    def _cfg(session: MarketSession, venue: MarketVenue, path: str) -> SessionConfig:
+        return SessionConfig(
+            session_date=day, journal_root=tmp_path / "l0", manifest_path=tmp_path / path,
+            candidates_path=cp, ntp_host="h", slot_budget=40, max_clock_offset_ns=2_000_000_000,
+            desired_streams=("H0NXCNT0", "H0NXASP0"), vendor="kis",
+            route=StreamRoute(venue, session),
+        )
+
+    nxt = bootstrap_session(_cfg(MarketSession.NXT_AFTER, MarketVenue.NXT, "nxt.json"), now_ns=1)
+    krx = bootstrap_session(_cfg(MarketSession.KRX_AFTER, MarketVenue.KRX, "krx.json"), now_ns=1)
+    anchors = resolve_session_anchors(DataPaths((tmp_path / "l0").parent).session_calendar_dir, day)
+    expected = int(dt.datetime.combine(day, anchors.after_market_end, tzinfo=ZoneInfo("Asia/Seoul")).timestamp() * 1_000_000_000)
+
+    assert nxt.manifest.expected_close_ns == expected
+    assert krx.manifest.expected_close_ns == expected

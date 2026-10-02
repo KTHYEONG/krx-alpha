@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from src.core.config import kis_data_env
-from src.core.errors import KrxAlphaError, SlotBudgetExceededError
+from src.core.errors import KrxAlphaError, MissingCredentialsError, SlotBudgetExceededError
 from src.realtime.contracts import MarketVenue
 
 logger = logging.getLogger(__name__)
@@ -150,3 +150,53 @@ def plan_aftermarket_shards(
             )
         )
     return tuple(plan)
+
+
+def plan_premarket_shard(
+    *,
+    symbols: tuple[str, ...],
+    credentials: tuple[KisDataCredential, ...],
+    credential_slot: str,
+    pair_capacity_per_connection: int,
+    nxt_streams: tuple[str, str],
+) -> AftermarketShard:
+    """Plan the single NXT premarket connection from a rank-ordered symbol list.
+
+    Uses exactly the credential whose ``slot`` equals ``credential_slot``. When the symbols exceed
+    ``pair_capacity_per_connection // len(nxt_streams)`` the longest rank-ordered prefix is kept and
+    ``[DATA] stage=premarket_plan status=TRUNCATED`` is logged; lower-ranked symbols are dropped
+    rather than aborting collection.
+
+    Raises:
+        KrxAlphaError: ``symbols`` is empty or has duplicates.
+        MissingCredentialsError: No credential holds ``credential_slot``.
+        SlotBudgetExceededError: Capacity cannot hold one symbol across all streams.
+    """
+    ordered = tuple(symbols)
+    if not ordered:
+        raise KrxAlphaError("empty premarket symbols")
+    if len(set(ordered)) != len(ordered):
+        raise KrxAlphaError("duplicate premarket symbols")
+    per_connection = pair_capacity_per_connection // len(nxt_streams)
+    if per_connection < 1:
+        raise SlotBudgetExceededError(
+            f"premarket pair capacity {pair_capacity_per_connection} cannot hold one symbol"
+        )
+    credential = next((item for item in credentials if item.slot == credential_slot), None)
+    if credential is None:
+        raise MissingCredentialsError(f"no data credential for slot {credential_slot}")
+    if len(ordered) > per_connection:
+        logger.warning(
+            "[DATA] stage=premarket_plan status=TRUNCATED kept=%d dropped=%d",
+            per_connection,
+            len(ordered) - per_connection,
+        )
+        ordered = ordered[:per_connection]
+    return AftermarketShard(
+        MarketVenue.NXT,
+        0,
+        ordered,
+        nxt_streams,
+        credential.slot,
+        credential.key_id,
+    )

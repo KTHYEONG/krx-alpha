@@ -26,9 +26,17 @@ def build_aftermarket_snapshot(
     capacity: int,
     excluded_symbols: frozenset[str] = frozenset(),
     policy_version: str = "aftermarket_v1",
+    session: str = "aftermarket",
+    effective_from: dt.datetime | None = None,
 ) -> CandidateSnapshot:
     kst_offset = dt.timedelta(hours=9)
     tz_ok = generated_at.tzinfo is not None and generated_at.utcoffset() == kst_offset
+    resolved_effective = generated_at if effective_from is None else effective_from
+    effective_ok = (
+        resolved_effective.tzinfo is not None
+        and resolved_effective.utcoffset() == kst_offset
+        and resolved_effective >= generated_at
+    )
     ta_symbols = [row.symbol for row in trade_amount_rows]
     fl_symbols = [row.symbol for row in fluctuation_rows]
     def _valid_rows(rows: tuple[KisRankingRow, ...], symbols: list[str]) -> bool:
@@ -49,7 +57,7 @@ def build_aftermarket_snapshot(
 
     ta_ok = _valid_rows(trade_amount_rows, ta_symbols)
     fl_ok = _valid_rows(fluctuation_rows, fl_symbols)
-    if not tz_ok or capacity < 1 or not ta_ok or not fl_ok:
+    if not tz_ok or not effective_ok or capacity < 1 or not ta_ok or not fl_ok:
         raise AftermarketUniverseError("invalid aftermarket source")
     ta_rank = {row.symbol: row.rank for row in trade_amount_rows}
     fl_rank = {row.symbol: row.rank for row in fluctuation_rows}
@@ -85,7 +93,7 @@ def build_aftermarket_snapshot(
     candidates: list[dict[str, object]] = []
     for index, row in enumerate(selected_rows, start=1):
         candidates.append({"symbol": row["symbol"], "rank": index, "source_ranks": row["source_ranks"], "metrics": row["metrics"], "selection_reasons": row["selection_reasons"]})
-    return CandidateSnapshot(schema_version=1, rev=int(session_date.strftime("%Y%m%d")), session_date=session_date, session="aftermarket", generated_at=generated_at, source_asof=generated_at, effective_from=generated_at, policy_version=policy_version, capacity=capacity, eligible_count=len(union), selected_count=len(selected_rows), candidates=tuple(candidates))
+    return CandidateSnapshot(schema_version=1, rev=int(session_date.strftime("%Y%m%d")), session_date=session_date, session=session, generated_at=generated_at, source_asof=generated_at, effective_from=resolved_effective, policy_version=policy_version, capacity=capacity, eligible_count=len(union), selected_count=len(selected_rows), candidates=tuple(candidates))
 
 
 def refresh_aftermarket_candidates(

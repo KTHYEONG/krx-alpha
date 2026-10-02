@@ -6,7 +6,7 @@ import datetime as dt
 import os
 import pathlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TypeVar
 
@@ -122,6 +122,44 @@ class AftermarketSettings(BaseSettings):
     def check_verified_capacity_when_enabled(self) -> AftermarketSettings:
         if self.enabled and (self.pair_capacity_per_connection is None or self.pair_capacity_per_connection <= 0):
             raise ValueError("pair_capacity_per_connection must be a positive verified value when enabled")
+        return self
+
+
+class PremarketSettings(BaseSettings):
+    """NXT premarket collection settings (env_prefix='KRX_ALPHA_PREMARKET_').
+
+    Disabled by default; when disabled every other field is inert. Enabling requires a verified
+    per-connection pair capacity and an explicit data slot, because premarket must never share
+    the snapshot REST slot or silently borrow a slot another automation owns.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_PREMARKET_", extra="ignore")
+
+    enabled: bool = False
+    credential_slot: str | None = None
+    pair_capacity_per_connection: int | None = None
+    nxt_streams: tuple[str, str] = ("H0NXCNT0", "H0NXASP0")
+    max_symbols: int = Field(default=20, ge=1)
+    start_lead_s: float = Field(default=120.0, gt=0)
+    close_grace_s: float = Field(default=60.0, gt=0)
+    pool_settle_s: float = Field(default=300.0, ge=0)
+    pool_retry_s: float = Field(default=60.0, gt=0)
+    silence_limit_s: float = Field(default=30.0, gt=0)
+    extra_free_disk_gb: float = Field(default=2.0, ge=0)
+
+    @model_validator(mode="after")
+    def check_verified_capacity_when_enabled(self) -> PremarketSettings:
+        if not self.enabled:
+            return self
+        if not self.credential_slot:
+            raise ValueError("credential_slot must be set when enabled")
+        if self.pair_capacity_per_connection is None or self.pair_capacity_per_connection <= 0:
+            raise ValueError("pair_capacity_per_connection must be a positive verified value when enabled")
+        if self.max_symbols > self.pair_capacity_per_connection // len(self.nxt_streams):
+            raise ValueError(
+                f"max_symbols {self.max_symbols} exceeds connection capacity "
+                f"{self.pair_capacity_per_connection // len(self.nxt_streams)}"
+            )
         return self
 
 
@@ -438,6 +476,7 @@ class CollectorRuntime:
     aftermarket: AftermarketSettings
     snapshot: SnapshotSettings
     paths: DataPaths
+    premarket: PremarketSettings = field(default_factory=lambda: PremarketSettings())
 
 
 def resolve_collector_runtime(
@@ -445,6 +484,7 @@ def resolve_collector_runtime(
     collector: CollectorSettings | None = None,
     aftermarket: AftermarketSettings | None = None,
     snapshot: SnapshotSettings | None = None,
+    premarket: PremarketSettings | None = None,
 ) -> CollectorRuntime:
     """Resolve one coherent collector configuration before child processes start.
 
@@ -452,15 +492,18 @@ def resolve_collector_runtime(
         collector: Optional prevalidated collector settings.
         aftermarket: Optional prevalidated aftermarket settings.
         snapshot: Optional prevalidated snapshot settings.
+        premarket: Optional prevalidated premarket settings.
 
     Returns:
         Settings and data paths from one resolved process configuration.
 
     Raises:
         ValueError: Explicit aftermarket enablement conflicts with collector enablement.
+        ValueError: Enabled premarket shares the snapshot REST data slot.
     """
     resolved_collector = collector if collector is not None else CollectorSettings()
     resolved_snapshot = snapshot if snapshot is not None else SnapshotSettings()
+    resolved_premarket = premarket if premarket is not None else PremarketSettings()
     if aftermarket is None:
         resolved_aftermarket = AftermarketSettings(enabled=resolved_collector.after_market_enabled)
     else:
@@ -469,11 +512,14 @@ def resolve_collector_runtime(
                 "aftermarket enabled conflicts with collector after_market_enabled"
             )
         resolved_aftermarket = aftermarket
+    if resolved_premarket.enabled and resolved_premarket.credential_slot == resolved_snapshot.kis_data_slot:
+        raise ValueError("premarket credential_slot must not equal snapshot kis_data_slot")
     return CollectorRuntime(
         collector=resolved_collector,
         aftermarket=resolved_aftermarket,
         snapshot=resolved_snapshot,
         paths=DataPaths(resolved_collector.data_root),
+        premarket=resolved_premarket,
     )
 
 

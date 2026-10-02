@@ -212,3 +212,25 @@ def test_aftermarket_open_constants_ordered() -> None:
     assert STANDARD_POST_CLOSING_PRICE_OPEN == STANDARD_NXT_AFTER_MARKET_OPEN
     assert STANDARD_NXT_AFTER_MARKET_OPEN < STANDARD_KRX_AFTER_MARKET_OPEN
     assert STANDARD_KRX_AFTER_MARKET_OPEN < STANDARD_AFTER_MARKET_END
+
+
+def test_premarket_constants_precede_regular_open() -> None:
+    from src.core.session_anchors import (
+        STANDARD_NXT_PREMARKET_END,
+        STANDARD_NXT_PREMARKET_OPEN,
+        STANDARD_REGULAR_OPEN,
+    )
+
+    assert STANDARD_NXT_PREMARKET_OPEN < STANDARD_NXT_PREMARKET_END < STANDARD_REGULAR_OPEN
+
+
+def test_premarket_boundaries_shift_with_open_shift() -> None:
+    from src.core.session_anchors import (
+        STANDARD_NXT_PREMARKET_END,
+        STANDARD_NXT_PREMARKET_OPEN,
+    )
+
+    anchors = _csat_anchors()
+
+    assert anchors.shift_pre_open(STANDARD_NXT_PREMARKET_OPEN) == dt.time(9, 0)
+    assert anchors.shift_pre_open(STANDARD_NXT_PREMARKET_END) == dt.time(9, 50)
