@@ -53,7 +53,8 @@ class CollectorSettings(BaseSettings):
     vendor: str = "ls"
     streams: tuple[str, ...] = ("H0STCNT0", "H0STASP0")
     ls_capacity_pairs: int = 200
-    universe_slot_budget: int = 90
+    # Symbols per session universe. Unset derives ``ls_capacity_pairs // len(streams)`` so the cap cannot drift from vendor capacity (a literal caused the 2026-09-10 and 2026-10-02 incidents). An explicit value (env ``KRX_ALPHA_UNIVERSE_SLOT_BUDGET`` or kwarg) may only tighten it.
+    universe_slot_budget: int = Field(default=0, ge=0)
     bars_window_days: int = 90
     # 61거래행 + 최장 KRX 휴장(약 10일)을 여유 있게 cover: 150역일은 약 100거래일.
     selection_lookback_calendar_days: int = Field(default=150, ge=100)
@@ -88,6 +89,12 @@ class CollectorSettings(BaseSettings):
 
     @model_validator(mode="after")
     def check_universe_budget_within_technical_capacity(self) -> CollectorSettings:
+        if "universe_slot_budget" not in self.model_fields_set:
+            self.universe_slot_budget = self.ls_capacity_pairs // len(self.streams)
+        elif self.universe_slot_budget < 1:
+            raise ValueError(
+                f"universe_slot_budget {self.universe_slot_budget} must be >= 1"
+            )
         if self.universe_slot_budget > self.subscription_symbol_budget:
             raise SlotBudgetExceededError(
                 f"universe_slot_budget {self.universe_slot_budget} exceeds "
@@ -107,6 +114,9 @@ class AftermarketSettings(BaseSettings):
     nxt_streams: tuple[str, str] = ("H0NXCNT0", "H0NXASP0")
     selection_time: dt.time = dt.time(15, 31)
     max_symbols: int = Field(default=40, ge=1)
+    # 2026-09 probe: max normal intra-connection silence 3.84s over ~30 conn-hours; 10s (~2.6x)
+    # bounds half-dead socket loss without false reconnects.
+    silence_limit_s: float = Field(default=10.0, gt=0)
 
     @model_validator(mode="after")
     def check_verified_capacity_when_enabled(self) -> AftermarketSettings:

@@ -44,8 +44,9 @@ def run(args: argparse.Namespace) -> int:
         ),
     )
     logger.info(
-        "[DATA] stage=universe_plan decision=%s selected=%d status=OK",
+        "[DATA] stage=universe_plan decision=%s selected=%d dropped=%d status=OK",
         result.decision_date.isoformat(),
         result.selected,
+        result.dropped,
     )
     return 0

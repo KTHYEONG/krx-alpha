@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import math
+from dataclasses import dataclass
 
 import polars as pl
 
-from src.core.errors import SlotBudgetExceededError
 from src.marketdata.schema import REQUIRED_BAR_COLUMNS
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ NEWHIGH_MIN_CHANGE_PCT: float = 5.0
 IMPLIED_BASE_EVENT_TOLERANCE: float = 0.005
 TV_MEDIAN_WINDOW: int = 20
 LIQUIDITY_FLOOR_100M: float = 50.0
-DEEP_SLOT_BUDGET: int = 90
+DROPPED_LOG_SAMPLE: int = 10
 ELIGIBLE_STOCK_CERT_KIND: str = "보통주"
 EXCLUDED_SECTIONS: frozenset[str] = frozenset({"관리종목(소속부없음)", "SPAC(소속부없음)", "투자주의환기종목(소속부없음)"})
 SECURITY_CLASS_COLUMNS: tuple[str, ...] = ("section", "stock_cert_kind")
@@ -159,8 +160,27 @@ def ineligible_security_symbols(bars: pl.DataFrame) -> frozenset[str]:
     return frozenset(out)
 
 
-def select_universe(featured: pl.DataFrame, decision_date: dt.date, *, slot_budget: int = DEEP_SLOT_BUDGET) -> pl.DataFrame:
-    """판정일 후보에 조건 태그를 부여하고 슬롯 예산을 강제한다."""
+@dataclass(frozen=True)
+class UniverseSelection:
+    selected: pl.DataFrame  # output schema, sorted by symbol
+    dropped: pl.DataFrame  # same schema, ordered by priority (trade_value_100m desc, symbol asc)
+
+
+def select_universe_detailed(featured: pl.DataFrame, decision_date: dt.date, *, slot_budget: int) -> UniverseSelection:
+    """Select the decision-date universe and enforce the slot budget by truncation.
+
+    Qualifying symbols above ``slot_budget`` are ranked by ``trade_value_100m`` descending, ties by ``symbol`` ascending
+    (a total order, so the result is independent of input row order); the top ``slot_budget`` are kept. Truncation
+    instead of failure is deliberate: selection count is data-dependent, and aborting the session degrades collection to
+    stale candidates, a far larger loss than dropping the lowest-liquidity tail. Exclusion rules and the liquidity floor
+    apply before ranking, so excluded symbols never consume budget.
+
+    Returns: ``selected`` (sorted by symbol) and ``dropped`` (priority order). ``selected + dropped`` equals the qualifying set.
+    Raises: ValueError if ``slot_budget < 1``, required columns are missing, or a row is dated after ``decision_date``.
+    Side effects: one ``[ALGO]`` WARNING when ``dropped`` is non-empty.
+    """
+    if slot_budget < 1:
+        raise ValueError(f"slot_budget must be >= 1, got {slot_budget}")
     missing = [c for c in list(REQUIRED_BAR_COLUMNS) + list(FEATURE_COLUMNS) if c not in featured.columns]
     if missing:
         raise ValueError(f"missing required columns: {missing}")
@@ -196,22 +216,61 @@ def select_universe(featured: pl.DataFrame, decision_date: dt.date, *, slot_budg
         .list.drop_nulls()
         .alias("selection_reasons")
     )
-    selected = cand.filter((cond_limit_up | cond_surge10 | cond_volsurge | cond_newhigh60) & liquid)
-    if selected.height > slot_budget:
-        raise SlotBudgetExceededError(f"selected {selected.height} exceeds slot_budget {slot_budget}")
-    out = selected.with_columns(pl.lit(decision_date).alias("decision_date")).select([
+    qualifying = cand.filter((cond_limit_up | cond_surge10 | cond_volsurge | cond_newhigh60) & liquid)
+    output_columns = [
         "decision_date",
         "symbol",
         "selection_reasons",
         "daily_change_pct",
         "trade_value_100m",
         "tv_ratio",
-    ]).sort("symbol")
+    ]
+    base = qualifying.with_columns(pl.lit(decision_date).alias("decision_date")).select(output_columns)
+    if base.height <= slot_budget:
+        selected = base.sort("symbol")
+        dropped = base.clear()
+        logger.info(
+            "[ALGO] decision=%s selected=%d excluded=%d budget=%d",
+            decision_date.isoformat(),
+            selected.height,
+            excluded,
+            slot_budget,
+        )
+        return UniverseSelection(selected=selected, dropped=dropped)
+    ranked = base.with_columns(
+        pl.when(pl.col("trade_value_100m").is_not_null() & pl.col("trade_value_100m").is_finite())
+        .then(pl.col("trade_value_100m"))
+        .otherwise(float("-inf"))
+        .alias("_rank_tv")
+    ).sort(["_rank_tv", "symbol"], descending=[True, False]).drop("_rank_tv")
+    kept_ranked = ranked.head(slot_budget)
+    dropped_ranked = ranked.slice(slot_budget)
+    selected = kept_ranked.sort("symbol")
+    tv_values = ranked["trade_value_100m"].to_list()
+    total_tv = sum(v for v in tv_values if isinstance(v, (int, float)) and math.isfinite(v))
+    dropped_values = dropped_ranked["trade_value_100m"].to_list()
+    dropped_tv = sum(v for v in dropped_values if isinstance(v, (int, float)) and math.isfinite(v))
+    share = (dropped_tv / total_tv) if total_tv > 0 else 0.0
+    head = dropped_ranked["symbol"].to_list()[:DROPPED_LOG_SAMPLE]
     logger.info(
         "[ALGO] decision=%s selected=%d excluded=%d budget=%d",
         decision_date.isoformat(),
-        out.height,
+        selected.height,
         excluded,
         slot_budget,
     )
-    return out
+    logger.warning(
+        "[ALGO] decision=%s status=TRUNCATED kept=%d dropped=%d budget=%d dropped_tv_share=%.6f dropped_head=%s",
+        decision_date.isoformat(),
+        kept_ranked.height,
+        dropped_ranked.height,
+        slot_budget,
+        share,
+        ",".join(str(s) for s in head),
+    )
+    return UniverseSelection(selected=selected, dropped=dropped_ranked)
+
+
+def select_universe(featured: pl.DataFrame, decision_date: dt.date, *, slot_budget: int) -> pl.DataFrame:
+    """Return only ``UniverseSelection.selected``; use ``select_universe_detailed`` when dropped symbols matter. Emits no extra log."""
+    return select_universe_detailed(featured, decision_date, slot_budget=slot_budget).selected

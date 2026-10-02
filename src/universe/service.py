@@ -17,7 +17,7 @@ from src.marketdata.partitioned_store import scan_month_partitions
 from src.marketdata.snapshot_contracts import SnapshotDataset
 from src.storage.snapshot_store import SnapshotStore, SnapshotStoreError
 from src.universe.ipc import emit_candidates
-from src.universe.policy import compute_selection_features, select_universe
+from src.universe.policy import compute_selection_features, select_universe_detailed
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,8 @@ class UniversePlanResult:
     candidates_emitted: int
     status_excluded: int = 0
     status_unknown: int = 0
+    dropped: int = 0
+    dropped_symbols: tuple[str, ...] = ()  # priority order, policy truncation only
 
 
 def plan_universe(
@@ -65,6 +67,8 @@ def plan_universe(
 
     Raises:
         ValueError: If ``status_source`` is given without ``session_date``.
+
+    Policy truncation happens on bar data only, before the managed-status check; slots freed by status exclusion are not back-filled (keeps selection point-in-time and independent of broker status availability). ``dropped`` counts policy truncation only, never status exclusions.
     """
     if status_source is not None and session_date is None:
         raise ValueError("status_source requires session_date")
@@ -75,7 +79,8 @@ def plan_universe(
     ).collect()
     bars = bars.filter(pl.col("date") <= decision_date)
     featured = compute_selection_features(bars)
-    selected = select_universe(featured, decision_date, slot_budget=slot_budget)
+    selection = select_universe_detailed(featured, decision_date, slot_budget=slot_budget)
+    selected = selection.selected
     status_excluded = 0
     status_unknown = 0
     if status_source is not None:
@@ -96,7 +101,10 @@ def plan_universe(
     emitted = 0
     if candidates_path is not None:
         emitted = emit_candidates(
-            pathlib.Path(candidates_path), selected.to_dicts(), rev=int(decision_date.strftime("%Y%m%d"))
+            pathlib.Path(candidates_path),
+            selected.to_dicts(),
+            rev=int(decision_date.strftime("%Y%m%d")),
+            dropped_symbols=tuple(selection.dropped["symbol"]),
         )
     return UniversePlanResult(
         decision_date=decision_date,
@@ -105,6 +113,8 @@ def plan_universe(
         candidates_emitted=emitted,
         status_excluded=status_excluded,
         status_unknown=status_unknown,
+        dropped=selection.dropped.height,
+        dropped_symbols=tuple(selection.dropped["symbol"]),
     )
 
 

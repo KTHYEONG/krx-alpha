@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import pathlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -135,9 +136,10 @@ def read_candidate_snapshot(
         raise CandidateFileError(f"corrupt candidate snapshot: {path}") from exc
 
 
-def write_candidates(path: pathlib.Path, candidates: list[dict[str, object]], *, rev: int) -> None:
+def write_candidates(path: pathlib.Path, candidates: list[dict[str, object]], *, rev: int, dropped_symbols: Sequence[str] = ()) -> None:
     target = pathlib.Path(path)
-    payload = {"rev": rev, "candidates": candidates}
+    dropped = [str(s) for s in dropped_symbols]
+    payload = {"rev": rev, "candidates": candidates, "dropped_count": len(dropped), "dropped_symbols": dropped}
     tmp = target.parent / f".{target.name}.{os.getpid()}.tmp"
     tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, target)
@@ -156,10 +158,13 @@ def read_candidates(path: pathlib.Path) -> dict[str, object] | None:
     return data
 
 
-def emit_candidates(path: pathlib.Path, rows: list[dict[str, Any]], *, rev: int) -> int:
-    """스캐너 selection 행을 candidates IPC 로 발행한다."""
+def emit_candidates(path: pathlib.Path, rows: list[dict[str, Any]], *, rev: int, dropped_symbols: Sequence[str] = ()) -> int:
+    """스캐너 selection 행을 candidates IPC 로 발행한다.
+
+    ``dropped_symbols`` are symbols removed by capacity truncation; they are recorded as ``dropped_count`` and ``dropped_symbols`` (priority order) beside ``candidates`` so offline analysis can explain missing symbols. Consumers must not read them to drive subscriptions.
+    """
     mapped: list[dict[str, object]] = [
         {"symbol": str(row["symbol"]), "selection_reasons": list(row["selection_reasons"])} for row in rows
     ]
-    write_candidates(pathlib.Path(path), mapped, rev=rev)
+    write_candidates(pathlib.Path(path), mapped, rev=rev, dropped_symbols=dropped_symbols)
     return len(mapped)
