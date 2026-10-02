@@ -33,7 +33,7 @@ def test_round_trip_all_enum_combos(tmp_path) -> None:
 
 
 def test_session_set_pinned() -> None:
-    assert {s.value for s in MarketSession} == {"regular", "krx_after", "nxt_after"}
+    assert {s.value for s in MarketSession} == {"regular", "krx_after", "nxt_after", "nxt_pre"}
 
 
 def test_legacy_shapes_classify_as_default() -> None:
@@ -63,7 +63,7 @@ def test_raw_venue_preserved() -> None:
 def _legacy_route(part: pathlib.PurePath) -> tuple[str, str, str]:
     stream_name = part.parent.name
     session_name = part.parent.parent.name
-    is_routed = session_name in {"regular", "krx_after", "nxt_after"}
+    is_routed = session_name in {"regular", "krx_after", "nxt_after", "nxt_pre"}
     legacy_venue = "krx" if not is_routed else part.parent.parent.parent.name
     legacy_session = "regular" if not is_routed else session_name
     return (legacy_venue, legacy_session, stream_name)
@@ -574,3 +574,42 @@ def test_deletion_gate_parity_all_shapes_deleted(tmp_path) -> None:
         assert not part.exists()
     assert stats.deleted == 6
     assert stats.failed == 0
+
+
+def test_premarket_partition_key_is_valid() -> None:
+    from src.storage.layout import l0_partition_key, l0_partition_relpath
+
+    key = l0_partition_key("kis", "nxt", "nxt_pre", "H0NXCNT0", DAY)
+
+    assert key is not None
+    assert l0_partition_relpath(key).as_posix().endswith("kis/nxt/nxt_pre/H0NXCNT0/dt=2026-09-18")
+
+
+def test_premarket_l1_path_mirrors_l0_shape() -> None:
+    from src.storage.layout import (
+        l0_partition_for_l1,
+        l0_partition_key,
+        l0_partition_relpath,
+        l1_relpath_for_l0_partition,
+        l1_repo_path,
+    )
+
+    key = l0_partition_key("kis", "nxt", "nxt_pre", "H0NXCNT0", DAY)
+    assert key is not None
+    l0_rel = l0_partition_relpath(key)
+    l1_rel = l1_relpath_for_l0_partition(l0_rel)
+
+    assert l1_rel.as_posix() == "kis/nxt/nxt_pre/H0NXCNT0/dt=2026-09-18.parquet"
+    assert l1_repo_path(l1_rel) == "l1/kis/nxt/nxt_pre/H0NXCNT0/dt=2026-09-18.parquet"
+    assert l0_partition_for_l1(l1_repo_path(l1_rel)) == f"l0/{l0_rel.as_posix()}"
+
+
+def test_premarket_route_is_inferred_from_directory() -> None:
+    from src.realtime.contracts import MarketSession
+    from src.storage.layout import route_for_l0_partition
+
+    route = route_for_l0_partition(pathlib.PurePosixPath("l0/kis/nxt/nxt_pre/H0NXASP0/dt=2026-09-18"))
+
+    assert route.venue == "nxt"
+    assert route.session is MarketSession.NXT_PRE
+    assert route.stream == "H0NXASP0"

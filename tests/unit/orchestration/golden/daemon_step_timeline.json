@@ -133,7 +133,13 @@
         "preflight_day": "2026-09-16",
         "prev_state": "STREAMER_ACTIVE",
         "program_sync_day": null,
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "next_premarket_pool_at": null,
+        "premarket_circuit_alerted_day": null,
+        "premarket_plan_day": null,
+        "premarket_pool_day": null,
+        "premarket_pool_failed_day": null,
+        "premarket_shard": null
       },
       "instant": "2026-09-16T08:25:00+09:00"
     },
@@ -190,7 +196,13 @@
         "preflight_day": "2026-09-16",
         "prev_state": "STREAMER_ACTIVE",
         "program_sync_day": null,
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "next_premarket_pool_at": null,
+        "premarket_circuit_alerted_day": null,
+        "premarket_plan_day": null,
+        "premarket_pool_day": null,
+        "premarket_pool_failed_day": null,
+        "premarket_shard": null
       },
       "instant": "2026-09-16T08:26:00+09:00"
     },
@@ -304,7 +316,13 @@
         "preflight_day": "2026-09-16",
         "prev_state": "STREAMER_ACTIVE",
         "program_sync_day": null,
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "next_premarket_pool_at": null,
+        "premarket_circuit_alerted_day": null,
+        "premarket_plan_day": null,
+        "premarket_pool_day": null,
+        "premarket_pool_failed_day": null,
+        "premarket_shard": null
       },
       "instant": "2026-09-16T08:31:00+09:00"
     },
@@ -391,7 +409,13 @@
         "preflight_day": "2026-09-16",
         "prev_state": "FULL_ACTIVE",
         "program_sync_day": null,
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "next_premarket_pool_at": null,
+        "premarket_circuit_alerted_day": null,
+        "premarket_plan_day": null,
+        "premarket_pool_day": null,
+        "premarket_pool_failed_day": null,
+        "premarket_shard": null
       },
       "instant": "2026-09-16T09:10:00+09:00"
     },
@@ -470,7 +494,13 @@
         "preflight_day": "2026-09-16",
         "prev_state": "FULL_ACTIVE",
         "program_sync_day": null,
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "next_premarket_pool_at": null,
+        "premarket_circuit_alerted_day": null,
+        "premarket_plan_day": null,
+        "premarket_pool_day": null,
+        "premarket_pool_failed_day": null,
+        "premarket_shard": null
       },
       "instant": "2026-09-16T15:32:00+09:00"
     },
@@ -612,7 +642,13 @@
         "preflight_day": "2026-09-16",
         "prev_state": "AFTER_MARKET_ACTIVE",
         "program_sync_day": null,
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "next_premarket_pool_at": null,
+        "premarket_circuit_alerted_day": null,
+        "premarket_plan_day": null,
+        "premarket_pool_day": null,
+        "premarket_pool_failed_day": null,
+        "premarket_shard": null
       },
       "instant": "2026-09-16T15:45:00+09:00"
     },
@@ -762,7 +798,13 @@
         "preflight_day": "2026-09-16",
         "prev_state": "AFTER_MARKET_ACTIVE",
         "program_sync_day": null,
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "next_premarket_pool_at": null,
+        "premarket_circuit_alerted_day": null,
+        "premarket_plan_day": null,
+        "premarket_pool_day": null,
+        "premarket_pool_failed_day": null,
+        "premarket_shard": null
       },
       "instant": "2026-09-16T16:05:00+09:00"
     },
@@ -912,7 +954,13 @@
         "preflight_day": "2026-09-16",
         "prev_state": "POST_MARKET_EOD",
         "program_sync_day": null,
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "next_premarket_pool_at": null,
+        "premarket_circuit_alerted_day": null,
+        "premarket_plan_day": null,
+        "premarket_pool_day": null,
+        "premarket_pool_failed_day": null,
+        "premarket_shard": null
       },
       "instant": "2026-09-16T20:05:00+09:00"
     },
@@ -985,7 +1033,13 @@
         "preflight_day": "2026-09-16",
         "prev_state": "POST_MARKET_EOD",
         "program_sync_day": null,
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "next_premarket_pool_at": null,
+        "premarket_circuit_alerted_day": null,
+        "premarket_plan_day": null,
+        "premarket_pool_day": null,
+        "premarket_pool_failed_day": null,
+        "premarket_shard": null
       },
       "instant": "2026-09-16T20:06:00+09:00"
     },
@@ -1079,7 +1133,13 @@
         "preflight_day": "2026-09-16",
         "prev_state": "NIGHT_SLEEP",
         "program_sync_day": null,
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "next_premarket_pool_at": null,
+        "premarket_circuit_alerted_day": null,
+        "premarket_plan_day": null,
+        "premarket_pool_day": null,
+        "premarket_pool_failed_day": null,
+        "premarket_shard": null
       },
       "instant": "2026-09-16T22:00:00+09:00"
     },
@@ -1199,7 +1259,13 @@
         "preflight_day": "2026-09-16",
         "prev_state": "FULL_ACTIVE",
         "program_sync_day": null,
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "next_premarket_pool_at": null,
+        "premarket_circuit_alerted_day": null,
+        "premarket_plan_day": null,
+        "premarket_pool_day": null,
+        "premarket_pool_failed_day": null,
+        "premarket_shard": null
       },
       "instant": "2026-09-17T09:00:00+09:00"
     },
@@ -1309,7 +1375,13 @@
         "preflight_day": "2026-09-16",
         "prev_state": "POST_MARKET_EOD",
         "program_sync_day": null,
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "next_premarket_pool_at": null,
+        "premarket_circuit_alerted_day": null,
+        "premarket_plan_day": null,
+        "premarket_pool_day": null,
+        "premarket_pool_failed_day": null,
+        "premarket_shard": null
       },
       "instant": "2026-09-17T20:05:00+09:00"
     },
@@ -1466,7 +1538,13 @@
         "preflight_day": "2026-09-18",
         "prev_state": "STREAMER_ACTIVE",
         "program_sync_day": null,
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "next_premarket_pool_at": null,
+        "premarket_circuit_alerted_day": null,
+        "premarket_plan_day": null,
+        "premarket_pool_day": null,
+        "premarket_pool_failed_day": null,
+        "premarket_shard": null
       },
       "instant": "2026-09-18T08:25:00+09:00"
     }
@@ -1478,6 +1556,7 @@
     "[DAEMON] stage=aftermarket_reselection status=FAIL reason=%s next_retry=%s",
     "[DAEMON] stage=aftermarket_stream status=FAIL reason=circuit_open key=%s",
     "[DAEMON] stage=aftermarket_stream status=RESTARTED key=%s exit_code=%s",
+    "[DAEMON] stage=child_ownership status=REPLACE_LIVE slot=%s stop_result=%s",
     "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=%s",
     "[DAEMON] stage=eod_maintenance status=DEGRADED reason=aftermarket_not_ready date=%s",
     "[DAEMON] stage=eod_maintenance status=FAIL reason=session_data_gap date=%s",
@@ -1503,10 +1582,20 @@
     "[DAEMON] stage=streamer status=DEGRADED reason=orchestration_failed candidates_rev=%d",
     "[DAEMON] stage=streamer status=FAIL reason=circuit_open",
     "[DAEMON] stage=streamer status=REPLACE_DEGRADED stop_result=%s",
-    "[DAEMON] stage=child_ownership status=REPLACE_LIVE slot=%s stop_result=%s",
     "[DAEMON] stage=streamer status=RESTARTED exit_code=%s restarts=%d",
     "[DAEMON] stage=streamer status=STARTED",
     "[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s",
-    "[DAEMON] stage=streamer_stop result=%s"
+    "[DAEMON] stage=streamer_stop result=%s",
+    "[DATA] stage=premarket_eod status=%s date=%s accepted=%d planned=%d",
+    "[DATA] stage=premarket_eod status=SKIPPED date=%s accepted=%d planned=%d",
+    "[DATA] stage=premarket_plan status=SKIP reason=%s date=%s",
+    "[DATA] stage=premarket_pool status=FAIL reason=%s target=%s next_retry=%s",
+    "[DATA] stage=premarket_pool status=FAIL reason=%s target=%s next_retry=%s",
+    "[DATA] stage=premarket_pool status=OK target=%s symbols=%d",
+    "[DATA] stage=premarket_pool status=SKIP reason=pool_ready target=%s",
+    "[DATA] stage=premarket_pool status=SKIP reason=shifted_next_day target=%s",
+    "[DATA] stage=premarket_stream status=FAIL reason=circuit_open date=%s",
+    "[DATA] stage=premarket_stream status=RESTARTED exit_code=%s",
+    "[DATA] stage=premarket_supervise status=FAIL reason=%s"
   ]
 }

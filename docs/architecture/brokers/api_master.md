@@ -106,6 +106,9 @@ flowchart TD
 | **KRX Closing Auction** | `15:20:00` – `15:30:00` | Single-Price Auction | `FHKST01010200` (`output2`) | N/A | N/A | Handled in `/market-calendar/KR` |
 | **NXT Aftermarket (Order)** | `15:30:00` – `15:40:00` | Order Acceptance | N/A | N/A | N/A | Handled in `/market-calendar/KR` |
 | **NXT Aftermarket (Exec)** | `15:40:00` – `20:00:00` | Continuous Auction | `market_div_code="NX"` | N/A | `stk_cd="005930_NX"` | Handled in `/market-calendar/KR` |
+| **NXT Premarket Ticks/L10** | `08:00:00` – `08:50:00` | Continuous Auction | KIS WS `H0NXCNT0`/`H0NXASP0` | N/A | N/A | N/A |
+
+> NX 랭킹 `FID_COND_MRKT_DIV_CODE`는 `NX`를 받지만 `UN`은 거부된다(`OPSQ2001`).
 
 ---
 

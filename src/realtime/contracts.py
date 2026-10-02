@@ -32,6 +32,7 @@ class MarketSession(StrEnum):
     REGULAR = "regular"
     KRX_AFTER = "krx_after"
     NXT_AFTER = "nxt_after"
+    NXT_PRE = "nxt_pre"
 
 
 @dataclass(frozen=True)

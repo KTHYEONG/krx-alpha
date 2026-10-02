@@ -22,6 +22,9 @@ STANDARD_POST_CLOSING_PRICE_OPEN: dt.time = dt.time(15, 40)
 STANDARD_NXT_AFTER_MARKET_OPEN: dt.time = dt.time(15, 40)
 STANDARD_KRX_AFTER_MARKET_OPEN: dt.time = dt.time(16, 0)
 # The two 15:40 constants are distinct exchange rules that coincide, kept separate so one can move without the other.
+STANDARD_NXT_PREMARKET_OPEN: dt.time = dt.time(8, 0)
+STANDARD_NXT_PREMARKET_END: dt.time = dt.time(8, 50)
+# NXT premarket (08:00~08:50) is a distinct NXT rule, kept separate from the KRX 08:30/08:40 closing-price window.
 STANDARD_AFTER_MARKET_END: dt.time = dt.time(20, 0)
 MAX_SESSION_SHIFT: dt.timedelta = dt.timedelta(hours=3)
 

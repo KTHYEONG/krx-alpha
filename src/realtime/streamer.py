@@ -17,6 +17,8 @@ from src.core.observability import EVENT
 from src.core.session_anchors import (
     STANDARD_KRX_AFTER_MARKET_OPEN,
     STANDARD_NXT_AFTER_MARKET_OPEN,
+    STANDARD_NXT_PREMARKET_END,
+    STANDARD_NXT_PREMARKET_OPEN,
     SessionAnchors,
 )
 from src.realtime.contracts import (
@@ -60,6 +62,21 @@ def aftermarket_silence_limit_s(
     else:
         open_t = anchors.shift_post_close(STANDARD_KRX_AFTER_MARKET_OPEN)
     if open_t <= now.astimezone(_KST).time() < anchors.after_market_end:
+        return limit_s
+    return None
+
+
+def premarket_silence_limit_s(
+    now: dt.datetime, *, anchors: SessionAnchors, limit_s: float = SILENCE_LIMIT_S
+) -> float | None:
+    """Silence limit for the NXT premarket collector, or None outside the premarket window.
+
+    The watchdog arms only inside [shift_pre_open(08:00), shift_pre_open(08:50)) so the quiet period
+    before the first print and after the window never trips a reconnect storm.
+    """
+    start = anchors.shift_pre_open(STANDARD_NXT_PREMARKET_OPEN)
+    end = anchors.shift_pre_open(STANDARD_NXT_PREMARKET_END)
+    if start <= now.astimezone(_KST).time() < end:
         return limit_s
     return None
 

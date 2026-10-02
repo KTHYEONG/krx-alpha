@@ -641,3 +641,75 @@ def test_execution_settings_rejects_non_positive_rest_lead() -> None:
 
     with pytest.raises(ValueError, match="positive"):
         ExecutionSettings(rest_max_lead_s=0.0)
+
+
+def test_disabled_premarket_needs_no_configuration(monkeypatch) -> None:
+    import os
+
+    from src.core.config import PremarketSettings
+
+    for name in [n for n in os.environ if n.startswith("KRX_ALPHA_PREMARKET_")]:
+        monkeypatch.delenv(name, raising=False)
+
+    settings = PremarketSettings()
+
+    assert settings.enabled is False
+
+
+def test_enabled_premarket_requires_slot_and_capacity() -> None:
+    import pytest
+
+    from src.core.config import PremarketSettings
+
+    with pytest.raises(ValueError, match="credential_slot"):
+        PremarketSettings(enabled=True)
+    with pytest.raises(ValueError, match="pair_capacity_per_connection"):
+        PremarketSettings(enabled=True, credential_slot="5")
+    with pytest.raises(ValueError, match="pair_capacity_per_connection"):
+        PremarketSettings(enabled=True, credential_slot="5", pair_capacity_per_connection=0)
+
+
+def test_premarket_symbol_cap_cannot_exceed_connection_capacity() -> None:
+    import pytest
+
+    from src.core.config import PremarketSettings
+
+    with pytest.raises(ValueError, match="max_symbols"):
+        PremarketSettings(enabled=True, credential_slot="5", pair_capacity_per_connection=41, max_symbols=21)
+    ok = PremarketSettings(enabled=True, credential_slot="5", pair_capacity_per_connection=41, max_symbols=20)
+    assert ok.max_symbols == 20
+
+
+def test_premarket_slot_may_not_equal_snapshot_slot() -> None:
+    import pytest
+
+    from src.core.config import PremarketSettings, SnapshotSettings, resolve_collector_runtime
+
+    snapshot = SnapshotSettings(kis_data_slot="2")
+    with pytest.raises(ValueError, match="credential_slot"):
+        resolve_collector_runtime(
+            snapshot=snapshot,
+            premarket=PremarketSettings(enabled=True, credential_slot="2", pair_capacity_per_connection=41),
+        )
+    runtime = resolve_collector_runtime(
+        snapshot=snapshot,
+        premarket=PremarketSettings(enabled=True, credential_slot="5", pair_capacity_per_connection=41),
+    )
+    assert runtime.premarket.credential_slot == "5"
+
+
+def test_runtime_exposes_premarket_without_changing_existing_fields(tmp_path, monkeypatch) -> None:
+    import os
+    import pathlib
+
+    from src.core.config import CollectorSettings, resolve_collector_runtime
+
+    for name in [n for n in os.environ if n.startswith("KRX_ALPHA_PREMARKET_")]:
+        monkeypatch.delenv(name, raising=False)
+    collector = CollectorSettings(data_root=pathlib.Path(tmp_path))
+
+    runtime = resolve_collector_runtime(collector=collector)
+
+    assert runtime.premarket.enabled is False
+    assert runtime.paths.root == pathlib.Path(tmp_path)
+    assert runtime.collector.data_root == pathlib.Path(tmp_path)

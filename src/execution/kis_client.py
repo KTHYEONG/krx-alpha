@@ -191,11 +191,11 @@ class KisRestClient:
     def post_order(self, tr_id: str, body: dict[str, str]) -> BrokerOutcome:
         return self._trading.post_order(tr_id, body)
 
-    def get_trade_amount_ranking(self) -> tuple[KisRankingRow, ...]:
-        return self._data.get_trade_amount_ranking()
+    def get_trade_amount_ranking(self, *, market_div: str = "J") -> tuple[KisRankingRow, ...]:
+        return self._data.get_trade_amount_ranking(market_div=market_div)
 
-    def get_fluctuation_ranking(self) -> tuple[KisRankingRow, ...]:
-        return self._data.get_fluctuation_ranking()
+    def get_fluctuation_ranking(self, *, market_div: str = "J") -> tuple[KisRankingRow, ...]:
+        return self._data.get_fluctuation_ranking(market_div=market_div)
 
     def get_security_status(self, symbol: str) -> dict[str, object]:
         return self._data.get_security_status(symbol)

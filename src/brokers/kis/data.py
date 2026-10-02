@@ -240,10 +240,19 @@ class KisDataClient:
             return None
         return cast("dict[str, str]", row)
 
-    def get_trade_amount_ranking(self) -> tuple[KisRankingRow, ...]:
-        """거래대금 랭킹(TR FHPST01710000, 거래량순위 화면의 거래금액순 정렬)을 조회한다."""
+    def get_trade_amount_ranking(self, *, market_div: str = "J") -> tuple[KisRankingRow, ...]:
+        """거래대금 랭킹(TR FHPST01710000, 거래량순위 화면의 거래금액순 정렬)을 조회한다.
+
+        ``market_div`` selects the venue screen: "J" (KRX, default) or "NX" (NXT-only listing and volumes).
+
+        Raises:
+            ValueError: ``market_div`` is not "J" or "NX" ("UN" is rejected by the vendor with OPSQ2001).
+            KisApiError: Transport, API, or schema failure (unchanged).
+        """
+        if market_div not in ("J", "NX"):
+            raise ValueError(f'market_div must be "J" or "NX", got {market_div!r}')
         params = {
-            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_COND_MRKT_DIV_CODE": market_div,
             "FID_COND_SCR_DIV_CODE": "20171",
             "FID_INPUT_ISCD": "0000",
             "FID_DIV_CLS_CODE": "0",
@@ -268,10 +277,19 @@ class KisDataClient:
         ]
         return _parse_ranking_rows(rows)
 
-    def get_fluctuation_ranking(self) -> tuple[KisRankingRow, ...]:
-        """등락률 랭킹(TR FHPST01700000)을 조회한다."""
+    def get_fluctuation_ranking(self, *, market_div: str = "J") -> tuple[KisRankingRow, ...]:
+        """등락률 랭킹(TR FHPST01700000)을 조회한다.
+
+        ``market_div`` selects the venue screen: "J" (KRX, default) or "NX" (NXT-only listing and volumes).
+
+        Raises:
+            ValueError: ``market_div`` is not "J" or "NX" ("UN" is rejected by the vendor with OPSQ2001).
+            KisApiError: Transport, API, or schema failure (unchanged).
+        """
+        if market_div not in ("J", "NX"):
+            raise ValueError(f'market_div must be "J" or "NX", got {market_div!r}')
         params = {
-            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_COND_MRKT_DIV_CODE": market_div,
             "FID_COND_SCR_DIV_CODE": "20170",
             "FID_INPUT_ISCD": "0000",
             "FID_RANK_SORT_CLS_CODE": "0",
