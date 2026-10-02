@@ -345,6 +345,7 @@ def _accepted_typed_env_names() -> set[str]:
     families = [
         config_module.CollectorSettings,
         config_module.AftermarketSettings,
+        config_module.PremarketSettings,
         config_module.SnapshotSettings,
         config_module.ExecutionSettings,
         config_module.DataQualitySettings,
