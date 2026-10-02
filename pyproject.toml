@@ -130,7 +130,7 @@ python_files = ["test_*.py"]
 addopts = "-ra -q --import-mode=importlib"
 pythonpath = ["."]
 markers = [
-    "slow: tests that read real parquet files (~0.3s each)",
+    "slow: tests that read real parquet files (~0.3s each) or spawn subprocess pytest runs",
 ]
 filterwarnings = [
     "ignore::RuntimeWarning:numpy.*",

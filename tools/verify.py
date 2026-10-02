@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 JsonDiag = dict[str, Any]
@@ -45,13 +48,17 @@ def _exit_with_diags(phase: str, header: str, diags: list[JsonDiag], exit_code: 
     sys.exit(exit_code)
 
 
-def run_cmd(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
+def run_cmd(
+    cmd: list[str], timeout: int = 120, extra_env: Mapping[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     # Strip unnecessary 'uv run' prefix when already running inside virtualenv
     if len(cmd) >= 3 and cmd[0] == "uv" and cmd[1] == "run" and os.environ.get("VIRTUAL_ENV"):
         cmd = cmd[2:]
     env = os.environ.copy()
     env["COVERAGE_NO_CTRACE"] = "1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    if extra_env:
+        env.update(extra_env)
     try:
         return subprocess.run(  # noqa: S603
             cmd, capture_output=True, text=True, shell=False, timeout=timeout, env=env
@@ -63,6 +70,12 @@ def run_cmd(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[s
             stdout="",
             stderr=f"Error: timed out after {timeout}s.",
         )
+
+
+def _make_invocation_dir(base: Path) -> Path:
+    """Create and return a unique `base/verify-<pid>-<random>` dir (`tempfile.mkdtemp`); creates `base` if missing."""
+    base.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=f"verify-{os.getpid()}-", dir=str(base)))
 
 
 def _available_memory_gb() -> float:
@@ -416,74 +429,75 @@ def main() -> None:
         worker_count = min(target_workers, os.cpu_count() or 2, len(test_files))
         xdist_args = ["-p", "no:cacheprovider", "-n", str(worker_count)]
 
-    src_files = [f for f in py_files if f.startswith("src/")]
-    cov_json_path = "tmp/verify_coverage.json"
-    cov_args: list[str] = []
+    inv_dir = _make_invocation_dir(Path("tmp") / "verify")
+    try:
+        src_files = [f for f in py_files if f.startswith("src/")]
+        cov_json_path = str(inv_dir / "coverage.json")
+        cov_args: list[str] = []
 
-    if src_files and not args.no_cov:
-        os.makedirs("tmp", exist_ok=True)
-        with contextlib.suppress(OSError):
-            os.remove(cov_json_path)
-        pkgs = {f.split("/")[1] for f in src_files if len(f.split("/")) >= 2}
-        cov_pkgs = [f"--cov=src/{p}" for p in sorted(pkgs)] if pkgs else ["--cov=src"]
-        cov_args = [*cov_pkgs, f"--cov-report=json:{cov_json_path}"]
+        if src_files and not args.no_cov:
+            pkgs = {f.split("/")[1] for f in src_files if len(f.split("/")) >= 2}
+            cov_pkgs = [f"--cov=src/{p}" for p in sorted(pkgs)] if pkgs else ["--cov=src"]
+            cov_args = [*cov_pkgs, f"--cov-report=json:{cov_json_path}"]
 
-    pytest_cmd = [
-        sys.executable,
-        "-m",
-        "pytest",
-        "-m",
-        "not slow" if not args.run_slow else "slow",
-        *test_files,
-        *xdist_args,
-        *cov_args,
-        "-q",
-        "--tb=line",
-    ]
-    pytest_timeout = args.timeout or max(60, min(240, 20 * len(test_files)))
-    pt_res = run_cmd(pytest_cmd, timeout=pytest_timeout)
-
-    if pt_res.returncode == 124:
-        _exit_with_diags(
-            "pytest-timeout",
-            f"FAIL | Pytest Timed Out ({pytest_timeout}s)",
-            [{
-                "file": "",
-                "line": 0,
-                "error": f"pytest timed out after {pytest_timeout}s across {len(test_files)} file(s).",
-                "fix_hint": "Use --files to scope checks, investigate slow tests, or pass --timeout with a larger value.",
-            }],
-        )
-
-    if pt_res.returncode == 0:
-        cov_diags, cov_pct = _check_diff_coverage(src_files, cov_json_path, unmapped) if cov_args else ([], None)
-        if cov_diags:
-            _exit_with_diags(
-                "coverage",
-                f"FAIL | Diff Coverage: {len(cov_diags)} file(s) with untested new lines",
-                cov_diags,
-            )
-        unmapped_diags = [
-            {"file": m, "line": 0, "error": f"unmapped: no test covers {m}", "fix_hint": "Add tests/unit coverage for this module"}
-            for m in unmapped
-        ]
-        cov_suffix = f", Diff-Coverage {cov_pct}%" if cov_pct is not None else ""
-        unmapped_suffix = f", {len(unmapped_diags)} unmapped" if unmapped_diags else ""
-        print(f"PASS | All checks passed (Scaffolding-Clean, Lint, Type, Tests{cov_suffix}{unmapped_suffix})")
-        print(_emit_json("PASS", "all", unmapped_diags, cov_pct), file=sys.stderr)
-    else:
-        last_err = [
-            line
-            for line in (pt_res.stdout or "").splitlines()
-            if any(x in line for x in ("FAIL", "Error", "AssertionError"))
-        ]
-        cause = last_err[-1] if last_err else (pt_res.stderr or "Check pytest output.").strip()
-        cause_sliced = "\n".join(cause.splitlines()[:10])
-        _exit_with_diags(
+        pytest_cmd = [
+            sys.executable,
+            "-m",
             "pytest",
-            f"FAIL | Pytest Failed: {cause_sliced}",
-            [{"file": "", "line": 0, "error": cause_sliced, "fix_hint": "Fix failing pytest assertions"}],
-        )
+            "-m",
+            "not slow" if not args.run_slow else "slow",
+            *test_files,
+            *xdist_args,
+            *cov_args,
+            "-q",
+            "--tb=line",
+        ]
+        pytest_timeout = args.timeout or max(60, min(240, 20 * len(test_files)))
+        pt_res = run_cmd(pytest_cmd, timeout=pytest_timeout, extra_env={"COVERAGE_FILE": str(inv_dir / ".coverage")})
+
+        if pt_res.returncode == 124:
+            _exit_with_diags(
+                "pytest-timeout",
+                f"FAIL | Pytest Timed Out ({pytest_timeout}s)",
+                [{
+                    "file": "",
+                    "line": 0,
+                    "error": f"pytest timed out after {pytest_timeout}s across {len(test_files)} file(s).",
+                    "fix_hint": "Use --files to scope checks, investigate slow tests, or pass --timeout with a larger value.",
+                }],
+            )
+
+        if pt_res.returncode == 0:
+            cov_diags, cov_pct = _check_diff_coverage(src_files, cov_json_path, unmapped) if cov_args else ([], None)
+            if cov_diags:
+                _exit_with_diags(
+                    "coverage",
+                    f"FAIL | Diff Coverage: {len(cov_diags)} file(s) with untested new lines",
+                    cov_diags,
+                )
+            unmapped_diags = [
+                {"file": m, "line": 0, "error": f"unmapped: no test covers {m}", "fix_hint": "Add tests/unit coverage for this module"}
+                for m in unmapped
+            ]
+            cov_suffix = f", Diff-Coverage {cov_pct}%" if cov_pct is not None else ""
+            unmapped_suffix = f", {len(unmapped_diags)} unmapped" if unmapped_diags else ""
+            print(f"PASS | All checks passed (Scaffolding-Clean, Lint, Type, Tests{cov_suffix}{unmapped_suffix})")
+            print(_emit_json("PASS", "all", unmapped_diags, cov_pct), file=sys.stderr)
+        else:
+            last_err = [
+                line
+                for line in (pt_res.stdout or "").splitlines()
+                if any(x in line for x in ("FAIL", "Error", "AssertionError"))
+            ]
+            cause = last_err[-1] if last_err else (pt_res.stderr or "Check pytest output.").strip()
+            cause_sliced = "\n".join(cause.splitlines()[:10])
+            _exit_with_diags(
+                "pytest",
+                f"FAIL | Pytest Failed: {cause_sliced}",
+                [{"file": "", "line": 0, "error": cause_sliced, "fix_hint": "Fix failing pytest assertions"}],
+            )
+    finally:
+        shutil.rmtree(inv_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
