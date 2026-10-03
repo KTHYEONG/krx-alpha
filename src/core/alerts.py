@@ -16,6 +16,8 @@ from src.core.log_format import format_record_timestamp
 
 ALERT_COOLDOWN_S: float = 1800.0
 ALERT_DAILY_CAP: int = 20
+ALERT_PER_KEY_DAILY_CAP: int = 3
+ALERT_FIRST_OCCURRENCE_RESERVE: int = 5
 ALERT_SEND_ATTEMPTS: int = 3
 ALERT_RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 8.0)
 
@@ -359,9 +361,20 @@ def format_digest_html(subject: str, body: str, *, bot_name: str = "krx-alpha") 
 
 
 class EmailAlertHandler(logging.Handler):
-    """Send bounded CRITICAL alerts with per-day and cooldown limits.
+    """Send bounded CRITICAL alerts with per-day, per-key and cooldown limits.
 
-    Sender failures remain logged without recursively escalating the same alert.
+    A single failure that keeps re-alerting (e.g. a restart circuit re-opening every window)
+    must not exhaust the daily budget and hide unrelated CRITICAL events raised later the same
+    day. Each alert key may be mailed at most ``per_key_daily_cap`` times per day, and repeat
+    sends of an already-mailed key may only use ``daily_cap - first_occurrence_reserve`` slots,
+    so at least ``first_occurrence_reserve`` slots always remain for keys first seen that day.
+    All counters reset on the KST day rollover. Suppressed alerts stay in the regular logs;
+    the handler only limits email delivery. Sender failures remain logged without recursively
+    escalating the same alert.
+
+    Raises:
+        ValueError: ``per_key_daily_cap < 1`` or ``first_occurrence_reserve`` outside
+            ``[0, daily_cap)``.
     """
 
     def __init__(
@@ -372,18 +385,26 @@ class EmailAlertHandler(logging.Handler):
         sender: Callable[..., None],
         cooldown_s: float = ALERT_COOLDOWN_S,
         daily_cap: int = ALERT_DAILY_CAP,
+        per_key_daily_cap: int = ALERT_PER_KEY_DAILY_CAP,
+        first_occurrence_reserve: int = ALERT_FIRST_OCCURRENCE_RESERVE,
         clock: Callable[[], float] = time.monotonic,
         today: Callable[[], dt.date] | None = None,
         send_attempts: int = ALERT_SEND_ATTEMPTS,
         retry_backoff_s: tuple[float, ...] = ALERT_RETRY_BACKOFF_S,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        if per_key_daily_cap < 1:
+            raise ValueError("per_key_daily_cap must be >= 1")
+        if not 0 <= first_occurrence_reserve < daily_cap:
+            raise ValueError("first_occurrence_reserve must be in [0, daily_cap)")
         super().__init__(level=logging.CRITICAL)
         self._component = component
         self._run_id = run_id
         self._sender = sender
         self._cooldown_s = cooldown_s
         self._daily_cap = daily_cap
+        self._per_key_daily_cap = per_key_daily_cap
+        self._first_occurrence_reserve = first_occurrence_reserve
         self._clock = clock
         self._today = today if today is not None else (lambda: dt.datetime.now(_KST).date())
         self._send_attempts = send_attempts
@@ -392,6 +413,8 @@ class EmailAlertHandler(logging.Handler):
         self._sent_today = 0
         self._current_day: dt.date | None = None
         self._last_sent: dict[str, float] = {}
+        self._per_key_counts: dict[str, int] = {}
+        self._suppressed_logged: set[str] = set()
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -408,7 +431,17 @@ class EmailAlertHandler(logging.Handler):
             self._current_day = day
             self._sent_today = 0
             self._last_sent.clear()
+            self._per_key_counts.clear()
+            self._suppressed_logged.clear()
         if self._sent_today >= self._daily_cap:
+            return
+        key_count = self._per_key_counts.get(key, 0)
+        if key_count >= self._per_key_daily_cap:
+            self._log_suppressed_once(key, "per_key_cap")
+            return
+        is_first = key_count == 0
+        if not is_first and self._sent_today >= self._daily_cap - self._first_occurrence_reserve:
+            self._log_suppressed_once(key, "repeat_budget")
             return
         now = self._clock()
         last = self._last_sent.get(key)
@@ -434,6 +467,15 @@ class EmailAlertHandler(logging.Handler):
                 self._sleep(backoff[attempt] if attempt < len(backoff) else backoff[-1])
         self._last_sent[key] = now
         self._sent_today += 1
+        self._per_key_counts[key] = key_count + 1
+
+    def _log_suppressed_once(self, key: str, reason: str) -> None:
+        if key in self._suppressed_logged:
+            return
+        self._suppressed_logged.add(key)
+        logging.getLogger(__name__).warning(
+            "[SYS] stage=alert status=SUPPRESSED reason=%s key=%r", reason, key
+        )
 
 
 def gmail_sender(settings: AlertSettings) -> Callable[..., None]:
@@ -488,6 +530,8 @@ def send_digest(
 __all__ = [
     "ALERT_COOLDOWN_S",
     "ALERT_DAILY_CAP",
+    "ALERT_FIRST_OCCURRENCE_RESERVE",
+    "ALERT_PER_KEY_DAILY_CAP",
     "ALERT_RETRY_BACKOFF_S",
     "ALERT_SEND_ATTEMPTS",
     "EmailAlertHandler",

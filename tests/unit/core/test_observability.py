@@ -195,7 +195,7 @@ def test_email_alert_handler_applies_cooldown_and_daily_cap() -> None:
     now = {"t": 0.0, "day": dt.date(2026, 9, 14)}
     handler = EmailAlertHandler(
         component="daemon", run_id="r", sender=lambda s, b: sent.append(s),
-        cooldown_s=1800.0, daily_cap=2, clock=lambda: now["t"], today=lambda: now["day"],
+        cooldown_s=1800.0, daily_cap=2, first_occurrence_reserve=0, clock=lambda: now["t"], today=lambda: now["day"],
     )
 
     def rec(msg: str) -> logging.LogRecord:
