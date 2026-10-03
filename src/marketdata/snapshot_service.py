@@ -5,10 +5,10 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Protocol, cast
+from typing import Protocol, TypeVar, assert_never, cast
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -84,7 +84,7 @@ _KIND_DATASET: dict[SnapshotJobKind, SnapshotDataset] = {
     SnapshotJobKind.EOD_MINUTE_BARS: SnapshotDataset.STOCK_MINUTE_BAR,
 }
 
-_SKIP: Any = object()
+_T = TypeVar("_T")
 
 
 def _ns_to_kst_cursor(published_at_ns: int) -> tuple[str, str]:
@@ -117,6 +117,42 @@ def _eod_targets(
     return tuple(cands["symbol"].to_list())
 
 
+@dataclass
+class _JobBudget:
+    """Per-job vendor-call counters that stop issuing calls once ``not_after`` passes."""
+
+    not_after: dt.datetime
+    now_fn: Callable[[], dt.datetime]
+    wall_ns: Callable[[], int]
+    attempted: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    truncated: bool = False
+
+    def call(self, fetch: Callable[[], _T]) -> tuple[_T, int] | None:
+        """Return ``(result, observed_at_ns)``, or None when the deadline passed or the vendor failed."""
+        if self.now_fn() >= self.not_after:
+            self.truncated = True
+            return None
+        self.attempted += 1
+        try:
+            result = fetch()
+        except KisApiError:
+            self.failed += 1
+            return None
+        self.succeeded += 1
+        return result, self.wall_ns()
+
+    def each(self, keys: Iterable[str], fetch: Callable[[str], _T]) -> Iterator[tuple[_T, int]]:
+        """Fetch keys in order, skipping vendor failures and stopping at the deadline."""
+        for key in keys:
+            taken = self.call(partial(fetch, key))
+            if taken is not None:
+                yield taken
+            elif self.truncated:
+                return
+
+
 def run_snapshot_job(
     job: SnapshotJob,
     *,
@@ -130,240 +166,143 @@ def run_snapshot_job(
 ) -> SnapshotJobResult:
     """Collect one bounded scheduled job and persist only validated rows."""
     session_date = store.session_date
-    attempted = 0
-    succeeded = 0
-    failed = 0
-    rows_added = 0
-    truncated = False
+    budget = _JobBudget(not_after=job.not_after, now_fn=now_fn, wall_ns=wall_ns)
 
-    def _guarded_call(call: Callable[[], Any]) -> Any:
-        nonlocal attempted, succeeded, failed, truncated
-        if now_fn() >= job.not_after:
-            truncated = True
-            return _SKIP
-        attempted += 1
-        try:
-            result = call()
-        except KisApiError:
-            failed += 1
-            return _SKIP
-        succeeded += 1
-        return (result, wall_ns())
+    def stamp(row: Mapping[str, object], observed: int) -> dict[str, object]:
+        return {**row, "session_date": session_date, "observed_at_ns": observed}
 
-    def _take(outcome: Any) -> tuple[Any, int] | None:
-        if outcome is _SKIP:
-            return None
-        return (outcome[0], outcome[1])
+    def append(dataset: SnapshotDataset, rows: list[dict[str, object]]) -> int:
+        return store.append(dataset, rows) if rows else 0
 
-    def _handle_auction_security() -> int:
-        if job.kind in (SnapshotJobKind.AUCTION_OPEN, SnapshotJobKind.AUCTION_CLOSE):
-            phase = "open" if job.kind is SnapshotJobKind.AUCTION_OPEN else "close"
-            auction_rows: list[dict[str, object]] = []
-            for symbol in symbols:
-                outcome = _guarded_call(partial(source.get_auction_book, symbol))
-                taken = _take(outcome)
-                if taken is None:
-                    if truncated:
-                        break
-                    continue
-                result, observed = taken
-                auction_rows.append({**result, "phase": phase, "session_date": session_date, "observed_at_ns": observed})
-            if auction_rows:
-                return store.append(SnapshotDataset.AUCTION_BOOK, auction_rows)
-            return 0
-        if job.kind is SnapshotJobKind.INVESTOR_ESTIMATE:
-            investor_rows: list[dict[str, object]] = []
-            for symbol in symbols:
-                outcome = _guarded_call(partial(source.get_investor_estimate, symbol))
-                taken = _take(outcome)
-                if taken is None:
-                    if truncated:
-                        break
-                    continue
-                result, observed = taken
-                investor_rows.extend(
-                    {**row, "session_date": session_date, "observed_at_ns": observed} for row in result
-                )
-            if investor_rows:
-                return store.append(SnapshotDataset.INVESTOR_ESTIMATE, investor_rows)
-            return 0
-        program_rows: list[dict[str, object]] = []
-        for symbol in symbols:
-            outcome = _guarded_call(partial(source.get_program_trade_latest, symbol))
-            taken = _take(outcome)
+    def auction(phase: str) -> int:
+        rows: list[dict[str, object]] = [
+            {**result, "phase": phase, "session_date": session_date, "observed_at_ns": observed}
+            for result, observed in budget.each(symbols, source.get_auction_book)
+        ]
+        return append(SnapshotDataset.AUCTION_BOOK, rows)
+
+    def investor_estimate() -> int:
+        rows = [
+            stamp(row, observed)
+            for result, observed in budget.each(symbols, source.get_investor_estimate)
+            for row in result
+        ]
+        return append(SnapshotDataset.INVESTOR_ESTIMATE, rows)
+
+    def program_trade() -> int:
+        rows = [
+            stamp(result, observed)
+            for result, observed in budget.each(symbols, source.get_program_trade_latest)
+            if result is not None
+        ]
+        return append(SnapshotDataset.PROGRAM_TRADE, rows)
+
+    def ranking() -> int:
+        lists = (
+            (source.get_trade_amount_ranking, TR_TRADE_AMOUNT, "trade_amount", True),
+            (source.get_fluctuation_ranking, TR_FLUCTUATION, "fluctuation", False),
+        )
+        rows: list[dict[str, object]] = []
+        for fetch, source_tr, list_kind, has_trade_value in lists:
+            if budget.truncated:
+                break
+            taken = budget.call(fetch)
             if taken is None:
-                if truncated:
-                    break
                 continue
             result, observed = taken
-            if result is not None:
-                program_rows.append({**result, "session_date": session_date, "observed_at_ns": observed})
-        if program_rows:
-            return store.append(SnapshotDataset.PROGRAM_TRADE, program_rows)
-        return 0
+            rows.extend(
+                {
+                    "session_date": session_date,
+                    "observed_at_ns": observed,
+                    "source_tr": source_tr,
+                    "market_div_code": "J",
+                    "list_kind": list_kind,
+                    "rank": row.rank,
+                    "symbol": row.symbol,
+                    "change_pct": row.change_pct,
+                    "trade_value_krw": row.trade_value_krw if has_trade_value else None,
+                }
+                for row in result
+            )
+        return append(SnapshotDataset.RANKING, rows)
 
-    def _handle_ranking_index() -> int:
-        if job.kind is SnapshotJobKind.RANKING:
-            ranking_rows: list[dict[str, object]] = []
-            outcome = _guarded_call(source.get_trade_amount_ranking)
-            taken = _take(outcome)
-            if taken is not None:
-                result, observed = taken
-                ranking_rows.extend(
-                    {
-                        "session_date": session_date,
-                        "observed_at_ns": observed,
-                        "source_tr": TR_TRADE_AMOUNT,
-                        "market_div_code": "J",
-                        "list_kind": "trade_amount",
-                        "rank": row.rank,
-                        "symbol": row.symbol,
-                        "change_pct": row.change_pct,
-                        "trade_value_krw": row.trade_value_krw,
-                    }
-                    for row in cast("tuple[KisRankingRow, ...]", result)
-                )
-            if not truncated:
-                outcome = _guarded_call(source.get_fluctuation_ranking)
-                taken = _take(outcome)
-                if taken is not None:
-                    result, observed = taken
-                    ranking_rows.extend(
-                        {
-                            "session_date": session_date,
-                            "observed_at_ns": observed,
-                            "source_tr": TR_FLUCTUATION,
-                            "market_div_code": "J",
-                            "list_kind": "fluctuation",
-                            "rank": row.rank,
-                            "symbol": row.symbol,
-                            "change_pct": row.change_pct,
-                            "trade_value_krw": None,
-                        }
-                        for row in cast("tuple[KisRankingRow, ...]", result)
-                    )
-            if ranking_rows:
-                return store.append(SnapshotDataset.RANKING, ranking_rows)
-            return 0
-        index_rows: list[dict[str, object]] = []
-        for index_code in settings.index_codes:
-            outcome = _guarded_call(partial(source.get_index_snapshot, index_code))
-            taken = _take(outcome)
-            if taken is None:
-                if truncated:
-                    break
-                continue
-            result, observed = taken
-            index_rows.append({**result, "session_date": session_date, "observed_at_ns": observed})
-        if index_rows:
-            return store.append(SnapshotDataset.INDEX_SNAPSHOT, index_rows)
-        return 0
+    def index_snapshot() -> int:
+        rows = [stamp(result, observed) for result, observed in budget.each(settings.index_codes, source.get_index_snapshot)]
+        return append(SnapshotDataset.INDEX_SNAPSHOT, rows)
 
-    def _handle_news() -> int:
-        nonlocal attempted, succeeded, failed, truncated
-        news_rows: list[dict[str, object]] = []
+    def index_minute_bars() -> int:
+        fetch = partial(source.get_index_minute_bars, session_date=session_date)
+        rows = [stamp(row, observed) for result, observed in budget.each(settings.index_codes, fetch) for row in result]
+        return append(SnapshotDataset.INDEX_MINUTE_BAR, rows)
+
+    def news() -> int:
+        rows: list[dict[str, object]] = []
         new_ids: list[str] = []
         claimed = set(news_seen)
         before: tuple[str, str] | None = None
         pages = 0
         while True:
-            if now_fn() >= job.not_after:
-                truncated = True
+            taken = budget.call(partial(source.get_news_titles, before=before))
+            if taken is None:
                 break
-            attempted += 1
-            try:
-                page = source.get_news_titles(before=before)
-            except KisApiError:
-                failed += 1
-                break
-            succeeded += 1
+            page, observed = taken
             pages += 1
-            observed = wall_ns()
             fresh = [row for row in page if cast(str, row["news_id"]) not in claimed]
             for row in fresh:
                 claimed.add(cast(str, row["news_id"]))
-            news_rows.extend(
-                {**row, "session_date": session_date, "observed_at_ns": observed} for row in fresh
-            )
+            rows.extend(stamp(row, observed) for row in fresh)
             new_ids.extend(cast(str, row["news_id"]) for row in fresh)
             if not page or any(cast(str, row["news_id"]) in news_seen for row in page) or not fresh:
                 break
             if pages >= settings.news_max_pages:
-                truncated = True
+                budget.truncated = True
                 break
-            last = page[-1]
-            before = _ns_to_kst_cursor(cast(int, last["published_at_ns"]))
-        if news_rows:
-            added = store.append(SnapshotDataset.NEWS_TITLE, news_rows)
-            news_seen.update(new_ids)
-            return added
-        return 0
-
-    def _handle_minute_bars() -> int:
-        if job.kind is SnapshotJobKind.INDEX_MINUTE_BAR:
-            bar_rows: list[dict[str, object]] = []
-            for index_code in settings.index_codes:
-                outcome = _guarded_call(
-                    partial(source.get_index_minute_bars, index_code, session_date=session_date)
-                )
-                taken = _take(outcome)
-                if taken is None:
-                    if truncated:
-                        break
-                    continue
-                result, observed = taken
-                bar_rows.extend(
-                    {**row, "session_date": session_date, "observed_at_ns": observed} for row in result
-                )
-            if bar_rows:
-                return store.append(SnapshotDataset.INDEX_MINUTE_BAR, bar_rows)
-            return 0
-        added = 0
-        for symbol in _eod_targets(store, settings, symbols):
-            outcome = _guarded_call(
-                partial(
-                    source.get_stock_minute_bars,
-                    symbol,
-                    session_date=session_date,
-                    session_open=settings.intraday_start,
-                    session_close=settings.intraday_end,
-                )
-            )
-            taken = _take(outcome)
-            if taken is None:
-                if truncated:
-                    break
-                continue
-            result, observed = taken
-            stamped = [
-                {**row, "session_date": session_date, "observed_at_ns": observed}
-                for row in cast("Sequence[dict[str, object]]", result)
-            ]
-            if stamped:
-                added += store.append(SnapshotDataset.STOCK_MINUTE_BAR, stamped)
+            before = _ns_to_kst_cursor(cast(int, page[-1]["published_at_ns"]))
+        added = append(SnapshotDataset.NEWS_TITLE, rows)
+        news_seen.update(new_ids)
         return added
 
-    if job.kind in (
-        SnapshotJobKind.AUCTION_OPEN,
-        SnapshotJobKind.AUCTION_CLOSE,
-        SnapshotJobKind.INVESTOR_ESTIMATE,
-        SnapshotJobKind.PROGRAM_TRADE,
-    ):
-        rows_added += _handle_auction_security()
-    elif job.kind in (SnapshotJobKind.RANKING, SnapshotJobKind.INDEX_SNAPSHOT):
-        rows_added += _handle_ranking_index()
-    elif job.kind is SnapshotJobKind.NEWS_TITLE:
-        rows_added += _handle_news()
-    else:
-        rows_added += _handle_minute_bars()
+    def eod_minute_bars() -> int:
+        fetch = partial(
+            source.get_stock_minute_bars,
+            session_date=session_date,
+            session_open=settings.intraday_start,
+            session_close=settings.intraday_end,
+        )
+        added = 0
+        for result, observed in budget.each(_eod_targets(store, settings, symbols), fetch):
+            added += append(SnapshotDataset.STOCK_MINUTE_BAR, [stamp(row, observed) for row in result])
+        return added
+
+    match job.kind:
+        case SnapshotJobKind.AUCTION_OPEN:
+            rows_added = auction("open")
+        case SnapshotJobKind.AUCTION_CLOSE:
+            rows_added = auction("close")
+        case SnapshotJobKind.INVESTOR_ESTIMATE:
+            rows_added = investor_estimate()
+        case SnapshotJobKind.PROGRAM_TRADE:
+            rows_added = program_trade()
+        case SnapshotJobKind.RANKING:
+            rows_added = ranking()
+        case SnapshotJobKind.INDEX_SNAPSHOT:
+            rows_added = index_snapshot()
+        case SnapshotJobKind.INDEX_MINUTE_BAR:
+            rows_added = index_minute_bars()
+        case SnapshotJobKind.NEWS_TITLE:
+            rows_added = news()
+        case SnapshotJobKind.EOD_MINUTE_BARS:
+            rows_added = eod_minute_bars()
+        case _:  # pragma: no cover - mypy proves the match exhaustive over SnapshotJobKind
+            assert_never(job.kind)
     return SnapshotJobResult(
         job_id=job.job_id,
         kind=job.kind,
-        attempted=attempted,
-        succeeded=succeeded,
-        failed=failed,
+        attempted=budget.attempted,
+        succeeded=budget.succeeded,
+        failed=budget.failed,
         rows_added=rows_added,
-        truncated=truncated,
+        truncated=budget.truncated,
     )
 
 
