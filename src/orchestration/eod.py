@@ -18,7 +18,9 @@ from src.realtime.kis_sharding import AftermarketShard
 from src.realtime.manifest import SessionManifest
 from src.storage.layout import (
     L0_JOURNAL_GLOB,
+    L0_REPO_PREFIX,
     L1_REPO_PREFIX,
+    l0_partition_for_l1,
     l0_partition_key,
     l0_partition_relpath,
     l1_repo_path,
@@ -52,6 +54,7 @@ def run_eod_maintenance(
     verified_remote_l1: AbstractSet[str] | None = None,
     progress: Callable[[], None] | None = None,
     normalize: bool = True,
+    reuse_fresh_l1: bool = False,
 ) -> int:
     return prune_old_journals(
         journal_root,
@@ -62,6 +65,7 @@ def run_eod_maintenance(
         verified_remote_l1=verified_remote_l1,
         progress=progress,
         normalize=normalize,
+        reuse_fresh_l1=reuse_fresh_l1,
         # 데몬 OOM crash loop를 막기 위해 정규화는 자식 프로세스로 격리한다
         normalizer=functools.partial(run_isolated_normalize, work_root=work_root),
     )
@@ -76,6 +80,7 @@ def run_eod_offload(
     reference_date: dt.date | None = None,
     retain_days: int = 30,
     progress: Callable[[], None] | None = None,
+    journal_root: pathlib.Path | None = None,
 ) -> EodOffloadResult:
     arc = remote if remote is not None else archiver
     if arc is None:
@@ -102,6 +107,13 @@ def run_eod_offload(
         if sizes.get(rel) == pq.stat().st_size:
             verified.add(rel)
     confirmed = arc.remote_files(L1_REPO_PREFIX)
+    if journal_root is not None:
+        # Keep verified bytes until the second maintenance pass has removed their inputs.
+        confirmed = {
+            path for path in confirmed
+            if (l0_dir := l0_partition_for_l1(path)) is None
+            or not (journal_root / l0_dir.removeprefix(L0_REPO_PREFIX)).exists()
+        }
     purged = prune_local_l1(
         archive_root, retain_days=retain_days, reference_date=reference_date, confirmed_remote=confirmed
     )
@@ -116,11 +128,14 @@ def run_eod_remote_l0_purge(
     *,
     archiver: Any = None,
     progress: Callable[[], None] | None = None,
+    quarantine_root: pathlib.Path | None = None,
 ) -> PurgeStats:
     """Purge Drive L0 partitions superseded by remote-verified L1 after local L0 pruning.
 
     Returns zero stats (and logs CRITICAL reason=rclone_settings_missing) when no
     archiver can be built, mirroring run_eod_offload.
+    When ``quarantine_root`` is provided, remote L0 for quarantined partitions
+    is retained because its records may not be represented in verified L1.
     """
     arc = archiver if archiver is not None else GDriveArchiver.try_from_env()
     if arc is None:
@@ -128,6 +143,13 @@ def run_eod_remote_l0_purge(
         return PurgeStats()
     if progress is not None and hasattr(arc, "bind_progress"):
         arc.bind_progress(progress)
+    if quarantine_root is not None:
+        # A quarantined input may contain records absent from the previously verified L1.
+        verified_remote_l1 = {
+            path for path in verified_remote_l1
+            if (l0_dir := l0_partition_for_l1(path)) is None
+            or not (quarantine_root / l0_dir.removeprefix(L0_REPO_PREFIX)).exists()
+        }
     return arc.purge_superseded_l0(verified_remote_l1, pathlib.Path(journal_root), progress=progress)
 
 

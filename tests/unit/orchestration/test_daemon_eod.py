@@ -78,7 +78,7 @@ def test_run_collector_daemon_eod_passes_quarantine_root(tmp_path, monkeypatch) 
 
     seen: dict[str, object] = {}
 
-    def _fake_maintenance(journal_root, *, retain_days=3, today=None, archive_root=None, quarantine_root=None, work_root=None, verified_remote_l1=None, progress=None, normalize=True):
+    def _fake_maintenance(journal_root, *, retain_days=3, today=None, archive_root=None, quarantine_root=None, work_root=None, verified_remote_l1=None, progress=None, normalize=True, reuse_fresh_l1=False):
         seen.update({'quarantine_root': quarantine_root, 'archive_root': archive_root, 'work_root': work_root})
         return 0
 
@@ -679,7 +679,7 @@ def test_eod_remote_l0_purge_runs_after_pruning_and_cannot_fail_eod(tmp_path, mo
     def _offload(*a, **kw):
         return _Offload()
 
-    def _purge(journal_root, verified, *, progress=None):
+    def _purge(journal_root, verified, *, progress=None, quarantine_root=None):
         order.append("purge")
         assert verified == _Offload.verified_remote_l1
         raise RuntimeError("purge boom")
@@ -1289,3 +1289,213 @@ def test_eod_housekeeping_failed_partitions_degrade_maintenance(tmp_path, monkey
     result = daemon_mod._run_eod_housekeeping(settings, settings.paths, dt.date(2026, 9, 14), progress=lambda: None)
 
     assert result.maintenance_ok is False
+
+
+def test_housekeeping_second_pass_reuses_l1_first_does_not(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    import src.orchestration.daemon as daemon_mod
+    from src.core.config import CollectorSettings
+    from src.storage.retention import PruneStats
+
+    monkeypatch.setattr(daemon_mod, "check_disk_watermark", lambda path, *, min_free_gb: True)
+    calls: list[dict] = []
+
+    def _spy(journal_root, **kw):
+        calls.append(dict(kw))
+        return PruneStats(0, 0)
+
+    verified = frozenset({"l1/kis/H0STCNT0/dt=2026-09-01.parquet"})
+    stub = _housekeeping_offload_stub()
+    stub.verified_remote_l1 = verified
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", _spy)
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **k: stub)
+    monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *a, **k: None)
+
+    settings = CollectorSettings(data_root=tmp_path)
+    daemon_mod._run_eod_housekeeping(settings, settings.paths, dt.date(2026, 9, 14), progress=lambda: None)
+
+    assert len(calls) == 2
+    assert calls[0]["verified_remote_l1"] is None
+    assert "reuse_fresh_l1" not in calls[0]
+    assert calls[1]["verified_remote_l1"] == verified
+    assert calls[1]["reuse_fresh_l1"] is True
+
+
+def test_housekeeping_failed_offload_skips_second_pass(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    import src.orchestration.daemon as daemon_mod
+    from src.core.config import CollectorSettings
+    from src.storage.remote import RemoteArchiveError
+    from src.storage.retention import PruneStats
+
+    monkeypatch.setattr(daemon_mod, "check_disk_watermark", lambda path, *, min_free_gb: True)
+    calls: list[dict] = []
+
+    def _spy(journal_root, **kw):
+        calls.append(dict(kw))
+        return PruneStats(0, 0)
+
+    def _fail(*a, **k):
+        raise RemoteArchiveError("lsjson failed")
+
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", _spy)
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", _fail)
+    monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *a, **k: None)
+
+    settings = CollectorSettings(data_root=tmp_path)
+    daemon_mod._run_eod_housekeeping(settings, settings.paths, dt.date(2026, 9, 14), progress=lambda: None)
+
+    assert len(calls) == 1
+    assert not any(c.get("reuse_fresh_l1") is True for c in calls)
+
+
+def test_housekeeping_low_disk_second_pass_keeps_contract(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    import src.orchestration.daemon as daemon_mod
+    from src.core.config import CollectorSettings
+    from src.storage.retention import PruneStats
+
+    monkeypatch.setattr(daemon_mod, "check_disk_watermark", lambda path, *, min_free_gb: False)
+    calls: list[dict] = []
+
+    def _spy(journal_root, **kw):
+        calls.append(dict(kw))
+        return PruneStats(0, 0)
+
+    stub = _housekeeping_offload_stub()
+    stub.verified_remote_l1 = frozenset({"l1/kis/H0STCNT0/dt=2026-09-01.parquet"})
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", _spy)
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **k: stub)
+    monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *a, **k: None)
+
+    settings = CollectorSettings(data_root=tmp_path)
+    daemon_mod._run_eod_housekeeping(settings, settings.paths, dt.date(2026, 9, 14), progress=lambda: None)
+
+    assert len(calls) == 1
+    assert calls[0]["normalize"] is False
+    assert calls[0]["reuse_fresh_l1"] is True
+
+
+@pytest.mark.parametrize("change", ["unchanged", "appended", "missing_l1", "corrupt_l0"])
+def test_housekeeping_preserves_invalidated_inputs_until_reverified(tmp_path, monkeypatch, change) -> None:
+    import datetime as dt
+    import json
+    import os
+    import subprocess
+    from unittest.mock import Mock
+
+    import pyarrow.parquet as pq
+    import zstandard as zstd
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon, eod
+    from src.storage.normalization import normalize_l0_partition
+    from src.storage.remote import GDriveArchiver, SyncStats
+    from tests.unit.orchestration.test_eod import _write_due_journal
+
+    cfg = CollectorSettings(data_root=tmp_path)
+    paths = cfg.paths
+    journal = _write_due_journal(tmp_path)
+    l1 = paths.archive_root / "kis/H0STCNT0/dt=2026-09-01.parquet"
+    repo_path = "l1/kis/H0STCNT0/dt=2026-09-01.parquet"
+
+    class MemoryArchive(GDriveArchiver):
+        def __init__(self):
+            super().__init__(remote_name="fake", remote_path="archive", runner=self.run)
+            self.l1_bytes = {}
+            self.remote_l0_exists = True
+
+        def run(self, cmd, **kwargs):
+            if cmd[1] == "purge":
+                self.remote_l0_exists = False
+            return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+        def sync_l1_tree(self, root, *, progress=None):
+            self.l1_bytes = {
+                "l1/" + path.relative_to(root).as_posix(): path.read_bytes()
+                for path in root.rglob("*.parquet")
+            }
+            return SyncStats(uploaded=len(self.l1_bytes))
+
+        def sync_manifest_tree(self, root):
+            return SyncStats()
+
+        def remote_file_sizes(self, prefix):
+            return {path: len(content) for path, content in self.l1_bytes.items()}
+
+        def remote_files(self, prefix):
+            return set(self.l1_bytes)
+
+    arc = MemoryArchive()
+    monkeypatch.setattr(GDriveArchiver, "try_from_env", classmethod(lambda cls: arc))
+    normalizer = Mock(wraps=normalize_l0_partition)
+    monkeypatch.setattr(eod, "run_isolated_normalize", normalizer)
+    monkeypatch.setattr(daemon, "check_disk_watermark", lambda *args, **kwargs: True)
+    changed = False
+
+    def offload(*args, **kwargs):
+        nonlocal changed
+        assert kwargs["journal_root"] == paths.journal_root
+        result = eod.run_eod_offload(*args, **kwargs)
+        assert l1.exists()
+        assert result.purged == 0
+        if not changed:
+            changed = True
+            if change == "appended":
+                record = {
+                    "raw": "new", "recv_mono_ns": 3, "recv_wall_ns": 4,
+                    "conn_id": "c1", "conn_seq": 2, "vendor": "kis", "tr_id": "H0STCNT0",
+                }
+                with journal.open("ab") as stream:
+                    stream.write(zstd.ZstdCompressor().compress((json.dumps(record) + "\n").encode()))
+            elif change == "missing_l1":
+                l1.unlink()
+            elif change == "corrupt_l0":
+                journal.write_bytes(b"broken frame")
+            if change in {"appended", "corrupt_l0"}:
+                newer = l1.stat().st_mtime_ns + 1
+                os.utime(journal, ns=(newer, newer))
+        return result
+
+    monkeypatch.setattr(daemon, "run_eod_offload", offload)
+    day = dt.date(2026, 10, 15)
+    result = daemon._run_eod_housekeeping(cfg, paths, day, progress=lambda: None)
+
+    if change == "unchanged":
+        assert normalizer.call_count == 1
+        assert result.deleted == 1
+        assert not journal.exists()
+        assert not arc.remote_l0_exists
+        assert l1.read_bytes() == arc.l1_bytes[repo_path]
+    elif change == "corrupt_l0":
+        assert result.deleted == 0
+        assert not result.maintenance_ok
+        assert not journal.exists()
+        assert (paths.quarantine_root / journal.relative_to(paths.journal_root)).read_bytes() == b"broken frame"
+        assert arc.remote_l0_exists
+        monkeypatch.setattr(daemon, "run_eod_offload", eod.run_eod_offload)
+        daemon._run_eod_housekeeping(cfg, paths, day + dt.timedelta(days=1), progress=lambda: None)
+        assert arc.remote_l0_exists
+    else:
+        assert result.deleted == 0
+        assert journal.exists()
+        assert arc.remote_l0_exists
+        assert pq.read_metadata(l1).num_rows == (2 if change == "appended" else 1)
+
+        monkeypatch.setattr(daemon, "run_eod_offload", eod.run_eod_offload)
+        result = daemon._run_eod_housekeeping(cfg, paths, day + dt.timedelta(days=1), progress=lambda: None)
+        assert result.deleted == 1
+        assert not journal.exists()
+        assert not arc.remote_l0_exists
+        assert l1.read_bytes() == arc.l1_bytes[repo_path]
+
+    if change != "corrupt_l0":
+        cleanup = eod.run_eod_offload(
+            paths.archive_root, paths.manifest_dir, journal_root=paths.journal_root,
+            reference_date=day + dt.timedelta(days=2),
+        )
+        assert cleanup.purged == 1
+        assert not l1.exists()
