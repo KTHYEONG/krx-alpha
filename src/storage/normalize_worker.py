@@ -14,6 +14,7 @@ from collections.abc import Callable, Sequence
 from src.core.config import CollectorSettings, DataQualitySettings, ObservabilitySettings, child_process_env
 from src.core.observability import configure_logging
 from src.core.session_anchors import resolve_session_anchors
+from src.storage.listing_days import listing_day_symbols
 from src.storage.market_phase import MARKET_PHASE_WINDOWS, phase_windows_for
 from src.storage.normalization import L1NormalizationError, L1StorageIOError, normalize_l0_partition
 from src.storage.retention import L1WorkerCrashError
@@ -106,12 +107,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             resolve_session_anchors(CollectorSettings().paths.session_calendar_dir, part_date)
         )
     try:
+        listing = (
+            listing_day_symbols(CollectorSettings().paths.bars_daily_dir, part_date)
+            if part_date is not None
+            else frozenset()
+        )
         rows = normalize_l0_partition(
             pathlib.Path(args.part),
             pathlib.Path(args.out),
             work_root=pathlib.Path(args.work_root) if args.work_root is not None else None,
             dq_settings=DataQualitySettings(),
             phase_windows=phase_windows,
+            listing_symbols=listing,
         )
     except L1StorageIOError as exc:
         print(json.dumps({"error": str(exc), "kind": "io"}), flush=True)  # noqa: T201 - child stdout protocol, read by parent

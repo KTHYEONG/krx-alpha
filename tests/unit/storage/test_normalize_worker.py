@@ -295,3 +295,77 @@ def test_normalize_worker_main_returns_io_fault_exit_on_storage_error(tmp_path, 
 
     assert code == EXIT_IO_FAULT
     assert json.loads(capsys.readouterr().out.strip().splitlines()[-1]) == {"error": "normalize failed: no space", "kind": "io"}
+
+
+def _write_listing_l0_tick(part, *, symbol, price, ref, seq=1) -> None:
+    import json
+
+    import zstandard as zstd
+
+    change = price - ref
+    drate = change / ref * 100
+    body = {
+        "shcode": symbol, "price": str(price), "cvolume": "10", "volume": "100",
+        "change": str(change), "sign": "2", "drate": f"{drate:.2f}",
+        "mdchecnt": "1", "mschecnt": "1",
+    }
+    raw = json.dumps({"header": {"tr_cd": "S3_", "tr_key": symbol}, "body": body})
+    part.mkdir(parents=True, exist_ok=True)
+    rec = {
+        "raw": raw, "recv_mono_ns": 1, "recv_wall_ns": 2, "conn_id": "ls-1",
+        "conn_seq": seq, "vendor": "ls", "tr_id": "H0STCNT0",
+    }
+    (part / "09.jsonl.zst").write_bytes(zstd.ZstdCompressor(level=3).compress((json.dumps(rec) + "\n").encode()))
+
+
+def test_worker_resolves_listing_symbols_for_partition_date(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    import json
+
+    import polars as pl
+    import pyarrow.parquet as pq
+
+    import src.storage.normalize_worker as worker_mod
+
+    _stub_collector_settings(monkeypatch, worker_mod, tmp_path)
+    day = dt.date(2026, 9, 29)
+    bars_dir = tmp_path / "data" / "bars" / "daily"
+    bars_dir.mkdir(parents=True)
+    pl.DataFrame({
+        "date": [dt.date(2026, 9, 26), day, day],
+        "symbol": ["OLD", "OLD", "NEW"],
+    }).write_parquet(bars_dir / "2026-09.parquet")
+    part = tmp_path / "l0" / "ls" / "H0STCNT0" / f"dt={day.isoformat()}"
+    _write_listing_l0_tick(part, symbol="NEW", price=18000, ref=10000)
+    out = tmp_path / "l1.parquet"
+
+    assert worker_mod.main(["--part", str(part), "--out", str(out)]) == 0
+
+    meta = pq.read_metadata(out).metadata
+    assert meta is not None
+    payload = json.loads(meta[b"krx_alpha.dq"].decode())
+    assert payload["status"] != "FAIL"
+    assert payload["tick"]["price_band_violation"] == 0
+
+
+def test_worker_unparsable_partition_uses_standard_band(tmp_path, monkeypatch) -> None:
+    import json
+
+    import pyarrow.parquet as pq
+
+    import src.storage.normalize_worker as worker_mod
+
+    _stub_collector_settings(monkeypatch, worker_mod, tmp_path)
+    calls: list = []
+    monkeypatch.setattr(worker_mod, "listing_day_symbols", lambda *a: calls.append(a) or frozenset({"NEW"}))
+    part = tmp_path / "l0" / "ls" / "H0STCNT0" / "dt=not-a-date"
+    _write_listing_l0_tick(part, symbol="NEW", price=18000, ref=10000)
+    out = tmp_path / "o.parquet"
+
+    assert worker_mod.main(["--part", str(part), "--out", str(out)]) == 0
+    assert calls == []
+    meta = pq.read_metadata(out).metadata
+    assert meta is not None
+    payload = json.loads(meta[b"krx_alpha.dq"].decode())
+    assert payload["status"] == "FAIL"
+    assert payload["tick"]["price_band_violation"] == 1

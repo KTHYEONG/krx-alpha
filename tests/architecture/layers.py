@@ -52,3 +52,4 @@ LAYER_RANK['src/brokers/kis/stack.py'] = 2
 LAYER_RANK['src/storage/layout.py'] = 2
 LAYER_RANK['src/cli/collect_premarket.py'] = 7
 LAYER_RANK['src/orchestration/premarket.py'] = 5
+LAYER_RANK['src/storage/listing_days.py'] = 2

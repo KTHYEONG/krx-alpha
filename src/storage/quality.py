@@ -22,7 +22,6 @@ _decode_kis_quote_frame = decode_kis_quotes
 
 _TICK_STREAM: str = "H0STCNT0"
 _TICK_STREAMS: tuple[str, ...] = ("H0STCNT0", "H0NXCNT0")
-_PRICE_BAND_RATIO: float = 0.30
 
 _TICK_BODY_FIELDS: tuple[str, ...] = ("shcode", "price", "cvolume", "volume", "change", "sign", "drate", "mdchecnt", "mschecnt")
 _QUOTE_STREAM: str = "H0STASP0"
@@ -204,7 +203,13 @@ def _decode_tick_chunk_mixed(chunk: pl.DataFrame) -> pl.DataFrame:
     return pl.concat(parts)
 
 
-def _summarize_tick_fields(raw_fields: pl.DataFrame, *, rows: int) -> TickQualitySummary:
+def _summarize_tick_fields(
+    raw_fields: pl.DataFrame,
+    *,
+    rows: int,
+    settings: DataQualitySettings,
+    listing_symbols: frozenset[str],
+) -> TickQualitySummary:
     frame = raw_fields.with_columns(
         price=pl.col("price_raw").cast(pl.Float64, strict=False),
         cvolume=pl.col("cvolume_raw").cast(pl.Int64, strict=False),
@@ -230,13 +235,18 @@ def _summarize_tick_fields(raw_fields: pl.DataFrame, *, rows: int) -> TickQualit
         .then(pl.col("price") / pl.col("drate_factor"))
         .otherwise(None),
     )
+    standard_upper = 1.0 + settings.price_band_ratio
+    standard_lower = 1.0 - settings.price_band_ratio
+    listing_upper = float(settings.listing_day_upper_ratio)
+    listing_lower = float(settings.listing_day_lower_ratio)
+    is_listing = pl.col("shcode").is_in(list(listing_symbols))
     flagged = flagged.with_columns(
         dq_zero_volume=(~pl.col("dq_decode_fail")) & (pl.col("cvolume") <= 0),
         dq_price_band_violation=(~pl.col("dq_decode_fail"))
         & (pl.col("ref_price") > 0)
         & (
-            (pl.col("price") > pl.col("ref_price") * (1 + _PRICE_BAND_RATIO))
-            | (pl.col("price") < pl.col("ref_price") * (1 - _PRICE_BAND_RATIO))
+            (pl.col("price") > pl.when(is_listing).then(pl.col("ref_price") * listing_upper).otherwise(pl.col("ref_price") * standard_upper))
+            | (pl.col("price") < pl.when(is_listing).then(pl.col("ref_price") * listing_lower).otherwise(pl.col("ref_price") * standard_lower))
         ),
         dq_schema_disagree=(~pl.col("dq_decode_fail"))
         & pl.col("ref_from_drate").is_not_null()
@@ -309,15 +319,35 @@ def decode_tick_raw_fields(df: pl.DataFrame, *, chunk_rows: int = _TICK_CHUNK_RO
     return pl.concat([_decode_tick_chunk_mixed(ticks.slice(offset, chunk_rows)) for offset in range(0, ticks.height, chunk_rows)])
 
 
-def decode_and_flag_ticks(df: pl.DataFrame, *, chunk_rows: int = _TICK_CHUNK_ROWS) -> TickQualitySummary | None:
+def decode_and_flag_ticks(
+    df: pl.DataFrame,
+    *,
+    chunk_rows: int = _TICK_CHUNK_ROWS,
+    settings: DataQualitySettings | None = None,
+    listing_symbols: frozenset[str] = frozenset(),
+) -> TickQualitySummary | None:
+    """Decode tick rows and flag quality invariants.
+
+    ``listing_symbols`` are judged against the listing-day band ``[listing_day_lower_ratio, listing_day_upper_ratio] x ref_price``; every other symbol against ``ref_price x (1 +/- price_band_ratio)``. ``settings=None`` means ``DataQualitySettings()``.
+    """
     fields = decode_tick_raw_fields(df, chunk_rows=chunk_rows)
     if fields is None:
         return None
-    return _summarize_tick_fields(fields, rows=fields.height)
+    resolved = settings if settings is not None else DataQualitySettings()
+    return _summarize_tick_fields(fields, rows=fields.height, settings=resolved, listing_symbols=listing_symbols)
 
 
-def summarize_tick_fields_bucketed(fields: pl.LazyFrame, *, rows: int, buckets: int) -> TickQualitySummary:
+def summarize_tick_fields_bucketed(
+    fields: pl.LazyFrame,
+    *,
+    rows: int,
+    buckets: int,
+    settings: DataQualitySettings | None = None,
+    listing_symbols: frozenset[str] = frozenset(),
+) -> TickQualitySummary:
     """Summarize spill-backed tick fields in shcode hash buckets with bounded memory.
+
+    ``listing_symbols`` are judged against the listing-day band ``[listing_day_lower_ratio, listing_day_upper_ratio] x ref_price``; every other symbol against ``ref_price x (1 +/- price_band_ratio)``. ``settings=None`` means ``DataQualitySettings()``.
 
     Args:
         fields: Lazy tick field frame (e.g. scan of per-chunk spill parquet).
@@ -332,6 +362,7 @@ def summarize_tick_fields_bucketed(fields: pl.LazyFrame, *, rows: int, buckets: 
     """
     if buckets <= 0:
         raise ValueError(f"buckets must be > 0, got {buckets}")
+    resolved = settings if settings is not None else DataQualitySettings()
     # 같은 shcode는 항상 같은 버킷에 모이므로 종목별 누적 상태가 경계를 넘지 않는다
     decode_fail = 0
     zero_volume = 0
@@ -344,7 +375,7 @@ def summarize_tick_fields_bucketed(fields: pl.LazyFrame, *, rows: int, buckets: 
         frame = fields.filter((pl.col("shcode").hash(_BUCKET_HASH_SEED) % buckets) == b).collect()
         if frame.height == 0:
             continue
-        s = _summarize_tick_fields(frame, rows=frame.height)
+        s = _summarize_tick_fields(frame, rows=frame.height, settings=resolved, listing_symbols=listing_symbols)
         decode_fail += s.decode_fail
         zero_volume += s.zero_volume
         price_band_violation += s.price_band_violation
