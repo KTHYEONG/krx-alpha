@@ -90,7 +90,9 @@ class LsRealtimeAdapter:
                 token = str(data["access_token"])
         except (TimeoutError, aiohttp.ClientError, ValueError, KeyError) as exc:
             raise VendorDisconnected(f"connect_failed:{type(exc).__name__}") from exc
-        return IssuedToken(token, None)
+        expires_in = data.get("expires_in") if isinstance(data, dict) else None
+        lifetime = float(expires_in) if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool) and expires_in > 0 else None
+        return IssuedToken(token, lifetime)
 
     async def connect(self) -> None:
         token = await self._token_store.aget_or_issue(self._issue_token)
@@ -128,14 +130,21 @@ class LsRealtimeAdapter:
         acks: list[VendorAck] = []
         for symbol, stream in pairs:
             tr_cd = LS_TR_CD[(stream, self._market_of[symbol])]
-            await self._ws.send_str(
-                json.dumps(
-                    {
-                        "header": {"token": self._token, "tr_type": "3"},
-                        "body": {"tr_cd": tr_cd, "tr_key": symbol},
-                    }
+            try:
+                await self._ws.send_str(
+                    json.dumps(
+                        {
+                            "header": {"token": self._token, "tr_type": "3"},
+                            "body": {"tr_cd": tr_cd, "tr_key": symbol},
+                        }
+                    )
                 )
-            )
+            except (aiohttp.ClientError, OSError) as exc:
+                if acks or self._token is None:
+                    raise VendorDisconnected(f"subscribe_failed:{type(exc).__name__}") from exc
+                # LS closes the socket right after connect when the token is expired; no auth error is sent.
+                await self._token_store.areplace_rejected(self._token, self._issue_token)
+                raise VendorAuthRejected(f"auth_rejected:subscribe_reset:{type(exc).__name__}") from exc
             # 구독 응답 대기 중에도 이미 구독된 심볼의 실시간 데이터가 끼어들 수 있어
             # ACK 로 인식될 때까지 프레임을 분류하며 소비한다 (데이터 유실 방지).
             resp: dict[str, Any] | None = None

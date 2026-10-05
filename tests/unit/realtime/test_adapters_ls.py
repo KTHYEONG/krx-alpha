@@ -755,3 +755,97 @@ def test_ls_adapter_ws_transport_failure_maps_to_disconnected(tmp_path) -> None:
     # When / Then
     with pytest.raises(VendorDisconnected, match="connect_failed"):
         asyncio.run(adapter.connect())
+
+def _reset_adapter(tmp_path, *, fail_on_send: int):
+    import asyncio
+    import aiohttp
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+
+    class _Resp:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def json(self):
+            return {'access_token': 'NEWTOK', 'expires_in': 86400}
+
+    class _WS:
+        def __init__(self):
+            self.sends = 0
+        async def send_str(self, s):
+            self.sends += 1
+            if self.sends >= fail_on_send:
+                raise aiohttp.ClientConnectionResetError('Cannot write to closing transport')
+        async def receive_str(self):
+            import json
+            return json.dumps({'header': {'tr_cd': 'S3_', 'rsp_cd': '00000', 'rsp_msg': 'ok'}, 'body': {}})
+        async def close(self):
+            return None
+
+    class _WSCtx:
+        def __init__(self, ws):
+            self._ws = ws
+        async def __aenter__(self):
+            return self._ws
+        async def __aexit__(self, *a):
+            return False
+
+    class _Http:
+        def __init__(self):
+            self.ws = _WS()
+            self.posts = 0
+        def post(self, url, **kw):
+            self.posts += 1
+            return _Resp()
+        def ws_connect(self, url, **kw):
+            return _WSCtx(self.ws)
+
+    store = TossTokenStore(ls_token_path(tmp_path, 'k'))
+    http = _Http()
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=http, market_of={'005930': 'KOSPI', '000660': 'KOSPI'}, token_store=store)
+    asyncio.run(adapter.connect())
+    return adapter, http, store
+
+
+def test_ls_adapter_subscribe_reset_before_first_ack_rotates_token_and_reports_auth_rejected(tmp_path) -> None:
+    import asyncio
+    import json
+    import pytest
+    from src.realtime.contracts import VendorAuthRejected
+
+    # Given: 연결 직후 서버가 소켓을 닫는 만료 토큰 상황(첫 구독 전송에서 reset)
+    adapter, http, store = _reset_adapter(tmp_path, fail_on_send=1)
+    assert http.posts == 1
+
+    # When: 구독한다
+    with pytest.raises(VendorAuthRejected):
+        asyncio.run(adapter.subscribe([('005930', 'H0STCNT0')]))
+
+    # Then: 크래시 대신 토큰이 교체(재발급)되어 다음 연결이 새 토큰을 쓴다
+    assert http.posts == 2
+    assert json.loads(store._path.read_text(encoding='utf-8'))['generation'] == 2
+
+
+def test_ls_adapter_subscribe_reset_after_acks_is_plain_disconnect(tmp_path) -> None:
+    import asyncio
+    import pytest
+    from src.realtime.contracts import VendorDisconnected
+
+    # Given: 첫 구독은 성공하고 두 번째 전송에서 reset
+    adapter, http, _ = _reset_adapter(tmp_path, fail_on_send=2)
+
+    # When / Then: 토큰은 교체하지 않고 VendorDisconnected 로 변환된다
+    with pytest.raises(VendorDisconnected):
+        asyncio.run(adapter.subscribe([('005930', 'H0STCNT0'), ('000660', 'H0STCNT0')]))
+    assert http.posts == 1
+
+
+def test_ls_adapter_issue_token_records_vendor_expiry(tmp_path) -> None:
+    import json
+
+    # Given: expires_in 를 반환하는 LS 응답
+    adapter, _, store = _reset_adapter(tmp_path, fail_on_send=99)
+
+    # Then: 저장소에는 만료 시각이 기록된다(영구 유효로 취급하지 않는다)
+    assert json.loads(store._path.read_text(encoding='utf-8'))['expires_at'] is not None
