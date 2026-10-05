@@ -242,7 +242,7 @@ def test_repeat_budget_preserves_first_occurrence_slots() -> None:
     for _ in range(30):
         handler.handle(_record("repeat-key"))
     for i in range(5):
-        handler.handle(_record(f"new-key-{i}"))
+        handler.handle(_record(f"new-key-{chr(97 + i)}"))
 
     assert handler._per_key_counts.get("repeat-key") == 15
     assert handler._sent_today == 20
@@ -279,7 +279,7 @@ def test_first_occurrences_may_use_reserved_slots(caplog) -> None:
     with caplog.at_level(logging.WARNING):
         caplog.clear()
         for i in range(5):
-            handler.handle(_record(f"fresh-{i}"))
+            handler.handle(_record(f"fresh-{chr(97 + i)}"))
         assert handler._sent_today == 20
         assert len(calls) == 20
         handler.handle(_record("fresh-overflow"))

@@ -1,5 +1,6 @@
 """관측 가능성 기반: 컴포넌트별 로깅·영속 JSONL 이벤트·CRITICAL 이메일 알림."""
 
+import atexit
 import logging
 import pathlib
 import queue
@@ -19,6 +20,7 @@ from src.core.alerts import (
     ALERT_COOLDOWN_S,
     ALERT_DAILY_CAP,
     EmailAlertHandler,
+    FileAlertLedger,
     format_alert_html,
     format_alert_subject,
     format_alert_text,
@@ -82,6 +84,7 @@ def configure_logging(
     stream: IO[str] | None = None,
     alert_settings: AlertSettings | None = None,
     alert_sender: Callable[[str, str], None] | None = None,
+    alert_ledger_path: pathlib.Path | None = None,
 ) -> str:
     """Install current process handlers and return a correlation run ID."""
     run_id = ObservabilitySettings().run_id or new_run_id(component)
@@ -112,11 +115,20 @@ def configure_logging(
         queue_handler = QueueHandler(q)
         queue_handler.setLevel(logging.CRITICAL)
         setattr(queue_handler, _MANAGED_ATTR, True)
-        email_handler = EmailAlertHandler(
-            component=component,
-            run_id=run_id,
-            sender=alert_sender or gmail_sender(alerts),
-        )
+        if alert_ledger_path is not None:
+            email_handler = EmailAlertHandler(
+                component=component,
+                run_id=run_id,
+                sender=alert_sender or gmail_sender(alerts),
+                ledger=FileAlertLedger(alert_ledger_path),
+                clock=time.time,
+            )
+        else:
+            email_handler = EmailAlertHandler(
+                component=component,
+                run_id=run_id,
+                sender=alert_sender or gmail_sender(alerts),
+            )
         listener = QueueListener(q, email_handler, respect_handler_level=False)
         listener.start()
         _LISTENERS.append(listener)
@@ -137,3 +149,6 @@ def shutdown_logging() -> None:
         if getattr(handler, _MANAGED_ATTR, False):
             root.removeHandler(handler)
             handler.close()
+
+
+atexit.register(shutdown_logging)

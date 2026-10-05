@@ -173,7 +173,11 @@ def test_normalize_worker_main_configures_logging_component(tmp_path, monkeypatc
     from src.core.config import CollectorSettings
 
     calls: list[tuple[str, object]] = []
-    monkeypatch.setattr(worker_mod, "configure_logging", lambda component, *, log_dir=None: calls.append((component, log_dir)) or "r")
+    monkeypatch.setattr(
+        worker_mod,
+        "configure_logging",
+        lambda component, *, log_dir=None, alert_ledger_path=None: calls.append((component, log_dir, alert_ledger_path)) or "r",
+    )
     part = tmp_path / "l0" / "ls" / "H0STCNT0" / "dt=2026-09-01"
     part.mkdir(parents=True)
     rec = {"raw": "a", "recv_mono_ns": 1, "recv_wall_ns": 2, "conn_id": "ls-1", "conn_seq": 1, "vendor": "ls", "tr_id": "H0STCNT0"}
@@ -184,7 +188,11 @@ def test_normalize_worker_main_configures_logging_component(tmp_path, monkeypatc
     monkeypatch.setenv("KRX_ALPHA_PERSISTENT_LOGS", "true")
     assert worker_mod.main(["--part", str(part), "--out", str(tmp_path / "o2.parquet")]) == 0
 
-    assert calls == [("normalize-worker", None), ("normalize-worker", CollectorSettings().paths.logs_dir)]
+    expected_ledger = CollectorSettings().paths.alert_ledger_file
+    assert calls == [
+        ("normalize-worker", None, expected_ledger),
+        ("normalize-worker", CollectorSettings().paths.logs_dir, expected_ledger),
+    ]
 
 
 def _write_l0_trade(part, *, event_time) -> None:

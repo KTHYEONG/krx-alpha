@@ -185,6 +185,89 @@ def test_configure_logging_sends_critical_email_via_background_queue(monkeypatch
     assert "stage=alert status=ENABLED" in stream.getvalue()
 
 
+def test_configure_logging_shared_ledger_bounds_repeats(tmp_path, monkeypatch) -> None:
+    import io
+    import json
+    import logging
+
+    from src.core.config import AlertSettings
+    from src.core.observability import configure_logging, shutdown_logging
+
+    monkeypatch.setenv("KRX_ALPHA_RUN_ID", "r-ledger")
+    sent: list[tuple[str, str]] = []
+    ledger_path = tmp_path / "alert_ledger.json"
+    configure_logging(
+        "daemon",
+        stream=io.StringIO(),
+        alert_settings=AlertSettings(alert_gmail_user="u@x", alert_gmail_app_password="pw", alert_gmail_to="t@x"),
+        alert_sender=lambda subject, body, **kw: sent.append((subject, body)),
+        alert_ledger_path=ledger_path,
+    )
+    try:
+        log = logging.getLogger("src.orchestration.daemon")
+        log.critical("[DATA] stage=quality tr_id=H0STCNT0 vendor=kis rows=1")
+        log.critical("[DATA] stage=quality tr_id=H0STCNT0 vendor=kis rows=999")
+    finally:
+        shutdown_logging()
+    assert ledger_path.exists()
+    data = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert data["sent_today"] == 1
+    assert len(sent) == 1
+
+
+def test_configure_logging_without_ledger_path_creates_no_file(tmp_path, monkeypatch) -> None:
+    import io
+    import logging
+
+    from src.core.config import AlertSettings
+    from src.core.observability import configure_logging, shutdown_logging
+
+    monkeypatch.setenv("KRX_ALPHA_RUN_ID", "r-noledeger")
+    monkeypatch.chdir(tmp_path)
+    sent: list[str] = []
+    configure_logging(
+        "daemon",
+        stream=io.StringIO(),
+        alert_settings=AlertSettings(alert_gmail_user="u@x", alert_gmail_app_password="pw", alert_gmail_to="t@x"),
+        alert_sender=lambda subject, body: sent.append(subject),
+    )
+    try:
+        logging.getLogger(__name__).critical("[DATA] stage=quality rows=1")
+        logging.getLogger(__name__).critical("[DATA] stage=quality rows=999")
+    finally:
+        shutdown_logging()
+    assert len(sent) == 1
+    assert list(tmp_path.rglob("alert_ledger.json*")) == []
+
+
+def test_process_exit_drains_email_queue_and_commits_shared_budget(tmp_path) -> None:
+    import json
+    import subprocess
+    import sys
+
+    ledger_path = tmp_path / "alert_ledger.json"
+    code = """
+import io, logging, pathlib, sys, time
+from src.core.config import AlertSettings
+from src.core.observability import configure_logging
+configure_logging(
+    "child", stream=io.StringIO(), alert_ledger_path=pathlib.Path(sys.argv[1]),
+    alert_settings=AlertSettings(alert_gmail_user="u@x", alert_gmail_app_password="pw", alert_gmail_to="t@x"),
+    alert_sender=lambda subject, body: time.sleep(0.1),
+)
+logging.getLogger("child").critical("[DATA] stage=quality rows=1")
+logging.getLogger("child").critical("[DATA] stage=quality rows=999")
+"""
+    result = subprocess.run(  # noqa: S603 - trusted child program and isolated ledger
+        [sys.executable, "-c", code, str(ledger_path)], check=False, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert data["sent_today"] == 1
+    assert data["keys"]["[DATA] stage=quality rows=#"]["confirmed_count"] == 1
+    assert data["reservations"] == {}
+
+
 def test_email_alert_handler_applies_cooldown_and_daily_cap() -> None:
     import datetime as dt
     import logging

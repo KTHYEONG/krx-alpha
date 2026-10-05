@@ -1858,7 +1858,9 @@ def run_collector_daemon(
     runtime = resolve_collector_runtime(collector=settings)
 
     run_id = configure_logging(
-        "daemon", log_dir=runtime.paths.logs_dir if ObservabilitySettings().persistent_logs else None
+        "daemon",
+        log_dir=runtime.paths.logs_dir if ObservabilitySettings().persistent_logs else None,
+        alert_ledger_path=runtime.paths.alert_ledger_file,
     )
     logger.info("[DAEMON] stage=start status=ONLINE timezone=Asia/Seoul run_id=%s", run_id, extra=EVENT)
 

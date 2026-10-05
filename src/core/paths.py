@@ -90,6 +90,10 @@ class DataPaths:
     def daemon_lifecycle(self) -> pathlib.Path:
         return self.work_root / "daemon_lifecycle.json"
 
+    @property
+    def alert_ledger_file(self) -> pathlib.Path:
+        return self.work_root / "alert_ledger.json"
+
     def universe_out(self, day: dt.date) -> pathlib.Path:
         return self.universe_dir / f"{day.isoformat()}.parquet"
 

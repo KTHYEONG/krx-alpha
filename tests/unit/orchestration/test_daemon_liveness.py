@@ -43,6 +43,7 @@ def _install_fake_sender(monkeypatch, daemon_mod):
             alert_gmail_user="u", alert_gmail_app_password="p", alert_gmail_to="t"
         )
         kw["alert_sender"] = lambda subject, body, **_: sent.append((subject, body))
+        kw.pop("alert_ledger_path", None)
         return real_configure(component, **kw)
 
     monkeypatch.setattr(daemon_mod, "configure_logging", _configure)

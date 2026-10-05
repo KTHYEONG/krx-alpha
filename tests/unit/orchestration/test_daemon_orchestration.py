@@ -639,7 +639,7 @@ def test_run_collector_daemon_orchestration_exception_logs_traceback(tmp_path, m
     import src.orchestration.daemon as daemon_mod
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None: "r")
+    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None, alert_ledger_path=None: "r")
     monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
 
     def _raise(**kw):
@@ -1750,7 +1750,7 @@ def test_run_collector_daemon_logs_failed_store_migration_and_continues(tmp_path
     }).write_parquet(settings.paths.legacy_bars_file)
     settings.paths.bars_daily_dir.mkdir(parents=True, exist_ok=True)
     (settings.paths.bars_daily_dir / "2026-09.parquet").write_bytes(b"existing-partition")
-    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None: "r")
+    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None, alert_ledger_path=None: "r")
     monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
     monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: False)
 
