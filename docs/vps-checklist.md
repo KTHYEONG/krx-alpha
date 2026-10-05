@@ -1,54 +1,432 @@
-# VPS Checklist (krx-collector, NXT premarket)
+# VPS Daily Automation Audit Runbook (krx-alpha)
 
-Host `or-vps`, container `krx-collector`, data root `/home/ubuntu/krx-alpha/data` (container `/app/data`). Read-only checks only.
-Set `D` = KST session date (YYYY-MM-DD), `N` = next business day. Report each item as PASS / WARN / FAIL with the value found.
+Agent-executable runbook. An AI auditor runs it on a schedule, verifies that every automated routine of the day ran **and that the data it produced is correct**, then reports. It is feature-agnostic: new automation is added as a check row (section 12), not as a new document.
 
-## A. Daily, after 20:30 KST (business days; first 2 weeks, then weekly)
+- Host `or-vps` (SSH alias, tailnet), container `krx-collector`, data root host `~/krx-alpha/data` = container `/app/data`.
+- Last verified against production: 2026-10-05 (baselines in section 9 are dated; refresh them, never hard-code new ones).
+- Output language: report in Korean; keys, IDs, badges stay English (section 10). This file stays English.
 
-| # | Check | Command | PASS |
+## 1. Operating rules (non-negotiable)
+
+1. **Read-only.** No restart, deploy, file write, `rclone` write, or config edit on the VPS. Analysis output goes to the local scratchpad / `scratch/`. Remediation is proposed, never executed, unless the user says so.
+2. **No secrets.** Never print env files, tokens, app keys, rclone config, or `~/.cache/kis` contents (file names and mtimes only).
+3. **UNKNOWN is not PASS.** A missing file, unreachable host, expired evidence, or a probe error is `UNKNOWN` with the reason. A silent check is a defect of the audit.
+4. **Day kind first.** Decide `BUSINESS` / `HOLIDAY` / `WEEKEND` / `SHIFTED` (section 4) before judging anything; the same silence is PASS on a holiday and SEV1 on a business day.
+5. **Baselines are relative.** Judge row counts and sizes against the trailing median of the previous 5 comparable days (probes print the ratio). Absolute numbers in section 9 are seeds for sanity only.
+6. **Do not trust the dashboard or the logs' own verdicts.** Confirm each claimed OK from primary evidence (files, manifests, parquet content). Audit the dashboard itself (A5).
+7. **A FAIL verdict from the pipeline is a finding, not a conclusion.** Before calling it a data defect, test whether the rule is wrong (2026-10-05: `price_band_violation` FAILs were new-listing days under a fixed ±30% band).
+8. **Evidence expires.** Collect volatile evidence first (section 5). Run M3 before 22:00.
+9. **Load discipline.** Heavy probes only at/after 20:35 KST on business days, wrapped in `nice -n 19`; parquet reads use column pruning. Never run content probes inside the container during 08:10–20:30. Deep re-derivations run locally on copied partitions.
+10. **Freeze.** Never recommend or perform a deploy/restart on a business day 08:10–22:00 KST except to stop an active data-loss incident (state this explicitly).
+
+## 2. Severity and escalation
+
+| Sev | Definition | Examples | Action |
 |---|---|---|---|
-| A1 | Manifest closed, ACKs complete | `python3 -c "import json;m=json.load(open('manifest/premarket/D.nxt.shard-00.json'));print(m['venue'],m['session'],m['writer_closed_at_ns'] is not None,len([a for a in m['subscription_acks'] if a['accepted']]),len(m['planned_pairs']),len(m['gaps']),m['degraded_reason'])"` | `nxt nxt_pre True 40 40 <gaps> None` |
-| A2 | Gaps | list `m['gaps']` entries inside 08:00–08:50: `reason`, duration `(gap_end_ns-gap_start_ns)/1e9` | max gap <= 30 s; `restart` gaps = 0. Baseline: aftermarket also logs `watchdog` gaps, compare with `manifest/aftermarket/D.nxt.shard-00.json` |
-| A3 | L0 present, both streams | `ls -l l0/kis/nxt/nxt_pre/H0NXCNT0/dt=D l0/kis/nxt/nxt_pre/H0NXASP0/dt=D` | files `08.s0.jsonl.zst` (and `07.s0` if frames before 08:00) in both; sizes > 0 |
-| A4 | Symbols with data | `zstdcat l0/kis/nxt/nxt_pre/H0NXCNT0/dt=D/*.zst \| python3 -c "import sys,json,collections;c=collections.Counter(json.loads(l)['raw'].split('^')[0] for l in sys.stdin);print(len(c),c.most_common(3),c.most_common()[-3:])"` (L0 `symbol` field is empty for KIS; use first `raw` field) | 15–20 symbols with trades; record counts as baseline |
-| A5 | Event time sane | first/last `exchange_event_time` of the same stream | HHMMSS, first >= 075800, last <= 085500 (WARN otherwise: V2 time-field assumption) |
-| A6 | EOD result | `grep eod_maintenance data/logs/events-daemon.jsonl \| tail -1` | `status=OK` (premarket never degrades it) |
-| A7 | Premarket EOD line | `docker logs --since 14h krx-collector 2>&1 \| grep premarket_eod` | `status=OK accepted=40 planned=40` |
-| A8 | Normalization quality (L1 is produced when a day leaves the 3-day L0 window: check day D-3, first valid on the 4th day) | `ls l1/kis/nxt/nxt_pre/*/` and `grep "stage=quality" data/logs/events-normalize-worker.jsonl \| grep "tr_id=H0NX" \| tail -6` | L1 parquet exists for both streams for D-3; `status=OK` or WARN with `tick_loss` < 0.1% of rows; `ladder_disorder`/`crossed_book` small (premarket quotes are continuous, not auction); no file under `quarantine/` dated D |
-| A9 | Phase labels (D-3; polars exists only in the container) | `docker exec krx-collector /app/.venv/bin/python -c "import polars as pl;print(pl.read_parquet('data/l1/kis/nxt/nxt_pre/H0NXCNT0/dt=<D-3>.parquet',columns=['market_phase']).to_series().value_counts())"` | `premarket` dominates; `unclassified` < 1% |
-| A10 | Offload | EOD `uploaded=` > 0; remote has `l1/kis/nxt/nxt_pre/<stream>/dt=<D-3>.parquet` (`rclone lsjson` on the configured remote) | present remotely |
-| A11 | Next pool (also on dashboard) | `ls -l universe/premarket/N.json` and `docker logs --since 14h krx-collector 2>&1 \| grep premarket_pool` | file exists; `status=OK target=N symbols=20`; otherwise tomorrow's premarket is skipped (fix after 22:00 only) |
+| SEV1 | Data is being lost or will be lost before the next run; fail-closed guard tripped | no ticks during a session window; streamer down >5 min in session; `ClockUnsyncedError`; disk >90%; EOD not finished by 21:00; offload size mismatch with L0 already deleted; calendar says business day but daemon skipped | Notify the user immediately (push/notification tool if available, else first line of the reply) before finishing the rest of the audit |
+| SEV2 | Data present but suspect, redundancy or monitoring degraded | DQ FAIL confirmed as real; snapshot kind missing/zero; host backup stale >26h; remote auth expired; unexplained CRITICAL; dashboard OK while ground truth FAIL | In the report headline; propose fix and deadline |
+| SEV3 | Anomaly with no data impact | known-benign WARN drifting; one gap ≤30 s; failed unit of another project | In report body; track in open items |
+| INFO | Context | baselines, counts, next run | Body only |
 
-## B. Daily, after 08:55 KST (quick)
+A finding keeps its severity until its evidence is gone; re-report only on change (section 10 open items).
 
-| # | Check | PASS |
+## 3. Run modes and cadence
+
+Run the mode that matches the KST time. Every run starts with C0 (section 4) and ends with the report (section 10).
+
+| Mode | When (KST) | Purpose | Checks |
+|---|---|---|---|
+| M0 pre-open | business day 07:45–08:15 | Is the day armed? | C0, H1–H6, S1, S6, S7, A1, NP* (if premarket enabled) |
+| M1 open | business day 09:05–09:30 | Did collection actually start? | C0, S2–S4, C1 (current hour), C2 (regular), H2 |
+| M2 close | business day 15:45–16:15 | Regular session closed clean, aftermarket armed | C0, S2, C2, C4, C7 (aftermarket universe) |
+| **M3 EOD review** | business day 20:35–21:45 (**finish before 22:00**) | Full audit of the day incl. content | everything in sections 6–8 except weekly rows |
+| M4 night | every day 23:45–00:15 | Host backup, next-day readiness | H5–H8, C7 (next premarket pool), S1 for tomorrow |
+| W weekly | Saturday 10:00 | Trends, deep content cross-checks, capacity | all `W` rows, X1, H3 trend |
+| X incident | on demand | Triage | section 11, then affected rows |
+
+Holiday / weekend: run M0-lite (H1–H6, S1) and M4; expected state is idle. Cadence is set by whoever schedules the run (loop/schedule skill or the user); this runbook only defines coverage per mode.
+
+## 4. C0 context bootstrap (every run)
+
+Run P-CTX (section 8). Derive:
+
+- `NOW` KST, `KIND` of today and of tomorrow. Sources that must agree: `calendar_cache.json` (`is_business_day`, `previous_business_day` = `P`, `next_business_day` = `N`; valid only when `date == today`), dashboard `[market]` `closed_dates` / `shifted_dates`, weekday. Disagreement = S1 finding. `SHIFTED` days move session anchors: read `calendar/dt=<day>.json` (`regular_open`, `regular_close`, `after_market_end`, `source`); every time in this runbook shifts accordingly. `source != vendor` means the vendor calendar failed and defaults are in use (SEV3).
+- `D` = session date under audit: today if business day and `NOW` ≥ 08:20, else `P`.
+- Deployed revision = container label `rev`; compare with `origin/main` head / last successful CI run. Mismatch or a start time inside 08:10–22:00 = S4 finding.
+
+## 5. Evidence volatility
+
+| Evidence | Lifetime | Consequence |
 |---|---|---|
-| B1 | Dashboard `프리마켓 종목`=OK, `프리마켓 수집`=DONE with `구독 40/40` | as stated |
-| B2 | `docker logs --since 2h krx-collector 2>&1 \| grep -E "premarket_(stream\|plan\|supervise)"` | `status=START` then `STOP`; no `SKIP`, `RESTARTED`, `circuit_open`, `FAIL` |
-| B3 | `tail -3 data/logs/events-cli-collect-premarket.jsonl` | `stream_connect ... rejected=0`; no `stream_gap`/`stream_disconnect` bursts |
+| `docker logs krx-collector` (INFO heartbeat, `stage=normalize`, digest, `stage=prune ... REUSED`) | until next container recreate (22:00 Mon–Fri, any deploy) and 30 MB cap | Collect in M3; export `docker logs --since 14h` to the scratchpad first |
+| `data/logs/events-*.jsonl` | persistent, rotating 5 MiB x5; **WARNING+ and flagged INFO only** | Absence of INFO is not evidence of absence; `state_change`, `start`, `streamer` INFO are retained |
+| `manifest/**`, `universe/**`, `candidates.json`, `calendar/**` | persistent | Primary evidence for plans and session boundaries |
+| L0 `l0/**` | until offload-verified and older than `journal_retain_days`=3 | Only source for same-day raw checks |
+| L1 `l1/**` | 30 days local, permanent on remote; created for dates < today-3 | DQ verdict of day D exists only from D+4 calendar days; same-day content is checked on L0 |
+| Dashboard `public/status.json` | refreshed every minute | Snapshot, not history |
+| Host timers / backup status | systemd journal, `host_backup_status.json` | Persistent |
 
-## C. Weekly
+## 6. Moments that must not be missed (business day timeline)
 
-| # | Check | PASS |
-|---|---|---|
-| C1 | Disk | `df -h /home/ubuntu` < 70%; `du -sh l0/kis/nxt/nxt_pre l1/kis/nxt/nxt_pre`: record bytes/day; projected 30-day growth acceptable |
-| C2 | Retention | `ls l0/kis/nxt/nxt_pre/H0NXCNT0` holds <= `journal_retain_days` (3) newest days after offload |
-| C3 | Pool quality | for each D: symbols with < 100 trades in A4 (dead symbols). If > 5 per day, tune `max_symbols` or selection; do not change during 08:10–22:00 |
-| C4 | Silence limit calibration (V3) | max in-window gap across the week (A2); set `KRX_ALPHA_PREMARKET_SILENCE_LIMIT_S` ~2.6x the largest normal gap |
-| C5 | Slot isolation (V5) | no `key_lease_busy` in premarket events; `KIS_DECISION_SHARD_SLOTS` and `KIS_HOST_DATA_SLOTS` unchanged vs `quant-secrets/*.env` (names only, never print keys) |
-| C6 | Container | `docker ps` Up; `docker stats --no-stream krx-collector` memory < 400 MiB at 08:30 and EOD; restarts = 0 |
+Times are standard anchors; shift per C0. "By" = latest acceptable time; missing it is the stated severity.
 
-## D. Failure triage (stop after reporting; do not deploy 08:10–22:00)
+| Time | Event | Verify with | If missed |
+|---|---|---|---|
+| 07:05 | Shared KIS token warm-up (host timer of the sibling project); krx issues a token only if the cache is empty | no `kis_token_preflight` CRITICAL in events at 08:20 | SEV1 for the premarket/aftermarket (KIS) paths |
+| 07:58 | Premarket pool effective (if `PREMARKET_ENABLED`) | NP1 | SEV3 (that day's premarket skipped) |
+| 08:00–08:50 | NXT premarket stream (if enabled) | NP2–NP6 | SEV2 |
+| 08:10 | Freeze starts | no deploy/restart after this | n/a |
+| 08:20 | Daemon `STREAMER_ACTIVE`: calendar gate, bars refresh, candidates | S2, S6, S7 | `candidates_not_ready` still failing at 08:50 = **SEV1** (2026-10-02: `selected 96 exceeds slot_budget 90`, collection started late, 97 gaps) |
+| by 08:50 | `FULL_ACTIVE`, regular streamer up | S3, C1 | SEV1 |
+| 09:00 | Open: first ticks | newest `l0/ls/krx/regular/*/dt=D/HH.jsonl.zst` mtime < 120 s | SEV1 |
+| 15:20–15:30 | Closing auction (densest data) | C2 gaps in window | SEV2 |
+| by 15:31 | Aftermarket universe written | `universe/aftermarket/D.json` | SEV1 for aftermarket collection |
+| 15:39 | Last snapshot REST job; 15:40 `AFTER_MARKET_ACTIVE`, NXT aftermarket starts (KRX aftermarket 16:00) | C4, C2 | SEV2 |
+| 20:00 | Aftermarket ends, EOD starts; writers close within ~10 s | C2 `closed` | SEV2 |
+| by 20:30 | EOD maintenance done (normalize, offload, reconcile); 20:20 program-trade sync; 20:30 next-day pool | S5, H8, C5, C7 | WARN at 20:30, **SEV1 at 21:00** |
+| 22:00 Mon-Fri | Deferred recreate applies pending deploys | M4: container start ~22:00, `rev` as intended | SEV2 |
+| 23:30 | Host Drive backup | H7 | SEV2 if stale >26 h |
+
+## 7. Check catalogue
+
+Columns: ID, modes, what, how (probe in section 8 or command), PASS / WARN / FAIL. Severity per section 2 unless stated. Commands run on the host; `cd ~/krx-alpha/data` first. Inside table cells `\|` is markdown escaping of a shell pipe `|`; type it as `|`.
+
+### H: Host and container
+
+| ID | Modes | Check | How | PASS | WARN / FAIL |
+|---|---|---|---|---|---|
+| H1 | M0 M3 M4 | Container health | P-CTX | Up; `restarts=0`; `oom=false`; start = last 22:00 recreate or a known deploy | any restart/OOM = SEV2; start inside 08:10–22:00 unexplained = SEV2 |
+| H2 | M0 M3 W | Memory | `docker stats --no-stream krx-collector` | idle <200 MiB; EOD peak <900 MiB of 1 GiB | >800 MiB WARN; OOM = SEV2 |
+| H3 | M0 M3 W | Disk | `df -h /home/ubuntu`; `du -sh data/l0 data/l1` | <70% | 70–85% WARN; >85% FAIL SEV1 (>90%); weekly: project 30-day growth |
+| H4 | M0 M3 | Clock | `chronyc tracking` (System time) | abs offset <0.5 s | >0.5 s WARN; >2.0 s FAIL SEV1 (`ClockUnsyncedError`); also per-manifest `clock_offset_ns` (C2) |
+| H5 | M0 M4 | Failed units | `systemctl --user --failed --no-legend; systemctl --failed --no-legend` | none for `krx-*` / `quant-dashboard-*` | krx unit failed = SEV2; other project's failed unit = SEV3 INFO (2026-10-05: `kca-tape-sweep.service`) |
+| H6 | M0 M4 | Timers armed | `systemctl --user list-timers --no-pager \| grep -E "krx-\|quant-dashboard\|vps-image"` | `krx-host-backup` (23:30 KST daily), `krx-deferred-recreate` (Mon-Fri 22:00 KST) have a future trigger | missing/stale trigger = SEV2 |
+| H7 | M0 M4 | Host backup | `cat ~/.local/state/krx-alpha/host_backup_status.json` (+ `journalctl --user -u krx-host-backup --since "2 days ago"`) | `rc=0`, `data_rc=0`, `prune_rc=0`, `last_ok_at` <26 h | stale/non-zero = SEV2 |
+| H8 | M3 W | Offload integrity | P-REMOTE | every newest-3 local L1 has identical remote size; rclone reachable | mismatch = SEV2 (SEV1 if its L0 is already deleted); rclone error = UNKNOWN then SEV2 (`auth_expired`) |
+| H9 | M3 | Other containers present | `docker ps -a --format "{{.Names}} {{.Status}}"` | `krx-collector` Up | others: INFO only |
+
+### S: Scheduling and daemon
+
+| ID | Modes | Check | How | PASS | WARN / FAIL |
+|---|---|---|---|---|---|
+| S1 | M0 M3 M4 | Calendar agreement | C0 sources + events `stage=session status=SKIP reason=market_holiday` | daemon SKIP exists iff day is closed | business day skipped = SEV1; holiday collected = SEV3; sources disagree = SEV2 |
+| S2 | M1 M2 M3 | State timeline | P-EVENTS section state_change: `grep '"state_change"' logs/events-daemon.jsonl` for D | `PRE_MARKET_SLEEP→STREAMER_ACTIVE(08:20)→FULL_ACTIVE(08:50)→AFTER_MARKET_ACTIVE(15:40)→POST_MARKET_EOD(20:00)→NIGHT_SLEEP`, each within ±90 s of anchor (holiday: same states, no collection) | late/missing transition = SEV2; skipped state = SEV1 |
+| S3 | M1 M2 | Heartbeat | `docker logs --since 30m krx-collector 2>&1 \| grep stage=heartbeat \| tail -3` | every ~10 min; `streamer_alive=True` in `FULL_ACTIVE` | stale >15 min or `alive=False` in session = SEV1; `streamer_restarts>0` = SEV2 |
+| S4 | M0 M3 | Starts and deploys | events `stage=start status=ONLINE` for D; `work/daemon_lifecycle.json` (`clean_exit`, `crash_error`) | ≤1 start/day (22:00) | start in 08:10–22:00 = SEV2 (hotfix or crash; read `shutdown` event: `signal`, `graceful`) |
+| S5 | M3 | Event audit | P-EVENTS for D | every non-INFO event is explained by an open item or the benign list (section 9); no `stage=eod_*`, `prune`, `quarantine`, `host_backup_freshness` CRITICAL | unexplained CRITICAL/ERROR = SEV2; `eod_maintenance DEGRADED` = SEV1 |
+| S6 | M0 | Candidates armed | `candidates.json`: `rev` = P as YYYYMMDD; count; no `candidates_not_ready` / `orchestration_error` since 08:20 | rev matches, count within trailing range and ≤ configured slot budget | stale rev or errors = SEV1 after 08:50 |
+| S7 | M0 M3 | Bars refresh | P-BARS `latest_date` | = P after 08:30 | older than P after 08:50 = SEV3; KRX timeout WARN is known (retry) |
+
+### C: Collection completeness
+
+| ID | Modes | Check | How | PASS | WARN / FAIL |
+|---|---|---|---|---|---|
+| C1 | M1 M3 | L0 inventory | P-L0 with `D` | expected streams (section 9) present; hourly files cover the session window; `zero_size=0`; each file within 0.3–3x the same-hour median of the previous 5 days; M1: newest file mtime <120 s | missing stream/hour = SEV1 in session, SEV2 after; zero-size = SEV1 |
+| C2 | M2 M3 | Manifests | P-MANIFEST with `D` | aftermarket: every shard `closed` within 10 s of 20:00, `acks_ok == planned` (40/shard), `gaps=0`, `degraded=None`; regular: `boots=1`, no `restart` gap, max gap ≤30 s; `clock` measured, |offset| <50 ms | ack shortfall / `degraded` = SEV2; `boots>1` or restart gap in session = SEV2; gap >30 s = SEV3 (SEV2 if in 15:20–15:30). Regular manifest has no `writer_closed` by design |
+| C3 | M3 | Symbol coverage | KIS aftermarket: `zstdcat l0/kis/<venue>/<session>/H0xxCNT0/dt=D/*.zst \| python3 -c "import sys,json,collections;c=collections.Counter(json.loads(l)['raw'].split('^')[0] for l in sys.stdin);print(len(c),c.most_common(3),c.most_common()[-3:])"` (L0 `symbol` is empty for KIS) | symbols with trades ≥ 90% of planned symbols; dead symbols (<100 trades) ≤ 5 | more dead symbols = SEV3 (tune selection, not during freeze) |
+| C4 | M2 M3 | Snapshots present | P-SNAP | 9 kinds for D; `ratio` 0.5–2.0 of median **and** consistent with candidate count (see Q6); `session_date` mismatch 0; key nulls 0 | missing kind or 0 rows = SEV2; ratio outside = SEV3 until explained by candidate count |
+| C5 | M3 | Program trades | P-BARS-style: `pl.scan_parquet('/app/data/bars/program_trades/*.parquet').group_by('date').len().sort('date').tail(3)` | row for D by 20:30, count within ±5% of median (~2456) | late = SEV3; missing by 21:00 = SEV2 |
+| C6 | M0 M3 | Daily bars | P-BARS | latest date = P (or D after refresh), count within ±3% of median (~2763) | see Q5 |
+| C7 | M2 M4 | Universe artifacts | aftermarket: `universe/aftermarket/D.json`; premarket: `universe/premarket/N.json` | exist; `selected_count` ≤ `capacity`; `effective_from` ≤ start of its session; fields `schema_version rev session_date candidates` present | missing = SEV1 for that session (premarket: SEV3) |
+
+### Q: Data content (is the data itself right)
+
+| ID | Modes | Check | How | PASS | WARN / FAIL |
+|---|---|---|---|---|---|
+| Q1 | M3 W | DQ verdicts | P-DQ | newest partition per active stream: no FAIL; WARN only with the benign counters in section 9 and ratios ≤3x baseline | FAIL: reproduce locally first (X2); real defect = SEV2, rule false positive = SEV3 fix the rule; unknown counter = SEV2 |
+| Q2 | M3 | L1 volume | P-DQ `ratio_vs_median` | 0.6–1.6 | outside = SEV3, explain via universe size |
+| Q3 | M3 | Conservation | docker logs `stage=normalize part=`: `raw_records == l1_rows + dedup_dropped`; `conn_seq_conflict=0`; footer `num_rows` (P-DQ `rows`) == `l1_rows` | exact | any inequality = SEV1 (loss or duplication) |
+| Q4 | M3 W | Phase labels | P-DQ `unclassified` | <1% of rows | ≥1% = SEV3 (time-field assumption broken) |
+| Q5 | M0 M3 | Daily bar invariants | P-BARS | all violation columns 0 for the last 10 dates; `duplicate_date_symbol=0`; `chg_mismatch=0` | any >0 = SEV2 |
+| Q6 | M3 | Snapshot invariants | P-SNAP2 | OHLC consistent, no duplicate keys/news ids, `net_qty == buy_qty - sell_qty`, ranking keys unique; `program_trade`/`security_status`/`investor_estimate` distinct symbols ≈ candidate count (±5%) | violation = SEV2; symbol/candidate mismatch = SEV3 |
+| Q7 | M3 | Candidate content | `candidates.json` via P-SNAP2 line: unique symbols matching `^[0-9A-Z]{6}$`, each present in daily bars for P | all hold | any miss = SEV3 |
+| Q8 | M3 | Retention | `ls l0/*/*/*/*/ \| sort`; `ls quarantine` | L0 dates ≤ 4 newest per stream (3 retained + current); L0 older than that exists only when offload is unverified (H8 FAIL); `quarantine/` empty | stale L0 without cause = SEV3; any quarantine entry = SEV2 (data moved out) |
+| X1 | W | Tick vs bar volume | X-VOL (local) | for every regular-session symbol, max cumulative tick `volume` == daily bar `volume` (measured 42/42 exact on 2026-10-01) | ≤2 symbols within 1% = SEV3; otherwise SEV2 (tick loss or bar error) |
+| X2 | on Q1 FAIL | Reproduce a verdict | copy the L1 partition to `scratch/`, `PYTHONPATH=. uv run python` with `src.storage.quality.decode_tick_raw_fields`, group violations by `shcode`/`sign`/`ref` | root cause class named (feed, decoder, or rule) | unresolved = SEV2 |
+
+### A: Alerting and observability pipeline
+
+| ID | Modes | Check | How | PASS | WARN / FAIL |
+|---|---|---|---|---|---|
+| A1 | M0 M3 | Alert path armed | `docker logs ... \| grep "stage=alert"`; `data/work/alert_ledger.json` after the first CRITICAL | `status=ENABLED` after start; no `status=FAIL` (send failure) | `DISABLED` = SEV1 (alerts off); `FAIL` = SEV2 |
+| A2 | M3 | CRITICAL vs mail budget | P-EVENTS CRITICAL count for D vs `alert_ledger.json` (`sent_today`, per-key `count`) and `stage=alert status=SUPPRESSED` lines | each distinct CRITICAL key mailed or logged as suppressed; `sent_today` < daily cap 20; no key at cap 3 unexplained | CRITICAL with neither mail record nor SUPPRESSED = SEV2 (ask the user to confirm mailbox) |
+| A3 | M3 | Digest | `docker logs ... \| grep "stage=digest"` | `status=SENT` after EOD | `FAIL`/missing = SEV3 |
+| A4 | M0 M3 | External liveness | `grep "stage=healthcheck"` | none or `RECOVERED` | `status=FAIL` = SEV2 (dead-man's switch blind) |
+| A5 | M3 | Dashboard truth audit | P-DASH vs this run's findings | every krx.* level agrees with primary evidence; `generated` <3 min old; `curl -s -o /dev/null -w "%{http_code}" http://100.81.197.26:8765/` = 200 | dashboard OK while a SEV1/SEV2 exists = SEV2 monitoring gap (name the missing check); dashboard FAIL with healthy evidence = SEV3 |
+
+## 8. Probes (tested 2026-10-05)
+
+Write each block to the scratchpad and run as shown. `D` = audit date. Host probes: `ssh or-vps "D=$D python3 -" < file`. Container probes: `ssh or-vps "nice -n 19 docker exec -i krx-collector /app/.venv/bin/python -" < file`.
+
+**P-CTX** (`ssh or-vps "bash -s" < p_ctx.sh`)
+
+```bash
+cd ~/krx-alpha/data
+echo "now_kst=$(TZ=Asia/Seoul date '+%F %T %a')"
+echo "calendar_cache=$(cat calendar_cache.json)"
+echo "anchors_today=$(cat calendar/dt=$(TZ=Asia/Seoul date +%F).json 2>/dev/null || echo ABSENT)"
+echo "dashboard_market=$(sed -n '/^\[market\]/,/^$/p' ~/quant-dashboard/config.toml | tr '\n' ' ')"
+docker inspect krx-collector --format 'container started={{.State.StartedAt}} restarts={{.RestartCount}} oom={{.State.OOMKilled}} rev={{index .Config.Labels "org.opencontainers.image.revision"}}'
+echo "latest_l0_days=$(ls -d l0/ls/krx/regular/H0STCNT0/dt=* 2>/dev/null | tail -3 | xargs -n1 basename | tr '\n' ' ')"
+echo "latest_l1_days=$(ls l1/ls/krx/regular/H0STCNT0 | tail -2 | tr '\n' ' ')"
+```
+
+**P-L0** (host)
+
+```python
+import glob, os, collections
+D = os.environ["D"]
+root = os.path.expanduser("~/krx-alpha/data/l0")
+rows = collections.defaultdict(list)
+for f in sorted(glob.glob(f"{root}/**/dt={D}/*.zst", recursive=True)):
+    rows[f.split("/l0/")[1].split("/dt=")[0]].append((os.path.basename(f).split(".")[0], os.path.getsize(f)))
+for s, v in sorted(rows.items()):
+    print(f"{s:42s} files={len(v):2d} hours={v[0][0]}-{v[-1][0]} total_mb={sum(x[1] for x in v)/1e6:8.1f} zero_size={sum(1 for x in v if x[1]==0)}")
+print("streams_found", len(rows))
+```
+
+**P-MANIFEST** (host)
+
+```python
+import datetime as dt, glob, json, os
+D = os.environ["D"]
+K = dt.timezone(dt.timedelta(hours=9))
+hm = lambda ns: dt.datetime.fromtimestamp(ns / 1e9, K).strftime("%H:%M:%S")
+for f in sorted(glob.glob(os.path.expanduser(f"~/krx-alpha/data/manifest/**/{D}*.json"), recursive=True)):
+    m = json.load(open(f)); acks = m["subscription_acks"]; gaps = m["gaps"]
+    dur = [(g["gap_end_ns"] - g["gap_start_ns"]) / 1e9 for g in gaps]
+    reasons = {}
+    for g in gaps: reasons[g.get("reason")] = reasons.get(g.get("reason"), 0) + 1
+    print(os.path.basename(f), m["venue"], m["session"], "shard", m["shard_index"],
+          "closed", None if m["writer_closed_at_ns"] is None else hm(m["writer_closed_at_ns"]),
+          "acks_ok", sum(1 for a in acks if a.get("accepted")), "/", len(acks), "planned", len(m["planned_pairs"]),
+          "gaps", len(gaps), "max_gap_s", round(max(dur), 1) if dur else 0, reasons, "boots", len(m["boots"]),
+          "clock", m["clock_status"], round(m["clock_offset_ns"] / 1e6, 3), "ms", "degraded", m["degraded_reason"])
+```
+
+**P-EVENTS** (host; non-INFO events of `D` per events file, plus daemon state transitions)
+
+```python
+import collections, json, os
+D = os.environ["D"]; base = os.path.expanduser("~/krx-alpha/data/logs")
+for name in sorted(os.listdir(base)):
+    if not name.startswith("events-") or not name.endswith(".jsonl"): continue
+    c = collections.Counter(); last = {}; states = []
+    for l in open(f"{base}/{name}", errors="replace"):
+        try: r = json.loads(l)
+        except ValueError: continue
+        if not r["ts"].startswith(D): continue
+        f = r["fields"]
+        if f.get("stage") == "state_change": states.append(r["ts"][11:19] + " " + f.get("to", "?"))
+        if r["level"] == "INFO": continue
+        k = (r["level"], f.get("stage"), f.get("status"), f.get("reason")); c[k] += 1; last[k] = r["ts"][11:19]
+    print("==", name, "non-INFO:", sum(c.values()))
+    for k, v in c.most_common(15): print("  ", v, k, "last", last[k])
+    if states: print("   states:", states)
+```
+
+**P-DQ** (container; L1 verdicts, ratios, phase labels; legacy layouts and partitions older than 14 days are not judged)
+
+```python
+import collections, datetime as dt, glob, json, statistics
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
+cut = (dt.date.today() - dt.timedelta(days=14)).isoformat()
+by = collections.defaultdict(list)
+for f in sorted(glob.glob("/app/data/l1/**/dt=*.parquet", recursive=True)):
+    if "/snapshot/" in f or f[-18:-8] < cut: continue
+    pf = pq.ParquetFile(f); raw = (pf.metadata.metadata or {}).get(b"krx_alpha.dq"); dq = json.loads(raw) if raw else {}
+    by[f.split("/l1/")[1].rsplit("/", 1)[0]].append((f, pf.metadata.num_rows, dq.get("status", "NONE"), dq.get("tick") or dq.get("quote") or {}))
+for stream, v in sorted(by.items()):
+    f, rows, st, t = v[-1]; prev = [r for _, r, _, _ in v[:-1]]; med = statistics.median(prev) if prev else None
+    ph = pq.read_table(f, columns=["market_phase"]).column(0)
+    unc = pc.sum(pc.equal(ph, "unclassified").cast("int64")).as_py() or 0
+    print(f"{stream:30s} {f[-18:-8]} rows={rows} ratio_vs_median={None if not med else round(rows/med,2)} dq={st} hist={[s for _,_,s,_ in v][-6:]} "
+          f"unclassified={unc/rows:.4%} nonzero={ {k: x for k, x in t.items() if k != 'rows' and x} }")
+```
+
+**P-BARS** (container)
+
+```python
+import statistics
+import polars as pl
+b = pl.scan_parquet("/app/data/bars/daily/*.parquet").with_columns(
+    chg_gap=(pl.col("daily_change_pct") - (pl.col("close") / pl.col("base_price") - 1) * 100).abs())
+g = b.group_by("date").agg(
+    pl.len().alias("n"), (pl.col("close") <= 0).sum().alias("close_le0"), (pl.col("high") < pl.col("low")).sum().alias("hi_lt_lo"),
+    ((pl.col("close") > pl.col("high")) | (pl.col("close") < pl.col("low"))).sum().alias("close_out_hl"),
+    (pl.col("volume") < 0).sum().alias("vol_neg"), pl.col("close").null_count().alias("nulls"),
+    (pl.col("chg_gap") > 0.1).sum().alias("chg_mismatch")).sort("date").tail(10).collect()
+print(g)
+base = statistics.median(g["n"].to_list()[:-1])
+print("latest_date", g["date"][-1], "latest_n", g["n"][-1], "median_prev_n", base, "ratio", round(g["n"][-1] / base, 4))
+print("duplicate_date_symbol", b.group_by(["date", "symbol"]).len().filter(pl.col("len") > 1).select(pl.len()).collect().item())
+```
+
+**P-SNAP** (container; presence, volume, key integrity per snapshot kind)
+
+```python
+import glob, statistics
+import polars as pl
+for k in sorted(glob.glob("/app/data/l1/snapshot/*")):
+    fs = sorted(glob.glob(k + "/dt=*.parquet"))
+    rows = [(f[-18:-8], pl.scan_parquet(f).select(pl.len()).collect().item()) for f in fs[-6:]]
+    last = rows[-1]; med = statistics.median([n for _, n in rows[:-1]]) if len(rows) > 1 else None
+    df = pl.read_parquet(fs[-1])
+    bad = int((df["session_date"].cast(pl.String) != last[0]).sum())
+    nulls = {c: int(df[c].null_count()) for c in ("symbol", "observed_at_ns", "session_date") if c in df.columns and df[c].null_count() > 0}
+    syms = df["symbol"].n_unique() if "symbol" in df.columns else None
+    print(k.split("/")[-1], "latest", last, "median_prev", med, "ratio", None if not med else round(last[1] / med, 3), "symbols", syms, "session_date_mismatch", bad, "key_nulls", nulls)
+```
+
+**P-SNAP2** (container; content invariants and candidates)
+
+```python
+import glob, json
+import polars as pl
+c = pl.col
+def last(kind): return sorted(glob.glob(f"/app/data/l1/snapshot/{kind}/dt=*.parquet"))[-1]
+def n(df, e): return int(df.select(e.sum()).item())
+d = pl.read_parquet(last("stock_minute_bar"))
+print("stock_minute_bar rows", d.height, "bad_ohlc", n(d, (c("high") < c("low")) | (c("open") > c("high")) | (c("open") < c("low")) | (c("close") > c("high")) | (c("close") < c("low"))),
+      "dup", d.height - d.select("symbol", "bar_time").unique().height, "symbols", d["symbol"].n_unique(), "bar_time", d["bar_time"].min(), d["bar_time"].max())
+d = pl.read_parquet(last("index_minute_bar"))
+print("index_minute_bar bad_ohlc", n(d, (c("high") < c("low")) | (c("close") > c("high")) | (c("close") < c("low"))), "dup", d.height - d.select("index_code", "bar_time").unique().height)
+d = pl.read_parquet(last("ranking")); print("ranking dup", d.height - d.select("list_kind", "rank", "observed_at_ns", "market_div_code").unique().height)
+d = pl.read_parquet(last("news_title")); print("news_title dup_news_id", d.height - d["news_id"].n_unique(), "null_title", int(d["title"].null_count()))
+d = pl.read_parquet(last("program_trade")); print("program_trade net_mismatch", n(d, (c("net_qty") - (c("buy_qty") - c("sell_qty"))).abs() > 0), "of", d.height)
+cand = json.load(open("/app/data/candidates.json")); syms = [x["symbol"] for x in cand["candidates"]]
+print("candidates rev", cand["rev"], "n", len(syms), "unique", len(set(syms)))
+```
+
+**P-REMOTE** (host; local vs remote L1 sizes for the newest 3 partitions per stream)
+
+```python
+import glob, json, os, subprocess
+R = os.path.expanduser("~/.local/bin/rclone"); ROOT = os.path.expanduser("~/krx-alpha/data/l1")
+REMOTE = "gdrive:quant-lake/live/krx-alpha/data/l1"; bad = 0
+streams = sorted({os.path.dirname(f) for f in glob.glob(f"{ROOT}/**/dt=*.parquet", recursive=True) if "/snapshot/" not in f})
+for s in streams:
+    rel = os.path.relpath(s, ROOT)
+    local = {os.path.basename(f): os.path.getsize(f) for f in sorted(glob.glob(f"{s}/dt=*.parquet"))[-3:]}
+    out = subprocess.run([R, "lsjson", f"{REMOTE}/{rel}"], capture_output=True, text=True, timeout=120)
+    remote = {x["Name"]: x["Size"] for x in json.loads(out.stdout or "[]")} if out.returncode == 0 else None
+    for name, size in local.items():
+        state = "UNKNOWN(rclone_error)" if remote is None else ("OK" if remote.get(name) == size else f"MISMATCH remote={remote.get(name)}")
+        bad += state != "OK"; print(f"{rel}/{name} local={size} {state}")
+print("not_ok", bad)
+```
+
+**P-DASH** (host)
+
+```python
+import json, os
+d = json.load(open(os.path.expanduser("~/quant-dashboard/public/status.json")))
+def walk(x):
+    if isinstance(x, dict):
+        if "id" in x and "level" in x: yield x
+        for v in x.values(): yield from walk(v)
+    elif isinstance(x, list):
+        for v in x: yield from walk(v)
+cs = [c for c in walk(d) if str(c["id"]).startswith("krx.")]
+print("generated", d.get("generated_at") or d.get("collected_at"), "krx_checks", len(cs))
+for c in cs: print(c["level"], c["id"], "|", c["detail"][:90])
+```
+
+**X-VOL** (local, weekly; `D` must have an L1 partition, i.e. at least 4 calendar days old)
+
+```bash
+mkdir -p scratch/vps_probe && scp -q or-vps:~/krx-alpha/data/l1/ls/krx/regular/H0STCNT0/dt=$D.parquet scratch/vps_probe/ticks.parquet \
+  && scp -q or-vps:~/krx-alpha/data/bars/daily/${D%-??}.parquet scratch/vps_probe/bars.parquet
+D=$D PYTHONPATH=. uv run python - <<'PY'
+import os, polars as pl
+from src.storage.quality import decode_tick_raw_fields
+D = os.environ["D"]
+f = decode_tick_raw_fields(pl.read_parquet("scratch/vps_probe/ticks.parquet"))
+g = f.with_columns(volume=pl.col("volume_raw").cast(pl.Int64, strict=False)).group_by("shcode").agg(pl.col("volume").max().alias("tick_vol"))
+b = pl.read_parquet("scratch/vps_probe/bars.parquet").filter(pl.col("date").cast(pl.String) == D).select(pl.col("symbol").alias("shcode"), "volume")
+j = g.join(b, on="shcode", how="left").with_columns(ratio=pl.col("tick_vol") / pl.col("volume"))
+print("symbols", j.height, "unmatched", j["volume"].null_count(), "exact", int((j["ratio"] == 1.0).sum()))
+print(j.filter(pl.col("ratio") != 1.0).sort("ratio").head(10))
+PY
+```
+
+## 9. Baselines and benign patterns (2026-10-05 measurements)
+
+Seeds for sanity and for "is this WARN the usual one". Refresh monthly or when the universe/policy changes; record the date.
+
+| Item | Baseline |
+|---|---|
+| Daily bars per date | 2760–2766 rows; `market` null on legacy rows only |
+| Program trades per date | ~2456–2461 |
+| Regular candidates / subscribed symbols | 37–54 per day (pairs = 2x symbols); 2026-10-01 selection produced 96 (see S6) |
+| Aftermarket plan | 2 venues x 2 shards x 40 pairs (20 symbols x 2 streams), `capacity` 40, all acks accepted, gaps 0 |
+| Expected L0 streams on a business day | `ls/krx/regular/{H0STCNT0,H0STASP0}` hours 08–20; `kis/krx/krx_after/{H0STCNT0,H0STASP0}` hours 16–20; `kis/nxt/nxt_after/{H0NXCNT0,H0NXASP0}` hours 15–20; premarket `kis/nxt/nxt_pre/{H0NXCNT0,H0NXASP0}` hours 07–08 when enabled |
+| L0 daily size | regular quote ~455 MB, regular tick ~165 MB, KRX aftermarket 52/20 MB, NXT aftermarket 27/15 MB |
+| Snapshot kinds (9) | `stock_minute_bar` 23460 rows (60 symbols x 391), `ranking` ~23400, `index_minute_bar` 1173, `index_snapshot` 234, `news_title` 4700–5800; `program_trade`, `security_status`, `investor_estimate`, `auction_book` scale with candidate count (2026-10-02: x2.2 because candidates were 96 vs ~42) |
+| Benign DQ WARN | `ls regular H0STASP0`: `decode_fail` ≤0.01%, `total_remain_short` ≤2.5%; `ls regular H0STCNT0`: `cum_volume_regression` ≤5 rows, `tick_loss` ≤2; `nxt_after H0NXCNT0`: `tick_loss` ≤0.02% of rows, `lost_volume` ≤200. Everything else PASS. FAIL is never benign |
+| Known false FAIL footers | `kis/krx/krx_after/H0STCNT0` `dt=2026-09-29` and `dt=2026-10-01` (new-listing days; fixed in `717225b`, footers not re-judged). Expected to clear from dashboard `krx.data_quality` on 2026-10-08. Remove this row once re-judged |
+| Offload | local L1 size == remote size for every partition |
+| Clock | manifest `clock_offset_ns` within ±1 ms; chrony offset <1 ms |
+| Memory | idle ~80–100 MiB; EOD normalizer child ≤500 MiB |
+
+## 10. Reporting
+
+Write the report in Korean, English keys. Save to `scratch/vps_reports/<D>_<mode>.md` (gitignored) and keep `scratch/vps_reports/open_items.md` (table: `id | first_seen | last_seen | sev | evidence | status`). Compare with the previous report and the open items; report only changes plus the standing SEV1/SEV2 list. Never delete reports.
+
+```text
+VPS-AUDIT <D> <mode>  run=<NOW KST>  rev=<short>  kind=<BUSINESS|HOLIDAY|WEEKEND|SHIFTED>
+VERDICT: GREEN | AMBER (SEV3 only) | RED (SEV2) | CRITICAL (SEV1)
+SEV1/SEV2: <ID> <한 줄 요약> | evidence: <command/value> | impact | proposed action (미실행)
+CHANGED since <prev run>: <new / resolved / worsened>
+CHECKED: H n/n · S n/n · C n/n · Q n/n · X n/n · A n/n   (PASS / WARN / FAIL / UNKNOWN counts)
+UNKNOWN: <ID> <사유> (what is needed to resolve)
+DATA CONTENT: <the content checks that ran and their key numbers, e.g. bars 2766 rows ratio 1.00; ticks==bars 42/42>
+NEXT: <next mode and time; pending known events, e.g. 22:00 recreate, 내일 첫 프리마켓>
+```
+
+SEV1: notify immediately (section 2). A report is not complete until every ID of the run's modes has a status; list skipped IDs with the reason.
+
+## 11. Failure triage (stop after reporting; no deploy 08:10–22:00)
 
 | Symptom | Look at |
 |---|---|
-| `premarket_plan status=SKIP` | `universe/premarket/D.json` missing/invalid → A11 of previous evening, `premarket_pool` WARN lines |
-| ACK accepted < planned | `subscription_acks[].code` in manifest (NX subscription rejected → V2) |
-| `key_lease_busy` | another process holds slot lease `work/kis_ws_leases/<key_id>.lock` |
-| `StorageExhaustedError` | disk below premarket floor (collector floor + `extra_free_disk_gb`) |
-| `ClockUnsyncedError` | NTP offset > 2.0 s; chrony status on host |
-| manifest unclosed after 08:55 | child alive? `docker exec krx-collector pgrep -af collect-premarket`; daemon log `premarket_stream` |
+| `candidates_not_ready` / `orchestration_error` | events message (`selected N exceeds slot_budget M`, bars refresh timeout `data-dbg.krx.co.kr`), `candidates.json` rev, `universe/` for P; recurring KRX timeouts are retried every 5 min |
+| Daemon restarted in session | `shutdown` event (`signal`, `graceful`), `daemon_lifecycle.json`, CI/deploy times vs freeze |
+| Manifest `degraded_reason`, ack shortfall | `subscription_acks[].code`; KIS 41-pair/connection cap; key lease `work/kis_ws_leases/<key_id>.lock` (`key_lease_busy`) |
+| L0 file stalled / zero size | `docker logs --since 30m`, `pgrep -af collect-` in container, disk (H3), clock (H4) |
+| `StorageExhaustedError` | disk below floor; free space only after 22:00 |
+| `ClockUnsyncedError` | `chronyc tracking`, NTP reachability |
+| DQ FAIL | X2; check universe for new listings, vendor format change (decode_fail), then session clock |
+| EOD not done by 21:00 | `stage=eod_*` CRITICAL, `rclone` auth (`auth_expired`), disk, normalize timeout `L1WorkerCrashError` (memory) |
+| Offload mismatch | `rclone lsjson` sizes, partition re-normalized after verification (H8), remote auth |
+| Alert silence | A1/A2, `alert_ledger.json`, SMTP failure `reason=` in logs |
+| Dashboard disagrees | P-DASH vs evidence; the adapter's allow-list (`_VERIFIED_STAGES`) hides stages it does not list |
 
-## E. Enable / disable switch
+## 12. Maintaining this runbook
 
-`docker-compose.yml` `KRX_ALPHA_PREMARKET_ENABLED` (true/false). Change only outside 08:10–22:00, then confirm CI deploy green and container Up.
+- Every new automated routine (timer, session, stream, snapshot kind, store) gets: a timeline row (section 6), a presence check (C), a content check (Q), and an expected-stream baseline (section 9). A routine without a content check is incomplete.
+- Every incident adds one of: a new check, a new benign pattern, or a triage row. Date the baseline change.
+- Prefer a new column/row over prose. Keep probes tested; re-run them against production after any schema change and update "tested" date.
+- Feature modules are appended as `## NP`-style sections with a lifecycle line (`trial until <date>` or `stable`) and merge into the main tables once stable.
+
+## NP. Module: NXT premarket (lifecycle: trial; first session 2026-10-06)
+
+Enabled by `KRX_ALPHA_PREMARKET_ENABLED` and `PREMARKET_CREDENTIAL_SLOT=5` in `docker-compose.yml`. Window 08:00–08:50, pool file `universe/premarket/D.json` (`capacity` 20), manifest `manifest/premarket/D.nxt.shard-00.json`, L0 `l0/kis/nxt/nxt_pre/{H0NXCNT0,H0NXASP0}/dt=D/`. Run in M0 (arming) and M3 (results).
+
+| ID | Check | How | PASS |
+|---|---|---|---|
+| NP1 | Pool armed (M0, previous evening M3) | `ls -l universe/premarket/D.json`; fields `selected_count`, `effective_from` ≤ 07:58 | file exists; `selected_count == capacity` or `eligible_count` shortfall explained |
+| NP2 | Manifest closed, ACKs complete (M3) | P-MANIFEST filtered to `session == nxt_pre` | `closed` set, `acks_ok == planned == 40`, `degraded=None` |
+| NP3 | Gaps (M3) | P-MANIFEST `max_gap_s`, `reasons` | max gap ≤30 s; no `restart` gaps; compare `watchdog` gaps with `manifest/aftermarket/D.nxt.shard-00.json` |
+| NP4 | L0 present, both streams (M3) | P-L0 | files `07`/`08.s0.jsonl.zst` for both streams, sizes >0 |
+| NP5 | Symbols with data (M3) | C3 command on `nxt/nxt_pre` | 15–20 symbols with trades; record counts as baseline |
+| NP6 | Event time sane (M3) | first/last `exchange_event_time` of the stream | HHMMSS, first ≥ 075800, last ≤ 085500 (else V2 time-field assumption) |
+| NP7 | EOD result (M3) | events `eod_maintenance`; `docker logs --since 14h \| grep premarket_eod` | `status=OK`, `accepted=40 planned=40`; premarket never degrades EOD |
+| NP8 | Normalization (W; L1 exists from D+4) | P-DQ stream `kis/nxt/nxt_pre/*`; `market_phase` | both streams L1 present; `OK`/WARN with `tick_loss` <0.1%; `premarket` dominates, `unclassified` <1%; nothing in `quarantine/` |
+| NP9 | Offload (W) | P-REMOTE | remote has `l1/kis/nxt/nxt_pre/<stream>/dt=<D>.parquet` |
+| NP10 | Next pool (M3) | `ls -l universe/premarket/N.json`; `docker logs --since 14h \| grep premarket_pool` | `status=OK target=N symbols=20`; else tomorrow's premarket is skipped (fix after 22:00 only) |
+| NP11 | Quick post-run (M1 at 08:55) | `docker logs --since 2h \| grep -E "premarket_(stream\|plan\|supervise)"`; `tail -3 logs/events-cli-collect-premarket.jsonl` | `status=START` then `STOP`; no `SKIP`, `RESTARTED`, `circuit_open`, `FAIL`; `rejected=0`; no `stream_gap`/`stream_disconnect` bursts |
+| NP12 | Calibration (W) | max in-window gap of the week; `grep key_lease_busy`; slot env names only | set `KRX_ALPHA_PREMARKET_SILENCE_LIMIT_S` ≈2.6x largest normal gap; no `key_lease_busy`; `KIS_DECISION_SHARD_SLOTS` / `KIS_HOST_DATA_SLOTS` unchanged |
+
+Disable switch: `KRX_ALPHA_PREMARKET_ENABLED` in `docker-compose.yml`; change only outside 08:10–22:00, then confirm CI deploy green and the container Up.
