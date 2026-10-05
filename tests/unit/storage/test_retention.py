@@ -1387,3 +1387,435 @@ def test_low_disk_prune_deletes_only_verified_existing_l1_without_normalizing(tm
     assert pending_part.exists()
     assert stats == 1
     assert stats.failed == 0
+
+
+def _fresh_reusable_pair(tmp_path):
+    import datetime as dt
+
+    from src.storage.retention import prune_old_journals
+
+    journal = _write_due_journal(tmp_path)
+    part = journal.parent
+    stats = prune_old_journals(
+        tmp_path / "l0",
+        archive_root=tmp_path / "l1",
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 8),
+        verified_remote_l1=None,
+    )
+    assert stats.normalized == 1
+    l1 = tmp_path / "l1" / "kis" / "H0STCNT0" / "dt=2026-09-01.parquet"
+    assert l1.exists()
+    return part, l1
+
+
+def test_prune_reuses_fresh_l1_without_normalizing(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.storage.retention import prune_old_journals
+
+    part, _ = _fresh_reusable_pair(tmp_path)
+    calls: list = []
+
+    def _spy(p, o):
+        calls.append((p, o))
+        raise AssertionError("normalizer must not run for fresh L1")
+
+    with caplog.at_level(logging.INFO):
+        stats = prune_old_journals(
+            tmp_path / "l0",
+            archive_root=tmp_path / "l1",
+            retain_days=3,
+            reference_date=dt.date(2026, 9, 8),
+            verified_remote_l1=None,
+            normalizer=_spy,
+            reuse_fresh_l1=True,
+        )
+    assert calls == []
+    assert stats.normalized == 1
+    assert stats.reused == 1
+    assert stats.deleted == 0
+    assert part.exists()
+    assert "status=REUSED" in caplog.text
+
+
+def test_prune_l1_stat_io_error_retries_normalization(tmp_path, monkeypatch) -> None:
+    import pathlib
+    from unittest.mock import Mock
+
+    from src.storage.retention import normalize_l0_partition, prune_old_journals
+
+    part, l1 = _fresh_reusable_pair(tmp_path)
+    real_stat = pathlib.Path.stat
+    faulted = False
+
+    def _stat(path, *args, **kwargs):
+        nonlocal faulted
+        if path == l1 and not faulted:
+            faulted = True
+            raise PermissionError("L1 metadata temporarily unreadable")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "stat", _stat)
+    normalizer = Mock(wraps=normalize_l0_partition)
+    stats = prune_old_journals(
+        tmp_path / "l0", archive_root=tmp_path / "l1", reference_date=_now(),
+        reuse_fresh_l1=True, normalizer=normalizer,
+    )
+
+    normalizer.assert_called_once_with(part, l1)
+    assert (stats.normalized, stats.reused, stats.failed, stats.deleted) == (1, 0, 0, 0)
+    assert part.exists()
+
+
+def test_prune_reuse_checks_nested_file_mtime_at_nanosecond_boundary(tmp_path) -> None:
+    import os
+    from unittest.mock import Mock
+
+    from src.storage.retention import normalize_l0_partition, prune_old_journals
+
+    part, l1 = _fresh_reusable_pair(tmp_path)
+    nested = part / "nested" / "metadata"
+    nested.parent.mkdir()
+    nested.write_bytes(b"new partition metadata")
+    boundary = l1.stat().st_mtime_ns
+    os.utime(nested, ns=(boundary, boundary))
+    normalizer = Mock(wraps=normalize_l0_partition)
+    kwargs = {
+        "archive_root": tmp_path / "l1", "reference_date": _now(),
+        "reuse_fresh_l1": True, "normalizer": normalizer,
+    }
+
+    stats = prune_old_journals(tmp_path / "l0", **kwargs)
+    assert stats.reused == 1
+    normalizer.assert_not_called()
+
+    os.utime(nested, ns=(boundary + 1, boundary + 1))
+    stats = prune_old_journals(tmp_path / "l0", **kwargs)
+    normalizer.assert_called_once_with(part, l1)
+    assert (stats.normalized, stats.reused, stats.deleted) == (1, 0, 0)
+    assert part.exists()
+
+
+def test_prune_reused_l1_bytes_untouched(tmp_path) -> None:
+    import datetime as dt
+
+    from src.storage.retention import prune_old_journals
+
+    _, l1 = _fresh_reusable_pair(tmp_path)
+    size_before = l1.stat().st_size
+    mtime_before = l1.stat().st_mtime_ns
+    content_before = l1.read_bytes()
+
+    def _spy(p, o):
+        raise AssertionError("must not normalize")
+
+    prune_old_journals(
+        tmp_path / "l0",
+        archive_root=tmp_path / "l1",
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 8),
+        verified_remote_l1=None,
+        normalizer=_spy,
+        reuse_fresh_l1=True,
+    )
+    assert l1.stat().st_size == size_before
+    assert l1.stat().st_mtime_ns == mtime_before
+    assert l1.read_bytes() == content_before
+
+
+def test_prune_reused_deleted_only_when_verified(tmp_path) -> None:
+    import datetime as dt
+
+    from src.storage.retention import prune_old_journals
+
+    part, _ = _fresh_reusable_pair(tmp_path)
+
+    def _spy(p, o):
+        raise AssertionError("must not normalize")
+
+    stats = prune_old_journals(
+        tmp_path / "l0",
+        archive_root=tmp_path / "l1",
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 8),
+        verified_remote_l1=frozenset(),
+        normalizer=_spy,
+        reuse_fresh_l1=True,
+    )
+    assert stats.deleted == 0
+    assert part.exists()
+
+    stats = prune_old_journals(
+        tmp_path / "l0",
+        archive_root=tmp_path / "l1",
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 8),
+        verified_remote_l1={"l1/kis/H0STCNT0/dt=2026-09-01.parquet"},
+        normalizer=_spy,
+        reuse_fresh_l1=True,
+    )
+    assert stats.deleted == 1
+    assert not part.exists()
+
+
+def test_prune_stale_l1_is_rebuilt(tmp_path) -> None:
+    import datetime as dt
+    import os
+    import time
+
+    from src.storage.retention import prune_old_journals
+
+    part, l1 = _fresh_reusable_pair(tmp_path)
+    old = time.time() - 3600
+    os.utime(l1, (old, old))
+    now = time.time()
+    for f in part.rglob("*"):
+        if f.is_file():
+            os.utime(f, (now, now))
+    calls: list = []
+
+    def _spy(p, o):
+        calls.append(p)
+        o.parent.mkdir(parents=True, exist_ok=True)
+        o.write_bytes(b"rebuilt")
+        return 1
+
+    stats = prune_old_journals(
+        tmp_path / "l0",
+        archive_root=tmp_path / "l1",
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 8),
+        verified_remote_l1=None,
+        normalizer=_spy,
+        reuse_fresh_l1=True,
+    )
+    assert len(calls) == 1
+    assert stats.reused == 0
+    assert stats.normalized == 1
+
+
+def test_prune_corrupt_l1_is_rebuilt(tmp_path) -> None:
+    import datetime as dt
+
+    from src.storage.retention import prune_old_journals
+
+    _, l1 = _fresh_reusable_pair(tmp_path)
+    l1.write_bytes(b"not-a-parquet-file")
+    calls: list = []
+
+    def _spy(p, o):
+        calls.append(p)
+        o.parent.mkdir(parents=True, exist_ok=True)
+        o.write_bytes(b"rebuilt")
+        return 1
+
+    stats = prune_old_journals(
+        tmp_path / "l0",
+        archive_root=tmp_path / "l1",
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 8),
+        verified_remote_l1=None,
+        normalizer=_spy,
+        reuse_fresh_l1=True,
+    )
+    assert len(calls) == 1
+    assert stats.reused == 0
+
+
+def test_prune_empty_l1_is_rebuilt(tmp_path) -> None:
+    import datetime as dt
+    import os
+    import time
+
+    import polars as pl
+
+    from src.storage.retention import prune_old_journals
+
+    part, l1 = _fresh_reusable_pair(tmp_path)
+    pl.DataFrame({"a": pl.Series([], dtype=pl.Int64)}).write_parquet(l1)
+    now = time.time()
+    for f in part.rglob("*"):
+        if f.is_file():
+            os.utime(f, (now - 60, now - 60))
+    os.utime(l1, (now, now))
+    calls: list = []
+
+    def _spy(p, o):
+        calls.append(p)
+        o.parent.mkdir(parents=True, exist_ok=True)
+        o.write_bytes(b"rebuilt")
+        return 1
+
+    stats = prune_old_journals(
+        tmp_path / "l0",
+        archive_root=tmp_path / "l1",
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 8),
+        verified_remote_l1=None,
+        normalizer=_spy,
+        reuse_fresh_l1=True,
+    )
+    assert len(calls) == 1
+    assert stats.reused == 0
+
+
+def test_prune_tmp_only_leftover_is_rebuilt(tmp_path) -> None:
+    import datetime as dt
+
+    from src.storage.retention import prune_old_journals
+
+    part, l1 = _fresh_reusable_pair(tmp_path)
+    l1.unlink()
+    (l1.parent / (l1.name + ".tmp")).write_bytes(b"partial")
+    calls: list = []
+
+    def _spy(p, o):
+        calls.append(p)
+        o.parent.mkdir(parents=True, exist_ok=True)
+        o.write_bytes(b"rebuilt")
+        return 1
+
+    stats = prune_old_journals(
+        tmp_path / "l0",
+        archive_root=tmp_path / "l1",
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 8),
+        verified_remote_l1=None,
+        normalizer=_spy,
+        reuse_fresh_l1=True,
+    )
+    assert len(calls) == 1
+    assert stats.reused == 0
+    assert part.exists()
+
+
+def test_prune_failed_first_attempt_is_retried(tmp_path) -> None:
+    import datetime as dt
+
+    from src.storage.retention import L1WorkerCrashError, prune_old_journals
+
+    journal = _write_due_journal(tmp_path)
+    part = journal.parent
+    calls: list = []
+
+    def _spy(p, o):
+        calls.append(p)
+        if len(calls) == 1:
+            raise L1WorkerCrashError("first normalization attempt crashed")
+        o.parent.mkdir(parents=True, exist_ok=True)
+        o.write_bytes(b"rebuilt")
+        return 2
+
+    first = prune_old_journals(
+        tmp_path / "l0", archive_root=tmp_path / "l1", reference_date=_now(),
+        normalizer=_spy,
+    )
+    assert (first.normalized, first.failed, first.deleted) == (0, 1, 0)
+    assert part.exists()
+    assert not (tmp_path / "l1" / "kis" / "H0STCNT0" / "dt=2026-09-01.parquet").exists()
+
+    stats = prune_old_journals(
+        tmp_path / "l0",
+        archive_root=tmp_path / "l1",
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 8),
+        verified_remote_l1=None,
+        normalizer=_spy,
+        reuse_fresh_l1=True,
+    )
+    assert len(calls) == 2
+    assert stats.normalized == 1
+    assert stats.reused == 0
+    assert stats.failed == 0
+    assert part.exists()
+
+
+def test_prune_default_behaviour_unchanged(tmp_path) -> None:
+    import datetime as dt
+
+    from src.storage.retention import prune_old_journals
+
+    _fresh_reusable_pair(tmp_path)
+    calls: list = []
+
+    def _spy(p, o):
+        calls.append(p)
+        o.parent.mkdir(parents=True, exist_ok=True)
+        o.write_bytes(b"rebuilt")
+        return 1
+
+    stats = prune_old_journals(
+        tmp_path / "l0",
+        archive_root=tmp_path / "l1",
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 8),
+        verified_remote_l1=None,
+        normalizer=_spy,
+    )
+    assert len(calls) == 1
+    assert stats.reused == 0
+
+
+def test_prune_low_disk_ignores_reuse(tmp_path) -> None:
+    import datetime as dt
+
+    from src.storage.retention import prune_old_journals
+
+    _, l1 = _fresh_reusable_pair(tmp_path)
+
+    def _spy(p, o):
+        raise AssertionError("normalizer must not run in low-disk mode")
+
+    stats = prune_old_journals(
+        tmp_path / "l0",
+        archive_root=tmp_path / "l1",
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 8),
+        verified_remote_l1={"l1/kis/H0STCNT0/dt=2026-09-01.parquet"},
+        normalizer=_spy,
+        normalize=False,
+        reuse_fresh_l1=True,
+    )
+    assert stats.deleted == 1
+    assert stats.normalized == 0
+    assert stats.reused == 0
+    assert not (tmp_path / "l0" / "kis" / "H0STCNT0" / "dt=2026-09-01").exists()
+    assert l1.exists()
+
+
+def test_prune_progress_fires_for_reused_partition(tmp_path) -> None:
+    import datetime as dt
+    import json
+
+    import zstandard as zstd
+
+    from src.storage.retention import prune_old_journals
+
+    _, _l1 = _fresh_reusable_pair(tmp_path)
+    part2 = tmp_path / "l0" / "kis" / "H0STCNT0" / "dt=2026-09-02"
+    part2.mkdir(parents=True, exist_ok=True)
+    rec = {'raw': 'a', 'recv_mono_ns': 1, 'recv_wall_ns': 2, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
+    (part2 / "09.jsonl.zst").write_bytes(zstd.ZstdCompressor(level=3).compress((json.dumps(rec) + "\n").encode()))
+
+    def _spy(p, o):
+        assert p.name == "dt=2026-09-02"
+        o.parent.mkdir(parents=True, exist_ok=True)
+        o.write_bytes(b"rebuilt")
+        return 1
+
+    calls: list[None] = []
+    stats = prune_old_journals(
+        tmp_path / "l0",
+        archive_root=tmp_path / "l1",
+        retain_days=3,
+        reference_date=dt.date(2026, 9, 8),
+        verified_remote_l1=None,
+        normalizer=_spy,
+        reuse_fresh_l1=True,
+        progress=lambda: calls.append(None),
+    )
+    assert len(calls) == 2
+    assert stats.normalized == 2
+    assert stats.reused == 1

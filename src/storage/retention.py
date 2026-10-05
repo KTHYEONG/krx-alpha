@@ -11,6 +11,9 @@ from collections.abc import Callable
 from collections.abc import Set as AbstractSet
 from zoneinfo import ZoneInfo
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 from src.core.errors import KrxAlphaError
 from src.storage.layout import l1_relpath_for_l0_partition, l1_repo_path
 from src.storage.normalization import (
@@ -58,12 +61,19 @@ class PruneStats(int):
     _deleted: int
     _normalized: int
     _failed: int
+    _reused: int
+    _invalidated_remote_l1: frozenset[str]
 
-    def __new__(cls, deleted: int, normalized: int = 0, failed: int = 0) -> PruneStats:
+    def __new__(
+        cls, deleted: int, normalized: int = 0, failed: int = 0, reused: int = 0,
+        *, invalidated_remote_l1: AbstractSet[str] = frozenset(),
+    ) -> PruneStats:
         obj = int.__new__(cls, deleted)
         obj._deleted = int(deleted)
         obj._normalized = int(normalized)
         obj._failed = int(failed)
+        obj._reused = int(reused)
+        obj._invalidated_remote_l1 = frozenset(invalidated_remote_l1)
         return obj
 
     @property
@@ -78,6 +88,36 @@ class PruneStats(int):
     def failed(self) -> int:
         return self._failed
 
+    @property
+    def reused(self) -> int:
+        return self._reused
+
+    @property
+    def invalidated_remote_l1(self) -> frozenset[str]:
+        """L1 paths whose previous verification cannot justify remote L0 deletion."""
+        return self._invalidated_remote_l1
+
+
+def _reusable_l1_rows(part: pathlib.Path, out_path: pathlib.Path) -> int | None:
+    """Row count of ``out_path`` when it is a complete L1 for ``part``, else None.
+
+    Complete means the file exists, its parquet footer is readable with at least one row,
+    and its mtime is not older than the newest file under ``part``. Any I/O or parquet
+    error yields None so the caller falls back to normalization.
+    """
+    try:
+        if not out_path.is_file():
+            return None
+        newest = max((f.stat().st_mtime_ns for f in part.rglob("*") if f.is_file()), default=None)
+        if newest is not None and out_path.stat().st_mtime_ns < newest:
+            return None
+        num_rows = pq.read_metadata(out_path).num_rows
+    except (OSError, pa.ArrowException):
+        return None
+    if num_rows <= 0:
+        return None
+    return int(num_rows)
+
 
 def prune_old_journals(
     journal_root: pathlib.Path,
@@ -90,6 +130,7 @@ def prune_old_journals(
     verified_remote_l1: AbstractSet[str] | None = None,
     progress: Callable[[], None] | None = None,
     normalize: bool = True,
+    reuse_fresh_l1: bool = False,
 ) -> PruneStats:
     """Normalize eligible L0 partitions and delete only remotely verified inputs.
 
@@ -105,9 +146,16 @@ def prune_old_journals(
         normalize: When False (low-disk recovery), never run the normalizer and
             only delete partitions whose L1 already exists locally and is in
             ``verified_remote_l1``; normalizing needs spill space the disk lacks.
+        reuse_fresh_l1: When True, a partition whose L1 parquet is complete and
+            not older than every file of its L0 partition is counted as normalized
+            without invoking the normalizer, and the L1 file is left byte-for-byte
+            untouched. A missing, unreadable, empty, or stale L1 is normalized as
+            usual, so a failed earlier attempt is retried. Ignored when
+            ``normalize`` is False. Rebuilt L1 files must be remotely verified
+            again before their L0 inputs can be deleted.
 
     Returns:
-        Existing deleted and normalized counts.
+        Prune counts and L1 paths whose prior remote verification was invalidated.
     """
     if archive_root is None or journal_root is None:
         return PruneStats(0, 0)
@@ -116,6 +164,8 @@ def prune_old_journals(
     deleted = 0
     normalized = 0
     failed = 0
+    reused = 0
+    invalidated_remote_l1: set[str] = set()
     archive_base = pathlib.Path(str(archive_root)) if not isinstance(archive_root, pathlib.Path) else archive_root
     for part in [p for p in pathlib.Path(str(journal_root)).rglob("dt=*") if p.is_dir()]:
         m = _DT_RE.fullmatch(part.name)
@@ -132,6 +182,21 @@ def prune_old_journals(
                     deleted += sum(1 for f in part.rglob("*") if f.is_file())
                     shutil.rmtree(part)
                 continue
+            if reuse_fresh_l1:
+                fresh_rows = _reusable_l1_rows(part, out_path)
+                if fresh_rows is not None:
+                    logger.info(
+                        "[DATA] stage=prune status=REUSED part=%s rows=%d", str(part), fresh_rows
+                    )
+                    normalized += 1
+                    reused += 1
+                    rel = l1_repo_path(out_path.relative_to(archive_base))
+                    if verified_remote_l1 is None or rel not in verified_remote_l1:
+                        continue
+                    deleted += sum(1 for f in part.rglob("*") if f.is_file())
+                    shutil.rmtree(part)
+                    continue
+                invalidated_remote_l1.add(l1_repo_path(out_path.relative_to(archive_base)))
             try:
                 normalize_fn = normalizer if normalizer is not None else normalize_l0_partition
                 rows = normalize_fn(part, out_path)
@@ -164,6 +229,9 @@ def prune_old_journals(
                 logger.critical("[DATA] stage=prune status=FAIL reason=unverified part=%s", str(part))
                 continue
             normalized += 1
+            if reuse_fresh_l1:
+                # Remote verification predates this rewrite and cannot justify deletion.
+                continue
             rel = l1_repo_path(out_path.relative_to(archive_base))
             if verified_remote_l1 is None or rel not in verified_remote_l1:
                 continue
@@ -172,7 +240,9 @@ def prune_old_journals(
         finally:
             if progress is not None:
                 progress()
-    return PruneStats(deleted, normalized, failed)
+    return PruneStats(
+        deleted, normalized, failed, reused, invalidated_remote_l1=invalidated_remote_l1,
+    )
 
 
 def prune_local_l1(

@@ -436,6 +436,7 @@ def _run_eod_housekeeping(
             retain_days=cfg.archive_retain_days,
             reference_date=ref_day,
             progress=progress,
+            journal_root=paths.journal_root,
         )
     except RemoteArchiveError as e:
         offload_ok = False
@@ -463,12 +464,16 @@ def _run_eod_housekeeping(
                 verified_remote_l1=verified,
                 progress=progress,
                 normalize=disk_ok,
+                reuse_fresh_l1=True,
             )
             if getattr(post_deleted, "failed", 0) > 0:
                 maintenance_ok = False
             deleted = int(deleted) + int(post_deleted)
+            verified = verified - getattr(post_deleted, "invalidated_remote_l1", frozenset())
             try:
-                run_eod_remote_l0_purge(paths.journal_root, verified, progress=progress)
+                run_eod_remote_l0_purge(
+                    paths.journal_root, verified, progress=progress, quarantine_root=paths.quarantine_root,
+                )
             except Exception as exc:  # noqa: BLE001 - purge failure never fails EOD
                 logger.error("[DAEMON] stage=eod_l0_remote_purge status=FAIL error=%s", str(exc), exc_info=True)
         except (KrxAlphaError, OSError) as e:

@@ -106,11 +106,11 @@ def test_run_eod_maintenance_forwards_quarantine_root(tmp_path, monkeypatch) -> 
 
     seen: dict[str, object] = {}
 
-    def _fake_prune(root, archive_root=None, *, retain_days=3, reference_date=None, quarantine_root=None, normalizer=None, verified_remote_l1=None, progress=None, normalize=True):
+    def _fake_prune(root, archive_root=None, *, retain_days=3, reference_date=None, quarantine_root=None, normalizer=None, verified_remote_l1=None, progress=None, normalize=True, reuse_fresh_l1=False):
         seen.update({
             'root': root, 'archive_root': archive_root, 'retain_days': retain_days,
             'reference_date': reference_date, 'quarantine_root': quarantine_root, 'normalizer': normalizer,
-            'verified_remote_l1': verified_remote_l1,
+            'verified_remote_l1': verified_remote_l1, 'reuse_fresh_l1': reuse_fresh_l1,
         })
         return 7
 
@@ -124,12 +124,14 @@ def test_run_eod_maintenance_forwards_quarantine_root(tmp_path, monkeypatch) -> 
         archive_root=pathlib.Path(tmp_path) / 'l1',
         quarantine_root=pathlib.Path(tmp_path) / 'quarantine',
         work_root=pathlib.Path(tmp_path) / 'work',
+        reuse_fresh_l1=True,
     )
 
     # Then: 격리 경로 + 자식 프로세스 정규화기가 보존 계층까지 전달된다
     assert deleted == 7
     assert seen['quarantine_root'] == pathlib.Path(tmp_path) / 'quarantine'
     assert seen['reference_date'] == dt.date(2026, 9, 30)
+    assert seen['reuse_fresh_l1'] is True
     assert seen['normalizer'].func is run_isolated_normalize
     assert seen['normalizer'].keywords == {'work_root': pathlib.Path(tmp_path) / 'work'}
 
