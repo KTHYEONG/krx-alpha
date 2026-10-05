@@ -139,6 +139,7 @@ def normalize_l0_partition(
     work_root: pathlib.Path | None = None,
     dq_settings: DataQualitySettings | None = None,
     phase_windows: tuple[PhaseWindow, ...] = MARKET_PHASE_WINDOWS,
+    listing_symbols: frozenset[str] = frozenset(),
 ) -> int:
     """Write one deduplicated, quality-annotated L1 partition from L0 records.
 
@@ -148,6 +149,7 @@ def normalize_l0_partition(
         work_root: Optional bounded spill workspace.
         dq_settings: Typed quality thresholds.
         phase_windows: Market-phase windows for the partition date.
+        listing_symbols: Symbols judged under the listing-day price band for this partition date.
 
     Returns:
         Number of persisted L1 records.
@@ -250,7 +252,13 @@ def normalize_l0_partition(
         assert writer is not None
         del reader, chunk, table, fields
         tick_summary: TickQualitySummary | None = (
-            summarize_tick_fields_bucketed(pl.scan_parquet(tick_dir / "*.parquet"), rows=tick_rows, buckets=_TICK_BUCKETS)
+            summarize_tick_fields_bucketed(
+                pl.scan_parquet(tick_dir / "*.parquet"),
+                rows=tick_rows,
+                buckets=_TICK_BUCKETS,
+                settings=settings,
+                listing_symbols=listing_symbols,
+            )
             if tick_rows > 0
             else None
         )
@@ -272,7 +280,7 @@ def normalize_l0_partition(
             if tick_summary is not None:
                 quality = tick_summary
                 dq_log(
-                    "[DATA] stage=quality tr_id=%s vendor=%s rows=%d decode_fail=%d zero_volume=%d price_band_violation=%d cum_volume_regression=%d schema_disagree=%d tick_loss=%d lost_volume=%d status=%s reasons=%s",
+                    "[DATA] stage=quality tr_id=%s vendor=%s rows=%d decode_fail=%d zero_volume=%d price_band_violation=%d cum_volume_regression=%d schema_disagree=%d tick_loss=%d lost_volume=%d part=%s listing_symbols=%d status=%s reasons=%s",
                     stream_name,
                     vendor_label,
                     quality.rows,
@@ -283,6 +291,8 @@ def normalize_l0_partition(
                     quality.schema_disagree,
                     quality.tick_loss,
                     quality.lost_volume,
+                    str(part),
+                    len(listing_symbols),
                     verdict.status.value,
                     reasons,
                 )

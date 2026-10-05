@@ -1206,3 +1206,172 @@ def test_null_phase_falls_back() -> None:
     summary = decode_and_flag_quotes(df)
     assert summary is not None
     assert summary.crossed_book == 0
+
+
+def _listing_tick(symbol, price, *, ref=10000, wall=100):
+    import json
+
+    change = price - ref
+    drate = change / ref * 100 if ref else 0.0
+    body = {
+        'shcode': symbol, 'price': str(price), 'cvolume': '10', 'volume': '100',
+        'change': str(change), 'sign': '2', 'drate': f'{drate:.2f}',
+        'mdchecnt': '1', 'mschecnt': '1',
+    }
+    return {'raw': json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': symbol}, 'body': body}), 'tr_id': 'H0STCNT0', 'recv_wall_ns': wall}
+
+
+def test_listing_day_symbol_within_listing_band_not_flagged() -> None:
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_ticks
+
+    df = pl.DataFrame([_listing_tick('NEW', 18870, wall=i) for i in range(3)])
+
+    summary = decode_and_flag_ticks(df, listing_symbols=frozenset({'NEW'}))
+
+    assert summary is not None
+    assert summary.price_band_violation == 0
+
+
+def test_same_ticks_without_listing_status_are_flagged() -> None:
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_ticks
+
+    df = pl.DataFrame([_listing_tick('NEW', 18870, wall=i) for i in range(3)])
+
+    summary = decode_and_flag_ticks(df, listing_symbols=frozenset())
+
+    assert summary is not None
+    assert summary.price_band_violation == 3
+
+
+def test_listing_band_still_catches_extremes() -> None:
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_ticks
+
+    df = pl.DataFrame([_listing_tick('NEW', 45000, wall=1), _listing_tick('NEW', 8500, wall=2)])
+
+    summary = decode_and_flag_ticks(df, listing_symbols=frozenset({'NEW'}))
+
+    assert summary is not None
+    assert summary.price_band_violation == 2
+
+
+def test_listing_and_standard_boundary_values_pass() -> None:
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_ticks
+
+    df = pl.DataFrame([
+        _listing_tick('NEW', 9000, wall=1),
+        _listing_tick('NEW', 40000, wall=2),
+        _listing_tick('OLD', 13000, wall=3),
+        _listing_tick('OLD', 7000, wall=4),
+    ])
+
+    summary = decode_and_flag_ticks(df, listing_symbols=frozenset({'NEW'}))
+
+    assert summary is not None
+    assert summary.price_band_violation == 0
+
+
+def test_mixed_partition_judged_per_symbol() -> None:
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_ticks
+
+    df = pl.DataFrame([_listing_tick('NEW', 15000, wall=1), _listing_tick('OLD', 15000, wall=2)])
+
+    summary = decode_and_flag_ticks(df, listing_symbols=frozenset({'NEW'}))
+
+    assert summary is not None
+    assert summary.price_band_violation == 1
+
+
+def test_bucketed_equals_unbucketed_with_listing_symbols() -> None:
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_ticks, decode_tick_raw_fields, summarize_tick_fields_bucketed
+
+    frame = pl.DataFrame([
+        _listing_tick('NEW', 18870, wall=1),
+        _listing_tick('OLD', 15000, wall=2),
+        _listing_tick('NEW', 45000, wall=3),
+        _listing_tick('AAA', 70000, wall=4),
+        _listing_tick('AAA', 70000, wall=5),
+    ])
+    listing = frozenset({'NEW'})
+    expected = decode_and_flag_ticks(frame, listing_symbols=listing)
+    fields = decode_tick_raw_fields(frame)
+    assert expected is not None
+    assert fields is not None
+
+    for buckets in (1, 3, 7):
+        assert summarize_tick_fields_bucketed(fields.lazy(), rows=fields.height, buckets=buckets, listing_symbols=listing) == expected
+
+
+def test_custom_settings_band_is_honoured() -> None:
+    import polars as pl
+
+    from src.core.config import DataQualitySettings
+    from src.storage.quality import decode_and_flag_ticks
+
+    df = pl.DataFrame([_listing_tick('OLD', 12000, wall=1)])
+
+    summary = decode_and_flag_ticks(df, settings=DataQualitySettings(price_band_ratio=0.10))
+
+    assert summary is not None
+    assert summary.price_band_violation == 1
+
+
+def test_listing_band_preserves_non_price_counters() -> None:
+    import json
+    from dataclasses import replace
+
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_ticks, decode_tick_raw_fields, summarize_tick_fields_bucketed
+
+    rows = []
+    for wall, volume, cvolume in ((1, 100, 10), (2, 120, 10), (3, 90, 0)):
+        row = _listing_tick('NEW', 15000, wall=wall)
+        payload = json.loads(row['raw'])
+        payload['body'].update(volume=str(volume), cvolume=str(cvolume), mdchecnt=str(wall))
+        if wall == 3:
+            payload['body']['drate'] = '0'
+        row['raw'] = json.dumps(payload)
+        rows.append(row)
+    rows.append({'raw': 'not-json', 'tr_id': 'H0STCNT0', 'recv_wall_ns': 4})
+    frame = pl.DataFrame(rows)
+    standard = decode_and_flag_ticks(frame)
+    listing = frozenset({'NEW'})
+    widened = decode_and_flag_ticks(frame, listing_symbols=listing)
+    assert standard is not None
+    assert widened == replace(standard, price_band_violation=0)
+    assert standard.price_band_violation == 3
+    assert standard.decode_fail == standard.zero_volume == standard.cum_volume_regression == standard.schema_disagree == standard.tick_loss == 1
+    assert standard.lost_volume == 10
+    fields = decode_tick_raw_fields(frame)
+    assert fields is not None
+    for buckets in (1, 3, 7):
+        assert summarize_tick_fields_bucketed(fields.lazy(), rows=frame.height, buckets=buckets, listing_symbols=listing) == widened
+
+
+def test_custom_listing_band_is_honoured_by_both_summaries() -> None:
+    import polars as pl
+
+    from src.core.config import DataQualitySettings
+    from src.storage.quality import decode_and_flag_ticks, decode_tick_raw_fields, summarize_tick_fields_bucketed
+
+    frame = pl.DataFrame([_listing_tick('NEW', 18000, wall=1), _listing_tick('NEW', 9000, wall=2)])
+    settings = DataQualitySettings(listing_day_lower_ratio=0.95, listing_day_upper_ratio=1.5)
+    listing = frozenset({'NEW'})
+    summary = decode_and_flag_ticks(frame, settings=settings, listing_symbols=listing)
+    assert summary is not None
+    assert summary.price_band_violation == 2
+    fields = decode_tick_raw_fields(frame)
+    assert fields is not None
+    assert summarize_tick_fields_bucketed(fields.lazy(), rows=frame.height, buckets=3, settings=settings, listing_symbols=listing) == summary

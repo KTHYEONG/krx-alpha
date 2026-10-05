@@ -713,3 +713,50 @@ def test_runtime_exposes_premarket_without_changing_existing_fields(tmp_path, mo
     assert runtime.premarket.enabled is False
     assert runtime.paths.root == pathlib.Path(tmp_path)
     assert runtime.collector.data_root == pathlib.Path(tmp_path)
+
+
+def test_dq_price_band_defaults_match_legacy_behaviour(monkeypatch) -> None:
+    import os
+
+    from src.core.config import DataQualitySettings
+
+    for name in [n for n in os.environ if n.startswith("KRX_ALPHA_DQ_")]:
+        monkeypatch.delenv(name, raising=False)
+
+    settings = DataQualitySettings()
+
+    assert settings.price_band_ratio == 0.30
+    assert settings.listing_day_lower_ratio == 0.90
+    assert settings.listing_day_upper_ratio == 4.00
+
+
+def test_dq_price_band_env_override_applies(monkeypatch) -> None:
+    from src.core.config import DataQualitySettings
+
+    monkeypatch.setenv("KRX_ALPHA_DQ_PRICE_BAND_RATIO", "0.25")
+
+    assert DataQualitySettings().price_band_ratio == 0.25
+
+
+def test_dq_price_band_out_of_range_rejected() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import DataQualitySettings
+
+    with pytest.raises(ValidationError):
+        DataQualitySettings(listing_day_upper_ratio=1.0)
+    with pytest.raises(ValidationError):
+        DataQualitySettings(listing_day_lower_ratio=1.0)
+    with pytest.raises(ValidationError):
+        DataQualitySettings(price_band_ratio=0)
+
+
+@pytest.mark.parametrize("upper", [float("inf"), float("-inf"), float("nan")])
+def test_dq_listing_upper_band_rejects_non_finite_values(upper) -> None:
+    from pydantic import ValidationError
+
+    from src.core.config import DataQualitySettings
+
+    with pytest.raises(ValidationError):
+        DataQualitySettings(listing_day_upper_ratio=upper)
