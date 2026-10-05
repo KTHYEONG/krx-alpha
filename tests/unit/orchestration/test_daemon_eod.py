@@ -286,7 +286,7 @@ def test_run_collector_daemon_eod_unexpected_error_logs_traceback(tmp_path, monk
     from src.orchestration import daemon as daemon_mod
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None: "r")
+    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None, alert_ledger_path=None: "r")
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
 

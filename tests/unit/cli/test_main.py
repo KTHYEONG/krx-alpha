@@ -92,8 +92,8 @@ def test_cli_main_configures_logging_per_subcommand(tmp_path, monkeypatch) -> No
 
     calls: list[dict[str, object]] = []
 
-    def fake_configure(component, *, log_dir=None, level="INFO"):
-        calls.append({"component": component, "log_dir": log_dir, "level": level})
+    def fake_configure(component, *, log_dir=None, level="INFO", alert_ledger_path=None):
+        calls.append({"component": component, "log_dir": log_dir, "level": level, "alert_ledger_path": alert_ledger_path})
         return "r"
 
     monkeypatch.setattr(main_mod, "configure_logging", fake_configure)
@@ -104,7 +104,16 @@ def test_cli_main_configures_logging_per_subcommand(tmp_path, monkeypatch) -> No
     code = main_mod.main(["--log-level", "DEBUG", "collect-status", "--manifest-path", str(manifest)])
 
     assert code == 0
-    assert calls == [{"component": "cli-collect-status", "log_dir": None, "level": "DEBUG"}]
+    from src.core.config import CollectorSettings as _CS
+
+    assert calls == [
+        {
+            "component": "cli-collect-status",
+            "log_dir": None,
+            "level": "DEBUG",
+            "alert_ledger_path": _CS().paths.alert_ledger_file,
+        }
+    ]
 
 
 def test_main_registers_collect_aftermarket_command():

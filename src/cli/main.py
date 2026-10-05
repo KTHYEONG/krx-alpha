@@ -57,6 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"cli-{args.command}",
         log_dir=CollectorSettings().paths.logs_dir if ObservabilitySettings().persistent_logs else None,
         level=str(args.log_level).upper(),
+        alert_ledger_path=CollectorSettings().paths.alert_ledger_file,
     )
     handler = getattr(args, "handler", None)
     if handler is None:

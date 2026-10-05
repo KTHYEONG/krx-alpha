@@ -161,7 +161,7 @@ def test_run_collector_daemon_configures_logging_with_persistent_dir_flag(tmp_pa
 
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
     calls: list[tuple[str, object]] = []
-    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None: calls.append((component, log_dir)) or "daemon-77")
+    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None, alert_ledger_path=None: calls.append((component, log_dir, alert_ledger_path)) or "daemon-77")
     night = dt.datetime(2026, 9, 8, 20, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     monkeypatch.delenv("KRX_ALPHA_PERSISTENT_LOGS", raising=False)
@@ -170,7 +170,10 @@ def test_run_collector_daemon_configures_logging_with_persistent_dir_flag(tmp_pa
     monkeypatch.setenv("KRX_ALPHA_PERSISTENT_LOGS", "true")
     daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: night)
 
-    assert calls == [("daemon", None), ("daemon", settings.paths.logs_dir)]
+    assert calls == [
+        ("daemon", None, settings.paths.alert_ledger_file),
+        ("daemon", settings.paths.logs_dir, settings.paths.alert_ledger_file),
+    ]
     assert "stage=start status=ONLINE timezone=Asia/Seoul run_id=daemon-77" in caplog.text
 
 
@@ -182,7 +185,7 @@ def test_run_collector_daemon_logs_state_changes_and_ten_minute_heartbeat_only(t
     from src.core.config import CollectorSettings
     from src.orchestration import daemon as daemon_mod
 
-    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None: "r")
+    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None, alert_ledger_path=None: "r")
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
     kst = ZoneInfo("Asia/Seoul")
     times = iter([
@@ -208,7 +211,7 @@ def test_run_collector_daemon_logs_streamer_restart_and_circuit_transition_once(
     import src.orchestration.daemon as daemon_mod
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None: "r")
+    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None, alert_ledger_path=None: "r")
     monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
     monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: True)
     results = iter(["started", "restarted", "circuit_open", "circuit_open"])

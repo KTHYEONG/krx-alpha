@@ -92,6 +92,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(
         "normalize-worker",
         log_dir=CollectorSettings().paths.logs_dir if ObservabilitySettings().persistent_logs else None,
+        alert_ledger_path=CollectorSettings().paths.alert_ledger_file,
     )
     try:
         part_date = dt.date.fromisoformat(pathlib.Path(args.part).name.removeprefix("dt="))
