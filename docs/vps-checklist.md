@@ -3,7 +3,7 @@
 Agent-executable runbook. An AI auditor runs it on a schedule, verifies that every automated routine of the day ran **and that the data it produced is correct**, then reports. It is feature-agnostic: new automation is added as a check row (section 12), not as a new document.
 
 - Host `or-vps` (SSH alias, tailnet), container `krx-collector`, data root host `~/krx-alpha/data` = container `/app/data`.
-- Last verified against production: 2026-10-05 (baselines in section 9 are dated; refresh them, never hard-code new ones).
+- Last verified against production: 2026-10-05. Dry-run coverage so far: C0, H1–H9, S1 (holiday), S4, S5, A1, A5, C6, C7, Q1–Q6, H8, X1, P-* probes. Not yet exercised on a live business day: S2, S3, S6, C1–C3 (current hour), NP*, A2 (ledger appears at the first CRITICAL). Baselines in section 9 are dated; refresh them, never hard-code new ones.
 - Output language: report in Korean; keys, IDs, badges stay English (section 10). This file stays English.
 
 ## 1. Operating rules (non-negotiable)
@@ -36,8 +36,8 @@ Run the mode that matches the KST time. Every run starts with C0 (section 4) and
 
 | Mode | When (KST) | Purpose | Checks |
 |---|---|---|---|
-| M0 pre-open | business day 07:45–08:15 | Is the day armed? | C0, H1–H6, S1, S6, S7, A1, NP* (if premarket enabled) |
-| M1 open | business day 09:05–09:30 | Did collection actually start? | C0, S2–S4, C1 (current hour), C2 (regular), H2 |
+| M0 pre-open | business day 07:45–08:15 | Is the day armed? | C0, H1–H6, S1, S7 (stale-by-one is expected), C7, A1, NP1 (if premarket enabled) |
+| M1 open | business day 09:05–09:30 | Did collection actually start? | C0, S2–S4, S6, S7, C1 (current hour), C2 (regular), H2 |
 | M2 close | business day 15:45–16:15 | Regular session closed clean, aftermarket armed | C0, S2, C2, C4, C7 (aftermarket universe) |
 | **M3 EOD review** | business day 20:35–21:45 (**finish before 22:00**) | Full audit of the day incl. content | everything in sections 6–8 except weekly rows |
 | M4 night | every day 23:45–00:15 | Host backup, next-day readiness | H5–H8, C7 (next premarket pool), S1 for tomorrow |
@@ -50,7 +50,7 @@ Holiday / weekend: run M0-lite (H1–H6, S1) and M4; expected state is idle. Cad
 
 Run P-CTX (section 8). Derive:
 
-- `NOW` KST, `KIND` of today and of tomorrow. Sources that must agree: `calendar_cache.json` (`is_business_day`, `previous_business_day` = `P`, `next_business_day` = `N`; valid only when `date == today`), dashboard `[market]` `closed_dates` / `shifted_dates`, weekday. Disagreement = S1 finding. `SHIFTED` days move session anchors: read `calendar/dt=<day>.json` (`regular_open`, `regular_close`, `after_market_end`, `source`); every time in this runbook shifts accordingly. `source != vendor` means the vendor calendar failed and defaults are in use (SEV3).
+- `NOW` KST, `KIND` of today and of tomorrow. Sources that must agree: `calendar_cache.json` (`is_business_day`, `previous_business_day` = `P`, `next_business_day` = `N`; valid only when `date == today`), dashboard `[market]` `closed_dates` / `shifted_dates`, weekday. Disagreement = S1 finding. `SHIFTED` days move session anchors: read `calendar/dt=<day>.json` (written only for business days; ABSENT on a holiday/weekend is normal) (`regular_open`, `regular_close`, `after_market_end`, `source`); every time in this runbook shifts accordingly. `source != vendor` means the vendor calendar failed and defaults are in use (SEV3).
 - `D` = session date under audit: today if business day and `NOW` ≥ 08:20, else `P`.
 - Deployed revision = container label `rev`; compare with `origin/main` head / last successful CI run. Mismatch or a start time inside 08:10–22:00 = S4 finding.
 
@@ -109,13 +109,13 @@ Columns: ID, modes, what, how (probe in section 8 or command), PASS / WARN / FAI
 
 | ID | Modes | Check | How | PASS | WARN / FAIL |
 |---|---|---|---|---|---|
-| S1 | M0 M3 M4 | Calendar agreement | C0 sources + events `stage=session status=SKIP reason=market_holiday` | daemon SKIP exists iff day is closed | business day skipped = SEV1; holiday collected = SEV3; sources disagree = SEV2 |
+| S1 | M0 M3 M4 | Calendar agreement | C0 sources + events `stage=session status=SKIP reason=market_holiday`; `calendar/dt=<N>.json` exists with `source: vendor` for the next business day (M4) | daemon SKIP exists iff day is closed; anchors file exists only for business days (ABSENT on a closed day is normal) | business day skipped = SEV1; holiday collected = SEV3; sources disagree = SEV2 |
 | S2 | M1 M2 M3 | State timeline | P-EVENTS section state_change: `grep '"state_change"' logs/events-daemon.jsonl` for D | `PRE_MARKET_SLEEP→STREAMER_ACTIVE(08:20)→FULL_ACTIVE(08:50)→AFTER_MARKET_ACTIVE(15:40)→POST_MARKET_EOD(20:00)→NIGHT_SLEEP`, each within ±90 s of anchor (holiday: same states, no collection) | late/missing transition = SEV2; skipped state = SEV1 |
 | S3 | M1 M2 | Heartbeat | `docker logs --since 30m krx-collector 2>&1 \| grep stage=heartbeat \| tail -3` | every ~10 min; `streamer_alive=True` in `FULL_ACTIVE` | stale >15 min or `alive=False` in session = SEV1; `streamer_restarts>0` = SEV2 |
-| S4 | M0 M3 | Starts and deploys | events `stage=start status=ONLINE` for D; `work/daemon_lifecycle.json` (`clean_exit`, `crash_error`) | ≤1 start/day (22:00) | start in 08:10–22:00 = SEV2 (hotfix or crash; read `shutdown` event: `signal`, `graceful`) |
+| S4 | M0 M3 | Starts and deploys | events `stage=start status=ONLINE` for D; `work/daemon_lifecycle.json` (`clean_exit`, `crash_error`) | starts only at/after 22:00 (deferred recreate, CI deploys after the freeze); no start between 08:10 and 22:00 | start in 08:10–22:00 = SEV2 (hotfix or crash; read `shutdown` event: `signal`, `graceful`); several starts after 22:00 = INFO (deploys) |
 | S5 | M3 | Event audit | P-EVENTS for D | every non-INFO event is explained by an open item or the benign list (section 9); no `stage=eod_*`, `prune`, `quarantine`, `host_backup_freshness` CRITICAL | unexplained CRITICAL/ERROR = SEV2; `eod_maintenance DEGRADED` = SEV1 |
-| S6 | M0 | Candidates armed | `candidates.json`: `rev` = P as YYYYMMDD; count; no `candidates_not_ready` / `orchestration_error` since 08:20 | rev matches, count within trailing range and ≤ configured slot budget | stale rev or errors = SEV1 after 08:50 |
-| S7 | M0 M3 | Bars refresh | P-BARS `latest_date` | = P after 08:30 | older than P after 08:50 = SEV3; KRX timeout WARN is known (retry) |
+| S6 | M1 | Candidates armed | `candidates.json` (written by the 08:20 orchestration, not before): `rev` = P as YYYYMMDD; count; no `candidates_not_ready` / `orchestration_error` since 08:20. Before 08:20 the file legitimately holds the previous session's rev | rev matches P, count within trailing range and ≤ configured slot budget | stale rev or errors = SEV1 after 08:50 |
+| S7 | M0 M1 M3 | Bars refresh | P-BARS `latest_date` | M0: = the business day before P (refresh runs ~08:20); from 08:50: = P | older than P after 08:50 = SEV3; KRX timeout WARN is known (retry) |
 
 ### C: Collection completeness
 
@@ -359,13 +359,14 @@ Seeds for sanity and for "is this WARN the usual one". Refresh monthly or when t
 |---|---|
 | Daily bars per date | 2760–2766 rows; `market` null on legacy rows only |
 | Program trades per date | ~2456–2461 |
-| Regular candidates / subscribed symbols | 37–54 per day (pairs = 2x symbols); 2026-10-01 selection produced 96 (see S6) |
+| Regular candidates / subscribed symbols | 37–54 per day (pairs = 2x symbols); the 2026-10-01 selection produced 96 and `candidates.json` still holds that rev (>90 budget, pre-fix) until the 2026-10-06 08:20 orchestration rewrites it; expect ≤ budget afterwards (verify in S6, first run after the `c6bbfb5` fix on a business day) |
 | Aftermarket plan | 2 venues x 2 shards x 40 pairs (20 symbols x 2 streams), `capacity` 40, all acks accepted, gaps 0 |
 | Expected L0 streams on a business day | `ls/krx/regular/{H0STCNT0,H0STASP0}` hours 08–20; `kis/krx/krx_after/{H0STCNT0,H0STASP0}` hours 16–20; `kis/nxt/nxt_after/{H0NXCNT0,H0NXASP0}` hours 15–20; premarket `kis/nxt/nxt_pre/{H0NXCNT0,H0NXASP0}` hours 07–08 when enabled |
 | L0 daily size | regular quote ~455 MB, regular tick ~165 MB, KRX aftermarket 52/20 MB, NXT aftermarket 27/15 MB |
 | Snapshot kinds (9) | `stock_minute_bar` 23460 rows (60 symbols x 391), `ranking` ~23400, `index_minute_bar` 1173, `index_snapshot` 234, `news_title` 4700–5800; `program_trade`, `security_status`, `investor_estimate`, `auction_book` scale with candidate count (2026-10-02: x2.2 because candidates were 96 vs ~42) |
 | Benign DQ WARN | `ls regular H0STASP0`: `decode_fail` ≤0.01%, `total_remain_short` ≤2.5%; `ls regular H0STCNT0`: `cum_volume_regression` ≤5 rows, `tick_loss` ≤2; `nxt_after H0NXCNT0`: `tick_loss` ≤0.02% of rows, `lost_volume` ≤200. Everything else PASS. FAIL is never benign |
 | Known false FAIL footers | `kis/krx/krx_after/H0STCNT0` `dt=2026-09-29` and `dt=2026-10-01` (new-listing days; fixed in `717225b`, footers not re-judged). Expected to clear from dashboard `krx.data_quality` on 2026-10-08. Remove this row once re-judged |
+| Premarket pool timing | `universe/premarket/N.json` is written on the preceding run, which can be well before 20:30 (2026-10-06 pool was generated 2026-10-03 00:24 across the weekend) |
 | Offload | local L1 size == remote size for every partition |
 | Clock | manifest `clock_offset_ns` within ±1 ms; chrony offset <1 ms |
 | Memory | idle ~80–100 MiB; EOD normalizer child ≤500 MiB |
