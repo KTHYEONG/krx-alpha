@@ -22,6 +22,9 @@ _SCHEMA_VERSION = 1
 _POLL_INTERVAL_S = 0.01
 _DEFAULT_LOCK_TIMEOUT_S = 30.0
 _DEFAULT_EXPIRY_MARGIN_S = 600.0
+# Peer writers (KCA) and vendors that omit expiry leave expires_at unset; such a token is trusted only this long,
+# because a vendor-side expiry silently closes the socket instead of reporting auth rejection.
+_DEFAULT_UNKNOWN_EXPIRY_MAX_AGE_S = 12 * 3600.0
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,7 @@ class TossTokenStore:
         *,
         lock_timeout_s: float = _DEFAULT_LOCK_TIMEOUT_S,
         expiry_margin_s: float = _DEFAULT_EXPIRY_MARGIN_S,
+        unknown_expiry_max_age_s: float = _DEFAULT_UNKNOWN_EXPIRY_MAX_AGE_S,
         clock: Callable[[], dt.datetime] = _utcnow,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -126,15 +130,18 @@ class TossTokenStore:
             raise ValueError("lock_timeout_s must be positive")
         if expiry_margin_s < 0:
             raise ValueError("expiry_margin_s must be non-negative")
+        if unknown_expiry_max_age_s <= 0:
+            raise ValueError("unknown_expiry_max_age_s must be positive")
         self._path = pathlib.Path(path)
         self._lock_timeout_s = float(lock_timeout_s)
         self._expiry_margin_s = float(expiry_margin_s)
+        self._unknown_expiry_max_age = dt.timedelta(seconds=float(unknown_expiry_max_age_s))
         self._clock = clock
         self._sleep = sleep
 
     def _is_usable(self, record: TokenRecord, now: dt.datetime) -> bool:
         if record.expires_at is None:
-            return True
+            return now - record.issued_at < self._unknown_expiry_max_age
         return now < record.expires_at - dt.timedelta(seconds=self._expiry_margin_s)
 
     def read(self) -> TokenRecord | None:

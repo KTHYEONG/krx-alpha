@@ -16,11 +16,13 @@ def _store(tmp_path: pathlib.Path, **kwargs: object) -> object:
     return TossTokenStore(tmp_path / "token_toss_abc.json", **params)  # type: ignore[arg-type]
 
 
-def _kca_payload(token: str, generation: int, issued_at: str = "2026-09-30T00:00:00+09:00") -> dict[str, object]:
+def _kca_payload(token: str, generation: int, issued_at: str | None = None) -> dict[str, object]:
+    import datetime as dt
+
     return {
         "schema_version": 1,
         "access_token": token,
-        "issued_at": issued_at,
+        "issued_at": issued_at if issued_at is not None else dt.datetime.now(dt.UTC).isoformat(),
         "expires_at": None,
         "generation": generation,
     }
@@ -335,3 +337,40 @@ def test_publish_failure_rolls_back_temp_file(tmp_path, monkeypatch) -> None:
         store.get_or_issue(lambda: IssuedToken("x", None))  # type: ignore[attr-defined]
     leftovers = [p for p in tmp_path.iterdir() if p.suffix == ".tmp"]
     assert leftovers == []
+
+
+def test_unknown_expiry_token_older_than_max_age_is_reissued(tmp_path) -> None:
+    # Given: expires_at 없이 기록된 13시간 전 토큰과 12시간 상한
+    import datetime as dt
+
+    now = dt.datetime(2026, 10, 6, 8, 20, tzinfo=dt.UTC)
+    path = tmp_path / "token_toss_abc.json"
+    path.write_text(json.dumps(_kca_payload("OLD", 1, issued_at=(now - dt.timedelta(hours=13)).isoformat())), encoding="utf-8")
+    store = _store(tmp_path, clock=lambda: now, unknown_expiry_max_age_s=12 * 3600.0)
+
+    # When: 토큰을 요청한다
+    token = store.get_or_issue(lambda: IssuedToken("NEW", None))  # type: ignore[attr-defined]
+
+    # Then: 만료 불명 토큰은 상한을 넘으면 재발급되고 generation 이 증가한다
+    assert token == "NEW"
+    assert json.loads(path.read_text(encoding="utf-8"))["generation"] == 2
+
+
+def test_unknown_expiry_token_within_max_age_is_reused(tmp_path) -> None:
+    # Given: expires_at 없이 기록된 1시간 전 토큰
+    import datetime as dt
+
+    now = dt.datetime(2026, 10, 6, 8, 20, tzinfo=dt.UTC)
+    path = tmp_path / "token_toss_abc.json"
+    path.write_text(json.dumps(_kca_payload("FRESH", 1, issued_at=(now - dt.timedelta(hours=1)).isoformat())), encoding="utf-8")
+    store = _store(tmp_path, clock=lambda: now, unknown_expiry_max_age_s=12 * 3600.0)
+
+    # When / Then: 발급기를 호출하지 않고 재사용한다
+    assert store.get_or_issue(lambda: IssuedToken("NEW", None)) == "FRESH"  # type: ignore[attr-defined]
+
+
+def test_non_positive_unknown_expiry_max_age_is_rejected(tmp_path) -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="unknown_expiry_max_age_s"):
+        _store(tmp_path, unknown_expiry_max_age_s=0.0)
