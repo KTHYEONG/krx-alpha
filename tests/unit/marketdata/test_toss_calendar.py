@@ -570,7 +570,7 @@ def test_fetch_trading_day_reuses_stored_token_without_issuance(tmp_path) -> Non
 
     path = toss_token_path(tmp_path, "k")
     path.write_text(json.dumps({
-        "schema_version": 1, "access_token": "tok-B", "issued_at": "2026-09-14T00:00:00+09:00",
+        "schema_version": 1, "access_token": "tok-B", "issued_at": __import__("datetime").datetime.now(__import__("datetime").UTC).isoformat(),
         "expires_at": None, "generation": 5,
     }), encoding="utf-8")
 
