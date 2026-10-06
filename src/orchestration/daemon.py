@@ -472,7 +472,10 @@ def _run_eod_housekeeping(
             verified = verified - getattr(post_deleted, "invalidated_remote_l1", frozenset())
             try:
                 run_eod_remote_l0_purge(
-                    paths.journal_root, verified, progress=progress, quarantine_root=paths.quarantine_root,
+                    paths.journal_root,
+                    verified,
+                    progress=progress,
+                    quarantine_root=paths.quarantine_root,
                 )
             except Exception as exc:  # noqa: BLE001 - purge failure never fails EOD
                 logger.error("[DAEMON] stage=eod_l0_remote_purge status=FAIL error=%s", str(exc), exc_info=True)
@@ -1231,18 +1234,19 @@ class DaemonRunner:
     def _supervise_regular(self) -> None:
         st = self._state
         ch = self._children
-        if ch.regular is not None:
-            result = ch.regular.ensure_running()
+        sup = ch.regular
+        if sup is not None:
+            result = sup.ensure_running()
             if result == "started":
                 logger.info("[DAEMON] stage=streamer status=STARTED", extra=EVENT)
             elif result == "restarted":
                 st.streamer_restarts += 1
                 logger.warning(
                     "[DAEMON] stage=streamer status=RESTARTED exit_code=%s restarts=%d",
-                    ch.regular.last_exit_code,
+                    sup.last_exit_code,
                     st.streamer_restarts,
                 )
-            elif result == "circuit_open" and st.last_supervisor_result != "circuit_open":
+            elif result == "circuit_open" and sup.take_circuit_alert():
                 logger.critical("[DAEMON] stage=streamer status=FAIL reason=circuit_open")
             st.last_supervisor_result = result
 
@@ -1251,14 +1255,15 @@ class DaemonRunner:
         ch = self._children
         snapshot_cfg = self._snapshot_cfg
         snapshot_run_end = shift_snapshot_settings(snapshot_cfg, anchors).run_end
-        if ch.snapshot is not None and now.astimezone(_KST).time() < snapshot_run_end:
-            snapshot_result = ch.snapshot.ensure_running()
+        sup = ch.snapshot
+        if sup is not None and now.astimezone(_KST).time() < snapshot_run_end:
+            snapshot_result = sup.ensure_running()
             if snapshot_result == "restarted":
                 logger.warning(
                     "[DAEMON] stage=snapshots status=RESTARTED exit_code=%s",
-                    ch.snapshot.last_exit_code,
+                    sup.last_exit_code,
                 )
-            elif snapshot_result == "circuit_open" and st.last_snapshot_result != "circuit_open":
+            elif snapshot_result == "circuit_open" and sup.take_circuit_alert():
                 logger.critical("[DAEMON] stage=snapshots status=FAIL reason=circuit_open")
             st.last_snapshot_result = snapshot_result
 

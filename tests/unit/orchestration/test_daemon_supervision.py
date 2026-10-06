@@ -19,8 +19,6 @@ def _verified_aftermarket_capacity(monkeypatch) -> None:
     monkeypatch.setenv("KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION", "4")
 
 
-
-
 def test_run_collector_daemon_single_cycle(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     import datetime as dt
@@ -29,7 +27,7 @@ def test_run_collector_daemon_single_cycle(tmp_path, monkeypatch) -> None:
     from src.orchestration.daemon import run_collector_daemon
 
     mock_sleep = MagicMock()
-    night = dt.datetime(2026, 9, 8, 20, 0, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+    night = dt.datetime(2026, 9, 8, 20, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     run_collector_daemon(sleep_fn=mock_sleep, max_cycles=1, now_fn=lambda: night)
 
@@ -44,25 +42,26 @@ def test_run_collector_daemon_streamer_active_spawns_supervised_process(tmp_path
     from src.orchestration.daemon import run_collector_daemon
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(daemon_mod, 'resolve_trading_day', lambda ref_date: None)
-    monkeypatch.setattr(daemon_mod, 'run_session_orchestration', lambda **kw: True)
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: True)
 
     calls: list[str] = []
 
     class _FakeSupervisor:
         def __init__(self, *, cmd, breaker=None):
-            calls.append('constructed')
+            calls.append("constructed")
+
         def ensure_running(self):
-            calls.append('ensure_running')
-            return 'started'
+            calls.append("ensure_running")
+            return "started"
 
-    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _FakeSupervisor)
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
 
-    active = dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+    active = dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     run_collector_daemon(sleep_fn=MagicMock(), max_cycles=1, now_fn=lambda: active)
 
-    assert calls == ['constructed', 'ensure_running']
+    assert calls == ["constructed", "ensure_running"]
 
 
 def test_run_collector_daemon_streamer_active_skips_spawn_when_not_ready(tmp_path, monkeypatch) -> None:
@@ -73,21 +72,22 @@ def test_run_collector_daemon_streamer_active_skips_spawn_when_not_ready(tmp_pat
     from src.orchestration.daemon import run_collector_daemon
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(daemon_mod, 'resolve_trading_day', lambda ref_date: None)
-    monkeypatch.setattr(daemon_mod, 'run_session_orchestration', lambda **kw: False)
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: False)
 
     constructed: list[str] = []
 
     class _FakeSupervisor:
         def __init__(self, *, cmd, breaker=None):
-            constructed.append('constructed')
+            constructed.append("constructed")
+
         def ensure_running(self):
-            constructed.append('ensure_running')
-            return 'started'
+            constructed.append("ensure_running")
+            return "started"
 
-    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _FakeSupervisor)
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
 
-    active = dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+    active = dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     run_collector_daemon(sleep_fn=MagicMock(), max_cycles=1, now_fn=lambda: active)
 
@@ -102,23 +102,27 @@ def test_run_collector_daemon_streamer_active_logs_circuit_open(tmp_path, monkey
     from src.orchestration.daemon import run_collector_daemon
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(daemon_mod, 'resolve_trading_day', lambda ref_date: None)
-    monkeypatch.setattr(daemon_mod, 'run_session_orchestration', lambda **kw: True)
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: True)
 
     class _FakeSupervisor:
         def __init__(self, *, cmd, breaker=None):
             self.cmd = cmd
+
         def ensure_running(self):
-            return 'circuit_open'
+            return "circuit_open"
 
-    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _FakeSupervisor)
+        def take_circuit_alert(self):
+            return True
 
-    active = dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+
+    active = dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     with caplog.at_level(logging.CRITICAL):
         run_collector_daemon(sleep_fn=MagicMock(), max_cycles=1, now_fn=lambda: active)
 
-    assert any('circuit_open' in r.message for r in caplog.records)
+    assert any("circuit_open" in r.message for r in caplog.records)
 
 
 def test_run_collector_daemon_weekend_sleeps_hourly(tmp_path, monkeypatch) -> None:
@@ -129,7 +133,7 @@ def test_run_collector_daemon_weekend_sleeps_hourly(tmp_path, monkeypatch) -> No
     from src.orchestration.daemon import run_collector_daemon
 
     mock_sleep = MagicMock()
-    saturday = dt.datetime(2026, 9, 12, 12, 0, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+    saturday = dt.datetime(2026, 9, 12, 12, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     run_collector_daemon(sleep_fn=mock_sleep, max_cycles=1, now_fn=lambda: saturday)
 
@@ -144,7 +148,7 @@ def test_run_collector_daemon_pre_market_sleeps_until_streamer_start(tmp_path, m
     from src.orchestration.daemon import run_collector_daemon
 
     mock_sleep = MagicMock()
-    pre_market = dt.datetime(2026, 9, 10, 8, 0, 0, tzinfo=ZoneInfo('Asia/Seoul'))
+    pre_market = dt.datetime(2026, 9, 10, 8, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     run_collector_daemon(sleep_fn=mock_sleep, max_cycles=1, now_fn=lambda: pre_market)
 
@@ -161,7 +165,13 @@ def test_run_collector_daemon_configures_logging_with_persistent_dir_flag(tmp_pa
 
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
     calls: list[tuple[str, object]] = []
-    monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None, alert_ledger_path=None: calls.append((component, log_dir, alert_ledger_path)) or "daemon-77")
+    monkeypatch.setattr(
+        daemon_mod,
+        "configure_logging",
+        lambda component, *, log_dir=None, alert_ledger_path=None: (
+            calls.append((component, log_dir, alert_ledger_path)) or "daemon-77"
+        ),
+    )
     night = dt.datetime(2026, 9, 8, 20, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     monkeypatch.delenv("KRX_ALPHA_PERSISTENT_LOGS", raising=False)
@@ -188,14 +198,18 @@ def test_run_collector_daemon_logs_state_changes_and_ten_minute_heartbeat_only(t
     monkeypatch.setattr(daemon_mod, "configure_logging", lambda component, *, log_dir=None, alert_ledger_path=None: "r")
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
     kst = ZoneInfo("Asia/Seoul")
-    times = iter([
-        dt.datetime(2026, 9, 8, 20, 0, 0, tzinfo=kst),
-        dt.datetime(2026, 9, 8, 20, 0, 10, tzinfo=kst),
-        dt.datetime(2026, 9, 8, 20, 10, 30, tzinfo=kst),
-    ])
+    times = iter(
+        [
+            dt.datetime(2026, 9, 8, 20, 0, 0, tzinfo=kst),
+            dt.datetime(2026, 9, 8, 20, 0, 10, tzinfo=kst),
+            dt.datetime(2026, 9, 8, 20, 10, 30, tzinfo=kst),
+        ]
+    )
 
     with caplog.at_level(logging.INFO):
-        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=3, now_fn=lambda: next(times))
+        daemon_mod.run_collector_daemon(
+            settings=settings, sleep_fn=lambda s: None, max_cycles=3, now_fn=lambda: next(times)
+        )
 
     info = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO and r.name == daemon_mod.logger.name]
     assert sum("stage=state_change" in m for m in info) == 1
@@ -220,9 +234,16 @@ def test_run_collector_daemon_logs_streamer_restart_and_circuit_transition_once(
         def __init__(self, *, cmd, breaker=None):
             self.cmd = cmd
             self.last_exit_code = -9
+            self._alerted = False
 
         def ensure_running(self):
             return next(results)
+
+        def take_circuit_alert(self):
+            if self._alerted:
+                return False
+            self._alerted = True
+            return True
 
     monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
     active = dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
@@ -237,7 +258,9 @@ def test_run_collector_daemon_logs_streamer_restart_and_circuit_transition_once(
     assert any("stage=streamer status=STARTED" in r.getMessage() for r in caplog.records if r.levelno == logging.INFO)
 
 
-def test_run_collector_daemon_ingest_watchdog_alerts_stale_journal_once_and_recovers(tmp_path, monkeypatch, caplog) -> None:
+def test_run_collector_daemon_ingest_watchdog_alerts_stale_journal_once_and_recovers(
+    tmp_path, monkeypatch, caplog
+) -> None:
 
     import datetime as dt
     import os
@@ -298,7 +321,9 @@ def test_run_collector_daemon_ingest_watchdog_alerts_stale_journal_once_and_reco
     assert recovered[0].levelno == logging.WARNING
 
 
-def test_run_collector_daemon_ingest_watchdog_skips_open_and_close_auction_windows(tmp_path, monkeypatch, caplog) -> None:
+def test_run_collector_daemon_ingest_watchdog_skips_open_and_close_auction_windows(
+    tmp_path, monkeypatch, caplog
+) -> None:
 
     import datetime as dt
     import pathlib
@@ -326,10 +351,18 @@ def test_run_collector_daemon_ingest_watchdog_skips_open_and_close_auction_windo
     monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
     monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: True)
 
-    times = iter([dt.datetime(2026, 9, 14, 9, 0, tzinfo=kst), dt.datetime(2026, 9, 14, 9, 4, tzinfo=kst), dt.datetime(2026, 9, 14, 15, 26, tzinfo=kst)])
+    times = iter(
+        [
+            dt.datetime(2026, 9, 14, 9, 0, tzinfo=kst),
+            dt.datetime(2026, 9, 14, 9, 4, tzinfo=kst),
+            dt.datetime(2026, 9, 14, 15, 26, tzinfo=kst),
+        ]
+    )
 
     with caplog.at_level(logging.INFO):
-        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=3, now_fn=lambda: next(times))
+        daemon_mod.run_collector_daemon(
+            settings=settings, sleep_fn=lambda s: None, max_cycles=3, now_fn=lambda: next(times)
+        )
 
     assert "stage=ingest_watchdog" not in caplog.text
 
@@ -342,17 +375,18 @@ def test_daemon_spawns_snapshot_supervisor_when_enabled(tmp_path, monkeypatch) -
     from src.orchestration.daemon import run_collector_daemon
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv('KRX_ALPHA_SNAPSHOT_ENABLED', 'true')
+    monkeypatch.setenv("KRX_ALPHA_SNAPSHOT_ENABLED", "true")
     _snapshot_ready_daemon(monkeypatch, daemon_mod)
     created = _snapshot_fake_supervisor(monkeypatch, daemon_mod)
 
     run_collector_daemon(
-        sleep_fn=MagicMock(), max_cycles=1,
-        now_fn=lambda: dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo('Asia/Seoul')),
+        sleep_fn=MagicMock(),
+        max_cycles=1,
+        now_fn=lambda: dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo("Asia/Seoul")),
     )
 
-    kinds = ['snapshots' if 'collect-snapshots' in sup.cmd else 'streamer' for sup in created]
-    assert sorted(kinds) == ['snapshots', 'streamer']
+    kinds = ["snapshots" if "collect-snapshots" in sup.cmd else "streamer" for sup in created]
+    assert sorted(kinds) == ["snapshots", "streamer"]
     assert all(sup.ensure_calls == 1 for sup in created)
 
 
@@ -364,19 +398,20 @@ def test_daemon_does_not_restart_snapshots_after_run_end(tmp_path, monkeypatch) 
     from src.orchestration.daemon import run_collector_daemon
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv('KRX_ALPHA_SNAPSHOT_ENABLED', 'true')
+    monkeypatch.setenv("KRX_ALPHA_SNAPSHOT_ENABLED", "true")
     _snapshot_ready_daemon(monkeypatch, daemon_mod)
     created = _snapshot_fake_supervisor(monkeypatch, daemon_mod)
 
     run_collector_daemon(
-        sleep_fn=MagicMock(), max_cycles=1,
-        now_fn=lambda: dt.datetime(2026, 9, 8, 15, 39, 30, tzinfo=ZoneInfo('Asia/Seoul')),
+        sleep_fn=MagicMock(),
+        max_cycles=1,
+        now_fn=lambda: dt.datetime(2026, 9, 8, 15, 39, 30, tzinfo=ZoneInfo("Asia/Seoul")),
     )
 
-    by_kind = {'snapshots' if 'collect-snapshots' in sup.cmd else 'streamer': sup for sup in created}
-    assert set(by_kind) == {'snapshots', 'streamer'}
-    assert by_kind['snapshots'].ensure_calls == 0
-    assert by_kind['streamer'].ensure_calls == 1
+    by_kind = {"snapshots" if "collect-snapshots" in sup.cmd else "streamer": sup for sup in created}
+    assert set(by_kind) == {"snapshots", "streamer"}
+    assert by_kind["snapshots"].ensure_calls == 0
+    assert by_kind["streamer"].ensure_calls == 1
 
 
 def test_daemon_without_snapshot_flag_keeps_existing_spawn_set(tmp_path, monkeypatch) -> None:
@@ -387,17 +422,18 @@ def test_daemon_without_snapshot_flag_keeps_existing_spawn_set(tmp_path, monkeyp
     from src.orchestration.daemon import run_collector_daemon
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv('KRX_ALPHA_SNAPSHOT_ENABLED', raising=False)
+    monkeypatch.delenv("KRX_ALPHA_SNAPSHOT_ENABLED", raising=False)
     _snapshot_ready_daemon(monkeypatch, daemon_mod)
     created = _snapshot_fake_supervisor(monkeypatch, daemon_mod)
 
     run_collector_daemon(
-        sleep_fn=MagicMock(), max_cycles=1,
-        now_fn=lambda: dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo('Asia/Seoul')),
+        sleep_fn=MagicMock(),
+        max_cycles=1,
+        now_fn=lambda: dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo("Asia/Seoul")),
     )
 
     assert len(created) == 1
-    assert 'collect-snapshots' not in created[0].cmd
+    assert "collect-snapshots" not in created[0].cmd
 
 
 def test_daemon_recreates_snapshot_supervisor_after_degraded_retry(tmp_path, monkeypatch) -> None:
@@ -410,7 +446,7 @@ def test_daemon_recreates_snapshot_supervisor_after_degraded_retry(tmp_path, mon
     from src.universe.ipc import write_candidates
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv('KRX_ALPHA_SNAPSHOT_ENABLED', 'true')
+    monkeypatch.setenv("KRX_ALPHA_SNAPSHOT_ENABLED", "true")
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
     settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
     write_candidates(settings.paths.candidates, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=20260911)
@@ -423,25 +459,27 @@ def test_daemon_recreates_snapshot_supervisor_after_degraded_retry(tmp_path, mon
             created.append(self)
 
         def ensure_running(self):
-            return 'started'
+            return "started"
 
         def stop(self, *, timeout_s=15.0):
             self.stop_calls.append(timeout_s)
-            return 'graceful'
+            return "graceful"
 
-    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _FakeSupervisor)
-    monkeypatch.setattr(daemon_mod, 'resolve_trading_day', lambda ref_date: None)
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+    monkeypatch.setattr(daemon_mod, "resolve_trading_day", lambda ref_date: None)
     outcomes = iter([False, True])
-    monkeypatch.setattr(daemon_mod, 'run_session_orchestration', lambda **kw: next(outcomes))
-    kst = ZoneInfo('Asia/Seoul')
-    times = iter([
-        dt.datetime(2026, 9, 14, 8, 25, tzinfo=kst),
-        dt.datetime(2026, 9, 14, 8, 31, tzinfo=kst),
-    ])
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: next(outcomes))
+    kst = ZoneInfo("Asia/Seoul")
+    times = iter(
+        [
+            dt.datetime(2026, 9, 14, 8, 25, tzinfo=kst),
+            dt.datetime(2026, 9, 14, 8, 31, tzinfo=kst),
+        ]
+    )
 
     run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: next(times))
 
-    snapshots = [sup for sup in created if 'collect-snapshots' in sup.cmd]
+    snapshots = [sup for sup in created if "collect-snapshots" in sup.cmd]
     assert len(snapshots) == 2
     assert snapshots[0].stop_calls == [15.0]
 
@@ -454,18 +492,20 @@ def test_daemon_stops_stale_snapshot_supervisor_on_day_change(tmp_path, monkeypa
     from src.orchestration.daemon import run_collector_daemon
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv('KRX_ALPHA_SNAPSHOT_ENABLED', 'true')
+    monkeypatch.setenv("KRX_ALPHA_SNAPSHOT_ENABLED", "true")
     _snapshot_ready_daemon(monkeypatch, daemon_mod)
     created = _snapshot_fake_supervisor(monkeypatch, daemon_mod)
-    kst = ZoneInfo('Asia/Seoul')
-    times = iter([
-        dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=kst),
-        dt.datetime(2026, 9, 9, 9, 0, 0, tzinfo=kst),
-    ])
+    kst = ZoneInfo("Asia/Seoul")
+    times = iter(
+        [
+            dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=kst),
+            dt.datetime(2026, 9, 9, 9, 0, 0, tzinfo=kst),
+        ]
+    )
 
     run_collector_daemon(sleep_fn=MagicMock(), max_cycles=2, now_fn=lambda: next(times))
 
-    snapshots = [sup for sup in created if 'collect-snapshots' in sup.cmd]
+    snapshots = [sup for sup in created if "collect-snapshots" in sup.cmd]
     assert len(snapshots) == 2
     assert snapshots[0].stop_calls == [15.0]
 
@@ -479,7 +519,7 @@ def test_daemon_logs_snapshot_restart_and_circuit_open(tmp_path, monkeypatch, ca
     from src.orchestration.daemon import run_collector_daemon
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv('KRX_ALPHA_SNAPSHOT_ENABLED', 'true')
+    monkeypatch.setenv("KRX_ALPHA_SNAPSHOT_ENABLED", "true")
     _snapshot_ready_daemon(monkeypatch, daemon_mod)
 
     class _FlappingSupervisor:
@@ -488,34 +528,39 @@ def test_daemon_logs_snapshot_restart_and_circuit_open(tmp_path, monkeypatch, ca
             self.last_exit_code = 3
 
         def ensure_running(self):
-            return 'restarted' if 'collect-snapshots' in self.cmd else 'started'
+            return "restarted" if "collect-snapshots" in self.cmd else "started"
+
+        def take_circuit_alert(self):
+            return True
 
         def stop(self, *, timeout_s=15.0):
-            return 'graceful'
+            return "graceful"
 
-    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _FlappingSupervisor)
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FlappingSupervisor)
 
     with caplog.at_level(logging.WARNING):
         run_collector_daemon(
-            sleep_fn=MagicMock(), max_cycles=1,
-            now_fn=lambda: dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo('Asia/Seoul')),
+            sleep_fn=MagicMock(),
+            max_cycles=1,
+            now_fn=lambda: dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo("Asia/Seoul")),
         )
 
-    assert 'stage=snapshots status=RESTARTED' in caplog.text
+    assert "stage=snapshots status=RESTARTED" in caplog.text
 
     class _TrippingSupervisor(_FlappingSupervisor):
         def ensure_running(self):
-            return 'circuit_open' if 'collect-snapshots' in self.cmd else 'started'
+            return "circuit_open" if "collect-snapshots" in self.cmd else "started"
 
-    monkeypatch.setattr(daemon_mod, 'ProcessSupervisor', _TrippingSupervisor)
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _TrippingSupervisor)
 
     with caplog.at_level(logging.CRITICAL):
         run_collector_daemon(
-            sleep_fn=MagicMock(), max_cycles=1,
-            now_fn=lambda: dt.datetime(2026, 9, 8, 9, 5, 0, tzinfo=ZoneInfo('Asia/Seoul')),
+            sleep_fn=MagicMock(),
+            max_cycles=1,
+            now_fn=lambda: dt.datetime(2026, 9, 8, 9, 5, 0, tzinfo=ZoneInfo("Asia/Seoul")),
         )
 
-    assert 'stage=snapshots status=FAIL reason=circuit_open' in caplog.text
+    assert "stage=snapshots status=FAIL reason=circuit_open" in caplog.text
 
 
 def test_daemon_holiday_sleep_aligns_to_state_boundary(tmp_path, monkeypatch) -> None:
@@ -530,7 +575,9 @@ def test_daemon_holiday_sleep_aligns_to_state_boundary(tmp_path, monkeypatch) ->
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
     holiday = _holiday_trading_day(dt.date(2026, 9, 14))
     monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: holiday)
-    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: (_ for _ in ()).throw(AssertionError("no orchestration")))
+    monkeypatch.setattr(
+        daemon_mod, "run_session_orchestration", lambda **kw: (_ for _ in ()).throw(AssertionError("no orchestration"))
+    )
     sleeps: list[float] = []
     now = dt.datetime(2026, 9, 14, 15, 10, tzinfo=ZoneInfo("Asia/Seoul"))
     daemon_mod.run_collector_daemon(settings=settings, sleep_fn=sleeps.append, max_cycles=1, now_fn=lambda: now)
@@ -557,9 +604,13 @@ def test_daemon_holiday_resolved_once_across_states(tmp_path, monkeypatch, caplo
         return holiday
 
     monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", _counting)
-    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: (_ for _ in ()).throw(AssertionError("no orchestration")))
+    monkeypatch.setattr(
+        daemon_mod, "run_session_orchestration", lambda **kw: (_ for _ in ()).throw(AssertionError("no orchestration"))
+    )
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
-    monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0})
+    monkeypatch.setattr(
+        daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
+    )
     monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
 
@@ -574,14 +625,18 @@ def test_daemon_holiday_resolved_once_across_states(tmp_path, monkeypatch, caplo
             return "graceful"
 
     monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
-    times = iter([
-        dt.datetime(2026, 9, 24, 8, 25, tzinfo=kst),
-        dt.datetime(2026, 9, 24, 12, 0, tzinfo=kst),
-        dt.datetime(2026, 9, 24, 16, 30, tzinfo=kst),
-        dt.datetime(2026, 9, 24, 20, 5, tzinfo=kst),
-    ])
+    times = iter(
+        [
+            dt.datetime(2026, 9, 24, 8, 25, tzinfo=kst),
+            dt.datetime(2026, 9, 24, 12, 0, tzinfo=kst),
+            dt.datetime(2026, 9, 24, 16, 30, tzinfo=kst),
+            dt.datetime(2026, 9, 24, 20, 5, tzinfo=kst),
+        ]
+    )
     with caplog.at_level(logging.INFO):
-        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=4, now_fn=lambda: next(times))
+        daemon_mod.run_collector_daemon(
+            settings=settings, sleep_fn=lambda s: None, max_cycles=4, now_fn=lambda: next(times)
+        )
     assert resolver_calls == [dt.date(2026, 9, 24)]
     assert sum("reason=market_holiday" in r.getMessage() for r in caplog.records) == 1
 
@@ -611,7 +666,9 @@ def test_daemon_unknown_calendar_without_journals_warns_once(tmp_path, monkeypat
     monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
     times = iter([dt.datetime(2026, 9, 14, 9, 30, tzinfo=kst), dt.datetime(2026, 9, 14, 9, 40, tzinfo=kst)])
     with caplog.at_level(logging.WARNING):
-        daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: next(times))
+        daemon_mod.run_collector_daemon(
+            settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: next(times)
+        )
     warns = [r for r in caplog.records if "status=POSSIBLE_HOLIDAY" in r.getMessage()]
     assert len(warns) == 1
     assert warns[0].levelno == logging.WARNING
@@ -689,7 +746,9 @@ def test_daemon_stops_stale_supervisors_on_holiday(tmp_path, monkeypatch) -> Non
 
     monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
     times = iter([dt.datetime(2026, 9, 14, 9, 0, tzinfo=kst), dt.datetime(2026, 9, 15, 9, 0, tzinfo=kst)])
-    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: next(times))
+    daemon_mod.run_collector_daemon(
+        settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: next(times)
+    )
     assert stops == ["2026-09-14"]
     assert ensures == ["2026-09-14"]
 
@@ -736,7 +795,6 @@ def test_holiday_stops_snapshot_child_and_shutdown_collects_regular_child(tmp_pa
     monkeypatch.setattr(daemon_mod, "stop_supervisors", _capture)
     runner.stop_children()
     assert selected == [regular]
-
 
 
 def _eod_runner(tmp_path):
@@ -789,3 +847,162 @@ def test_eod_progress_does_not_duplicate_a_recent_cycle_heartbeat(tmp_path, monk
         runner._eod_progress()
         runner._eod_progress()
     assert not any("stage=heartbeat" in r.getMessage() for r in caplog.records)
+
+
+def _episode_runner(tmp_path, monkeypatch, script: list[str]):
+    import pathlib
+
+    from src.core.config import CollectorSettings, resolve_collector_runtime
+    from src.orchestration import daemon as daemon_mod
+
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    runtime = resolve_collector_runtime(collector=settings)
+    runner = daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda s: None)
+    results = list(script)
+    alerts = {"n": 0}
+
+    class _Scripted:
+        last_exit_code = 1
+
+        def ensure_running(self):
+            return results.pop(0)
+
+        def take_circuit_alert(self):
+            if alerts["n"] == 0:
+                alerts["n"] += 1
+                return True
+            return False
+
+    runner.children.regular = _Scripted()
+    return runner
+
+
+def test_regular_circuit_alert_once_per_episode_with_probes(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    runner = _episode_runner(
+        tmp_path, monkeypatch, ["circuit_open", "restarted", "circuit_open", "restarted", "circuit_open"]
+    )
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(5):
+            runner._supervise_regular()
+    criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert criticals == ["[DAEMON] stage=streamer status=FAIL reason=circuit_open"]
+    assert runner.state.streamer_restarts == 2
+
+
+def test_snapshot_circuit_alert_once_per_episode_with_probes(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings, resolve_collector_runtime
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.setenv("KRX_ALPHA_SNAPSHOT_ENABLED", "true")
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    runtime = resolve_collector_runtime(collector=settings)
+    runner = daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda s: None)
+    results = ["circuit_open", "restarted", "circuit_open", "restarted", "circuit_open"]
+    alerts = {"n": 0}
+
+    class _Scripted:
+        last_exit_code = 3
+
+        def ensure_running(self):
+            return results.pop(0)
+
+        def take_circuit_alert(self):
+            if alerts["n"] == 0:
+                alerts["n"] += 1
+                return True
+            return False
+
+    runner.children.snapshot = _Scripted()
+    now = dt.datetime(2026, 9, 8, 9, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    monkeypatch.setattr(
+        daemon_mod, "shift_snapshot_settings", lambda cfg, anchors: type("S", (), {"run_end": dt.time(23, 59)})()
+    )
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(5):
+            runner._supervise_snapshot(now, None)
+    criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert criticals == ["[DAEMON] stage=snapshots status=FAIL reason=circuit_open"]
+
+
+def test_heartbeat_treats_probe_restart_as_alive(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    runner = _episode_runner(tmp_path, monkeypatch, ["restarted"])
+    runner._supervise_regular()
+    with caplog.at_level(logging.INFO):
+        runner._log_heartbeat(runner.state.prev_state)
+    assert "streamer_alive=True" in caplog.text
+
+
+@pytest.mark.parametrize("slot", ["regular", "snapshot"])
+@pytest.mark.parametrize("observe_healthy_close", [False, True])
+def test_circuit_alert_rearms_after_recovery(
+    tmp_path, monkeypatch, caplog, slot, observe_healthy_close
+) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.core.session_anchors import resolve_session_anchors
+    from src.orchestration import supervisor as sup_mod
+    from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(sup_mod.time, "monotonic", lambda: clock["t"])
+
+    class _Proc:
+        def __init__(self, code: int | None) -> None:
+            self.code = code
+
+        def poll(self) -> int | None:
+            return self.code
+
+    spawned: list[_Proc] = []
+
+    def _popen(cmd):
+        proc = _Proc(None if clock["t"] == 61.0 else -9)
+        spawned.append(proc)
+        return proc
+
+    breaker = RestartCircuitBreaker(max_restarts=1, window_s=1800.0)
+    sup = ProcessSupervisor(cmd=["fake-child"], breaker=breaker, popen=_popen)
+    runner = _eod_runner(tmp_path)
+    setattr(runner.children, slot, sup)
+    now = dt.datetime(2026, 9, 8, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    anchors = resolve_session_anchors(runner._paths.session_calendar_dir, now.date())
+
+    def _supervise(t: float) -> None:
+        clock["t"] = t
+        if slot == "regular":
+            runner._supervise_regular()
+        else:
+            runner._supervise_snapshot(now, anchors)
+
+    with caplog.at_level(logging.INFO):
+        for t in (0.0, 1.0, 2.0, 3.0, 61.0, 62.0):
+            _supervise(t)
+        assert sup.is_running()
+        if observe_healthy_close:
+            _supervise(1900.0)
+            assert not breaker.is_open(now=1900.0)
+        spawned[-1].code = -9
+        for t in (1901.0, 1902.0, 1903.0):
+            _supervise(t)
+
+    stage = "streamer" if slot == "regular" else "snapshots"
+    alerts = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.CRITICAL and "reason=circuit_open" in r.getMessage()
+    ]
+    assert alerts == [f"[DAEMON] stage={stage} status=FAIL reason=circuit_open"] * 2
+    assert len(spawned) == 4
+    assert sup.last_exit_code == -9
+    if slot == "regular":
+        assert runner.state.streamer_restarts == 3
