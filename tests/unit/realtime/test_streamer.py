@@ -1871,3 +1871,59 @@ def test_pump_cancellation_survives_cleanup_domain_errors() -> None:
         assert asyncio.all_tasks() == baseline
 
     asyncio.run(run())
+
+
+def test_streamer_all_rejected_is_not_a_silent_run(caplog) -> None:
+    import asyncio
+    import logging
+
+    from src.realtime.contracts import VendorAuthRejected
+    from src.realtime.streamer import RealtimeStreamer
+
+    class _Adapter:
+        name = "ls"
+        capacity_pairs = 200
+
+        async def connect(self):
+            return None
+
+        async def subscribe(self, pairs):
+            raise VendorAuthRejected("auth_rejected:all_acks_rejected:01234")
+
+        async def recv(self):
+            raise AssertionError("unreachable")
+
+        async def aclose(self):
+            return None
+
+    class _Sink:
+        def __init__(self):
+            self.gaps = []
+
+        def record(self, f):
+            raise AssertionError("no frames on auth rejection")
+
+        def note_ack(self, v, a):
+            raise AssertionError("rejected acks are not recorded")
+
+        def note_gap(self, symbol, start, end, reason):
+            self.gaps.append((symbol, start, end, reason))
+
+        def flush(self):
+            return 0
+
+    sink = _Sink()
+    streamer = RealtimeStreamer(adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0")])
+    with caplog.at_level(logging.WARNING):
+        reason = asyncio.run(streamer.pump(asyncio.Event()))
+    assert reason == "auth_rejected"
+
+    async def _run() -> None:
+        await streamer.run_forever(asyncio.Event(), max_cycles=1, backoff_s=0.01, sleep=lambda s: asyncio.sleep(0))
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(_run())
+    criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert any("reason=auth_rejected" in m and "auth_rejected:all_acks_rejected:01234" in m for m in criticals)
+    assert sink.gaps
+    assert sink.gaps[0][3] == "auth_rejected"

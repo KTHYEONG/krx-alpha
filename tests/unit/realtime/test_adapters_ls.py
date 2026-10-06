@@ -1248,24 +1248,310 @@ def test_ls_token_rotation_store_errors_are_disconnects(tmp_path) -> None:
     from src.marketdata.toss_token_store import TokenStoreLockTimeout
     from src.realtime.contracts import VendorAuthRejected, VendorDisconnected
 
-    for during_connect in (True, False):
+    for stage in ("connect", "reset", "all_rejected"):
         for error in (TokenStoreLockTimeout("busy"), PermissionError("denied")):
             adapter = _ls_adapter(tmp_path)
             adapter._token_store.aget_or_issue = AsyncMock(return_value="cached")
             adapter._token_store.areplace_rejected = AsyncMock(side_effect=error)
-            if during_connect:
+            if stage == "connect":
                 class Http:
                     def ws_connect(self, *args, **kwargs):
                         raise VendorAuthRejected("rejected")
 
                 adapter._http = Http()
                 call = adapter.connect()
-            else:
+            elif stage == "reset":
                 adapter._token = "cached"
                 adapter._ws = type("Ws", (), {"send_str": AsyncMock(side_effect=OSError("reset"))})()
+                call = adapter.subscribe([("005930", "H0STCNT0")])
+            else:
+                adapter._token = "cached"
+                adapter._ws = _ack_ws(["01234"])
                 call = adapter.subscribe([("005930", "H0STCNT0")])
             with pytest.raises(VendorDisconnected) as caught:
                 asyncio.run(call)
             assert str(caught.value) == f"token_store_failed:{type(error).__name__}"
             assert caught.value.__cause__ is error
             adapter._token_store.areplace_rejected.assert_awaited_once()
+
+
+def _ack_ws(codes: list[str]):
+    import json
+
+    class _WS:
+        def __init__(self):
+            self._q = [json.dumps({"header": {"tr_cd": "S3_", "rsp_cd": c}, "body": {}}) for c in codes]
+            self.sent: list[str] = []
+
+        async def send_str(self, s):
+            self.sent.append(s)
+
+        async def receive_str(self):
+            return self._q.pop(0)
+
+    return _WS()
+
+
+def _cooldown_adapter(tmp_path, ws, *, age_s: float, cooldown_s: float = 300.0, http=None):
+    import datetime as dt
+    import json
+
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
+
+    now = dt.datetime(2026, 10, 6, 8, 20, tzinfo=dt.UTC)
+    path = ls_token_path(tmp_path, "k")
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "access_token": "TOK",
+                "issued_at": (now - dt.timedelta(seconds=age_s)).isoformat(),
+                "expires_at": None,
+                "generation": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = TossTokenStore(path, clock=lambda: now, rotation_cooldown_s=cooldown_s)
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+
+    adapter = LsRealtimeAdapter(
+        app_key="k",
+        app_secret="s",
+        http=http if http is not None else object(),
+        market_of={"005930": "KOSPI", "000660": "KOSPI"},
+        token_store=store,
+    )
+    adapter._ws = ws  # type: ignore[attr-defined]
+    adapter._token = "TOK"  # type: ignore[attr-defined]
+    return adapter, store
+
+
+class _IssueHttp:
+    """Minimal stub serving one token issuance for rotation-path tests."""
+
+    def __init__(self):
+        self.posts = 0
+
+    def post(self, url, **kw):
+        self.posts += 1
+        class _Resp:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def json(self):
+                return {"access_token": "NEW"}
+
+        return _Resp()
+
+
+def test_ls_subscribe_all_rejected_raises_auth_rejection(tmp_path) -> None:
+    import asyncio
+
+    import pytest
+
+    from src.realtime.contracts import VendorAuthRejected
+
+    http = _IssueHttp()
+    adapter, store = _cooldown_adapter(
+        tmp_path, _ack_ws(["01234", "01234"]), age_s=10_000.0, cooldown_s=0.0, http=http
+    )
+    with pytest.raises(VendorAuthRejected, match=r"auth_rejected:all_acks_rejected:01234"):
+        asyncio.run(adapter.subscribe([("005930", "H0STCNT0"), ("000660", "H0STCNT0")]))
+    assert store.read().generation == 2
+    assert store.read().access_token == "NEW"
+    assert http.posts == 1
+
+
+def test_ls_subscribe_partial_rejection_is_not_an_error(tmp_path) -> None:
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    adapter, _ = _cooldown_adapter(tmp_path, _ack_ws(["00000", "IGW00001"]), age_s=10_000.0, cooldown_s=0.0)
+    adapter._token_store.areplace_rejected = AsyncMock(side_effect=AssertionError("must not rotate on partial"))  # type: ignore[attr-defined]
+    out = asyncio.run(adapter.subscribe([("005930", "H0STCNT0"), ("000660", "H0STCNT0")]))
+    assert [a.accepted for a in out] == [True, False]
+
+
+def test_ls_subscribe_empty_pairs_returns_empty(tmp_path) -> None:
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    adapter, _ = _cooldown_adapter(tmp_path, _ack_ws([]), age_s=10_000.0, cooldown_s=0.0)
+    adapter._token_store.areplace_rejected = AsyncMock(side_effect=AssertionError("must not touch store"))  # type: ignore[attr-defined]
+    assert asyncio.run(adapter.subscribe([])) == []
+
+
+def test_ls_subscribe_all_rejected_with_fresh_token_skips_rotation(tmp_path) -> None:
+    import asyncio
+
+    import pytest
+
+    from src.realtime.contracts import VendorAuthRejected
+
+    adapter, store = _cooldown_adapter(tmp_path, _ack_ws(["05678", "01234"]), age_s=5.0)
+    with pytest.raises(VendorAuthRejected, match=r"auth_rejected:all_acks_rejected:01234,05678"):
+        asyncio.run(adapter.subscribe([("005930", "H0STCNT0"), ("000660", "H0STCNT0")]))
+    assert store.read().generation == 1
+    assert store.read().access_token == "TOK"
+
+
+def test_ls_subscribe_six_resets_on_fresh_token_issue_once(tmp_path) -> None:
+    import asyncio
+
+    import aiohttp
+    import pytest
+
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import VendorAuthRejected
+    import datetime as dt
+
+    now = dt.datetime(2026, 10, 6, 8, 20, tzinfo=dt.UTC)
+    clock = {"now": now}
+    store = TossTokenStore(ls_token_path(tmp_path, "k"), clock=lambda: clock["now"], rotation_cooldown_s=300.0)
+    posts: list[str] = []
+
+    class _Resp:
+        def __init__(self, token):
+            self._token = token
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self):
+            posts.append(self._token)
+            return {"access_token": self._token}
+
+    class _FailWS:
+        async def send_str(self, s):
+            raise aiohttp.ClientConnectionResetError("reset")
+
+        async def close(self):
+            return None
+
+    class _WSCtx:
+        def __init__(self, ws):
+            self._ws = ws
+
+        async def __aenter__(self):
+            return self._ws
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Http:
+        def __init__(self):
+            self.n = 0
+
+        def post(self, url, **kw):
+            self.n += 1
+            return _Resp("TOK" if self.n == 1 else f"ROT{self.n}")
+
+        def ws_connect(self, url, **kw):
+            return _WSCtx(_FailWS())
+
+    adapter = LsRealtimeAdapter(
+        app_key="k", app_secret="s", http=_Http(), market_of={"005930": "KOSPI"}, token_store=store
+    )
+    asyncio.run(adapter.connect())
+    assert posts == ["TOK"]
+    for _ in range(6):
+        asyncio.run(adapter.connect())
+        with pytest.raises(VendorAuthRejected):
+            asyncio.run(adapter.subscribe([("005930", "H0STCNT0")]))
+        asyncio.run(adapter.aclose())
+    assert posts == ["TOK"]
+
+
+def test_ls_subscribe_stale_token_rotates_once_on_reset(tmp_path) -> None:
+    import asyncio
+
+    import aiohttp
+    import pytest
+
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import VendorAuthRejected
+    import datetime as dt
+
+    now = dt.datetime(2026, 10, 6, 8, 20, tzinfo=dt.UTC)
+    store = TossTokenStore(ls_token_path(tmp_path, "k"), clock=lambda: now, rotation_cooldown_s=300.0)
+    posts: list[str] = []
+
+    class _Resp:
+        def __init__(self, token):
+            self._token = token
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self):
+            posts.append(self._token)
+            return {"access_token": self._token}
+
+    class _FailWS:
+        async def send_str(self, s):
+            raise aiohttp.ClientConnectionResetError("reset")
+
+    class _OKWS:
+        def __init__(self):
+            self.sent = []
+
+        async def send_str(self, s):
+            self.sent.append(s)
+
+        async def receive_str(self):
+            return '{"header":{"rsp_cd":"00000"}}'
+
+    class _WSCtx:
+        def __init__(self, ws):
+            self._ws = ws
+
+        async def __aenter__(self):
+            return self._ws
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Http:
+        def __init__(self):
+            self.n = 0
+            self.ws = _FailWS()
+
+        def post(self, url, **kw):
+            self.n += 1
+            return _Resp("TOK" if self.n == 1 else "NEW")
+
+        def ws_connect(self, url, **kw):
+            return _WSCtx(self.ws)
+
+    http = _Http()
+    adapter = LsRealtimeAdapter(
+        app_key="k", app_secret="s", http=http, market_of={"005930": "KOSPI"}, token_store=store
+    )
+    asyncio.run(adapter.connect())
+    store._clock = lambda: now + dt.timedelta(seconds=301)  # type: ignore[attr-defined]
+    adapter._token = "TOK"  # type: ignore[attr-defined]
+    adapter._ws = _FailWS()  # type: ignore[attr-defined]
+    with pytest.raises(VendorAuthRejected):
+        asyncio.run(adapter.subscribe([("005930", "H0STCNT0")]))
+    assert posts == ["TOK", "NEW"]
+    assert store.read().generation == 2
+    http.ws = _OKWS()
+    asyncio.run(adapter.connect())
+    acks = asyncio.run(adapter.subscribe([("005930", "H0STCNT0")]))
+    assert acks[0].accepted is True
+    import json
+
+    assert json.loads(http.ws.sent[0])["header"]["token"] == "NEW"
+    assert posts == ["TOK", "NEW"]

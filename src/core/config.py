@@ -53,6 +53,8 @@ class CollectorSettings(BaseSettings):
     vendor: str = "ls"
     streams: tuple[str, ...] = ("H0STCNT0", "H0STASP0")
     ls_capacity_pairs: int = 200
+    # Rotation of a fresh token is a transport problem, not expiry.
+    ls_token_rotation_cooldown_s: float = Field(default=300.0, ge=0)
     # Symbols per session universe. Unset derives ``ls_capacity_pairs // len(streams)`` so the cap cannot drift from vendor capacity (a literal caused the 2026-09-10 and 2026-10-02 incidents). An explicit value (env ``KRX_ALPHA_UNIVERSE_SLOT_BUDGET`` or kwarg) may only tighten it.
     universe_slot_budget: int = Field(default=0, ge=0)
     bars_window_days: int = 90

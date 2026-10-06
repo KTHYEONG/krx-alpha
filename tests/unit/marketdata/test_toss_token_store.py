@@ -374,3 +374,173 @@ def test_non_positive_unknown_expiry_max_age_is_rejected(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="unknown_expiry_max_age_s"):
         _store(tmp_path, unknown_expiry_max_age_s=0.0)
+
+
+def _seed(path, token: str, generation: int, issued_at: str) -> None:
+    import json
+
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "access_token": token,
+                "issued_at": issued_at,
+                "expires_at": None,
+                "generation": generation,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_fresh_rejected_token_is_not_rotated(tmp_path, caplog) -> None:
+    # Given: 10초 전 발급 토큰과 300초 쿨다운
+    import datetime as dt
+    import logging
+
+    now = dt.datetime(2026, 10, 6, 8, 20, tzinfo=dt.UTC)
+    path = tmp_path / "token_toss_abc.json"
+    _seed(path, "FRESH", 4, (now - dt.timedelta(seconds=10)).isoformat())
+    before = path.read_bytes()
+    store = _store(tmp_path, clock=lambda: now, rotation_cooldown_s=300.0)
+
+    def _boom() -> IssuedToken:
+        raise AssertionError("fresh token must not rotate")
+
+    # When
+    with caplog.at_level(logging.INFO, logger="src.marketdata.toss_token_store"):
+        token = store.replace_rejected("FRESH", _boom)  # type: ignore[attr-defined]
+
+    # Then: 발급 없이 저장 토큰을 반환하고 파일이 그대로다
+    assert token == "FRESH"
+    assert path.read_bytes() == before
+    assert any("ROTATION_SKIPPED" in r.getMessage() for r in caplog.records)
+    assert "FRESH" not in caplog.text
+
+
+def test_old_rejected_token_is_rotated(tmp_path) -> None:
+    # Given: 301초 전 발급 토큰과 300초 쿨다운
+    import datetime as dt
+    import json
+
+    now = dt.datetime(2026, 10, 6, 8, 20, tzinfo=dt.UTC)
+    path = tmp_path / "token_toss_abc.json"
+    _seed(path, "OLD", 4, (now - dt.timedelta(seconds=301)).isoformat())
+    store = _store(tmp_path, clock=lambda: now, rotation_cooldown_s=300.0)
+    calls: list[str] = []
+
+    # When
+    token = store.replace_rejected("OLD", lambda: calls.append("x") or IssuedToken("NEW", None))  # type: ignore[attr-defined]
+
+    # Then: 1회 발급되고 세대가 전진한다
+    assert token == "NEW"
+    assert calls == ["x"]
+    assert json.loads(path.read_text(encoding="utf-8"))["generation"] == 5
+
+
+def test_peer_rotation_adopted_regardless_of_cooldown(tmp_path) -> None:
+    # Given: 거부된 토큰과 다른 피어 토큰(1초 전 발급)과 300초 쿨다운
+    import datetime as dt
+
+    now = dt.datetime(2026, 10, 6, 8, 20, tzinfo=dt.UTC)
+    path = tmp_path / "token_toss_abc.json"
+    _seed(path, "PEER", 9, (now - dt.timedelta(seconds=1)).isoformat())
+    store = _store(tmp_path, clock=lambda: now, rotation_cooldown_s=300.0)
+
+    def _boom() -> IssuedToken:
+        raise AssertionError("peer token must be adopted without issuance")
+
+    # When / Then
+    assert store.replace_rejected("STALE", _boom) == "PEER"  # type: ignore[attr-defined]
+
+
+def test_zero_cooldown_is_unconditional(tmp_path) -> None:
+    import asyncio
+    import datetime as dt
+
+    now = dt.datetime(2026, 10, 6, 8, 20, tzinfo=dt.UTC)
+    path = tmp_path / "token_toss_abc.json"
+    store = _store(tmp_path, clock=lambda: now)
+
+    for asynchronous in (False, True):
+        for age_s in (-1, 0, 1):
+            _seed(path, "FRESH", 1, (now - dt.timedelta(seconds=age_s)).isoformat())
+            if asynchronous:
+                token = asyncio.run(store.areplace_rejected(  # type: ignore[attr-defined]
+                    "FRESH", lambda: asyncio.sleep(0, result=IssuedToken("NEW", None)),
+                ))
+            else:
+                token = store.replace_rejected("FRESH", lambda: IssuedToken("NEW", None))  # type: ignore[attr-defined]
+            assert token == "NEW"
+            assert store.read().generation == 2  # type: ignore[attr-defined]
+
+
+def test_rotation_cooldown_exact_boundary(tmp_path) -> None:
+    import asyncio
+    import datetime as dt
+
+    now = dt.datetime(2026, 10, 6, 8, 20, tzinfo=dt.UTC)
+    path = tmp_path / "token_toss_abc.json"
+    store = _store(tmp_path, clock=lambda: now, rotation_cooldown_s=300.0)
+
+    for asynchronous in (False, True):
+        for age_s, expected in ((299.999999, "OLD"), (300.0, "NEW")):
+            _seed(path, "OLD", 4, (now - dt.timedelta(seconds=age_s)).isoformat())
+            before = path.read_bytes()
+            calls: list[str] = []
+
+            def issue(calls: list[str] = calls) -> IssuedToken:
+                calls.append("issue")
+                return IssuedToken("NEW", None)
+
+            async def aissue() -> IssuedToken:
+                return issue()
+
+            if asynchronous:
+                token = asyncio.run(store.areplace_rejected("OLD", aissue))  # type: ignore[attr-defined]
+            else:
+                token = store.replace_rejected("OLD", issue)  # type: ignore[attr-defined]
+            assert token == expected
+            if expected == "OLD":
+                assert calls == []
+                assert path.read_bytes() == before
+            else:
+                assert calls == ["issue"]
+                assert store.read().generation == 5  # type: ignore[attr-defined]
+
+
+def test_negative_cooldown_rejected(tmp_path) -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="rotation_cooldown_s"):
+        _store(tmp_path, rotation_cooldown_s=-1.0)
+
+
+def test_async_replace_rejected_honors_cooldown(tmp_path) -> None:
+    # Given: 동기 시나리오와 같은 시드(신선/오래됨/피어)
+    import asyncio
+    import datetime as dt
+    import json
+
+    now = dt.datetime(2026, 10, 6, 8, 20, tzinfo=dt.UTC)
+    path = tmp_path / "token_toss_abc.json"
+
+    async def _boom() -> IssuedToken:
+        raise AssertionError("must not issue")
+
+    async def _main() -> tuple[str, str, str]:
+        _seed(path, "FRESH", 1, (now - dt.timedelta(seconds=10)).isoformat())
+        store = _store(tmp_path, clock=lambda: now, rotation_cooldown_s=300.0)
+        before = path.read_bytes()
+        fresh = await store.areplace_rejected("FRESH", _boom)  # type: ignore[attr-defined]
+        assert path.read_bytes() == before
+        _seed(path, "OLD", 1, (now - dt.timedelta(seconds=301)).isoformat())
+        old = await store.areplace_rejected("OLD", lambda: asyncio.sleep(0, result=IssuedToken("NEW", None)))  # type: ignore[attr-defined]
+        assert store.read().generation == 2  # type: ignore[attr-defined]
+        _seed(path, "PEER", 7, (now - dt.timedelta(seconds=1)).isoformat())
+        peer = await store.areplace_rejected("STALE", _boom)  # type: ignore[attr-defined]
+        return fresh, old, peer
+
+    # When / Then
+    assert asyncio.run(_main()) == ("FRESH", "NEW", "PEER")
+    assert json.loads(path.read_text(encoding="utf-8"))["generation"] == 7

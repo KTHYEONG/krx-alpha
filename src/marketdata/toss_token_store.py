@@ -123,19 +123,33 @@ class TossTokenStore:
         lock_timeout_s: float = _DEFAULT_LOCK_TIMEOUT_S,
         expiry_margin_s: float = _DEFAULT_EXPIRY_MARGIN_S,
         unknown_expiry_max_age_s: float = _DEFAULT_UNKNOWN_EXPIRY_MAX_AGE_S,
+        rotation_cooldown_s: float = 0.0,
         clock: Callable[[], dt.datetime] = _utcnow,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        """Bind the store to a shared protocol file.
+
+        ``rotation_cooldown_s``: a stored token issued less than this long ago is not rotated by
+        ``replace_rejected`` / ``areplace_rejected`` even when the caller reports it rejected, because a
+        rejection of a just-issued token points at the transport or vendor, not at token age, and each
+        issuance may revoke peers' tokens. Zero keeps unconditional rotation.
+
+        Raises:
+            ValueError: ``rotation_cooldown_s`` is negative.
+        """
         if lock_timeout_s <= 0:
             raise ValueError("lock_timeout_s must be positive")
         if expiry_margin_s < 0:
             raise ValueError("expiry_margin_s must be non-negative")
         if unknown_expiry_max_age_s <= 0:
             raise ValueError("unknown_expiry_max_age_s must be positive")
+        if rotation_cooldown_s < 0:
+            raise ValueError("rotation_cooldown_s must be non-negative")
         self._path = pathlib.Path(path)
         self._lock_timeout_s = float(lock_timeout_s)
         self._expiry_margin_s = float(expiry_margin_s)
         self._unknown_expiry_max_age = dt.timedelta(seconds=float(unknown_expiry_max_age_s))
+        self._rotation_cooldown = dt.timedelta(seconds=float(rotation_cooldown_s))
         self._clock = clock
         self._sleep = sleep
 
@@ -263,6 +277,15 @@ class TossTokenStore:
             cached = self.read()
             if cached is not None and cached.access_token != rejected_token:
                 return cached.access_token
+            if cached is not None and self._rotation_cooldown > dt.timedelta(0):
+                age = self._clock() - cached.issued_at
+                if age < self._rotation_cooldown:
+                    logger.info(
+                        "[SYS] stage=shared_token status=ROTATION_SKIPPED path=%s age_s=%d",
+                        self._path.name,
+                        int(age.total_seconds()),
+                    )
+                    return cached.access_token
             record = self._build_record(issue(), cached)
             self._publish(record)
             return record.access_token
@@ -294,6 +317,15 @@ class TossTokenStore:
             cached = self.read()
             if cached is not None and cached.access_token != rejected_token:
                 return cached.access_token
+            if cached is not None and self._rotation_cooldown > dt.timedelta(0):
+                age = self._clock() - cached.issued_at
+                if age < self._rotation_cooldown:
+                    logger.info(
+                        "[SYS] stage=shared_token status=ROTATION_SKIPPED path=%s age_s=%d",
+                        self._path.name,
+                        int(age.total_seconds()),
+                    )
+                    return cached.access_token
             record = self._build_record(await issue(), cached)
             self._publish(record)
             return record.access_token

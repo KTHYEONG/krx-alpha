@@ -170,6 +170,14 @@ class LsRealtimeAdapter:
             )
 
     async def subscribe(self, pairs: list[tuple[str, str]]) -> list[VendorAck]:
+        """Subscribe symbols and return per-pair vendor acks.
+
+        Raises:
+            VendorAuthRejected: ``auth_rejected:all_acks_rejected:<codes>`` when at least one subscription
+                was attempted and every ack was rejected. A subscription that yields no data cannot be
+                distinguished from an invalid token, so the token is reported rejected to the shared store
+                (subject to its rotation cooldown) before raising.
+        """
         acks: list[VendorAck] = []
         for symbol, stream in pairs:
             tr_cd = LS_TR_CD[(stream, self._market_of[symbol])]
@@ -222,6 +230,11 @@ class LsRealtimeAdapter:
                 # 인식 불가 시스템 프레임: 크래시 대신 스킵.
             rsp_cd = str(resp["header"].get("rsp_cd"))
             acks.append(VendorAck(symbol, stream, resp["header"].get("rsp_cd") == "00000", rsp_cd))
+        if acks and not any(a.accepted for a in acks):
+            codes = ",".join(sorted({a.code for a in acks}))
+            if self._token is not None:
+                await self._replace_rejected_token(self._token)
+            raise VendorAuthRejected(f"auth_rejected:all_acks_rejected:{codes}")
         return acks
 
     async def recv(self) -> L0Frame:

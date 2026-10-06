@@ -84,7 +84,10 @@ async def _run_stream(args: argparse.Namespace) -> int:
     market_of = json.loads(pathlib.Path(str(args.market_map)).read_text(encoding="utf-8"))  # noqa: ASYNC240 - one-shot startup read
     http = aiohttp.ClientSession()
     try:
-        token_store = TossTokenStore(ls_token_path(KisTokenSettings().token_cache_dir, creds.ls_app_key))
+        token_store = TossTokenStore(
+            ls_token_path(KisTokenSettings().token_cache_dir, creds.ls_app_key),
+            rotation_cooldown_s=settings.ls_token_rotation_cooldown_s,
+        )
         adapter = LsRealtimeAdapter(
             app_key=creds.ls_app_key,
             app_secret=creds.ls_app_secret,
