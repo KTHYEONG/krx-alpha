@@ -387,7 +387,7 @@ Seeds for sanity and for "is this WARN the usual one". Refresh monthly or when t
 | NXT premarket (2026-10-06 first run) | 20 symbols all with data; ~188K ticks and ~211K quotes; manifest 40/40 pairs; event time 08:00:00–08:50:08 |
 | Aftermarket L1 (2026-10-02) | `krx_after` ASP 508K / CNT 127K rows, `nxt_after` ASP 244K / CNT 99K; DQ PASS except NXT CNT WARN (`tick_loss` 7) |
 | Benign DQ WARN | `ls regular H0STASP0`: `decode_fail` ≤0.01%, `total_remain_short` ≤2.5%; `ls regular H0STCNT0`: `cum_volume_regression` ≤5 rows, `tick_loss` ≤2; `nxt_after H0NXCNT0`: `tick_loss` ≤0.02% of rows, `lost_volume` ≤200. Everything else PASS. FAIL is never benign |
-| Known false FAIL footers | `kis/krx/krx_after/H0STCNT0` `dt=2026-09-29` and `dt=2026-10-01` (new-listing days; fixed in `717225b`, footers not re-judged). Expected to clear from dashboard `krx.data_quality` on 2026-10-08. Remove this row once re-judged |
+| Known false FAIL footers | `kis/krx/krx_after/H0STCNT0` `dt=2026-09-29` and `dt=2026-10-01` (new-listing days misjudged by the old fixed ±30% band; rule fixed in `717225b`). Decided 2026-10-06 NOT to re-judge: the data is intact and only the footer label is wrong. Ignore these two verdicts permanently in Q1 and in weekly scans; the dashboard `krx.data_quality` WARN for them clears on 2026-10-08 |
 | Premarket pool timing | `universe/premarket/N.json` is written on the preceding run, which can be well before 20:30 (2026-10-06 pool was generated 2026-10-03 00:24 across the weekend) |
 | Offload | local L1 size == remote size for every partition |
 | Clock | manifest `clock_offset_ns` within ±1 ms; chrony offset <1 ms |
