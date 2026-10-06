@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import Mapping
 from typing import Any
 
 import aiohttp
 
-from src.marketdata.toss_token_store import IssuedToken, TossTokenStore
+from src.marketdata.toss_token_store import IssuedToken, TokenStoreLockTimeout, TossTokenStore
 from src.realtime.contracts import L0Frame, VendorAck, VendorAuthRejected, VendorDisconnected
+
+logger = logging.getLogger(__name__)
 
 LS_TOKEN_URL = "https://openapi.ls-sec.co.kr:8080/oauth2/token"  # noqa: S105 - public endpoint, not a secret
 LS_WS_URL = "wss://openapi.ls-sec.co.kr:9443/websocket"
@@ -27,8 +30,17 @@ _REV_TR_CD: dict[str, str] = {v: k[0] for k, v in LS_TR_CD.items()}
 
 
 class LsRealtimeAdapter:
+    """LS plain-text realtime adapter.
+
+    Failure contract: every socket write failure (``aiohttp.ClientError``, ``OSError``), malformed
+    handshake payload and shared-token-store failure is raised as ``VendorDisconnected`` with a
+    ``<kind>:<ExcType>`` detail; credential rejection is ``VendorAuthRejected``. Callers (the streamer)
+    therefore never see raw transport or parsing exceptions.
+    """
+
     name: str
     capacity_pairs: int
+    unparsable_frames: int
 
     def __init__(
         self,
@@ -69,6 +81,8 @@ class LsRealtimeAdapter:
         self._seq = 0
         self._conn_id: str = ""
         self._pending: list[L0Frame] = []  # subscribe 중 끼어든 데이터 프레임 (recv 가 먼저 소진)
+        self.unparsable_frames = 0
+        self._unparsable_warned = False
 
     async def _issue_token(self) -> IssuedToken:
         try:
@@ -82,31 +96,48 @@ class LsRealtimeAdapter:
                 },
             ) as resp:
                 data = await resp.json()
+                if not isinstance(data, dict):
+                    raise VendorDisconnected("connect_failed:token_response_not_object")
                 status = getattr(resp, 'status', None)
-                if isinstance(data, dict) and 'access_token' not in data:
+                if 'access_token' not in data:
                     code = str(data.get('error_code', ''))
                     if status in (401, 403) or code:
                         raise VendorAuthRejected(f'auth_rejected:{status}:{code}')
                 token = str(data["access_token"])
-        except (TimeoutError, aiohttp.ClientError, ValueError, KeyError) as exc:
+        except (VendorAuthRejected, VendorDisconnected):
+            raise
+        except (TimeoutError, aiohttp.ClientError, ValueError, KeyError, OSError) as exc:
             raise VendorDisconnected(f"connect_failed:{type(exc).__name__}") from exc
         expires_in = data.get("expires_in") if isinstance(data, dict) else None
         lifetime = float(expires_in) if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool) and expires_in > 0 else None
         return IssuedToken(token, lifetime)
 
     async def connect(self) -> None:
-        token = await self._token_store.aget_or_issue(self._issue_token)
+        try:
+            token = await self._token_store.aget_or_issue(self._issue_token)
+        except (TokenStoreLockTimeout, OSError) as exc:
+            raise VendorDisconnected(f"token_store_failed:{type(exc).__name__}") from exc
         self._token = token
         try:
             self._ws = await (self._http.ws_connect(self._ws_url, heartbeat=self._heartbeat_s)).__aenter__()
         except VendorAuthRejected:
-            await self._token_store.areplace_rejected(token, self._issue_token)
+            await self._replace_rejected_token(token)
             raise
-        except (TimeoutError, aiohttp.ClientError, ValueError, KeyError) as exc:
+        except VendorDisconnected:
+            raise
+        except (TimeoutError, aiohttp.ClientError, ValueError, KeyError, OSError) as exc:
             raise VendorDisconnected(f"connect_failed:{type(exc).__name__}") from exc
         self._seq = 0
         self._conn_id = f"{self.name}-{time.time_ns()}"
         self._pending = []
+        self.unparsable_frames = 0
+        self._unparsable_warned = False
+
+    async def _replace_rejected_token(self, token: str) -> None:
+        try:
+            await self._token_store.areplace_rejected(token, self._issue_token)
+        except (TokenStoreLockTimeout, OSError) as exc:
+            raise VendorDisconnected(f"token_store_failed:{type(exc).__name__}") from exc
 
     def _build_frame(self, o: dict[str, Any], raw: str) -> L0Frame:
         self._seq += 1
@@ -124,7 +155,19 @@ class LsRealtimeAdapter:
     @staticmethod
     def _is_data_frame(o: dict[str, Any]) -> bool:
         header = o.get("header", {})
+        if not isinstance(header, dict):
+            return False
         return header.get("tr_cd") in _REV_TR_CD and "tr_key" in header
+
+    def _note_unparsable(self, frame_len: int) -> None:
+        self.unparsable_frames += 1
+        if not self._unparsable_warned:
+            self._unparsable_warned = True
+            logger.warning(
+                "[DATA] stage=ls_frame status=UNPARSEABLE conn_id=%s frame_len=%d",
+                self._conn_id,
+                frame_len,
+            )
 
     async def subscribe(self, pairs: list[tuple[str, str]]) -> list[VendorAck]:
         acks: list[VendorAck] = []
@@ -143,7 +186,7 @@ class LsRealtimeAdapter:
                 if acks or self._token is None:
                     raise VendorDisconnected(f"subscribe_failed:{type(exc).__name__}") from exc
                 # LS closes the socket right after connect when the token is expired; no auth error is sent.
-                await self._token_store.areplace_rejected(self._token, self._issue_token)
+                await self._replace_rejected_token(self._token)
                 raise VendorAuthRejected(f"auth_rejected:subscribe_reset:{type(exc).__name__}") from exc
             # 구독 응답 대기 중에도 이미 구독된 심볼의 실시간 데이터가 끼어들 수 있어
             # ACK 로 인식될 때까지 프레임을 분류하며 소비한다 (데이터 유실 방지).
@@ -155,10 +198,20 @@ class LsRealtimeAdapter:
                     raise VendorDisconnected(f"ack_timeout:{symbol}:{stream}") from exc
                 except TypeError as exc:
                     raise VendorDisconnected("subscribe_non_text") from exc
-                o = json.loads(raw)
+                try:
+                    o = json.loads(raw)
+                except ValueError as exc:
+                    raise VendorDisconnected(f"malformed_ack:{stream}") from exc
+                if not isinstance(o, dict):
+                    raise VendorDisconnected(f"malformed_ack:{stream}")
                 header = o.get("header", {})
+                if not isinstance(header, dict):
+                    continue
                 if header.get("tr_cd") == "PINGPONG":
-                    await self._ws.send_str(raw)
+                    try:
+                        await self._ws.send_str(raw)
+                    except (aiohttp.ClientError, OSError) as exc:
+                        raise VendorDisconnected(f"pingpong_echo_failed:{type(exc).__name__}") from exc
                     continue
                 if self._is_data_frame(o):
                     self._pending.append(self._build_frame(o, raw))
@@ -178,13 +231,28 @@ class LsRealtimeAdapter:
         while True:
             msg = await self._ws.receive()
             if msg.type == aiohttp.WSMsgType.PING:
-                await self._ws.pong()
+                try:
+                    await self._ws.pong()
+                except (aiohttp.ClientError, OSError) as exc:
+                    raise VendorDisconnected(f"pingpong_echo_failed:{type(exc).__name__}") from exc
                 continue
             if msg.type == aiohttp.WSMsgType.TEXT:
-                o = json.loads(msg.data)
+                try:
+                    o = json.loads(msg.data)
+                except ValueError:
+                    self._note_unparsable(len(msg.data) if isinstance(msg.data, str) else 0)
+                    continue
+                if not isinstance(o, dict):
+                    self._note_unparsable(len(msg.data) if isinstance(msg.data, str) else 0)
+                    continue
                 header = o.get("header", {})
+                if not isinstance(header, dict):
+                    continue
                 if header.get("tr_cd") == "PINGPONG":
-                    await self._ws.send_str(msg.data)
+                    try:
+                        await self._ws.send_str(msg.data)
+                    except (aiohttp.ClientError, OSError) as exc:
+                        raise VendorDisconnected(f"pingpong_echo_failed:{type(exc).__name__}") from exc
                     continue
                 if self._is_data_frame(o):
                     return self._build_frame(o, msg.data)
@@ -193,5 +261,10 @@ class LsRealtimeAdapter:
             raise VendorDisconnected(str(msg.type))
 
     async def aclose(self) -> None:
-        if self._ws is not None:
-            await self._ws.close()
+        ws, self._ws = self._ws, None
+        if ws is None:
+            return
+        try:
+            await ws.close()
+        except (aiohttp.ClientError, OSError) as exc:
+            logger.debug("[DATA] stage=ls_close status=SUPPRESSED error_type=%s", type(exc).__name__)
