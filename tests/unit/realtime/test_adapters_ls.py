@@ -210,11 +210,13 @@ def test_ls_adapter_aclose_closes_ws(tmp_path) -> None:
             self.closed = True
 
     adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
-    adapter._ws = _WS()  # type: ignore[attr-defined]
+    ws = _WS()
+    adapter._ws = ws  # type: ignore[attr-defined]
 
     asyncio.run(adapter.aclose())
 
-    assert adapter._ws.closed is True  # type: ignore[attr-defined]
+    assert ws.closed is True
+    assert adapter._ws is None  # type: ignore[attr-defined]
 
 
 def test_ls_adapter_subscribe_stashes_interleaved_data_frame_instead_of_dropping(tmp_path) -> None:
@@ -849,3 +851,421 @@ def test_ls_adapter_issue_token_records_vendor_expiry(tmp_path) -> None:
 
     # Then: 저장소에는 만료 시각이 기록된다(영구 유효로 취급하지 않는다)
     assert json.loads(store._path.read_text(encoding='utf-8'))['expires_at'] is not None
+
+
+def _ls_adapter(tmp_path, ws=None, **kw):
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+
+    adapter = LsRealtimeAdapter(app_key='k', app_secret='s', http=object(), market_of={'005930': 'KOSPI'}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")), **kw)
+    if ws is not None:
+        adapter._ws = ws
+        adapter._conn_id = "ls-test"
+    return adapter
+
+
+def test_ls_recv_pong_write_reset_becomes_disconnect(tmp_path) -> None:
+    import asyncio
+
+    import aiohttp
+    import pytest
+    from aiohttp.client_exceptions import ClientConnectionResetError
+
+    from src.realtime.contracts import VendorDisconnected
+
+    class _Msg:
+        def __init__(self, t, d=None):
+            self.type = t
+            self.data = d
+
+    class _WS:
+        async def receive(self):
+            return _Msg(aiohttp.WSMsgType.PING)
+
+        async def pong(self):
+            raise ClientConnectionResetError("reset")
+
+    adapter = _ls_adapter(tmp_path, _WS())
+    with pytest.raises(VendorDisconnected, match="pingpong_echo_failed:"):
+        asyncio.run(adapter.recv())
+
+
+def test_ls_recv_pingpong_echo_reset_becomes_disconnect(tmp_path) -> None:
+    import asyncio
+    import json
+
+    import aiohttp
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    ping = json.dumps({"header": {"tr_cd": "PINGPONG"}})
+
+    class _Msg:
+        def __init__(self, t, d):
+            self.type = t
+            self.data = d
+
+    class _WS:
+        async def receive(self):
+            return _Msg(aiohttp.WSMsgType.TEXT, ping)
+
+        async def send_str(self, s):
+            raise OSError("reset")
+
+    adapter = _ls_adapter(tmp_path, _WS())
+    with pytest.raises(VendorDisconnected, match="pingpong_echo_failed:OSError"):
+        asyncio.run(adapter.recv())
+
+
+def test_ls_subscribe_pingpong_echo_reset_becomes_disconnect(tmp_path) -> None:
+    import asyncio
+    import json
+
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    ping = json.dumps({"header": {"tr_cd": "PINGPONG"}})
+    ack = json.dumps({"header": {"tr_cd": "S3_", "rsp_cd": "00000"}, "body": {}})
+
+    class _WS:
+        def __init__(self):
+            self._q = [ping, ack]
+            self.calls = 0
+
+        async def send_str(self, s):
+            self.calls += 1
+            if self.calls == 2:
+                raise OSError("reset")
+
+        async def receive_str(self):
+            return self._q.pop(0)
+
+    adapter = _ls_adapter(tmp_path, _WS())
+    adapter._token = "TOK"
+    with pytest.raises(VendorDisconnected, match="pingpong_echo_failed:OSError"):
+        asyncio.run(adapter.subscribe([("005930", "H0STCNT0")]))
+
+
+def test_ls_recv_skips_non_object_text_with_single_warning(tmp_path, caplog) -> None:
+    import asyncio
+    import json
+    import logging
+
+    import aiohttp
+
+    ping_data = json.dumps({"header": {"tr_cd": "S3_", "tr_key": "005930"}, "body": {}})
+
+    class _Msg:
+        def __init__(self, t, d):
+            self.type = t
+            self.data = d
+
+    class _WS:
+        def __init__(self):
+            self._q = [
+                _Msg(aiohttp.WSMsgType.TEXT, "<html>"),
+                _Msg(aiohttp.WSMsgType.TEXT, "[1,2]"),
+                _Msg(aiohttp.WSMsgType.TEXT, '{"header":null}'),
+                _Msg(aiohttp.WSMsgType.TEXT, ping_data),
+            ]
+
+        async def receive(self):
+            return self._q.pop(0)
+
+    adapter = _ls_adapter(tmp_path, _WS())
+    adapter._conn_id = "ls-1"
+    with caplog.at_level(logging.WARNING, logger="src.realtime.adapters.ls"):
+        frame = asyncio.run(adapter.recv())
+    assert frame.symbol == "005930"
+    assert adapter.unparsable_frames == 2
+    warnings = [r for r in caplog.records if "status=UNPARSEABLE" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "<html>" not in caplog.text
+    assert "[1,2]" not in caplog.text
+    assert "ls-1" in warnings[0].getMessage()
+
+
+def test_ls_subscribe_malformed_ack_disconnects(tmp_path) -> None:
+    import asyncio
+
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    for bad in ("garbage", "[]"):
+        class _WS:
+            def __init__(self, payload: str = bad):
+                self._payload = payload
+
+            async def send_str(self, s):
+                return None
+
+            async def receive_str(self):
+                return self._payload
+
+        adapter = _ls_adapter(tmp_path, _WS())
+        adapter._token = "TOK"
+        with pytest.raises(VendorDisconnected, match="malformed_ack:H0STCNT0"):
+            asyncio.run(adapter.subscribe([("005930", "H0STCNT0")]))
+
+
+def test_ls_token_payload_not_object_disconnects(tmp_path) -> None:
+    import asyncio
+
+    import pytest
+
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import VendorDisconnected
+
+    for bad in (None, [1], "oops"):
+        class _Resp:
+            def __init__(self, payload=bad):
+                self._payload = payload
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def json(self):
+                return self._payload
+
+        class _Http:
+            def post(self, url, **kw):
+                return _Resp()
+
+            def ws_connect(self, url, **kw):
+                raise AssertionError("ws must not open")
+
+        adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(), market_of={}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
+        with pytest.raises(VendorDisconnected, match="connect_failed:token_response_not_object"):
+            asyncio.run(adapter.connect())
+        assert adapter._token is None
+
+
+def test_ls_connect_token_store_failure_is_disconnect(tmp_path) -> None:
+    import asyncio
+    import fcntl
+    import os
+
+    import pytest
+
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import VendorDisconnected
+
+    path = ls_token_path(tmp_path, "k")
+    store = TossTokenStore(path, lock_timeout_s=0.05)
+    fd = os.open(str(path) + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=object(), market_of={}, token_store=store)
+        with pytest.raises(VendorDisconnected, match="token_store_failed:TokenStoreLockTimeout"):
+            asyncio.run(adapter.connect())
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    bad_store = TossTokenStore(ro / "token_ls_x.json")
+    ro.chmod(0o500)
+    try:
+        adapter2 = LsRealtimeAdapter(app_key="k", app_secret="s", http=object(), market_of={}, token_store=bad_store)
+        with pytest.raises(VendorDisconnected, match="token_store_failed:"):
+            asyncio.run(adapter2.connect())
+    finally:
+        ro.chmod(0o700)
+
+
+def test_ls_connect_ws_oserror_is_disconnect(tmp_path) -> None:
+    import asyncio
+
+    import pytest
+
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import VendorDisconnected
+
+    class _Resp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self):
+            return {"access_token": "TOK", "expires_in": 86400}
+
+    class _Http:
+        def post(self, url, **kw):
+            return _Resp()
+
+        def ws_connect(self, url, **kw):
+            raise OSError("net unreachable")
+
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(), market_of={}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
+    with pytest.raises(VendorDisconnected, match="connect_failed:OSError"):
+        asyncio.run(adapter.connect())
+
+
+def test_ls_connect_vendor_disconnected_passthrough(tmp_path) -> None:
+    import asyncio
+
+    import pytest
+
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import VendorDisconnected
+
+    class _Resp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self):
+            return {"access_token": "TOK", "expires_in": 86400}
+
+    class _Http:
+        def post(self, url, **kw):
+            return _Resp()
+
+        def ws_connect(self, url, **kw):
+            raise VendorDisconnected("custom-down")
+
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(), market_of={}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
+    with pytest.raises(VendorDisconnected, match="custom-down"):
+        asyncio.run(adapter.connect())
+
+
+def test_ls_aclose_suppresses_transport_error_and_idempotent(tmp_path) -> None:
+    import asyncio
+
+    import aiohttp
+
+    class _WS:
+        def __init__(self):
+            self.calls = 0
+
+        async def close(self):
+            self.calls += 1
+            raise aiohttp.ClientConnectionResetError("reset")
+
+    ws = _WS()
+    adapter = _ls_adapter(tmp_path, ws)
+    asyncio.run(adapter.aclose())
+    assert adapter._ws is None
+    asyncio.run(adapter.aclose())
+    assert ws.calls == 1
+
+
+def test_ls_connect_resets_unparsable_counter(tmp_path) -> None:
+    import asyncio
+
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+
+    class _Resp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self):
+            return {"access_token": "TOK", "expires_in": 86400}
+
+    class _WSCtx:
+        def __init__(self, ws):
+            self._ws = ws
+
+        async def __aenter__(self):
+            return self._ws
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _WS:
+        async def close(self):
+            return None
+
+    class _Http:
+        def post(self, url, **kw):
+            return _Resp()
+
+        def ws_connect(self, url, **kw):
+            return _WSCtx(_WS())
+
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=_Http(), market_of={}, token_store=TossTokenStore(ls_token_path(tmp_path, "k")))
+    adapter.unparsable_frames = 5
+    adapter._unparsable_warned = True
+    asyncio.run(adapter.connect())
+    assert adapter.unparsable_frames == 0
+    assert adapter._unparsable_warned is False
+
+
+def test_ls_subscribe_skips_unknown_header_without_losing_interleaved_data(tmp_path) -> None:
+    import asyncio
+
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+
+    class Ws:
+        def __init__(self):
+            self.replies = iter([
+                '{"header":null}',
+                '{"header":{"tr_cd":"S3_","tr_key":"005930"},"body":{}}',
+                '{"header":{"tr_cd":"S3_","rsp_cd":"00000"}}',
+            ])
+
+        async def send_str(self, raw):
+            return None
+
+        async def receive_str(self):
+            return next(self.replies)
+
+    adapter = _ls_adapter(tmp_path, Ws())
+    assert LsRealtimeAdapter._is_data_frame({"header": None}) is False
+    acks = asyncio.run(adapter.subscribe([("005930", "H0STCNT0")]))
+    frame = asyncio.run(adapter.recv())
+    assert acks[0].accepted is True
+    assert frame.symbol == "005930"
+    assert frame.conn_seq == 1
+    assert frame.raw == '{"header":{"tr_cd":"S3_","tr_key":"005930"},"body":{}}'
+
+
+def test_ls_token_rotation_store_errors_are_disconnects(tmp_path) -> None:
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    import pytest
+
+    from src.marketdata.toss_token_store import TokenStoreLockTimeout
+    from src.realtime.contracts import VendorAuthRejected, VendorDisconnected
+
+    for during_connect in (True, False):
+        for error in (TokenStoreLockTimeout("busy"), PermissionError("denied")):
+            adapter = _ls_adapter(tmp_path)
+            adapter._token_store.aget_or_issue = AsyncMock(return_value="cached")
+            adapter._token_store.areplace_rejected = AsyncMock(side_effect=error)
+            if during_connect:
+                class Http:
+                    def ws_connect(self, *args, **kwargs):
+                        raise VendorAuthRejected("rejected")
+
+                adapter._http = Http()
+                call = adapter.connect()
+            else:
+                adapter._token = "cached"
+                adapter._ws = type("Ws", (), {"send_str": AsyncMock(side_effect=OSError("reset"))})()
+                call = adapter.subscribe([("005930", "H0STCNT0")])
+            with pytest.raises(VendorDisconnected) as caught:
+                asyncio.run(call)
+            assert str(caught.value) == f"token_store_failed:{type(error).__name__}"
+            assert caught.value.__cause__ is error
+            adapter._token_store.areplace_rejected.assert_awaited_once()

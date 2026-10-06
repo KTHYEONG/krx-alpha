@@ -7,6 +7,8 @@ import logging
 import time
 from typing import Any
 
+import aiohttp
+
 from src.realtime.contracts import (
     L0Frame,
     MarketVenue,
@@ -86,22 +88,27 @@ class KisRealtimeAdapter:
         self.pingpong_count: int = 0
         self.last_pingpong_wall_ns: int | None = None
 
-    async def connect(self) -> None:  # pragma: no cover - live KIS approval/WebSocket boundary (G0-gated, needs production credentials)
+    async def connect(self) -> None:
         if self._lease is not None:
             await self._lease.acquire()
-        async with self._http.post(
-            KIS_APPROVAL_URL,
-            json={"grant_type": "client_credentials", "appkey": self._app_key, "secretkey": self._app_secret},
-        ) as resp:
-            data = await resp.json()
-            status = getattr(resp, "status", 200)
-            if status != 200:
-                raise VendorAuthRejected(f"auth_rejected:{status}")
-            approval = data.get("approval_key") if isinstance(data, dict) else None
-            if not approval:
-                raise VendorAuthRejected(f"auth_rejected:{status}:no_approval_key")
-            self._approval_key = str(approval)
-        self._ws = await self._http.ws_connect(KIS_WS_URL)
+        try:
+            async with self._http.post(
+                KIS_APPROVAL_URL,
+                json={"grant_type": "client_credentials", "appkey": self._app_key, "secretkey": self._app_secret},
+            ) as resp:
+                data = await resp.json()
+                status = getattr(resp, "status", 200)
+                if status != 200:
+                    raise VendorAuthRejected(f"auth_rejected:{status}")
+                approval = data.get("approval_key") if isinstance(data, dict) else None
+                if not approval:
+                    raise VendorAuthRejected(f"auth_rejected:{status}:no_approval_key")
+                self._approval_key = str(approval)
+            self._ws = await self._http.ws_connect(KIS_WS_URL)
+        except (VendorAuthRejected, VendorDisconnected):
+            raise
+        except (aiohttp.ClientError, TimeoutError, OSError, ValueError) as exc:
+            raise VendorDisconnected(f"connect_failed:{type(exc).__name__}") from exc
         self._seq = 0
         self._conn_id = f"kis-{time.time_ns()}"
         self._pending = []
@@ -242,8 +249,14 @@ class KisRealtimeAdapter:
             self._pending.extend(frames[1:])
             return frames[0]
 
-    async def aclose(self) -> None:  # pragma: no cover - live WebSocket close path
-        if self._ws is not None:
-            await self._ws.close()
-        if self._lease is not None:
-            await self._lease.release()
+    async def aclose(self) -> None:
+        ws, self._ws = self._ws, None
+        try:
+            if ws is not None:
+                try:
+                    await ws.close()
+                except (aiohttp.ClientError, OSError) as exc:
+                    logger.debug("[DATA] stage=kis_close status=SUPPRESSED error_type=%s", type(exc).__name__)
+        finally:
+            if self._lease is not None:
+                await self._lease.release()

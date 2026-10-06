@@ -506,10 +506,9 @@ def test_streamer_backoff_is_capped_exponential_and_resets_after_healthy_connect
     assert run(set(), 2, lambda: 0.0) == [0.5]
 
 
-def test_streamer_pump_flushes_buffer_when_unexpected_exception_escapes() -> None:
+def test_streamer_pump_flushes_buffer_when_unexpected_exception_escapes(caplog) -> None:
     import asyncio
-
-    import pytest
+    import logging
 
     from src.realtime.contracts import L0Frame
     from src.realtime.streamer import RealtimeStreamer
@@ -520,7 +519,7 @@ def test_streamer_pump_flushes_buffer_when_unexpected_exception_escapes() -> Non
 
         def __init__(self):
             self.n = 0
-            self.closed = False
+            self.closed = 0
 
         async def connect(self):
             return None
@@ -535,7 +534,7 @@ def test_streamer_pump_flushes_buffer_when_unexpected_exception_escapes() -> Non
             return L0Frame("ls", "H0STCNT0", "005930", "x", 1, 10 + self.n, self.n, "c")
 
         async def aclose(self):
-            self.closed = True
+            self.closed += 1
 
     class _Sink:
         def __init__(self):
@@ -559,12 +558,15 @@ def test_streamer_pump_flushes_buffer_when_unexpected_exception_escapes() -> Non
     adapter, sink = _Adapter(), _Sink()
     streamer = RealtimeStreamer(adapter=adapter, sink=sink, replay_pairs=[("005930", "H0STCNT0")], flush_every=200)
 
-    with pytest.raises(RuntimeError, match="parser bug"):
-        asyncio.run(streamer.pump(asyncio.Event()))
+    with caplog.at_level(logging.ERROR, logger="src.realtime.streamer"):
+        reason = asyncio.run(streamer.pump(asyncio.Event()))
 
+    assert reason == "disconnect"
+    assert streamer._last_disconnect_detail == "unexpected:RuntimeError"
+    assert any(r.levelno == logging.ERROR and r.exc_info for r in caplog.records)
     assert sink.persisted == 3
     assert sink.buffer == 0
-    assert adapter.closed is True
+    assert adapter.closed == 1
 
 
 def test_streamer_pump_flushes_on_time_interval_between_count_flushes() -> None:
@@ -714,6 +716,8 @@ def test_streamer_pump_logs_critical_when_final_flush_fails(caplog) -> None:
     import asyncio
     import logging
 
+    import pytest
+
     from src.realtime.contracts import VendorAck, VendorDisconnected
     from src.realtime.streamer import RealtimeStreamer
     from src.storage.journal import JournalWriteError
@@ -753,8 +757,8 @@ def test_streamer_pump_logs_critical_when_final_flush_fails(caplog) -> None:
     adapter, sink = _Adapter(), _Sink()
     streamer = RealtimeStreamer(adapter=adapter, sink=sink, replay_pairs=[("005930", "H0STCNT0")])
 
-    with caplog.at_level(logging.CRITICAL):
-        assert asyncio.run(streamer.pump(asyncio.Event())) == "disconnect"
+    with caplog.at_level(logging.CRITICAL), pytest.raises(JournalWriteError, match="disk full"):
+        asyncio.run(streamer.pump(asyncio.Event()))
 
     assert "[DATA] stage=stream_flush status=FAIL error=disk full" in caplog.text
     assert adapter.closed is True
@@ -1519,3 +1523,351 @@ def test_premarket_window_follows_open_shift() -> None:
 
     assert premarket_silence_limit_s(dt.datetime(2025, 11, 13, 8, 30, tzinfo=kst), anchors=anchors) is None
     assert premarket_silence_limit_s(dt.datetime(2025, 11, 13, 9, 30, tzinfo=kst), anchors=anchors) == 30.0
+
+
+def test_streamer_pump_propagates_fail_closed_domain_errors() -> None:
+    import asyncio
+
+    import pytest
+
+    from src.core.errors import SlotBudgetExceededError
+    from src.realtime.streamer import RealtimeStreamer
+    from src.storage.journal import JournalWriteError
+
+    class _Adapter:
+        name = "ls"
+        capacity_pairs = 200
+
+        def __init__(self):
+            self.flushed = 0
+            self.closed = 0
+
+        async def connect(self):
+            return None
+
+        async def subscribe(self, pairs):
+            return []
+
+        async def recv(self):
+            from src.realtime.contracts import L0Frame
+
+            return L0Frame("ls", "H0STCNT0", "005930", "x", 1, 2, 1, "ls-1")
+
+        async def aclose(self):
+            self.closed += 1
+
+    class _FailSink:
+        def __init__(self, exc):
+            self._exc = exc
+            self.flushed = 0
+
+        def record(self, f):
+            raise self._exc
+
+        def note_ack(self, v, a):
+            return None
+
+        def note_gap(self, *a):
+            return None
+
+        def flush(self):
+            self.flushed += 1
+            return 0
+
+    for exc in (JournalWriteError("disk full"), SlotBudgetExceededError("budget")):
+        adapter = _Adapter()
+        sink = _FailSink(exc)
+        streamer = RealtimeStreamer(adapter=adapter, sink=sink, replay_pairs=[("005930", "H0STCNT0")])
+        with pytest.raises(type(exc)):
+            asyncio.run(streamer.pump(asyncio.Event()))
+        assert sink.flushed >= 1
+        assert adapter.closed == 1
+
+
+def test_streamer_pump_does_not_swallow_cancellation() -> None:
+    import asyncio
+
+    import pytest
+
+    from src.realtime.streamer import RealtimeStreamer
+
+    class _Adapter:
+        name = "ls"
+        capacity_pairs = 200
+
+        def __init__(self):
+            self.closed = 0
+
+        async def connect(self):
+            return None
+
+        async def subscribe(self, pairs):
+            return []
+
+        async def recv(self):
+            await asyncio.sleep(3600)
+
+        async def aclose(self):
+            self.closed += 1
+
+    class _Sink:
+        def record(self, f):
+            return None
+
+        def note_ack(self, v, a):
+            return None
+
+        def note_gap(self, *a):
+            return None
+
+        def flush(self):
+            return 0
+
+    async def _run() -> None:
+        streamer = RealtimeStreamer(adapter=_Adapter(), sink=_Sink(), replay_pairs=[("005930", "H0STCNT0")])
+        task = asyncio.ensure_future(streamer.pump(asyncio.Event()))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+
+
+def test_streamer_pump_aclose_failure_does_not_mask_result() -> None:
+    import asyncio
+
+    from src.realtime.contracts import VendorDisconnected
+    from src.realtime.streamer import RealtimeStreamer
+
+    class _Adapter:
+        name = "ls"
+        capacity_pairs = 200
+
+        async def connect(self):
+            return None
+
+        async def subscribe(self, pairs):
+            return []
+
+        async def recv(self):
+            raise VendorDisconnected("closed")
+
+        async def aclose(self):
+            raise OSError("close reset")
+
+    class _Sink:
+        def record(self, f):
+            return None
+
+        def note_ack(self, v, a):
+            return None
+
+        def note_gap(self, *a):
+            return None
+
+        def flush(self):
+            return 0
+
+    streamer = RealtimeStreamer(adapter=_Adapter(), sink=_Sink(), replay_pairs=[("005930", "H0STCNT0")])
+    assert asyncio.run(streamer.pump(asyncio.Event())) == "disconnect"
+    assert streamer._last_disconnect_detail == "closed"
+
+
+def test_streamer_run_forever_survives_unexpected_errors() -> None:
+    import asyncio
+
+    from src.realtime.streamer import RealtimeStreamer
+
+    stop = asyncio.Event()
+
+    class _Adapter:
+        name = "ls"
+        capacity_pairs = 200
+
+        def __init__(self):
+            self.calls = 0
+            self.closes = 0
+
+        async def connect(self):
+            return None
+
+        async def subscribe(self, pairs):
+            return []
+
+        async def recv(self):
+            self.calls += 1
+            if self.calls <= 3:
+                raise ValueError(f"bad frame {self.calls}")
+            stop.set()
+            from src.realtime.contracts import L0Frame
+
+            return L0Frame("ls", "H0STCNT0", "005930", "ok", 1, 99, 1, "ls-9")
+
+        async def aclose(self):
+            self.closes += 1
+
+    class _Sink:
+        def record(self, f):
+            return None
+
+        def note_ack(self, v, a):
+            return None
+
+        def note_gap(self, *a):
+            return None
+
+        def flush(self):
+            return 0
+
+    slept: list[float] = []
+
+    async def _sleep(s):
+        slept.append(s)
+
+    adapter = _Adapter()
+    streamer = RealtimeStreamer(adapter=adapter, sink=_Sink(), replay_pairs=[("005930", "H0STCNT0")], rng=lambda: 1.0)
+    asyncio.run(streamer.run_forever(stop, sleep=_sleep))
+
+    assert len(slept) == 3
+    assert streamer._failures == 3
+    assert adapter.closes == 4
+
+
+def _cleanup_streamer(*, close_error=None, flush_error=None):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    from src.realtime.contracts import VendorDisconnected
+    from src.realtime.streamer import RealtimeStreamer
+
+    adapter = SimpleNamespace(
+        name="ls", capacity_pairs=200,
+        connect=AsyncMock(), subscribe=AsyncMock(return_value=[]),
+        recv=AsyncMock(side_effect=VendorDisconnected("closed")),
+        aclose=AsyncMock(side_effect=close_error),
+    )
+    sink = Mock()
+    sink.flush = Mock(return_value=0, side_effect=flush_error)
+    return RealtimeStreamer(adapter=adapter, sink=sink, replay_pairs=[]), adapter, sink
+
+
+def test_repeated_disconnects_leave_no_pending_tasks() -> None:
+    import asyncio
+
+    async def run():
+        baseline = asyncio.all_tasks()
+        streamer, adapter, _ = _cleanup_streamer()
+        stop = asyncio.Event()
+        for _ in range(5):
+            assert await streamer.pump(stop) == "disconnect"
+            assert asyncio.all_tasks() == baseline
+        assert adapter.aclose.await_count == 5
+
+    asyncio.run(run())
+
+
+def test_cleanup_propagates_domain_errors_and_preserves_primary() -> None:
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    import pytest
+
+    from src.core.errors import KrxAlphaError
+    from src.storage.journal import JournalWriteError
+
+    for close_error, flush_error in (
+        (KrxAlphaError("domain close"), None),
+        (None, OSError("disk full")),
+        (KrxAlphaError("domain close"), JournalWriteError("journal failure")),
+    ):
+        streamer, adapter, _ = _cleanup_streamer(close_error=close_error, flush_error=flush_error)
+        expected = JournalWriteError if flush_error else KrxAlphaError
+        with pytest.raises(expected):
+            asyncio.run(streamer.pump(asyncio.Event()))
+        adapter.aclose.assert_awaited_once()
+
+    primary = JournalWriteError("primary")
+    streamer, adapter, sink = _cleanup_streamer(
+        close_error=KrxAlphaError("secondary close"), flush_error=JournalWriteError("secondary flush"),
+    )
+    adapter.connect = AsyncMock(side_effect=primary)
+    with pytest.raises(JournalWriteError) as caught:
+        asyncio.run(streamer.pump(asyncio.Event()))
+    assert caught.value is primary
+    sink.flush.assert_called_once()
+    adapter.aclose.assert_awaited_once()
+
+
+def test_close_vendor_disconnect_keeps_primary_reason() -> None:
+    import asyncio
+
+    from src.realtime.contracts import VendorDisconnected
+
+    streamer, _, _ = _cleanup_streamer(close_error=VendorDisconnected("secondary"))
+    assert asyncio.run(streamer.pump(asyncio.Event())) == "disconnect"
+    assert streamer._last_disconnect_detail == "closed"
+
+
+def test_cancelled_recv_domain_error_propagates_after_all_tasks_drained() -> None:
+    import asyncio
+
+    import pytest
+
+    from src.storage.journal import JournalWriteError
+
+    async def run():
+        baseline = asyncio.all_tasks()
+        stop = asyncio.Event()
+        entered = asyncio.Event()
+        domain_error = JournalWriteError("recv cleanup")
+
+        async def recv():
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise domain_error from None
+
+        streamer, adapter, _ = _cleanup_streamer()
+        adapter.recv = recv
+        task = asyncio.create_task(streamer.pump(stop))
+        await entered.wait()
+        stop.set()
+        with pytest.raises(JournalWriteError) as caught:
+            await task
+        assert caught.value is domain_error
+        assert asyncio.all_tasks() == baseline
+
+    asyncio.run(run())
+
+
+def test_pump_cancellation_survives_cleanup_domain_errors() -> None:
+    import asyncio
+
+    import pytest
+
+    from src.core.errors import KrxAlphaError
+    from src.storage.journal import JournalWriteError
+
+    async def run():
+        baseline = asyncio.all_tasks()
+        entered = asyncio.Event()
+
+        async def recv():
+            entered.set()
+            await asyncio.Event().wait()
+
+        streamer, adapter, _ = _cleanup_streamer(
+            close_error=KrxAlphaError("close"), flush_error=JournalWriteError("flush"),
+        )
+        adapter.recv = recv
+        task = asyncio.create_task(streamer.pump(asyncio.Event()))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        adapter.aclose.assert_awaited_once()
+        assert asyncio.all_tasks() == baseline
+
+    asyncio.run(run())

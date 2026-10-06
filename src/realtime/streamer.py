@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import datetime as dt
 import logging
 import random
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
+from src.core.errors import KrxAlphaError
 from src.core.observability import EVENT
 from src.core.session_anchors import (
     STANDARD_KRX_AFTER_MARKET_OPEN,
@@ -230,6 +231,11 @@ class RealtimeStreamer:
         cancelled only on return (stop, watchdog, failure): cancelling a pending
         recv may discard a frame already read from the socket but not yet returned.
 
+        Any other ``Exception`` raised while connecting, subscribing, receiving or recording is a
+        connection-level failure: it is logged at ERROR with traceback and reported as ``"disconnect"``
+        so the reconnect/backoff loop in ``run_forever`` keeps the process alive. ``JournalWriteError``
+        and ``KrxAlphaError`` are fail-closed domain errors and still propagate.
+
         Returns:
             "stopped" | "watchdog" | "disconnect" | "auth_rejected".
         """
@@ -295,8 +301,15 @@ class RealtimeStreamer:
                 # socket, so it happens only once pump is returning for good.
                 for pending in (recv_task, stop_task):
                     pending.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await pending
+                primary_error = sys.exception()
+                outcomes = await asyncio.gather(recv_task, stop_task, return_exceptions=True)
+                for outcome in outcomes:
+                    if (
+                        isinstance(outcome, KrxAlphaError)
+                        and not isinstance(outcome, VendorDisconnected)
+                        and not isinstance(primary_error, (KrxAlphaError, asyncio.CancelledError))
+                    ):
+                        raise outcome
             return "stopped"
         except VendorAuthRejected as exc:
             self._last_disconnect_detail = str(exc)
@@ -304,14 +317,33 @@ class RealtimeStreamer:
         except VendorDisconnected as exc:
             self._last_disconnect_detail = str(exc)
             return "disconnect"
+        except (JournalWriteError, KrxAlphaError):
+            raise
+        except Exception as exc:
+            self._last_disconnect_detail = f"unexpected:{type(exc).__name__}"
+            logger.error("[DATA] stage=stream_pump status=ERROR error_type=%s", type(exc).__name__, exc_info=True)
+            return "disconnect"
         finally:
             self._last_pump_frames = frames
             self._last_pingpong = self._snapshot_pingpong()
+            primary_error = sys.exception()
+            cleanup_error: KrxAlphaError | None = None
             try:
                 self._sink.flush()
-            except (JournalWriteError, OSError) as flush_exc:
+            except (KrxAlphaError, OSError) as flush_exc:
                 logger.critical("[DATA] stage=stream_flush status=FAIL error=%s", str(flush_exc), exc_info=True)
-            await self._adapter.aclose()
+                cleanup_error = flush_exc if isinstance(flush_exc, KrxAlphaError) else JournalWriteError(str(flush_exc))
+            try:
+                await self._adapter.aclose()
+            except VendorDisconnected as close_exc:
+                logger.debug("[DATA] stage=stream_close status=SUPPRESSED error_type=%s", type(close_exc).__name__)
+            except KrxAlphaError as close_exc:
+                if cleanup_error is None:
+                    cleanup_error = close_exc
+            except Exception as close_exc:
+                logger.debug("[DATA] stage=stream_close status=SUPPRESSED error_type=%s", type(close_exc).__name__)
+            if cleanup_error is not None and not isinstance(primary_error, (KrxAlphaError, asyncio.CancelledError)):
+                raise cleanup_error
 
     async def run_forever(
         self,

@@ -409,3 +409,185 @@ def test_kis_adapter_uses_nxt_route_for_probe_assertion() -> None:
 
     assert isinstance(adapter, HeartbeatProbe)
     assert (adapter.pingpong_count, adapter.last_pingpong_wall_ns) == (0, None)
+
+
+def _kis_connect_adapter(http) -> object:
+    from src.realtime.adapters.kis import KisRealtimeAdapter
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import StreamRoute
+
+    return KisRealtimeAdapter(app_key="k", app_secret="s", http=http, route=StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER), allowed_streams=("H0NXCNT0", "H0NXASP0"), capacity_pairs=4)
+
+
+def test_kis_connect_approval_post_network_error_disconnects() -> None:
+    import asyncio
+
+    import aiohttp
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    class Http:
+        def post(self, *a, **k):
+            raise aiohttp.ClientConnectorError(None, OSError("dns"))
+
+        async def ws_connect(self, *a):
+            raise AssertionError("ws must not open")
+
+    with pytest.raises(VendorDisconnected, match="connect_failed:ClientConnectorError"):
+        asyncio.run(_kis_connect_adapter(Http()).connect())
+
+
+def test_kis_connect_ws_failure_disconnects_and_aclose_safe(tmp_path) -> None:
+    import asyncio
+
+    import aiohttp
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+    from src.realtime.kis_lease import KisWebSocketLease
+
+    class Response:
+        status = 200
+
+        async def json(self):
+            return {"approval_key": "approved"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class Http:
+        def post(self, *a, **k):
+            return Response()
+
+        async def ws_connect(self, *a):
+            raise aiohttp.WSServerHandshakeError(None, (), status=503)
+
+    adapter = _kis_connect_adapter(Http())
+    adapter._lease = KisWebSocketLease(root=tmp_path, credential_key_id="failed-connect")
+    with pytest.raises(VendorDisconnected, match="connect_failed:WSServerHandshakeError"):
+        asyncio.run(adapter.connect())
+    asyncio.run(adapter.aclose())
+
+    async def acquire_follower() -> None:
+        follower = KisWebSocketLease(root=tmp_path, credential_key_id="failed-connect")
+        await follower.acquire()
+        await follower.release()
+
+    asyncio.run(acquire_follower())
+
+
+def test_kis_connect_approval_json_decode_error_disconnects() -> None:
+    import asyncio
+
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    class Response:
+        status = 200
+
+        async def json(self):
+            raise ValueError("Expecting value")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class Http:
+        def post(self, *a, **k):
+            return Response()
+
+        async def ws_connect(self, *a):
+            raise AssertionError("ws must not open")
+
+    with pytest.raises(VendorDisconnected, match="connect_failed:ValueError"):
+        asyncio.run(_kis_connect_adapter(Http()).connect())
+
+
+def test_kis_connect_auth_rejection_unchanged() -> None:
+    import asyncio
+
+    import pytest
+
+    from src.realtime.contracts import VendorAuthRejected
+
+    class Response:
+        def __init__(self, status, payload):
+            self.status = status
+            self._payload = payload
+
+        async def json(self):
+            return self._payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class Http:
+        def __init__(self, resp):
+            self._resp = resp
+
+        def post(self, *a, **k):
+            return self._resp
+
+        async def ws_connect(self, *a):
+            raise AssertionError("ws must not open after auth rejection")
+
+    with pytest.raises(VendorAuthRejected, match="auth_rejected:401"):
+        asyncio.run(_kis_connect_adapter(Http(Response(401, {}))).connect())
+    with pytest.raises(VendorAuthRejected, match="no_approval_key"):
+        asyncio.run(_kis_connect_adapter(Http(Response(200, {}))).connect())
+
+
+def test_kis_close_failure_releases_lease_and_allows_reconnect(tmp_path) -> None:
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from src.realtime.kis_lease import KisWebSocketLease
+
+    async def run():
+        lease = KisWebSocketLease(root=tmp_path, credential_key_id="close-failure")
+        adapter = _kis_connect_adapter(object())
+        adapter._lease = lease
+        await lease.acquire()
+        ws = type("Ws", (), {"close": AsyncMock(side_effect=OSError("reset"))})()
+        adapter._ws = ws
+        await adapter.aclose()
+        await adapter.aclose()
+        ws.close.assert_awaited_once()
+        assert adapter._ws is None
+        await lease.acquire()
+        await adapter.aclose()
+
+    asyncio.run(run())
+
+
+def test_kis_close_cancellation_still_releases_lease(tmp_path) -> None:
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    import pytest
+
+    from src.realtime.kis_lease import KisWebSocketLease
+
+    async def run():
+        adapter = _kis_connect_adapter(object())
+        lease = KisWebSocketLease(root=tmp_path, credential_key_id="cancel-close")
+        adapter._lease = lease
+        await lease.acquire()
+        adapter._ws = type("Ws", (), {"close": AsyncMock(side_effect=asyncio.CancelledError)})()
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.aclose()
+        follower = KisWebSocketLease(root=tmp_path, credential_key_id="cancel-close")
+        await follower.acquire()
+        await follower.release()
+
+    asyncio.run(run())
