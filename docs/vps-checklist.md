@@ -3,7 +3,7 @@
 Agent-executable runbook. An AI auditor runs it on a schedule, verifies that every automated routine of the day ran **and that the data it produced is correct**, then reports. It is feature-agnostic: new automation is added as a check row (section 12), not as a new document.
 
 - Host `or-vps` (SSH alias, tailnet), container `krx-collector`, data root host `~/krx-alpha/data` = container `/app/data`.
-- Last verified against production: 2026-10-05. Dry-run coverage so far: C0, H1–H9, S1 (holiday), S4, S5, A1, A5, C6, C7, Q1–Q6, H8, X1, P-* probes. Not yet exercised on a live business day: S2, S3, S6, C1–C3 (current hour), NP*, A2 (ledger appears at the first CRITICAL). Baselines in section 9 are dated; refresh them, never hard-code new ones.
+- Last verified against production: 2026-10-06 (first full business day: M0, M1, M2, M3 exercised; S2, S3, S6, S7, C1–C4, C7, Q1–Q6, H8, A1–A2, A5, NP2–NP6, X1 all ran against live data). Still unexercised: M4 on a business day, A3/A4 failure paths, W-only rows beyond X1. Baselines in section 9 are dated; refresh them, never hard-code new ones.
 - Output language: report in Korean; keys, IDs, badges stay English (section 10). This file stays English.
 
 ## 1. Operating rules (non-negotiable)
@@ -104,13 +104,15 @@ Columns: ID, modes, what, how (probe in section 8 or command), PASS / WARN / FAI
 | H7 | M0 M4 | Host backup | `cat ~/.local/state/krx-alpha/host_backup_status.json` (+ `journalctl --user -u krx-host-backup --since "2 days ago"`) | `rc=0`, `data_rc=0`, `prune_rc=0`, `last_ok_at` <26 h | stale/non-zero = SEV2 |
 | H8 | M3 W | Offload integrity | P-REMOTE | every newest-3 local L1 has identical remote size; rclone reachable | mismatch = SEV2 (SEV1 if its L0 is already deleted); rclone error = UNKNOWN then SEV2 (`auth_expired`) |
 | H9 | M3 | Other containers present | `docker ps -a --format "{{.Names}} {{.Status}}"` | `krx-collector` Up | others: INFO only |
+| H10 | M0 M1 + 5-min | LS token age | P-HEALTH `ls_token_age_h` (file mtime of `~/.cache/kis/token_ls_*.json`; never read its content) | <12 h; the store reissues unknown-expiry tokens older than 12 h (since `fc22b36`) and records the vendor `expires_in` | ≥12 h at M0 on a business day = SEV2 (stale token: LS closes the socket at subscribe; 2026-10-06 08:20 crash loop); remediation: rename the token file aside and restart the container |
+| H11 | 5-min (09:05–15:30 regular, 16:05–20:00 aftermarket) | Live L0 freshness | P-HEALTH `l0 <stream> newest_age_s` | regular ≤180 s until 15:30, KIS aftermarket ≤300 s; after 15:30 regular ticks legitimately stop (last tick 15:30:29); after 20:00 all streams idle | stale in window = SEV1; streamer_alive=False in session = SEV1 |
 
 ### S: Scheduling and daemon
 
 | ID | Modes | Check | How | PASS | WARN / FAIL |
 |---|---|---|---|---|---|
 | S1 | M0 M3 M4 | Calendar agreement | C0 sources + events `stage=session status=SKIP reason=market_holiday`; `calendar/dt=<N>.json` exists with `source: vendor` for the next business day (M4) | daemon SKIP exists iff day is closed; anchors file exists only for business days (ABSENT on a closed day is normal) | business day skipped = SEV1; holiday collected = SEV3; sources disagree = SEV2 |
-| S2 | M1 M2 M3 | State timeline | P-EVENTS section state_change: `grep '"state_change"' logs/events-daemon.jsonl` for D | `PRE_MARKET_SLEEP→STREAMER_ACTIVE(08:20)→FULL_ACTIVE(08:50)→AFTER_MARKET_ACTIVE(15:40)→POST_MARKET_EOD(20:00)→NIGHT_SLEEP`, each within ±90 s of anchor (holiday: same states, no collection) | late/missing transition = SEV2; skipped state = SEV1 |
+| S2 | M1 M2 M3 | State timeline | P-EVENTS section state_change: `grep '"state_change"' logs/events-daemon.jsonl` for D | `PRE_MARKET_SLEEP→STREAMER_ACTIVE(08:20)→FULL_ACTIVE(08:50)→AFTER_MARKET_ACTIVE(15:40)→POST_MARKET_EOD(20:00)→NIGHT_SLEEP`, each within ±90 s of anchor (holiday: same states, no collection). Cross-check the crash-loop window: `streamer RESTARTED`/`circuit_open` events and `STREAMER_ACTIVE` re-entries must be absent or explained, because manifest gaps do NOT record periods in which the streamer was not running (2026-10-06 08:20–08:41 outage left `gaps=0`) | late/missing transition = SEV2; skipped state = SEV1; crash loop with `circuit_open` = SEV1 |
 | S3 | M1 M2 | Heartbeat | `docker logs --since 30m krx-collector 2>&1 \| grep stage=heartbeat \| tail -3` | every ~10 min; `streamer_alive=True` in `FULL_ACTIVE` | stale >15 min or `alive=False` in session = SEV1; `streamer_restarts>0` = SEV2 |
 | S4 | M0 M3 | Starts and deploys | events `stage=start status=ONLINE` for D; `work/daemon_lifecycle.json` (`clean_exit`, `crash_error`) | starts only at/after 22:00 (deferred recreate, CI deploys after the freeze); no start between 08:10 and 22:00 | start in 08:10–22:00 = SEV2 (hotfix or crash; read `shutdown` event: `signal`, `graceful`); several starts after 22:00 = INFO (deploys) |
 | S5 | M3 | Event audit | P-EVENTS for D | every non-INFO event is explained by an open item or the benign list (section 9); no `stage=eod_*`, `prune`, `quarantine`, `host_backup_freshness` CRITICAL | unexplained CRITICAL/ERROR = SEV2; `eod_maintenance DEGRADED` = SEV1 |
@@ -125,7 +127,7 @@ Columns: ID, modes, what, how (probe in section 8 or command), PASS / WARN / FAI
 | C2 | M2 M3 | Manifests | P-MANIFEST with `D` | aftermarket: every shard `closed` within 10 s of 20:00, `acks_ok == planned` (40/shard), `gaps=0`, `degraded=None`; regular: `boots=1`, no `restart` gap, max gap ≤30 s; `clock` measured, |offset| <50 ms | ack shortfall / `degraded` = SEV2; `boots>1` or restart gap in session = SEV2; gap >30 s = SEV3 (SEV2 if in 15:20–15:30). Regular manifest has no `writer_closed` by design |
 | C3 | M3 | Symbol coverage | KIS aftermarket: `zstdcat l0/kis/<venue>/<session>/H0xxCNT0/dt=D/*.zst \| python3 -c "import sys,json,collections;c=collections.Counter(json.loads(l)['raw'].split('^')[0] for l in sys.stdin);print(len(c),c.most_common(3),c.most_common()[-3:])"` (L0 `symbol` is empty for KIS) | symbols with trades ≥ 90% of planned symbols; dead symbols (<100 trades) ≤ 5 | more dead symbols = SEV3 (tune selection, not during freeze) |
 | C4 | M2 M3 | Snapshots present | P-SNAP | 9 kinds for D; `ratio` 0.5–2.0 of median **and** consistent with candidate count (see Q6); `session_date` mismatch 0; key nulls 0 | missing kind or 0 rows = SEV2; ratio outside = SEV3 until explained by candidate count |
-| C5 | M3 | Program trades | P-BARS-style: `pl.scan_parquet('/app/data/bars/program_trades/*.parquet').group_by('date').len().sort('date').tail(3)` | row for D by 20:30, count within ±5% of median (~2456) | late = SEV3; missing by 21:00 = SEV2 |
+| C5 | M3 | Program trades | P-BARS-style: `pl.scan_parquet('/app/data/bars/program_trades/*.parquet').group_by('date').len().sort('date').tail(3)` | the sync lags one business day: the latest date at M3 equals P (2026-10-06 M3 still showed 2026-10-02 while `stage=program_trades_sync status=STARTED date=D` ran at 20:28); count within ±5% of median (~2456) | latest date older than P = SEV3; no `STARTED` log by 21:00 = SEV2 |
 | C6 | M0 M3 | Daily bars | P-BARS | latest date = P (or D after refresh), count within ±3% of median (~2763) | see Q5 |
 | C7 | M2 M4 | Universe artifacts | aftermarket: `universe/aftermarket/D.json`; premarket: `universe/premarket/N.json` | exist; `selected_count` ≤ `capacity`; `effective_from` ≤ start of its session; fields `schema_version rev session_date candidates` present | missing = SEV1 for that session (premarket: SEV3) |
 
@@ -141,7 +143,7 @@ Columns: ID, modes, what, how (probe in section 8 or command), PASS / WARN / FAI
 | Q6 | M3 | Snapshot invariants | P-SNAP2 | OHLC consistent, no duplicate keys/news ids, `net_qty == buy_qty - sell_qty`, ranking keys unique; `program_trade`/`security_status`/`investor_estimate` distinct symbols ≈ candidate count (±5%) | violation = SEV2; symbol/candidate mismatch = SEV3 |
 | Q7 | M3 | Candidate content | `candidates.json` via P-SNAP2 line: unique symbols matching `^[0-9A-Z]{6}$`, each present in daily bars for P | all hold | any miss = SEV3 |
 | Q8 | M3 | Retention | `ls l0/*/*/*/*/ \| sort`; `ls quarantine` | L0 dates ≤ 4 newest per stream (3 retained + current); L0 older than that exists only when offload is unverified (H8 FAIL); `quarantine/` empty | stale L0 without cause = SEV3; any quarantine entry = SEV2 (data moved out) |
-| X1 | W | Tick vs bar volume | X-VOL (local) | for every regular-session symbol, max cumulative tick `volume` == daily bar `volume` (measured 42/42 exact on 2026-10-01) | ≤2 symbols within 1% = SEV3; otherwise SEV2 (tick loss or bar error) |
+| X1 | W | Tick vs bar volume | X-VOL (local) | for every symbol subscribed for the whole session (final candidate set), max cumulative tick `volume` == daily bar `volume` (42/42 exact on 2026-10-01; 95/95 on 2026-10-02). Symbols present in L1 with only a few pre-open ticks come from a replaced candidate list after a mid-morning restart (2026-10-02: 24 such symbols) and are excluded, explained by the S4 restart | ≤2 final-set symbols within 1% = SEV3; otherwise SEV2 (tick loss or bar error) |
 | X2 | on Q1 FAIL | Reproduce a verdict | copy the L1 partition to `scratch/`, `PYTHONPATH=. uv run python` with `src.storage.quality.decode_tick_raw_fields`, group violations by `shcode`/`sign`/`ref` | root cause class named (feed, decoder, or rule) | unresolved = SEV2 |
 
 ### A: Alerting and observability pipeline
@@ -149,7 +151,7 @@ Columns: ID, modes, what, how (probe in section 8 or command), PASS / WARN / FAI
 | ID | Modes | Check | How | PASS | WARN / FAIL |
 |---|---|---|---|---|---|
 | A1 | M0 M3 | Alert path armed | `docker logs ... \| grep "stage=alert"`; `data/work/alert_ledger.json` after the first CRITICAL | `status=ENABLED` after start; no `status=FAIL` (send failure) | `DISABLED` = SEV1 (alerts off); `FAIL` = SEV2 |
-| A2 | M3 | CRITICAL vs mail budget | P-EVENTS CRITICAL count for D vs `alert_ledger.json` (`sent_today`, per-key `count`) and `stage=alert status=SUPPRESSED` lines | each distinct CRITICAL key mailed or logged as suppressed; `sent_today` < daily cap 20; no key at cap 3 unexplained | CRITICAL with neither mail record nor SUPPRESSED = SEV2 (ask the user to confirm mailbox) |
+| A2 | M3 | CRITICAL vs mail budget | P-EVENTS CRITICAL count for D vs `alert_ledger.json` (`sent_today`, per-key `count`) and `stage=alert status=SUPPRESSED` lines | each distinct CRITICAL key mailed or logged as suppressed; read the ledger with `docker exec krx-collector cat /app/data/work/alert_ledger.json` (host file is root 0600; fields `sent_today`, per-key `count`/`confirmed_count`); `sent_today` < daily cap 20; no key at cap 3 unexplained (2026-10-06: 1 key, `circuit_open`, mailed once) | CRITICAL with neither mail record nor SUPPRESSED = SEV2 (ask the user to confirm mailbox) |
 | A3 | M3 | Digest | `docker logs ... \| grep "stage=digest"` | `status=SENT` after EOD | `FAIL`/missing = SEV3 |
 | A4 | M0 M3 | External liveness | `grep "stage=healthcheck"` | none or `RECOVERED` | `status=FAIL` = SEV2 (dead-man's switch blind) |
 | A5 | M3 | Dashboard truth audit | P-DASH vs this run's findings | every krx.* level agrees with primary evidence; `generated` <3 min old; `curl -s -o /dev/null -w "%{http_code}" http://100.81.197.26:8765/` = 200 | dashboard OK while a SEV1/SEV2 exists = SEV2 monitoring gap (name the missing check); dashboard FAIL with healthy evidence = SEV3 |
@@ -317,6 +319,24 @@ for s in streams:
 print("not_ok", bad)
 ```
 
+**P-HEALTH** (`ssh or-vps "bash -s" < p_health.sh`; run every 5 minutes during sessions. Silent when healthy, remediate and report only on a violation)
+
+```bash
+cd ~/krx-alpha/data
+K=$(TZ=Asia/Seoul date +%T); D=$(TZ=Asia/Seoul date +%F)
+echo "now=$K"
+docker inspect krx-collector --format 'container restarts={{.RestartCount}} oom={{.State.OOMKilled}} started={{.State.StartedAt}} rev={{slice (index .Config.Labels "org.opencontainers.image.revision") 0 7}}'
+docker logs --since 12m krx-collector 2>&1 | grep -E "stage=heartbeat" | tail -1 | sed -E 's/.*(state=[A-Z_]+ cycle=[0-9]+ streamer_alive=[A-Za-z]+ streamer_restarts=[0-9]+).*/hb: \1/'
+echo "last_state: $(grep '"state_change"' logs/events-daemon.jsonl | tail -1 | sed -E 's/.*"ts": "([^"]+)".*to=([A-Z_]+).*/\1 -> \2/')"
+for s in ls/krx/regular kis/krx/krx_after kis/nxt/nxt_after kis/nxt/nxt_pre; do n=$(find l0/$s -path "*dt=$D*" -name '*.zst' -printf '%T@\n' 2>/dev/null | sort -n | tail -1); [ -n "$n" ] && echo "l0 $s newest_age_s=$(( $(date +%s) - ${n%.*} ))" || echo "l0 $s none"; done
+echo "crit_6m: $(docker logs --since 6m krx-collector 2>&1 | grep -cE 'level=CRITICAL|level=ERROR|Traceback')  restarts_6m: $(docker logs --since 6m krx-collector 2>&1 | grep -c 'status=RESTARTED')"
+docker logs --since 6m krx-collector 2>&1 | grep -E 'level=CRITICAL|level=ERROR|status=RESTARTED|stream_disconnect' | cut -c1-230 | tail -4
+t=$(ls -l --time-style=+%s ~/.cache/kis/token_ls_*.json 2>/dev/null | awk '{print $6}' | head -1); [ -n "$t" ] && echo "ls_token_age_h=$(( ($(date +%s)-t)/3600 ))"
+echo "disk=$(df -h /home/ubuntu | awk 'NR==2{print $5}') mem=$(docker stats --no-stream --format '{{.MemUsage}}' krx-collector)"
+```
+
+Live monitoring pipelines must be unbuffered: end with `awk '{print substr($0,1,260); fflush()}'`, never `cut`/`sed` (they hold output until exit and silence the monitor; 2026-10-06). Prove a watcher fires once on a real event before trusting its silence.
+
 **P-DASH** (host)
 
 ```python
@@ -364,6 +384,8 @@ Seeds for sanity and for "is this WARN the usual one". Refresh monthly or when t
 | Expected L0 streams on a business day | `ls/krx/regular/{H0STCNT0,H0STASP0}` hours 08–20; `kis/krx/krx_after/{H0STCNT0,H0STASP0}` hours 16–20; `kis/nxt/nxt_after/{H0NXCNT0,H0NXASP0}` hours 15–20; premarket `kis/nxt/nxt_pre/{H0NXCNT0,H0NXASP0}` hours 07–08 when enabled |
 | L0 daily size | regular quote ~455 MB, regular tick ~165 MB, KRX aftermarket 52/20 MB, NXT aftermarket 27/15 MB |
 | Snapshot kinds (9) | `stock_minute_bar` 23460 rows (60 symbols x 391), `ranking` ~23400, `index_minute_bar` 1173, `index_snapshot` 234, `news_title` 4700–5800; `program_trade`, `security_status`, `investor_estimate`, `auction_book` scale with candidate count (2026-10-02: x2.2 because candidates were 96 vs ~42) |
+| NXT premarket (2026-10-06 first run) | 20 symbols all with data; ~188K ticks and ~211K quotes; manifest 40/40 pairs; event time 08:00:00–08:50:08 |
+| Aftermarket L1 (2026-10-02) | `krx_after` ASP 508K / CNT 127K rows, `nxt_after` ASP 244K / CNT 99K; DQ PASS except NXT CNT WARN (`tick_loss` 7) |
 | Benign DQ WARN | `ls regular H0STASP0`: `decode_fail` ≤0.01%, `total_remain_short` ≤2.5%; `ls regular H0STCNT0`: `cum_volume_regression` ≤5 rows, `tick_loss` ≤2; `nxt_after H0NXCNT0`: `tick_loss` ≤0.02% of rows, `lost_volume` ≤200. Everything else PASS. FAIL is never benign |
 | Known false FAIL footers | `kis/krx/krx_after/H0STCNT0` `dt=2026-09-29` and `dt=2026-10-01` (new-listing days; fixed in `717225b`, footers not re-judged). Expected to clear from dashboard `krx.data_quality` on 2026-10-08. Remove this row once re-judged |
 | Premarket pool timing | `universe/premarket/N.json` is written on the preceding run, which can be well before 20:30 (2026-10-06 pool was generated 2026-10-03 00:24 across the weekend) |
@@ -393,6 +415,7 @@ SEV1: notify immediately (section 2). A report is not complete until every ID of
 | Symptom | Look at |
 |---|---|
 | `candidates_not_ready` / `orchestration_error` | events message (`selected N exceeds slot_budget M`, bars refresh timeout `data-dbg.krx.co.kr`), `candidates.json` rev, `universe/` for P; recurring KRX timeouts are retried every 5 min |
+| `streamer RESTARTED` x5 then `circuit_open` right after `STREAMER_ACTIVE`; traceback `ClientConnectionResetError: Cannot write to closing transport` in `ls.py subscribe` | stale LS token (H10); rename `~/.cache/kis/token_ls_*.json` aside, restart the container, confirm `stage=shared_token status=PUBLISHED` and `stream_connect accepted=<pairs>`; keep file ownership (uid 1001) |
 | Daemon restarted in session | `shutdown` event (`signal`, `graceful`), `daemon_lifecycle.json`, CI/deploy times vs freeze |
 | Manifest `degraded_reason`, ack shortfall | `subscription_acks[].code`; KIS 41-pair/connection cap; key lease `work/kis_ws_leases/<key_id>.lock` (`key_lease_busy`) |
 | L0 file stalled / zero size | `docker logs --since 30m`, `pgrep -af collect-` in container, disk (H3), clock (H4) |
