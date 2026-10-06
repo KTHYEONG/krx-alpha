@@ -729,6 +729,8 @@ class DaemonRunner:
         self._shutdown = shutdown
         self._now = now
         self._sleep = sleep
+        # Kept off DaemonState: a monotonic reading is not part of the deterministic state snapshot.
+        self._last_heartbeat_mono: float | None = None
         self._cfg = runtime.collector
         self._paths = runtime.paths
         self._after_cfg = runtime.aftermarket
@@ -972,16 +974,33 @@ class DaemonRunner:
                 "[DAEMON] stage=state_change from=%s to=%s cycle=%d", st.prev_state, state, st.cycle, extra=EVENT
             )
             st.prev_state = state
-        streamer_alive = st.last_supervisor_result in ("started", "running", "restarted")
         if st.last_summary is None or (now - st.last_summary).total_seconds() >= HEARTBEAT_SUMMARY_S:
-            logger.info(
-                "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
-                state,
-                st.cycle,
-                streamer_alive,
-                st.streamer_restarts,
-            )
+            self._log_heartbeat(state)
             st.last_summary = now
+
+    def _log_heartbeat(self, state: SessionState, mono: float | None = None) -> None:
+        st = self._state
+        streamer_alive = st.last_supervisor_result in ("started", "running", "restarted")
+        logger.info(
+            "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
+            state,
+            st.cycle,
+            streamer_alive,
+            st.streamer_restarts,
+        )
+        self._last_heartbeat_mono = mono if mono is not None else time.monotonic()
+
+    def _eod_progress(self) -> None:
+        """Liveness callback for EOD housekeeping, which blocks the daemon loop for tens of minutes.
+
+        Pings the external dead-man's switch and keeps the ten-minute heartbeat going so observers can tell
+        a busy EOD from a hung daemon. Uses the monotonic clock only: it must not consume the injected wall clock.
+        """
+        mono = time.monotonic()
+        self._maybe_ping(mono)
+        last = self._last_heartbeat_mono
+        if last is None or mono - last >= HEARTBEAT_SUMMARY_S:
+            self._log_heartbeat(SessionState.POST_MARKET_EOD, mono)
 
     def _step_active_session(
         self, now: dt.datetime, state: SessionState, day: TradingDayView, anchors: SessionAnchors
@@ -1638,7 +1657,7 @@ class DaemonRunner:
     def _run_holiday_eod(self, now: dt.datetime, ref_day: dt.date) -> None:
         cfg = self._cfg
         paths = self._paths
-        housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=lambda: self._maybe_ping(time.monotonic()))
+        housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=self._eod_progress)
         _check_backup(
             cfg.host_backup_status_path,
             paths,
@@ -1669,7 +1688,7 @@ class DaemonRunner:
         paths = self._paths
         aftermarket_blocked = self._aftermarket_eod_blocked(now, ref_day, anchors)
         self._log_premarket_eod(ref_day)
-        housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=lambda: self._maybe_ping(time.monotonic()))
+        housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=self._eod_progress)
         reconcile_ok, reconciled = self._reconcile_regular_session(ref_day, day, anchors)
         backup_missing, backup_ok, host_backup = _check_backup(
             cfg.host_backup_status_path,
