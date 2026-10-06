@@ -333,7 +333,7 @@ for s in ls/krx/regular kis/krx/krx_after kis/nxt/nxt_after kis/nxt/nxt_pre; do 
 echo "crit_6m: $(docker logs --since 6m krx-collector 2>&1 | grep -cE 'level=CRITICAL|level=ERROR|Traceback')  restarts_6m: $(docker logs --since 6m krx-collector 2>&1 | grep -c 'status=RESTARTED')"
 docker logs --since 6m krx-collector 2>&1 | grep -E 'level=CRITICAL|level=ERROR|status=RESTARTED|stream_disconnect' | cut -c1-230 | tail -4
 t=$(ls -l --time-style=+%s ~/.cache/kis/token_ls_*.json 2>/dev/null | awk '{print $6}' | head -1); [ -n "$t" ] && echo "ls_token_age_h=$(( ($(date +%s)-t)/3600 ))"
-o=$(stat -c '%u %n' ~/.cache/kis/token_ls_*.json ~/.cache/kis/*.lock ~/.cache/kis/.stale-* 2>/dev/null | awk '$1!=1001'); echo "ls_token_owner_bad=$(printf '%s' "$o" | grep -c '^')${o:+ files: $o}"
+o=$(stat -c '%u %n' ~/.cache/kis/token_ls_* 2>/dev/null | awk '$1!=1001'); echo "ls_token_owner_bad=$(printf '%s' "$o" | grep -c '^')${o:+ files: $o}"
 echo "disk=$(df -h /home/ubuntu | awk 'NR==2{print $5}') mem=$(docker stats --no-stream --format '{{.MemUsage}}' krx-collector)"
 ```
 
