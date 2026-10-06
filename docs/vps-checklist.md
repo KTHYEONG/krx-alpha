@@ -37,7 +37,7 @@ Run the mode that matches the KST time. Every run starts with C0 (section 4) and
 | Mode | When (KST) | Purpose | Checks |
 |---|---|---|---|
 | M0 pre-open | business day 07:45–08:15 | Is the day armed? | C0, H1–H6, S1, S7 (stale-by-one is expected), C7, A1, NP1 (if premarket enabled) |
-| M1 open | business day 09:05–09:30 | Did collection actually start? | C0, S2–S4, S6, S7, C1 (current hour), C2 (regular), H2 |
+| M1 open | business day 09:05–09:30 | Did collection actually start? | C0, S2–S4, S6–S8, C1 (current hour), C2 (regular), H2 |
 | M2 close | business day 15:45–16:15 | Regular session closed clean, aftermarket armed | C0, S2, C2, C4, C7 (aftermarket universe) |
 | **M3 EOD review** | business day 20:35–21:45 (**finish before 22:00**) | Full audit of the day incl. content | everything in sections 6–8 except weekly rows |
 | M4 night | every day 23:45–00:15 | Host backup, next-day readiness | H5–H8, C7 (next premarket pool), S1 for tomorrow |
@@ -104,7 +104,7 @@ Columns: ID, modes, what, how (probe in section 8 or command), PASS / WARN / FAI
 | H7 | M0 M4 | Host backup | `cat ~/.local/state/krx-alpha/host_backup_status.json` (+ `journalctl --user -u krx-host-backup --since "2 days ago"`) | `rc=0`, `data_rc=0`, `prune_rc=0`, `last_ok_at` <26 h | stale/non-zero = SEV2 |
 | H8 | M3 W | Offload integrity | P-REMOTE | every newest-3 local L1 has identical remote size; rclone reachable | mismatch = SEV2 (SEV1 if its L0 is already deleted); rclone error = UNKNOWN then SEV2 (`auth_expired`) |
 | H9 | M3 | Other containers present | `docker ps -a --format "{{.Names}} {{.Status}}"` | `krx-collector` Up | others: INFO only |
-| H10 | M0 M1 + 5-min | LS token age | P-HEALTH `ls_token_age_h` (file mtime of `~/.cache/kis/token_ls_*.json`; never read its content) | <12 h; the store reissues unknown-expiry tokens older than 12 h (since `fc22b36`) and records the vendor `expires_in` | ≥12 h at M0 on a business day = SEV2 (stale token: LS closes the socket at subscribe; 2026-10-06 08:20 crash loop); remediation: rename the token file aside and restart the container |
+| H10 | M0 M1 + 5-min | LS token age and ownership | P-HEALTH `ls_token_age_h` (file mtime of `~/.cache/kis/token_ls_*.json`; never read its content) and `ls_token_owner_bad` | <12 h; the store reissues unknown-expiry tokens older than 12 h (since `fc22b36`) and records the vendor `expires_in`; `ls_token_owner_bad=0` (store files `token_ls_*.json`, `*.lock`, any `.stale-*` aside must be owned by uid 1001, the container user; a root-owned file makes the in-container store raise `PermissionError`) | ≥12 h at M0 on a business day = SEV2 (stale token: LS closes the socket at subscribe; 2026-10-06 08:20 crash loop); remediation: rename the token file aside and restart the container. `ls_token_owner_bad>0` = SEV2; remediation: `docker exec krx-collector chown 1001:1001 /run/kis-token-cache/token_ls_*` (and the lock files), then confirm `ls_token_age_h` and the next `stream_connect` |
 | H11 | 5-min (09:05–15:30 regular, 16:05–20:00 aftermarket) | Live L0 freshness | P-HEALTH `l0 <stream> newest_age_s` | regular ≤180 s until 15:30, KIS aftermarket ≤300 s; after 15:30 regular ticks legitimately stop (last tick 15:30:29); after 20:00 all streams idle | stale in window = SEV1; streamer_alive=False in session = SEV1 |
 
 ### S: Scheduling and daemon
@@ -118,6 +118,7 @@ Columns: ID, modes, what, how (probe in section 8 or command), PASS / WARN / FAI
 | S5 | M3 | Event audit | P-EVENTS for D | every non-INFO event is explained by an open item or the benign list (section 9); no `stage=eod_*`, `prune`, `quarantine`, `host_backup_freshness` CRITICAL | unexplained CRITICAL/ERROR = SEV2; `eod_maintenance DEGRADED` = SEV1 |
 | S6 | M1 | Candidates armed | `candidates.json` (written by the 08:20 orchestration, not before): `rev` = P as YYYYMMDD; count; no `candidates_not_ready` / `orchestration_error` since 08:20. Before 08:20 the file legitimately holds the previous session's rev | rev matches P, count within trailing range and ≤ configured slot budget | stale rev or errors = SEV1 after 08:50 |
 | S7 | M0 M1 M3 | Bars refresh | P-BARS `latest_date` | M0: = the business day before P (refresh runs ~08:20); from 08:50: = P | older than P after 08:50 = SEV3; KRX timeout WARN is known (retry) |
+| S8 | M1 | First-frame watch (08:36–09:05) | events `stage=ingest_watchdog status=NO_FIRST_FRAME` for D | absent | present = SEV1 (regular streamer produced no frame after the 08:30 print was due); same remediation chain as H11 |
 
 ### C: Collection completeness
 
@@ -332,6 +333,7 @@ for s in ls/krx/regular kis/krx/krx_after kis/nxt/nxt_after kis/nxt/nxt_pre; do 
 echo "crit_6m: $(docker logs --since 6m krx-collector 2>&1 | grep -cE 'level=CRITICAL|level=ERROR|Traceback')  restarts_6m: $(docker logs --since 6m krx-collector 2>&1 | grep -c 'status=RESTARTED')"
 docker logs --since 6m krx-collector 2>&1 | grep -E 'level=CRITICAL|level=ERROR|status=RESTARTED|stream_disconnect' | cut -c1-230 | tail -4
 t=$(ls -l --time-style=+%s ~/.cache/kis/token_ls_*.json 2>/dev/null | awk '{print $6}' | head -1); [ -n "$t" ] && echo "ls_token_age_h=$(( ($(date +%s)-t)/3600 ))"
+o=$(stat -c '%u %n' ~/.cache/kis/token_ls_*.json ~/.cache/kis/*.lock ~/.cache/kis/.stale-* 2>/dev/null | awk '$1!=1001'); echo "ls_token_owner_bad=$(printf '%s' "$o" | grep -c '^')${o:+ files: $o}"
 echo "disk=$(df -h /home/ubuntu | awk 'NR==2{print $5}') mem=$(docker stats --no-stream --format '{{.MemUsage}}' krx-collector)"
 ```
 
@@ -416,6 +418,8 @@ SEV1: notify immediately (section 2). A report is not complete until every ID of
 |---|---|
 | `candidates_not_ready` / `orchestration_error` | events message (`selected N exceeds slot_budget M`, bars refresh timeout `data-dbg.krx.co.kr`), `candidates.json` rev, `universe/` for P; recurring KRX timeouts are retried every 5 min |
 | `streamer RESTARTED` x5 then `circuit_open` right after `STREAMER_ACTIVE`; traceback `ClientConnectionResetError: Cannot write to closing transport` in `ls.py subscribe` | stale LS token (H10); rename `~/.cache/kis/token_ls_*.json` aside, restart the container, confirm `stage=shared_token status=PUBLISHED` and `stream_connect accepted=<pairs>`; keep file ownership (uid 1001) |
+| `ls_token_owner_bad>0` in P-HEALTH | token cache files owned by another uid (H10); the in-container store raises `PermissionError` before `stream_connect` | `docker exec krx-collector chown 1001:1001 /run/kis-token-cache/token_ls_*` (and the lock files), then confirm `ls_token_age_h` and the next `stream_connect` |
+| `stage=ingest_watchdog status=NO_FIRST_FRAME` on a business day 08:36–09:05 (S8) | regular streamer produced no frame after the 08:30 print was due (all subscriptions rejected, wrong token, silent socket) | same remediation chain as H11 (`L0 file stalled / zero size` row); if the 08:20–08:41 window is affected, the 08:30–08:40 prints are lost |
 | Daemon restarted in session | `shutdown` event (`signal`, `graceful`), `daemon_lifecycle.json`, CI/deploy times vs freeze |
 | Manifest `degraded_reason`, ack shortfall | `subscription_acks[].code`; KIS 41-pair/connection cap; key lease `work/kis_ws_leases/<key_id>.lock` (`key_lease_busy`) |
 | L0 file stalled / zero size | `docker logs --since 30m`, `pgrep -af collect-` in container, disk (H3), clock (H4) |
