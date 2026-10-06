@@ -737,3 +737,55 @@ def test_holiday_stops_snapshot_child_and_shutdown_collects_regular_child(tmp_pa
     runner.stop_children()
     assert selected == [regular]
 
+
+
+def _eod_runner(tmp_path):
+    import datetime as dt
+    import pathlib
+    import threading
+
+    from src.core.config import CollectorSettings, resolve_collector_runtime
+    from src.orchestration.daemon import DaemonRunner
+
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    runtime = resolve_collector_runtime(collector=settings)
+
+    def _wall() -> dt.datetime:
+        raise AssertionError("EOD progress must not consume the injected wall clock")
+
+    return DaemonRunner(runtime=runtime, shutdown=threading.Event(), now=_wall, sleep=lambda s: None)
+
+
+def test_eod_progress_keeps_ten_minute_heartbeat_going_during_housekeeping(tmp_path, monkeypatch, caplog) -> None:
+    from src.orchestration import daemon as daemon_mod
+
+    # Given: 하트비트 없이 시작해 600초 간격으로 진행 콜백이 반복 호출되는 EOD 후처리
+    clock = iter([1000.0, 1100.0, 1700.0, 1790.0, 2300.0])
+    monkeypatch.setattr(daemon_mod.time, "monotonic", lambda: next(clock))
+    runner = _eod_runner(tmp_path)
+
+    # When: 콜백이 다섯 번 호출된다
+    with caplog.at_level(logging.INFO):
+        for _ in range(5):
+            runner._eod_progress()
+
+    # Then: 첫 호출과 600초 경과 시점마다 하트비트가 찍히고 상태는 POST_MARKET_EOD 이다
+    beats = [r.getMessage() for r in caplog.records if "stage=heartbeat" in r.getMessage()]
+    assert len(beats) == 3
+    assert all("state=POST_MARKET_EOD" in m for m in beats)
+
+
+def test_eod_progress_does_not_duplicate_a_recent_cycle_heartbeat(tmp_path, monkeypatch, caplog) -> None:
+    from src.orchestration import daemon as daemon_mod
+
+    # Given: 직전에 정상 사이클이 하트비트를 찍은 직후
+    clock = iter([500.0, 600.0])
+    monkeypatch.setattr(daemon_mod.time, "monotonic", lambda: next(clock))
+    runner = _eod_runner(tmp_path)
+    runner._last_heartbeat_mono = 450.0
+
+    # When / Then: 600초가 지나지 않았으므로 추가 하트비트가 없다
+    with caplog.at_level(logging.INFO):
+        runner._eod_progress()
+        runner._eod_progress()
+    assert not any("stage=heartbeat" in r.getMessage() for r in caplog.records)
