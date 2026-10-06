@@ -1006,3 +1006,369 @@ def test_circuit_alert_rearms_after_recovery(
     assert sup.last_exit_code == -9
     if slot == "regular":
         assert runner.state.streamer_restarts == 3
+
+
+def _first_frame_runner(tmp_path, monkeypatch):
+    import pathlib
+
+    from src.core.config import CollectorSettings, resolve_collector_runtime
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    runtime = resolve_collector_runtime(collector=settings)
+    runner = daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda s: None)
+    runner.children.regular = object()
+    return runner, settings, daemon_mod
+
+
+def _first_frame_day(day, *, status):
+    from src.orchestration.trading_day_gate import TradingDayStatus, TradingDayView
+
+    trading_day = None
+    if status is TradingDayStatus.BUSINESS:
+        trading_day = _business_trading_day(day)
+    elif status is TradingDayStatus.HOLIDAY:
+        trading_day = _holiday_trading_day(day)
+    return TradingDayView(date=day, status=status, trading_day=trading_day)
+
+
+def _standard_anchors(day):
+    from src.core.session_anchors import standard_session_anchors
+
+    return standard_session_anchors(day)
+
+
+def _no_first_frame(records) -> list:
+    return [r for r in records if "status=NO_FIRST_FRAME" in r.getMessage()]
+
+
+def test_first_frame_watchdog_alerts_once_without_frames(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from src.core.calendar import SessionState
+    from src.orchestration.trading_day_gate import TradingDayStatus
+
+    runner, _settings, _daemon_mod = _first_frame_runner(tmp_path, monkeypatch)
+    kst = ZoneInfo("Asia/Seoul")
+    day = dt.date(2026, 9, 14)
+    view = _first_frame_day(day, status=TradingDayStatus.BUSINESS)
+    anchors = _standard_anchors(day)
+
+    with caplog.at_level(logging.WARNING):
+        minute = dt.datetime(2026, 9, 14, 8, 36, tzinfo=kst)
+        while minute <= dt.datetime(2026, 9, 14, 9, 4, tzinfo=kst):
+            runner._run_first_frame_watchdog(minute, SessionState.STREAMER_ACTIVE, view, anchors)
+            minute += dt.timedelta(minutes=1)
+
+    alerts = _no_first_frame(caplog.records)
+    assert len(alerts) == 1
+    assert alerts[0].levelno == logging.CRITICAL
+    assert alerts[0].getMessage() == (
+        "[DAEMON] stage=ingest_watchdog status=NO_FIRST_FRAME date=2026-09-14 due=08:35:00"
+    )
+
+
+def test_first_frame_watchdog_silent_before_due(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from src.core.calendar import SessionState
+    from src.orchestration.trading_day_gate import TradingDayStatus
+
+    runner, _settings, _daemon_mod = _first_frame_runner(tmp_path, monkeypatch)
+    day = dt.date(2026, 9, 14)
+    with caplog.at_level(logging.WARNING):
+        runner._run_first_frame_watchdog(
+            dt.datetime(2026, 9, 14, 8, 34, tzinfo=ZoneInfo("Asia/Seoul")),
+            SessionState.STREAMER_ACTIVE,
+            _first_frame_day(day, status=TradingDayStatus.BUSINESS),
+            _standard_anchors(day),
+        )
+    assert not _no_first_frame(caplog.records)
+
+
+def test_first_frame_watchdog_silent_with_frames(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from src.core.calendar import SessionState
+    from src.orchestration.trading_day_gate import TradingDayStatus
+
+    runner, settings, _daemon_mod = _first_frame_runner(tmp_path, monkeypatch)
+    day = dt.date(2026, 9, 14)
+    part = settings.paths.journal_root / "ls" / "krx" / "regular" / "H0STCNT0" / "dt=2026-09-14"
+    part.mkdir(parents=True, exist_ok=True)
+    (part / "08.jsonl.zst").write_bytes(b"x")
+    with caplog.at_level(logging.WARNING):
+        runner._run_first_frame_watchdog(
+            dt.datetime(2026, 9, 14, 8, 36, tzinfo=ZoneInfo("Asia/Seoul")),
+            SessionState.STREAMER_ACTIVE,
+            _first_frame_day(day, status=TradingDayStatus.BUSINESS),
+            _standard_anchors(day),
+        )
+    assert not _no_first_frame(caplog.records)
+
+
+def test_first_frame_watchdog_empty_file_counts_as_no_data(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from src.core.calendar import SessionState
+    from src.orchestration.trading_day_gate import TradingDayStatus
+
+    runner, settings, _daemon_mod = _first_frame_runner(tmp_path, monkeypatch)
+    day = dt.date(2026, 9, 14)
+    part = settings.paths.journal_root / "ls" / "krx" / "regular" / "H0STCNT0" / "dt=2026-09-14"
+    part.mkdir(parents=True, exist_ok=True)
+    (part / "08.jsonl.zst").write_bytes(b"")
+    with caplog.at_level(logging.WARNING):
+        runner._run_first_frame_watchdog(
+            dt.datetime(2026, 9, 14, 8, 36, tzinfo=ZoneInfo("Asia/Seoul")),
+            SessionState.STREAMER_ACTIVE,
+            _first_frame_day(day, status=TradingDayStatus.BUSINESS),
+            _standard_anchors(day),
+        )
+    assert len(_no_first_frame(caplog.records)) == 1
+
+
+def test_first_frame_watchdog_recovery_reported_once(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from src.core.calendar import SessionState
+    from src.orchestration.trading_day_gate import TradingDayStatus
+
+    runner, settings, _daemon_mod = _first_frame_runner(tmp_path, monkeypatch)
+    kst = ZoneInfo("Asia/Seoul")
+    day = dt.date(2026, 9, 14)
+    view = _first_frame_day(day, status=TradingDayStatus.BUSINESS)
+    anchors = _standard_anchors(day)
+    with caplog.at_level(logging.WARNING):
+        runner._run_first_frame_watchdog(
+            dt.datetime(2026, 9, 14, 8, 36, tzinfo=kst), SessionState.STREAMER_ACTIVE, view, anchors
+        )
+        part = settings.paths.journal_root / "ls" / "krx" / "regular" / "H0STCNT0" / "dt=2026-09-14"
+        part.mkdir(parents=True, exist_ok=True)
+        (part / "08.jsonl.zst").write_bytes(b"x")
+        runner._run_first_frame_watchdog(
+            dt.datetime(2026, 9, 14, 8, 41, tzinfo=kst), SessionState.FULL_ACTIVE, view, anchors
+        )
+        runner._run_first_frame_watchdog(
+            dt.datetime(2026, 9, 14, 8, 46, tzinfo=kst), SessionState.FULL_ACTIVE, view, anchors
+        )
+    assert len(_no_first_frame(caplog.records)) == 1
+    recovered = [r for r in caplog.records if "status=FIRST_FRAME_RECOVERED" in r.getMessage()]
+    assert len(recovered) == 1
+    assert recovered[0].levelno == logging.WARNING
+    assert recovered[0].getMessage() == (
+        "[DAEMON] stage=ingest_watchdog status=FIRST_FRAME_RECOVERED date=2026-09-14"
+    )
+
+
+def test_first_frame_watchdog_shifted_open_moves_window(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from src.core.calendar import SessionState
+    from src.core.session_anchors import AnchorSource, SessionAnchors
+    from src.orchestration.trading_day_gate import TradingDayStatus
+
+    runner, _settings, _daemon_mod = _first_frame_runner(tmp_path, monkeypatch)
+    kst = ZoneInfo("Asia/Seoul")
+    day = dt.date(2026, 9, 14)
+    view = _first_frame_day(day, status=TradingDayStatus.BUSINESS)
+    anchors = SessionAnchors(
+        date=day,
+        regular_open=dt.time(10, 0),
+        closing_auction_start=dt.time(16, 20),
+        regular_close=dt.time(16, 30),
+        after_market_end=dt.time(20, 0),
+        source=AnchorSource.DEFAULT,
+    )
+    with caplog.at_level(logging.WARNING):
+        runner._run_first_frame_watchdog(
+            dt.datetime(2026, 9, 14, 8, 36, tzinfo=kst), SessionState.STREAMER_ACTIVE, view, anchors
+        )
+        assert not _no_first_frame(caplog.records)
+        runner._last_first_frame_check = None
+        runner._run_first_frame_watchdog(
+            dt.datetime(2026, 9, 14, 9, 35, tzinfo=kst), SessionState.FULL_ACTIVE, view, anchors
+        )
+    alerts = _no_first_frame(caplog.records)
+    assert len(alerts) == 1
+    assert "due=09:35:00" in alerts[0].getMessage()
+
+
+def test_first_frame_watchdog_hands_over_to_ingest_watchdog(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from src.core.calendar import SessionState
+    from src.orchestration.trading_day_gate import TradingDayStatus
+
+    runner, _settings, _daemon_mod = _first_frame_runner(tmp_path, monkeypatch)
+    day = dt.date(2026, 9, 14)
+    with caplog.at_level(logging.WARNING):
+        runner._run_first_frame_watchdog(
+            dt.datetime(2026, 9, 14, 9, 5, tzinfo=ZoneInfo("Asia/Seoul")),
+            SessionState.FULL_ACTIVE,
+            _first_frame_day(day, status=TradingDayStatus.BUSINESS),
+            _standard_anchors(day),
+        )
+    assert not _no_first_frame(caplog.records)
+    assert "stage=ingest_watchdog" not in caplog.text
+
+
+def test_first_frame_watchdog_silent_without_business_day_or_child(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from src.core.calendar import SessionState
+    from src.orchestration.trading_day_gate import TradingDayStatus
+
+    runner, _settings, _daemon_mod = _first_frame_runner(tmp_path, monkeypatch)
+    kst = ZoneInfo("Asia/Seoul")
+    day = dt.date(2026, 9, 14)
+    anchors = _standard_anchors(day)
+    at = dt.datetime(2026, 9, 14, 8, 36, tzinfo=kst)
+    with caplog.at_level(logging.WARNING):
+        runner._run_first_frame_watchdog(
+            at, SessionState.STREAMER_ACTIVE, _first_frame_day(day, status=TradingDayStatus.HOLIDAY), anchors
+        )
+        runner._run_first_frame_watchdog(
+            at, SessionState.STREAMER_ACTIVE, _first_frame_day(day, status=TradingDayStatus.UNKNOWN), anchors
+        )
+        runner.children.regular = None
+        runner._run_first_frame_watchdog(
+            at,
+            SessionState.STREAMER_ACTIVE,
+            _first_frame_day(day, status=TradingDayStatus.BUSINESS),
+            anchors,
+        )
+        runner.children.regular = object()
+        runner._run_first_frame_watchdog(
+            at,
+            SessionState.PRE_MARKET_SLEEP,
+            _first_frame_day(day, status=TradingDayStatus.BUSINESS),
+            anchors,
+        )
+    assert not _no_first_frame(caplog.records)
+    assert "stage=ingest_watchdog" not in caplog.text
+
+
+def test_first_frame_watchdog_throttles_repeat_checks(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from src.core.calendar import SessionState
+    from src.orchestration.trading_day_gate import TradingDayStatus
+
+    runner, _settings, _daemon_mod = _first_frame_runner(tmp_path, monkeypatch)
+    kst = ZoneInfo("Asia/Seoul")
+    day = dt.date(2026, 9, 14)
+    view = _first_frame_day(day, status=TradingDayStatus.BUSINESS)
+    anchors = _standard_anchors(day)
+    first = dt.datetime(2026, 9, 14, 8, 36, tzinfo=kst)
+    with caplog.at_level(logging.WARNING):
+        runner._run_first_frame_watchdog(first, SessionState.STREAMER_ACTIVE, view, anchors)
+        runner._run_first_frame_watchdog(
+            first + dt.timedelta(seconds=30), SessionState.STREAMER_ACTIVE, view, anchors
+        )
+    assert len(_no_first_frame(caplog.records)) == 1
+    assert runner._last_first_frame_check == first
+
+
+def test_journal_has_frames_skips_unstatable_files(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    import pathlib
+
+    from src.orchestration import daemon as daemon_mod
+
+    day = dt.date(2026, 9, 14)
+    part = tmp_path / "ls" / "krx" / "regular" / "H0STCNT0" / "dt=2026-09-14"
+    part.mkdir(parents=True, exist_ok=True)
+    good = part / "08.jsonl.zst"
+    good.write_bytes(b"x")
+
+    class _Unstatable:
+        def is_file(self) -> bool:
+            return True
+
+        def stat(self):
+            raise OSError("denied")
+
+    entries = [_Unstatable(), good]
+    real_glob = pathlib.Path.glob
+    monkeypatch.setattr(
+        pathlib.Path,
+        "glob",
+        lambda self, pattern: iter(entries) if pattern.startswith("ls/") else real_glob(self, pattern),
+    )
+    assert daemon_mod._journal_has_frames(tmp_path, "ls", day) is True
+    assert daemon_mod._journal_has_frames(tmp_path, "other", day) is False
+    monkeypatch.setattr(pathlib.Path, "glob", lambda self, _pattern: iter([_Unstatable()]))
+    assert daemon_mod._journal_has_frames(tmp_path, "ls", day) is False
+
+
+def test_first_frame_watchdog_wired_into_active_step(tmp_path, monkeypatch, caplog) -> None:
+    import dataclasses
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    kst = ZoneInfo("Asia/Seoul")
+
+    class _FakeSupervisor:
+        def __init__(self, *, cmd, breaker=None):
+            pass
+
+        def ensure_running(self):
+            return "started"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+    monkeypatch.setattr(
+        daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(d)
+    )
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **kw: True)
+
+    with caplog.at_level(logging.WARNING):
+        daemon_mod.run_collector_daemon(
+            settings=settings,
+            sleep_fn=lambda s: None,
+            max_cycles=1,
+            now_fn=lambda: dt.datetime(2026, 9, 14, 8, 36, tzinfo=kst),
+        )
+    alerts = _no_first_frame(caplog.records)
+    assert len(alerts) == 1
+    assert "status=STALE" not in caplog.text
+    from src.core.config import resolve_collector_runtime
+
+    probe = daemon_mod.DaemonRunner(
+        runtime=resolve_collector_runtime(collector=settings),
+        shutdown=None,
+        now=lambda: None,
+        sleep=lambda s: None,
+    )
+    assert probe._last_first_frame_check is None
+    assert probe._first_frame_alerted_for is None
+    assert "_last_first_frame_check" not in dataclasses.asdict(probe.state)
+    assert "_first_frame_alerted_for" not in dataclasses.asdict(probe.state)

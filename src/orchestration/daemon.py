@@ -117,6 +117,8 @@ INGEST_STALE_S: float = 300.0
 INGEST_CHECK_S: float = 60.0
 INGEST_WATCH_START_OFFSET: dt.timedelta = dt.timedelta(minutes=5)
 INGEST_WATCH_END_OFFSET: dt.timedelta = dt.timedelta(minutes=5)
+FIRST_FRAME_LEAD: dt.timedelta = dt.timedelta(minutes=30)
+FIRST_FRAME_GRACE: dt.timedelta = dt.timedelta(minutes=5)
 # 컴포즈 stop_grace_period(30s) 안에 자식 정상종료 + 로그 flush 를 끝내기 위한 공유 데드라인.
 SHUTDOWN_CHILD_DEADLINE_S: float = 20.0
 HOLIDAY_SLEEP_CAP_S: float = 3600.0
@@ -132,6 +134,21 @@ def _journal_age_s(journal_root: pathlib.Path, vendor: str, day: dt.date, now: d
     if not files:
         return None
     return now.timestamp() - max(f.stat().st_mtime for f in files)
+
+
+def _journal_has_frames(journal_root: pathlib.Path, vendor: str, day: dt.date) -> bool:
+    """True when ``vendor`` has at least one non-empty L0 journal file for ``day``.
+
+    Pre-open liveness only needs existence of data: prints before 09:00 are sparse, so a staleness
+    age (as in ``_journal_age_s``) would false-alarm between prints.
+    """
+    for path in journal_root.glob(l0_day_journal_glob(vendor, day)):
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def resolve_trading_day(ref_date: dt.date) -> TradingDay | None:
@@ -759,6 +776,8 @@ class DaemonRunner:
                 d, runtime.paths.calendar_cache, runtime.paths.session_calendar_dir
             )
         )
+        self._last_first_frame_check: dt.datetime | None = None
+        self._first_frame_alerted_for: dt.date | None = None
         self._run_id: str | None = None
 
     def _maybe_ping(self, now_mono: float) -> None:
@@ -1025,6 +1044,7 @@ class DaemonRunner:
         self._supervise_regular()
         self._supervise_snapshot(now, anchors)
         self._run_ingest_watchdog(now, state, day, anchors)
+        self._run_first_frame_watchdog(now, state, day, anchors)
         self._maybe_reselect_aftermarket(now, state, today, anchors)
         if state == SessionState.AFTER_MARKET_ACTIVE and self._cfg.after_market_enabled:
             self._supervise_aftermarket(now, today, anchors)
@@ -1309,6 +1329,52 @@ class DaemonRunner:
                     int(age),
                 )
             st.ingest_stale = stale and not (age is None and day.status is TradingDayStatus.UNKNOWN)
+
+    def _run_first_frame_watchdog(
+        self, now: dt.datetime, state: SessionState, day: TradingDayView, anchors: SessionAnchors
+    ) -> None:
+        """Alert once per day when no regular-stream frame exists after the first pre-open print is due.
+
+        The first KRX print precedes ``regular_open`` by ``FIRST_FRAME_LEAD`` (08:30:00 on every
+        observed business day); the check is due ``FIRST_FRAME_GRACE`` later and ends where
+        ``_run_ingest_watchdog`` takes over (``regular_open + INGEST_WATCH_START_OFFSET``). Anchors are
+        shift-aware, so shifted-open days move the window with the open.
+        """
+        if state not in (SessionState.STREAMER_ACTIVE, SessionState.FULL_ACTIVE):
+            return
+        if day.status is not TradingDayStatus.BUSINESS:
+            return
+        if self._children.regular is None:
+            return
+        today = day.date
+        due = _shifted_time(anchors.regular_open, -FIRST_FRAME_LEAD + FIRST_FRAME_GRACE)
+        handover = _shifted_time(anchors.regular_open, INGEST_WATCH_START_OFFSET)
+        now_time = now.astimezone(_KST).time()
+        if not (due <= now_time < handover):
+            return
+        if (
+            self._last_first_frame_check is not None
+            and (now - self._last_first_frame_check).total_seconds() < INGEST_CHECK_S
+        ):
+            return
+        self._last_first_frame_check = now
+        cfg = self._cfg
+        paths = self._paths
+        if _journal_has_frames(paths.journal_root, cfg.vendor, today):
+            if self._first_frame_alerted_for == today:
+                logger.warning(
+                    "[DAEMON] stage=ingest_watchdog status=FIRST_FRAME_RECOVERED date=%s",
+                    today.isoformat(),
+                )
+                self._first_frame_alerted_for = None
+            return
+        if self._first_frame_alerted_for != today:
+            logger.critical(
+                "[DAEMON] stage=ingest_watchdog status=NO_FIRST_FRAME date=%s due=%s",
+                today.isoformat(),
+                due.isoformat(),
+            )
+            self._first_frame_alerted_for = today
 
     def _maybe_reselect_aftermarket(
         self, now: dt.datetime, state: SessionState, today: dt.date, anchors: SessionAnchors

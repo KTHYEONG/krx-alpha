@@ -1564,6 +1564,8 @@
     "[DAEMON] stage=eod_reconciliation status=FAIL error=%s",
     "[DAEMON] stage=eod_reconciliation status=SKIP reason=calendar_unknown",
     "[DAEMON] stage=heartbeat state=%s cycle=%d streamer_alive=%s streamer_restarts=%d",
+    "[DAEMON] stage=ingest_watchdog status=FIRST_FRAME_RECOVERED date=%s",
+    "[DAEMON] stage=ingest_watchdog status=NO_FIRST_FRAME date=%s due=%s",
     "[DAEMON] stage=ingest_watchdog status=POSSIBLE_HOLIDAY date=%s",
     "[DAEMON] stage=ingest_watchdog status=RECOVERED date=%s age_s=%d",
     "[DAEMON] stage=ingest_watchdog status=STALE date=%s age_s=%s",
