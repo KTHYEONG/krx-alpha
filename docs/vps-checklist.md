@@ -3,7 +3,7 @@
 Agent-executable runbook. An AI auditor runs it on a schedule, verifies that every automated routine of the day ran **and that the data it produced is correct**, then reports. It is feature-agnostic: new automation is added as a check row (section 12), not as a new document.
 
 - Host `or-vps` (SSH alias, tailnet), container `krx-collector`, data root host `~/krx-alpha/data` = container `/app/data`.
-- Last verified against production: 2026-10-07 (second business day with the hardened streamer: M0–M3 exercised, first LS token reissue at 08:20:31 observed, EOD heartbeat continuity observed); 2026-10-06 (first full business day: M0, M1, M2, M3 exercised; S2, S3, S6, S7, C1–C4, C7, Q1–Q6, H8, A1–A2, A5, NP2–NP6, X1 all ran against live data). M4 exercised 2026-10-06 (H7 still in progress at 23:47). Still unexercised: A3/A4 failure paths, the 22:00 deferred recreate with pending image changes, W-only rows beyond X1. Baselines in section 9 are dated; refresh them, never hard-code new ones.
+- Last verified against production: 2026-10-07 (second business day with the hardened streamer: M0–M3 exercised, first LS token reissue at 08:20:31 observed, EOD heartbeat continuity observed); 2026-10-06 (first full business day: M0, M1, M2, M3 exercised; S2, S3, S6, S7, C1–C4, C7, Q1–Q6, H8, A1–A2, A5, NP2–NP6, X1 all ran against live data). M4 exercised 2026-10-06 (H7 still in progress at 23:47) and 2026-10-07 (backup finished 23:31:44, all green). Still unexercised: A3/A4 failure paths, the 22:00 deferred recreate with pending image changes, W-only rows beyond X1. Baselines in section 9 are dated; refresh them, never hard-code new ones.
 - Output language: report in Korean; keys, IDs, badges stay English (section 10). This file stays English.
 
 ## 1. Operating rules (non-negotiable)
@@ -394,6 +394,7 @@ Seeds for sanity and for "is this WARN the usual one". Refresh monthly or when t
 | Aftermarket symbols with trades (C3, 2026-10-06 / 10-07) | `krx_after` CNT 40/40 symbols, dead (<100 trades) 8 / 10; `nxt_after` CNT 19 / 21 of 40 pool symbols, dead 0 (illiquid NXT symbols print no trades) |
 | Known quarantine content | `quarantine/ls/H0STCNT0` and `H0STASP0` `dt=2026-09-09` hours 09–15: 14 files, ~185 MB, quarantined by retention on 2026-09-15 15:40 (CRITICAL then); no entry since. Not deleted pending a user decision; the 2026-10-06 note that the folder was empty was wrong (`ls quarantine` shows only the `ls` folder) |
 | Dashboard `krx.regular_stream` | a WARN at 15:22–15:25 on 2026-10-06 and 10-07 was the closing auction (no trades 15:20–15:30) judged as a stale tick file; fixed in quant-dashboard `28ccb6f` (deployed 2026-10-07 20:4x); expect no WARN from 2026-10-08 |
+| Host backup duration (H7) | 2026-10-05 run 45 min (lock_wait 2666 s), 10-06 run 1 h 45 min (lock_wait 6174 s, shared Drive lock held by another project's backup), 10-07 run 1 min 40 s (lock_wait 0). Run time is dominated by the lock wait; judge `rc`/`last_ok_at`, and treat lock_wait >2 h or a run still active at the next 23:30 as SEV3 |
 | Offload | local L1 size == remote size for every partition |
 | Clock | manifest `clock_offset_ns` within ±1 ms; chrony offset <1 ms |
 | Memory | idle ~80–100 MiB; EOD normalizer child ≤500 MiB |
