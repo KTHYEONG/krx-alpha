@@ -33,7 +33,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
 
 
 def run(args: argparse.Namespace) -> int:
-    """Bootstrap one collection session and persist its manifest. Flags left None (or absent) resolve from one CollectorSettings() built here; explicit flags win. Returns 3 on ClockUnsyncedError (fail-closed), else 0."""
+    """Bootstrap one collection session and persist its manifest, returning exit code."""
     settings = CollectorSettings()
     raw_streams = getattr(args, "streams", None)
     raw_ntp_host = getattr(args, "ntp_host", None)

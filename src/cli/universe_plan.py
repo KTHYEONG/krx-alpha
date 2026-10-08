@@ -26,7 +26,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
 
 
 def run(args: argparse.Namespace) -> int:
-    """Plan the universe and map the result to an exit code. Settings resolve here, not at import, so an invalid collector env cannot break unrelated subcommands. Explicit --slot-budget wins."""
+    """Plan the collection universe and write output manifest, returning exit code."""
     settings = CollectorSettings()
     raw_slot_budget = getattr(args, "slot_budget", None)
     slot_budget = int(raw_slot_budget) if raw_slot_budget is not None else settings.universe_slot_budget

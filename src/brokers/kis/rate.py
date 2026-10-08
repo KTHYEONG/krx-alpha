@@ -27,13 +27,13 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class Pacer(Protocol):
-    """Blocking admission gate a KIS REST caller passes before every vendor request (data GET, order POST, token issuance). Production stacks use `HostPacedRateLimiter` so admission is shared host-wide with KCA over the protocol state file; `RateLimiter` is process-private and only valid where no other process shares the app key (tests)."""
+    """Blocking admission gate passed before every vendor REST request."""
 
     def acquire(self) -> None: ...
 
 
 class RateLimiter:
-    """Process-private minimum-interval pacer. Not host-safe: it ignores the shared state file, so it must never pace a production app key."""
+    """Process-private minimum-interval pacer for isolated environments."""
 
     def __init__(
         self,

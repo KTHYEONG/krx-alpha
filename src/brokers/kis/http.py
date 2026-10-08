@@ -25,7 +25,7 @@ class KisRetryDecision(StrEnum):
 
 
 def classify_kis_retry(msg_cd: str, *, retries: int, refreshed: bool) -> KisRetryDecision:
-    """Classify a KIS response code into the shared safe-retry decision. Rate-limit codes retry while `retries < MAX_SAFE_RETRIES`; expired-token codes retry once (`refreshed` False). Everything else is FINAL and the caller applies its own success/failure semantics (GET raises, order POST classifies REJECTED/UNKNOWN). `retries` is the caller's total retry count, so a caller may share one budget across transport and rate-limit retries."""
+    """Classify a KIS response code into a safe-retry decision."""
     if msg_cd in _RATE_LIMIT_CODES and retries < MAX_SAFE_RETRIES:
         return KisRetryDecision.RETRY_RATE_LIMITED
     if msg_cd in _EXPIRED_TOKEN_CODES and not refreshed:
@@ -54,7 +54,7 @@ class KisGetTransport:
         self._base_url = base_url
 
     def authorized_headers(self, tr_id: str, tr_cont: str = "") -> tuple[dict[str, str], str]:
-        """Build signed KIS headers and return the bearer token embedded in them. The returned token is the only valid `rejected_token` for a later refresh: re-reading the provider after a refusal can observe a peer-rotated token."""
+        """Build signed KIS headers and return (headers, bearer_token)."""
         token = self._tokens.access_token()
         return (
             {
@@ -75,7 +75,7 @@ class KisGetTransport:
         return headers
 
     def refresh_token(self, rejected_token: str) -> str:
-        """Resolve a replacement after the vendor refused `rejected_token` (the token returned by `authorized_headers`). May adopt a peer-rotated cached token instead of issuing."""
+        """Resolve a replacement token after vendor rejects the provided token."""
         return self._tokens.access_token(force=True, rejected_token=rejected_token)
 
     def ensure_token(self) -> TokenSource:
