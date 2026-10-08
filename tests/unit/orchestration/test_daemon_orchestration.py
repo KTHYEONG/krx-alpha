@@ -1,4 +1,4 @@
-"""Daemon orchestration cases split from test_daemon.py (bars/universe orchestration, retry and degraded fallback, trading-day calendar, token preflight, and program-trade backfill)."""
+"""Daemon orchestration unit tests."""
 
 from __future__ import annotations
 

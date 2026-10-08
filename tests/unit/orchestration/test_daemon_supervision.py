@@ -1,4 +1,4 @@
-"""Daemon supervision cases split from test_daemon.py (child supervision, schedule sleeps, snapshot children, ingest watchdog, and active-phase holiday handling)."""
+"""Daemon supervision unit tests."""
 
 from __future__ import annotations
 

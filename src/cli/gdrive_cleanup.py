@@ -1,4 +1,4 @@
-"""one-time, evidence-gated removal of superseded krx-alpha objects from `gdrive:quant-lake/live/krx-alpha/data`. Why: host copy and container offload historically wrote overlapping trees, and `rclone copy` never deletes. Dry-run by default; runs from the workstation."""
+"""Evidence-gated cleanup of superseded krx-alpha archive objects from remote storage."""
 
 from __future__ import annotations
 
@@ -170,7 +170,7 @@ def _print_plan(candidates: Sequence[CleanupCandidate], kept: Sequence[tuple[str
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """``python -m src.cli.gdrive_cleanup [--apply]``: list once (lsjson -R --fast-list --files-only), plan, print per-rule counts/bytes; with --apply re-list, re-plan, then purge l0 dirs / deletefile others and rmdirs --leave-root on l0, manifest, work."""
+    """CLI entry point to audit and clean up superseded remote objects."""
     parser = argparse.ArgumentParser(description="One-time Drive cleanup for superseded krx-alpha objects.")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args(argv)

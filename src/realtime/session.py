@@ -1,6 +1,6 @@
-"""수집 세션 composition root (코어 프리미티브 결선 facade)."""
+"""Realtime collection session composition root."""
 
-# ruff: noqa: I001 - spec pins import order check_disk_watermark, StorageExhaustedError
+# ruff: noqa: I001 - preserve required import order
 from __future__ import annotations
 
 import datetime as dt
