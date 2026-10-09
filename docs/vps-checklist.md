@@ -25,10 +25,10 @@ Agent-executable runbook. An AI auditor runs it on a schedule, verifies that eve
 |---|---|---|---|
 | SEV1 | Data is being lost or will be lost before the next run; fail-closed guard tripped | no ticks during a session window; streamer down >5 min in session; `ClockUnsyncedError`; disk >90%; EOD not finished by 21:00; offload size mismatch with L0 already deleted; calendar says business day but daemon skipped | Notify the user immediately (push/notification tool if available, else first line of the reply) before finishing the rest of the audit |
 | SEV2 | Data present but suspect, redundancy or monitoring degraded | DQ FAIL confirmed as real; snapshot kind missing/zero; host backup stale >26h; remote auth expired; unexplained CRITICAL; dashboard OK while ground truth FAIL | In the report headline; propose fix and deadline |
-| SEV3 | Anomaly with no data impact | known-benign WARN drifting; one gap ≤30 s; failed unit of another project | In report body; track in open items |
+| SEV3 | Anomaly with no data impact | known-benign WARN drifting; one gap ≤30 s; failed unit of another project | In report body |
 | INFO | Context | baselines, counts, next run | Body only |
 
-A finding keeps its severity until its evidence is gone; re-report only on change (section 10 open items).
+A finding keeps its severity until its evidence is gone; re-report only on change (section 10).
 
 ## 3. Run modes and cadence
 
@@ -402,7 +402,7 @@ Seeds for sanity and for "is this WARN the usual one". Refresh monthly or when t
 
 ## 10. Reporting
 
-Write the report in Korean, English keys. Save to `scratch/vps_reports/<D>_<mode>.md` (gitignored) and keep `scratch/vps_reports/open_items.md` (table: `id | first_seen | last_seen | sev | evidence | status`). Compare with the previous report and the open items; report only changes plus the standing SEV1/SEV2 list. Never delete reports.
+Write the report in Korean, English keys, as the chat reply; do not write report files. Report only changes since the previous run plus the standing SEV1/SEV2 list.
 
 ```text
 VPS-AUDIT <D> <mode>  run=<NOW KST>  rev=<short>  kind=<BUSINESS|HOLIDAY|WEEKEND|SHIFTED>
