@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import time
 from collections.abc import Callable
 from zoneinfo import ZoneInfo
 
@@ -26,6 +27,7 @@ from src.execution.contracts import (
 )
 from src.execution.journal import OrderJournal
 from src.execution.ledger import CostModel, Ledger
+from src.execution.recovery import RecoveredSession
 from src.execution.risk import RiskContext, RiskLimits, check_intent, reference_price
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,9 @@ class OrderManager:
         journal: OrderJournal,
         now: Callable[[], dt.datetime],
         kill_switch: Callable[[], bool],
+        recovered: RecoveredSession | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        on_close: Callable[[], None] = lambda: None,
     ) -> None:
         self.gateway = gateway
         self.ledger = ledger
@@ -64,6 +69,29 @@ class OrderManager:
         self._kill_switch = kill_switch
         self._seq = 0
         self._submit_times: list[dt.datetime] = []
+        self.submit_block_reason: str | None = None
+        self._monotonic = monotonic
+        self._on_close = on_close
+        self._closed = False
+        if recovered is not None:
+            self.orders = dict(recovered.orders)
+            self._seq = recovered.next_seq
+            self._submit_times = list(recovered.submit_times)
+
+    def block_submits(self, reason: str) -> None:
+        """Reject every later submit with ACCOUNT_MISMATCH."""
+        self.submit_block_reason = reason
+
+    def close(self) -> None:
+        """Release session resources; idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        self._on_close()
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise ExecutionError("order session is closed")
 
     @property
     def _mode(self) -> ExecutionMode:
@@ -71,6 +99,8 @@ class OrderManager:
 
     def submit(self, intent: OrderIntent) -> Order:
         """의도를 검증·전송하고 주문을 등록한다."""
+        self._ensure_open()
+        entry = self._monotonic()
         quote = self._quotes.get_quote(intent.symbol)
         self._seq += 1
         client_id = f"{self._mode.value}-{self._now():%Y%m%d}-{self._seq:06d}"
@@ -105,6 +135,7 @@ class OrderManager:
                 ),
                 orderable_cash_krw=orderable,
                 est_commission_krw=self._costs.commission(intent.qty * ref),
+                submit_block_reason=self.submit_block_reason,
             )
             check_intent(intent, quote, limits=self._limits, ctx=ctx)
         except RiskRejectedError as exc:
@@ -135,7 +166,11 @@ class OrderManager:
             "intent", client_id=client_id, intent=intent, quote=quote, reference_price=ref
         )
         self._submit_times.append(self._now())
+        pre_send = self._monotonic()
         outcome = self.gateway.submit(order, quote)
+        post_send = self._monotonic()
+        pretrade_ms = (pre_send - entry) * 1000.0
+        gateway_ms = (post_send - pre_send) * 1000.0
         if outcome.kind is OutcomeKind.ACCEPTED:
             order.status = transition(order.status, OrderStatus.ACCEPTED)
             order.broker_order_no = outcome.broker_order_no
@@ -148,10 +183,15 @@ class OrderManager:
         else:
             order.status = transition(order.status, OrderStatus.UNKNOWN)
         self._journal.append(
-            "submit_result", client_id=client_id, outcome=outcome, status=order.status.value
+            "submit_result",
+            client_id=client_id,
+            outcome=outcome,
+            status=order.status.value,
+            pretrade_ms=pretrade_ms,
+            gateway_ms=gateway_ms,
         )
         logger.info(
-            "[EXEC] stage=submit mode=%s client_id=%s symbol=%s side=%s qty=%d status=%s code=%s",
+            "[EXEC] stage=submit mode=%s client_id=%s symbol=%s side=%s qty=%d status=%s code=%s pretrade_ms=%s gateway_ms=%s",
             self._mode.value,
             client_id,
             intent.symbol,
@@ -159,11 +199,14 @@ class OrderManager:
             intent.qty,
             order.status.value,
             outcome.code,
+            pretrade_ms,
+            gateway_ms,
         )
         return order
 
     def cancel(self, client_id: str) -> Order:
         """취소를 요청한다 (상태 변경은 reconcile 만 수행)."""
+        self._ensure_open()
         order = self.orders.get(client_id)
         if order is None:
             raise ExecutionError(f"unknown client_id: {client_id}")
@@ -178,6 +221,7 @@ class OrderManager:
 
     def reconcile(self) -> list[Order]:
         """브로커 누적체결을 대사로 반영한다."""
+        self._ensure_open()
         statuses = self.gateway.fetch_statuses()
         by_no = {s.broker_order_no: s for s in statuses}
         child_parents = {
@@ -217,6 +261,8 @@ class OrderManager:
                     "unknown_adopted",
                     client_id=order.client_id,
                     broker_order_no=match.broker_order_no,
+                    broker_org_no=match.org_no,
+                    order_time=match.order_time,
                 )
                 changed[order.client_id] = order
                 logger.info("[EXEC] stage=unknown_adopted client_id=%s", order.client_id)
@@ -268,6 +314,7 @@ class OrderManager:
                     delta_qty=delta_qty,
                     delta_amount_krw=delta_amount,
                     cumulative_qty=status.filled_qty,
+                    cumulative_amount_krw=status.filled_amount_krw,
                 )
                 logger.info(
                     "[EXEC] stage=fill client_id=%s delta_qty=%d", order.client_id, delta_qty

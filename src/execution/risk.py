@@ -31,6 +31,7 @@ class RiskContext:
     open_sell_qty: int
     orderable_cash_krw: int
     est_commission_krw: int
+    submit_block_reason: str | None = None
 
 
 def reference_price(intent: OrderIntent, quote: Quote) -> int:
@@ -48,6 +49,8 @@ def check_intent(intent: OrderIntent, quote: Quote, *, limits: RiskLimits, ctx: 
     """위반 코드를 순서대로 판정하고 통과 시 None 을 반환한다."""
     if ctx.kill_switch:
         raise RiskRejectedError(RejectCode.KILL_SWITCH, "kill switch engaged")
+    if ctx.submit_block_reason is not None:
+        raise RiskRejectedError(RejectCode.ACCOUNT_MISMATCH, ctx.submit_block_reason)
     if ctx.unknown_pending:
         raise RiskRejectedError(RejectCode.UNKNOWN_PENDING, "unknown order pending for symbol side")
     if limits.symbol_whitelist and intent.symbol not in limits.symbol_whitelist:

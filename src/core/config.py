@@ -408,6 +408,7 @@ class ExecutionSettings(BaseSettings):
     max_orders_per_minute: int = 10
     max_daily_loss_krw: int = 300_000
     symbol_whitelist: tuple[str, ...] = ()
+    position_parity_attempts: int = 2
     # Host-wide KIS pacing reservation lead for order execution (critical work:
     # None books without bound so execution never waits behind bulk bookings).
     rest_max_lead_s: float | None = None
@@ -439,6 +440,8 @@ class ExecutionSettings(BaseSettings):
             raise ValueError("rest_max_lead_s must be positive or None")
         if self.mock_rest_rate_per_s <= 0:
             raise ValueError("mock_rest_rate_per_s must be positive")
+        if self.position_parity_attempts < 1:
+            raise ValueError("position_parity_attempts must be >= 1")
         return self
 
 

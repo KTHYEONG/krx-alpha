@@ -8,8 +8,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from src.brokers.kis.trading import TR_CANCEL, KisTradingClient, build_cancel_body, build_order_body, order_tr_id
-from src.core.config import ExecutionMode, KisCredentials
+from src.brokers.kis.trading import (
+    TR_CANCEL,
+    KisTradingClient,
+    build_cancel_body,
+    build_order_body,
+    order_tr_id,
+    wire_tr_id,
+)
+from src.core.config import ExecutionMode, KisCredentials, KisVenue
 from src.execution.contracts import (
     BrokerOrderStatus,
     BrokerOutcome,
@@ -30,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 class LiveOrderClient(Protocol):
     """LiveGateway 가 사용하는 클라이언트 경계 (실전 KisTradingClient)."""
+
+    venue: KisVenue
 
     def post_order(self, tr_id: str, body: dict[str, str]) -> BrokerOutcome: ...
     def get_daily_orders(self, day: dt.date) -> list[BrokerOrderStatus]: ...
@@ -163,8 +172,6 @@ class PaperGateway:
 class LiveGateway:
     """실전 전송기: 전송 직전 기록 후 클라이언트에 위임한다."""
 
-    mode = ExecutionMode.LIVE
-
     def __init__(
         self,
         *,
@@ -172,22 +179,32 @@ class LiveGateway:
         creds: KisCredentials,
         journal: OrderJournal,
         today: Callable[[], dt.date],
+        mode: ExecutionMode = ExecutionMode.LIVE,
     ) -> None:
+        if mode is ExecutionMode.PAPER:
+            raise ValueError("LiveGateway does not support paper mode")
+        if mode.value != client.venue.value:
+            raise ValueError(f"gateway mode {mode.value} disagrees with client venue {client.venue.value}")
+        self.mode: ExecutionMode = mode
         self._client: KisTradingClient | LiveOrderClient = client
         self._creds = creds
         self._journal = journal
         self._today = today
 
     def submit(self, order: Order, quote: Quote) -> BrokerOutcome:
-        tr_id = order_tr_id(order.intent.side)
+        canonical = order_tr_id(order.intent.side)
         body = build_order_body(self._creds, order)
-        self._journal.append("live_send", client_id=order.client_id, tr_id=tr_id, body=body)
-        logger.info("[EXEC] stage=live_send client_id=%s tr_id=%s", order.client_id, tr_id)
-        return self._client.post_order(tr_id, body)
+        self._journal.append(
+            "live_send", client_id=order.client_id, tr_id=wire_tr_id(self._client.venue, canonical), body=body
+        )
+        logger.info("[EXEC] stage=live_send client_id=%s tr_id=%s", order.client_id, canonical)
+        return self._client.post_order(canonical, body)
 
     def cancel(self, order: Order) -> BrokerOutcome:
         body = build_cancel_body(self._creds, order)
-        self._journal.append("live_send", client_id=order.client_id, tr_id=TR_CANCEL, body=body)
+        self._journal.append(
+            "live_send", client_id=order.client_id, tr_id=wire_tr_id(self._client.venue, TR_CANCEL), body=body
+        )
         logger.info("[EXEC] stage=live_send_cancel client_id=%s", order.client_id)
         return self._client.post_order(TR_CANCEL, body)
 

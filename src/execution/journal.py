@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from src.core.config import ExecutionMode
+from src.execution.contracts import ExecutionError
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +37,12 @@ class OrderJournal:
         self._root = root
         self._mode = mode
         self._now = now
+        self._torn_days: set[dt.date] = set()
 
     def append(self, event: str, **fields: Any) -> dict[str, Any]:
         ts = self._now()
+        if ts.date() in self._torn_days:
+            raise ExecutionError(f"cannot append to torn journal: {ts.date().isoformat()}")
         converted: dict[str, Any] = {}
         for key, value in fields.items():
             if dataclasses.is_dataclass(value) and not isinstance(value, type):
@@ -54,3 +58,32 @@ class OrderJournal:
             os.fsync(handle.fileno())
         logger.debug("[EXEC] stage=journal event=%s ts=%s", event, record["ts"])
         return record
+
+    def read_day(self, day: dt.date) -> list[dict[str, Any]]:
+        """Return this journal mode's records for one day in file order."""
+        path = self._root / f"{day.isoformat()}.jsonl"
+        if not path.exists():
+            return []
+        raw = path.read_bytes()
+        if raw and not raw.endswith(b"\n"):
+            self._torn_days.add(day)
+        lines = raw.splitlines()
+        records: list[dict[str, Any]] = []
+        last = len(lines) - 1
+        for idx, line in enumerate(lines):
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                if idx == last:
+                    self._torn_days.add(day)
+                    logger.warning("[EXEC] stage=journal_read status=torn_tail day=%s", day.isoformat())
+                    continue
+                raise ExecutionError(f"corrupt journal line {idx} for {day.isoformat()}") from None
+            if not isinstance(rec, dict):
+                raise ExecutionError(f"corrupt journal line {idx} for {day.isoformat()}")
+            if rec.get("mode") != self._mode.value:
+                continue
+            records.append(rec)
+        return records
