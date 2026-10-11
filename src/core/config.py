@@ -409,6 +409,8 @@ class ExecutionSettings(BaseSettings):
     max_daily_loss_krw: int = 300_000
     symbol_whitelist: tuple[str, ...] = ()
     position_parity_attempts: int = 2
+    fill_poll_interval_s: float = 1.0
+    cancel_confirm_wait_s: float = 5.0
     # Host-wide KIS pacing reservation lead for order execution (critical work:
     # None books without bound so execution never waits behind bulk bookings).
     rest_max_lead_s: float | None = None
@@ -442,6 +444,10 @@ class ExecutionSettings(BaseSettings):
             raise ValueError("mock_rest_rate_per_s must be positive")
         if self.position_parity_attempts < 1:
             raise ValueError("position_parity_attempts must be >= 1")
+        if self.fill_poll_interval_s <= 0:
+            raise ValueError("fill_poll_interval_s must be positive")
+        if self.cancel_confirm_wait_s <= 0:
+            raise ValueError("cancel_confirm_wait_s must be positive")
         return self
 
 

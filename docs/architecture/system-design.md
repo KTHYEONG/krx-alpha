@@ -149,8 +149,8 @@ flowchart TD
         INTENT["OrderIntent"]:::exec --> RISK_GATE["Pre-Trade Risk Gate<br/>(킬스위치, 호가단위 래더, 한도)"]:::exec
         RISK_GATE --> GATE_SPLIT{"실행 모드"}:::exec
         GATE_SPLIT -->|paper| PAPER_GATE["PaperGateway<br/>(10단계 호가 모의체결 + 저널링)"]:::exec
-        GATE_SPLIT -->|live| LIVE_GATE["LiveGateway<br/>(KIS REST 발송, Armed 플래그)"]:::exec
-        PAPER_GATE & LIVE_GATE --> OMS_LEDGER["OMS Ledger<br/>(결정론적 상태머신 영속)"]:::exec
+        GATE_SPLIT -->|mock / live| VENUE_GATE["베뉴 바운드 브로커 게이트웨이<br/>(mock VTS / live KIS REST, Armed 플래그)"]:::exec
+        PAPER_GATE & VENUE_GATE --> OMS_LEDGER["OMS Ledger<br/>(당일 저널 복원 + 브로커 보유량 대조 영속)"]:::exec
     end
 ```
 

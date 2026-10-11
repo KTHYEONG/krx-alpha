@@ -162,10 +162,25 @@ uv run pytest
 uv run python -m src.cli.main bars-refresh --store-path data/bars/daily.parquet --ref-date 2026-09-12
 uv run python -m src.cli.main universe-plan --bars-path data/bars/daily.parquet --decision-date 2026-09-11
 uv run python -m src.cli.main order --symbol 005930 --side buy --qty 10 --type limit --price 70000
+uv run python -m src.cli.main order --symbol 005930 --side buy --qty 1 --type limit --price 70000 --wait-s 20
+uv run python -m src.cli.main order-cancel --client-id paper-20260911-000001
+uv run python -m src.cli.main order-status
+
+# mock(VTS) 리허설: 워크스테이션 전용, scratch 데이터 루트로 운영 저널과 격리 (KIS_MOCK_* 자격증명 필요)
+export KRX_ALPHA_EXEC_MODE=mock KRX_ALPHA_EXEC_DATA_ROOT=scratch/mock_data
+export KRX_ALPHA_KIS_TOKEN_CACHE_DIR=scratch/mock_data/execution/kis_tokens
+uv run python -m src.cli.main order --symbol 005930 --side buy --qty 1 --type limit --price 70000 --wait-s 30 --cancel-on-timeout
+uv run python -m src.cli.main order-status
 
 # 3. 24/7 데몬 무인 구동
 docker compose up -d
 ```
+
+| 모드 | 베뉴 | 설명 |
+| :--- | :--- | :--- |
+| `paper` | shadow | 실계좌 잔고 조회 + 10단계 호가 모의체결, 거래소 소켓 차단 |
+| `mock` | VTS | 모의투자 베뉴 바운드 브로커 게이트웨이 (`mock`) |
+| `live` | live | 실전 베뉴 바운드 브로커 게이트웨이, `KRX_ALPHA_EXEC_LIVE_ARMED=true` 필요 |
 
 ---
 
