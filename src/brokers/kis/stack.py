@@ -13,8 +13,8 @@ from src.brokers.kis.auth import KisAppAuth, KisTokenProvider, kis_token_cache_p
 from src.brokers.kis.data import KisDataClient
 from src.brokers.kis.http import KisGetTransport
 from src.brokers.kis.rate import HostPacedRateLimiter, kis_state_path
-from src.brokers.kis.trading import KIS_LIVE_BASE_URL, KisTradingClient
-from src.core.config import KisCredentials, KisTokenSettings, SnapshotSettings
+from src.brokers.kis.trading import KisTradingClient, venue_base_url
+from src.core.config import KisCredentials, KisTokenSettings, KisVenue, SnapshotSettings
 from src.core.errors import MissingCredentialsError
 from src.realtime.kis_sharding import KisDataCredential
 
@@ -35,6 +35,7 @@ class KisRestStack:
     session: Any
     timeout_s: float
     base_url: str
+    venue: KisVenue
 
     def trading_client(self, credentials: KisCredentials) -> KisTradingClient:
         """Account/order client over this stack's transport, pacer, session, timeout, and base URL.
@@ -52,6 +53,7 @@ class KisRestStack:
             limiter=self.limiter,
             timeout_s=self.timeout_s,
             base_url=self.base_url,
+            venue=self.venue,
         )
 
 
@@ -65,7 +67,7 @@ def build_kis_rest_stack(
     max_lead_s: float | None,
     timeout_s: float,
     allow_issue: bool,
-    base_url: str = KIS_LIVE_BASE_URL,
+    venue: KisVenue = KisVenue.LIVE,
     clock: Callable[[], float] = time.time,
     sleep: Callable[[float], None] = time.sleep,
 ) -> KisRestStack:
@@ -82,6 +84,7 @@ def build_kis_rest_stack(
     """
     if not auth.app_key:
         raise ValueError("app_key must be non-empty")
+    base_url = venue_base_url(venue)
     cache_path = kis_token_cache_path(cache_dir, auth.app_key)
     state_path = kis_state_path(cache_dir, auth.app_key)
     limiter = HostPacedRateLimiter(state_path, rate_per_s, max_lead_s=max_lead_s, clock=clock, sleep=sleep)
@@ -113,6 +116,7 @@ def build_kis_rest_stack(
         session=session,
         timeout_s=timeout_s,
         base_url=base_url,
+        venue=venue,
     )
 
 

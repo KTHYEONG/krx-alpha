@@ -760,3 +760,178 @@ def test_dq_listing_upper_band_rejects_non_finite_values(upper) -> None:
 
     with pytest.raises(ValidationError):
         DataQualitySettings(listing_day_upper_ratio=upper)
+
+
+def _clear_exec_env(monkeypatch) -> None:
+    for name in (
+        "KRX_ALPHA_EXEC_MODE",
+        "KRX_ALPHA_EXEC_LIVE_ARMED",
+        "KRX_ALPHA_EXEC_REST_RATE_PER_S",
+        "KRX_ALPHA_EXEC_MOCK_REST_RATE_PER_S",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _clear_kis_env(monkeypatch) -> None:
+    for name in (
+        "KIS_APP_KEY",
+        "KIS_APP_SECRET",
+        "KIS_ACCOUNT_NO",
+        "KIS_ACCOUNT_PRODUCT_CODE",
+        "KIS_MOCK_APP_KEY",
+        "KIS_MOCK_APP_SECRET",
+        "KIS_MOCK_ACCOUNT_NO",
+        "KIS_MOCK_ACCOUNT_PRODUCT_CODE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_mock_mode_maps_to_mock_venue_without_arming(monkeypatch) -> None:
+    from src.core.config import ExecutionMode, ExecutionSettings, KisVenue
+
+    _clear_exec_env(monkeypatch)
+    monkeypatch.setenv("KRX_ALPHA_EXEC_MODE", "mock")
+
+    settings = ExecutionSettings()
+
+    assert settings.mode is ExecutionMode.MOCK
+    assert settings.venue is KisVenue.MOCK
+    assert settings.venue_rest_rate_per_s == settings.mock_rest_rate_per_s
+
+
+def test_paper_and_live_map_to_live_venue(monkeypatch) -> None:
+    from src.core.config import ExecutionMode, ExecutionSettings, KisVenue
+
+    _clear_exec_env(monkeypatch)
+    assert ExecutionSettings().venue is KisVenue.LIVE
+    assert ExecutionSettings().venue_rest_rate_per_s == ExecutionSettings().rest_rate_per_s
+
+    armed = ExecutionSettings(mode=ExecutionMode.LIVE, live_armed=True)
+    assert armed.venue is KisVenue.LIVE
+    assert armed.venue_rest_rate_per_s == armed.rest_rate_per_s
+
+
+def test_non_positive_mock_rate_is_rejected() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import ExecutionSettings
+
+    with pytest.raises(ValidationError):
+        ExecutionSettings(mock_rest_rate_per_s=0)
+    with pytest.raises(ValidationError):
+        ExecutionSettings(mock_rest_rate_per_s=-1.0)
+
+
+def test_mock_credentials_never_fall_back_to_live_variables(monkeypatch) -> None:
+    import pytest
+
+    from src.core.config import KisVenue, load_venue_credentials
+    from src.core.errors import MissingCredentialsError
+
+    _clear_kis_env(monkeypatch)
+    monkeypatch.setenv("KIS_APP_KEY", "live-key")
+    monkeypatch.setenv("KIS_APP_SECRET", "live-secret")
+    monkeypatch.setenv("KIS_ACCOUNT_NO", "12345678")
+    monkeypatch.setenv("KIS_ACCOUNT_PRODUCT_CODE", "01")
+
+    with pytest.raises(MissingCredentialsError, match="kis_mock_"):
+        load_venue_credentials(KisVenue.MOCK)
+
+
+def test_mock_credentials_load_with_default_product_code(monkeypatch) -> None:
+    from src.core.config import KisVenue, load_venue_credentials
+
+    _clear_kis_env(monkeypatch)
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "mock-key")
+    monkeypatch.setenv("KIS_MOCK_APP_SECRET", "mock-secret")
+    monkeypatch.setenv("KIS_MOCK_ACCOUNT_NO", "87654321")
+
+    creds = load_venue_credentials(KisVenue.MOCK)
+
+    assert (creds.kis_app_key, creds.kis_account_no) == ("mock-key", "87654321")
+    assert creds.kis_account_product_code == "01"
+
+
+def test_identical_key_across_venues_fails_closed(monkeypatch) -> None:
+    import pytest
+
+    from src.core.config import KisVenue, load_venue_credentials
+    from src.core.errors import VenueCredentialError
+
+    _clear_kis_env(monkeypatch)
+    for name, value in (
+        ("KIS_APP_KEY", "same-key"),
+        ("KIS_APP_SECRET", "live-secret"),
+        ("KIS_ACCOUNT_NO", "11111111"),
+        ("KIS_ACCOUNT_PRODUCT_CODE", "01"),
+        ("KIS_MOCK_APP_KEY", "same-key"),
+        ("KIS_MOCK_APP_SECRET", "mock-secret"),
+        ("KIS_MOCK_ACCOUNT_NO", "22222222"),
+    ):
+        monkeypatch.setenv(name, value)
+
+    for venue in (KisVenue.LIVE, KisVenue.MOCK):
+        with pytest.raises(VenueCredentialError) as excinfo:
+            load_venue_credentials(venue)
+        assert "same-key" not in str(excinfo.value)
+
+
+def test_identical_account_across_venues_fails_closed(monkeypatch) -> None:
+    import pytest
+
+    from src.core.config import KisVenue, load_venue_credentials
+    from src.core.errors import VenueCredentialError
+
+    _clear_kis_env(monkeypatch)
+    for name, value in (
+        ("KIS_APP_KEY", "live-key"),
+        ("KIS_APP_SECRET", "live-secret"),
+        ("KIS_ACCOUNT_NO", "99999999"),
+        ("KIS_ACCOUNT_PRODUCT_CODE", "01"),
+        ("KIS_MOCK_APP_KEY", "mock-key"),
+        ("KIS_MOCK_APP_SECRET", "mock-secret"),
+        ("KIS_MOCK_ACCOUNT_NO", "99999999"),
+    ):
+        monkeypatch.setenv(name, value)
+
+    for venue in (KisVenue.LIVE, KisVenue.MOCK):
+        with pytest.raises(VenueCredentialError):
+            load_venue_credentials(venue)
+
+
+@pytest.mark.parametrize("arming", ["true", "not-a-boolean"])
+def test_mock_settings_ignore_live_arming_environment(monkeypatch, arming) -> None:
+    from src.core.config import ExecutionMode, ExecutionSettings
+
+    _clear_exec_env(monkeypatch)
+    monkeypatch.setenv("KRX_ALPHA_EXEC_MODE", "mock")
+    monkeypatch.setenv("KRX_ALPHA_EXEC_LIVE_ARMED", arming)
+    settings = ExecutionSettings()
+    assert settings.mode is ExecutionMode.MOCK
+    assert settings.live_armed is False
+
+
+@pytest.mark.parametrize("rate", [float("nan"), float("inf"), float("-inf")])
+def test_mock_rate_must_be_finite(rate) -> None:
+    from pydantic import ValidationError
+
+    from src.core.config import ExecutionSettings
+
+    with pytest.raises(ValidationError):
+        ExecutionSettings(mock_rest_rate_per_s=rate)
+
+
+@pytest.mark.parametrize("field", ["APP_KEY", "ACCOUNT_NO"])
+def test_equal_empty_cross_venue_variables_are_rejected(monkeypatch, field) -> None:
+    from src.core.config import KisVenue, load_venue_credentials
+    from src.core.errors import VenueCredentialError
+
+    _clear_kis_env(monkeypatch)
+    for prefix in ("KIS_", "KIS_MOCK_"):
+        for key, value in (("APP_KEY", prefix + "key"), ("APP_SECRET", "secret"), ("ACCOUNT_NO", prefix + "account"), ("ACCOUNT_PRODUCT_CODE", "01")):
+            monkeypatch.setenv(prefix + key, value)
+        monkeypatch.setenv(prefix + field, "")
+    for venue in (KisVenue.LIVE, KisVenue.MOCK):
+        with pytest.raises(VenueCredentialError):
+            load_venue_credentials(venue)

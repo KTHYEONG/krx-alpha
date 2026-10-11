@@ -8,13 +8,13 @@ import pathlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import AliasChoices, Field, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.core.calendar import SessionSchedule
-from src.core.errors import LiveNotArmedError, MissingCredentialsError, SlotBudgetExceededError
+from src.core.errors import LiveNotArmedError, MissingCredentialsError, SlotBudgetExceededError, VenueCredentialError
 from src.core.paths import (
     DEFAULT_DATA_ROOT,
     DEFAULT_HOST_BACKUP_STATUS_PATH,
@@ -29,10 +29,18 @@ SettingsT = TypeVar("SettingsT", bound=BaseSettings)
 RUN_ID_ENV: str = "KRX_ALPHA_RUN_ID"
 
 
+class KisVenue(StrEnum):
+    """KIS server environment an app key is issued for."""
+
+    LIVE = "live"
+    MOCK = "mock"
+
+
 class ExecutionMode(StrEnum):
     """주문집행 모드 (기본 paper fail-closed)."""
 
     PAPER = "paper"
+    MOCK = "mock"
     LIVE = "live"
 
 
@@ -242,6 +250,17 @@ class KisCredentials(BaseSettings):
     kis_account_product_code: str
 
 
+class KisMockCredentials(BaseSettings):
+    """KIS mock-trading (VTS) credentials read from KIS_MOCK_* only."""
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+    kis_mock_app_key: str
+    kis_mock_app_secret: str
+    kis_mock_account_no: str
+    kis_mock_account_product_code: str = "01"
+
+
 class KisTokenSettings(BaseSettings):
     """KIS 토큰 캐시 설정 (env_prefix='KRX_ALPHA_KIS_TOKEN_')."""
 
@@ -379,6 +398,7 @@ class ExecutionSettings(BaseSettings):
     live_armed: bool = False
     data_root: pathlib.Path = DEFAULT_DATA_ROOT
     rest_rate_per_s: float = 18.0
+    mock_rest_rate_per_s: float = Field(default=1.0, allow_inf_nan=False)
     request_timeout_s: float = 5.0
     commission_bps: float = 0.36396
     sell_tax_bps: float = 20.0
@@ -396,12 +416,29 @@ class ExecutionSettings(BaseSettings):
     def paths(self) -> DataPaths:
         return DataPaths(self.data_root)
 
+    @property
+    def venue(self) -> KisVenue:
+        return KisVenue.MOCK if self.mode is ExecutionMode.MOCK else KisVenue.LIVE
+
+    @property
+    def venue_rest_rate_per_s(self) -> float:
+        return self.mock_rest_rate_per_s if self.venue is KisVenue.MOCK else self.rest_rate_per_s
+
+    @model_validator(mode="before")
+    @classmethod
+    def ignore_mock_arming(cls, values: Any) -> Any:
+        if isinstance(values, Mapping) and values.get("mode") == ExecutionMode.MOCK:
+            return {**values, "live_armed": False}
+        return values
+
     @model_validator(mode="after")
     def check_live_armed(self) -> ExecutionSettings:
         if self.mode is ExecutionMode.LIVE and not self.live_armed:
             raise LiveNotArmedError("live mode requires KRX_ALPHA_EXEC_LIVE_ARMED=true")
         if self.rest_max_lead_s is not None and self.rest_max_lead_s <= 0:
             raise ValueError("rest_max_lead_s must be positive or None")
+        if self.mock_rest_rate_per_s <= 0:
+            raise ValueError("mock_rest_rate_per_s must be positive")
         return self
 
 
@@ -549,3 +586,26 @@ def load_credentials(model: type[SettingsT]) -> SettingsT:
     except ValidationError as exc:
         fields = sorted(str(err["loc"][0]) for err in exc.errors() if err.get("loc"))
         raise MissingCredentialsError(f"missing credentials for {model.__name__}: {', '.join(fields)}") from exc
+
+
+def load_venue_credentials(venue: KisVenue) -> KisCredentials:
+    """Load the trading credentials for one venue; raises MissingCredentialsError or VenueCredentialError."""
+    if venue is KisVenue.MOCK:
+        mock = load_credentials(KisMockCredentials)
+        creds = KisCredentials(
+            kis_app_key=mock.kis_mock_app_key,
+            kis_app_secret=mock.kis_mock_app_secret,
+            kis_account_no=mock.kis_mock_account_no,
+            kis_account_product_code=mock.kis_mock_account_product_code,
+        )
+    else:
+        creds = load_credentials(KisCredentials)
+    live_key = os.environ.get("KIS_APP_KEY")
+    mock_key = os.environ.get("KIS_MOCK_APP_KEY")
+    if live_key is not None and mock_key is not None and live_key == mock_key:
+        raise VenueCredentialError("KIS_APP_KEY and KIS_MOCK_APP_KEY must differ across venues")
+    live_acct = os.environ.get("KIS_ACCOUNT_NO")
+    mock_acct = os.environ.get("KIS_MOCK_ACCOUNT_NO")
+    if live_acct is not None and mock_acct is not None and live_acct == mock_acct:
+        raise VenueCredentialError("KIS_ACCOUNT_NO and KIS_MOCK_ACCOUNT_NO must differ across venues")
+    return creds

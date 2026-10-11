@@ -339,3 +339,49 @@ def test_data_slot_no_env_read(tmp_path, monkeypatch) -> None:
     # Then: 경로는 인자에서만 유도된다
     assert stack.tokens._token_cache_path.parent == cache
     assert not elsewhere.exists()
+
+
+def test_stack_binds_venue_to_base_url_and_propagates(tmp_path) -> None:
+    from src.brokers.kis.stack import build_kis_rest_stack
+    from src.brokers.kis.trading import KIS_LIVE_BASE_URL, KIS_MOCK_BASE_URL
+    from src.core.config import KisCredentials, KisVenue
+
+    cache = tmp_path / "cache"
+    cache.mkdir(parents=True)
+    (cache / ".host-admission").touch()
+    mock = build_kis_rest_stack(
+        auth=_auth("app-key"),
+        cache_dir=cache,
+        session=_FakeSession([]),
+        now=lambda: T0,
+        rate_per_s=1.0,
+        max_lead_s=1.0,
+        timeout_s=5.0,
+        allow_issue=False,
+        venue=KisVenue.MOCK,
+    )
+    assert mock.base_url == KIS_MOCK_BASE_URL
+    assert mock.venue is KisVenue.MOCK
+    assert mock.tokens._base_url == KIS_MOCK_BASE_URL
+    assert mock.transport._base_url == KIS_MOCK_BASE_URL
+    creds = KisCredentials(
+        kis_app_key="app-key",
+        kis_app_secret="app-secret",
+        kis_account_no="12345678",
+        kis_account_product_code="01",
+    )
+    assert mock.trading_client(creds).venue is KisVenue.MOCK
+
+    default = build_kis_rest_stack(
+        auth=_auth("app-key"),
+        cache_dir=cache,
+        session=_FakeSession([]),
+        now=lambda: T0,
+        rate_per_s=18.0,
+        max_lead_s=None,
+        timeout_s=5.0,
+        allow_issue=False,
+    )
+    assert default.base_url == KIS_LIVE_BASE_URL
+    assert default.venue is KisVenue.LIVE
+    assert default.trading_client(creds).venue is KisVenue.LIVE
