@@ -13,6 +13,7 @@ from src.execution.contracts import (
     TERMINAL_STATUSES,
     BrokerIntegrityError,
     ExecutionError,
+    KisApiError,
     Order,
     OrderGateway,
     OrderIntent,
@@ -218,6 +219,35 @@ class OrderManager:
         self._journal.append("cancel_result", client_id=client_id, outcome=outcome)
         logger.info("[EXEC] stage=cancel client_id=%s code=%s", client_id, outcome.code)
         return order
+
+    def await_terminal(self, client_id: str, *, timeout_s: float, interval_s: float,
+                       sleep: Callable[[float], None] = time.sleep) -> Order:
+        """Reconcile until the order is terminal or the timeout elapses; raises ExecutionError for an unknown client_id."""
+        self._ensure_open()
+        if client_id not in self.orders:
+            raise ExecutionError(f"unknown client_id: {client_id}")
+        start = self._monotonic()
+        try:
+            self.reconcile()
+        except KisApiError as exc:
+            logger.warning("[EXEC] stage=await_terminal client_id=%s code=%s", client_id, exc.msg_cd)
+        order = self.orders[client_id]
+        if order.status in TERMINAL_STATUSES:
+            return order
+        if timeout_s <= 0:
+            return order
+        while self._monotonic() - start < timeout_s:
+            sleep(interval_s)
+            try:
+                self.reconcile()
+            except KisApiError as exc:
+                logger.warning(
+                    "[EXEC] stage=await_terminal client_id=%s code=%s", client_id, exc.msg_cd
+                )
+            order = self.orders[client_id]
+            if order.status in TERMINAL_STATUSES:
+                return order
+        return self.orders[client_id]
 
     def reconcile(self) -> list[Order]:
         """브로커 누적체결을 대사로 반영한다."""
