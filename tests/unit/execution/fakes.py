@@ -243,10 +243,12 @@ def make_manager(
     limits: RiskLimits | None = None,
     kill: bool = False,
     quote: Quote | None = None,
+    recovered: Any = None,
+    ledger: Ledger | None = None,
 ) -> tuple[OrderManager, FixedClock]:
     clock = FixedClock(T0)
     journal = OrderJournal(root=root / "journal", mode=gateway.mode, now=clock)
-    ledger = Ledger(cash_krw=1_000_000, costs=_COSTS)
+    ledger = ledger if ledger is not None else Ledger(cash_krw=1_000_000, costs=_COSTS)
     manager = OrderManager(
         gateway=gateway,
         quotes=FakeQuotes(quote or make_quote()),
@@ -256,6 +258,7 @@ def make_manager(
         journal=journal,
         now=clock,
         kill_switch=lambda: kill,
+        recovered=recovered,
     )
     return manager, clock
 

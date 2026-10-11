@@ -121,13 +121,15 @@ def test_live_gateway_delegates_to_client_and_journals_send(tmp_path) -> None:
     import datetime as dt
     import json
 
-    from src.core.config import ExecutionMode
+    from src.core.config import ExecutionMode, KisVenue
     from src.execution.contracts import BrokerOutcome, Order, OrderIntent, OrderStatus, OrderType, OutcomeKind, Side
     from src.execution.gateways import LiveGateway
     from src.execution.journal import OrderJournal
     from tests.unit.execution.fakes import T0, FixedClock, make_creds, make_quote
 
     class _Client:
+        venue = KisVenue.LIVE
+
         def __init__(self) -> None:
             self.posts: list[tuple[str, dict[str, str]]] = []
             self.days: list[dt.date] = []
@@ -172,3 +174,89 @@ def test_live_gateway_delegates_to_client_and_journals_send(tmp_path) -> None:
     assert [e["event"] for e in events] == ["live_send", "live_send"]
     assert events[0]["tr_id"] == "TTTC0011U"
     assert events[0]["body"]["CANO"] == "***"
+
+def test_mock_gateway_journals_wire_tr_and_delegates_canonical(tmp_path) -> None:
+    # Given: mock venue 클라이언트
+    import datetime as dt
+    import json
+
+    from src.core.config import ExecutionMode, KisVenue
+    from src.execution.contracts import BrokerOutcome, Order, OrderIntent, OrderStatus, OrderType, OutcomeKind, Side
+    from src.execution.gateways import LiveGateway
+    from src.execution.journal import OrderJournal
+    from tests.unit.execution.fakes import T0, FixedClock, make_creds, make_quote
+
+    class _MockClient:
+        venue = KisVenue.MOCK
+
+        def __init__(self) -> None:
+            self.posts: list[tuple[str, dict[str, str]]] = []
+
+        def post_order(self, tr_id, body):
+            self.posts.append((tr_id, body))
+            return BrokerOutcome(
+                kind=OutcomeKind.ACCEPTED, broker_order_no="0000117057", broker_org_no="91252", order_time="090001"
+            )
+
+        def get_daily_orders(self, day):
+            return []
+
+        def get_orderable_cash(self, symbol, price, order_type):
+            return 850_000
+
+    client = _MockClient()
+    journal = OrderJournal(root=tmp_path, mode=ExecutionMode.MOCK, now=FixedClock(T0))
+    gateway = LiveGateway(client=client, creds=make_creds(), journal=journal, today=lambda: dt.date(2026, 9, 11), mode=ExecutionMode.MOCK)
+    order = Order(
+        client_id="mock-20260911-000001", intent=OrderIntent("005930", Side.SELL, 2, OrderType.LIMIT, 10_000),
+        status=OrderStatus.PENDING_SUBMIT, created_at=T0,
+    )
+
+    # When
+    gateway.submit(order, make_quote())
+    order.broker_order_no = "0000117057"
+    order.broker_org_no = "91252"
+    gateway.cancel(order)
+
+    # Then: 저널은 wire TR, 클라이언트는 canonical TR
+    assert gateway.mode is ExecutionMode.MOCK
+    assert client.posts[0][0] == "TTTC0011U"
+    assert client.posts[1][0] == "TTTC0013U"
+    events = [json.loads(line) for line in (tmp_path / "2026-09-11.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [e["tr_id"] for e in events] == ["VTTC0011U", "VTTC0013U"]
+
+def test_gateway_mode_and_venue_must_agree(tmp_path) -> None:
+    # Given
+    import datetime as dt
+
+    import pytest
+
+    from src.core.config import ExecutionMode, KisVenue
+    from src.execution.gateways import LiveGateway
+    from src.execution.journal import OrderJournal
+    from tests.unit.execution.fakes import T0, FixedClock, make_creds
+
+    class _Client:
+        def __init__(self, venue) -> None:
+            self.venue = venue
+
+        def post_order(self, tr_id, body):
+            raise AssertionError("no call")
+
+        def get_daily_orders(self, day):
+            return []
+
+        def get_orderable_cash(self, symbol, price, order_type):
+            return 0
+
+    def _gateway(venue, mode):
+        journal = OrderJournal(root=tmp_path, mode=ExecutionMode.LIVE, now=FixedClock(T0))
+        return LiveGateway(client=_Client(venue), creds=make_creds(), journal=journal, today=lambda: dt.date(2026, 9, 11), mode=mode)
+
+    # When / Then
+    with pytest.raises(ValueError, match="disagrees"):
+        _gateway(KisVenue.LIVE, ExecutionMode.MOCK)
+    with pytest.raises(ValueError, match="disagrees"):
+        _gateway(KisVenue.MOCK, ExecutionMode.LIVE)
+    with pytest.raises(ValueError, match="paper"):
+        _gateway(KisVenue.LIVE, ExecutionMode.PAPER)

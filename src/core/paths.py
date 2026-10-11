@@ -137,3 +137,7 @@ class DataPaths:
     @property
     def kill_switch_file(self) -> pathlib.Path:
         return self.execution_dir / "KILL_SWITCH"
+
+    @property
+    def order_session_lock_file(self) -> pathlib.Path:
+        return self.execution_dir / "oms.lock"

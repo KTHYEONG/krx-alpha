@@ -254,3 +254,251 @@ def test_oms_cancel_guards_unknown_and_terminal_orders(tmp_path) -> None:
     # Then: 미지 client_id
     with pytest.raises(ExecutionError):
         manager.cancel("missing-id")
+
+def _recovered_session(**overrides):
+    from src.execution.recovery import RecoveredSession
+
+    base = {"orders": {}, "next_seq": 0, "submit_times": (), "ledger": None}
+    base.update(overrides)
+    return RecoveredSession(**base)
+
+def _unknown_buy(client_id="live-20260911-000001", symbol="005930"):
+    from src.execution.contracts import Order, OrderIntent, OrderStatus, OrderType, Side
+    from tests.unit.execution.fakes import T0
+
+    return Order(
+        client_id=client_id,
+        intent=OrderIntent(symbol, Side.BUY, 3, OrderType.LIMIT, 10_000),
+        status=OrderStatus.UNKNOWN,
+        created_at=T0,
+    )
+
+def test_restored_unknown_blocks_same_symbol_and_side(tmp_path) -> None:
+    # Given
+    from src.execution.contracts import BrokerOutcome, OrderIntent, OrderStatus, OrderType, OutcomeKind, Side
+    from src.execution.oms import OrderManager
+    from tests.unit.execution.fakes import ScriptedGateway, make_limits, FakeQuotes, make_quote
+    from tests.unit.execution.fakes import T0, FixedClock
+    from src.execution.journal import OrderJournal
+    from src.execution.ledger import CostModel, Ledger
+    from src.core.config import ExecutionMode
+
+    gateway = ScriptedGateway(outcomes=[
+        BrokerOutcome(kind=OutcomeKind.ACCEPTED, broker_order_no="0000000001", broker_org_no="91252", order_time="090001")
+    ])
+    clock = FixedClock(T0)
+    costs = CostModel(commission_bps=1.5, sell_tax_bps=20.0)
+    ledger = Ledger(cash_krw=1_000_000, costs=costs)
+    journal = OrderJournal(root=tmp_path / "journal", mode=ExecutionMode.LIVE, now=clock)
+    manager = OrderManager(
+        gateway=gateway, quotes=FakeQuotes(make_quote()), ledger=ledger, limits=make_limits(),
+        costs=costs, journal=journal, now=clock, kill_switch=lambda: False,
+        recovered=_recovered_session(orders={"live-20260911-000001": _unknown_buy()}, next_seq=1),
+    )
+
+    # When
+    blocked = manager.submit(OrderIntent("005930", Side.BUY, 1, OrderType.LIMIT, 10_000))
+
+    # Then
+    assert blocked.status is OrderStatus.REJECTED
+    assert blocked.reject_code == "unknown_pending"
+    assert gateway.submitted == []
+
+def test_restored_sequence_never_reuses_client_id(tmp_path) -> None:
+    # Given: recovered.next_seq == 7
+    from src.execution.contracts import BrokerOutcome, OrderIntent, OrderStatus, OrderType, OutcomeKind, Side
+    from src.execution.oms import OrderManager
+    from src.core.config import ExecutionMode
+    from src.execution.journal import OrderJournal
+    from src.execution.ledger import CostModel, Ledger
+    from tests.unit.execution.fakes import T0, FakeQuotes, FixedClock, ScriptedGateway, make_limits, make_quote
+
+    gateway = ScriptedGateway(outcomes=[
+        BrokerOutcome(kind=OutcomeKind.ACCEPTED, broker_order_no="0000000001", broker_org_no="91252", order_time="090001")
+    ])
+    clock = FixedClock(T0)
+    costs = CostModel(commission_bps=1.5, sell_tax_bps=20.0)
+    manager = OrderManager(
+        gateway=gateway, quotes=FakeQuotes(make_quote()), ledger=Ledger(cash_krw=1_000_000, costs=costs),
+        limits=make_limits(), costs=costs, journal=OrderJournal(root=tmp_path / "journal", mode=ExecutionMode.LIVE, now=clock),
+        now=clock, kill_switch=lambda: False, recovered=_recovered_session(next_seq=7),
+    )
+
+    # When
+    order = manager.submit(OrderIntent("005930", Side.BUY, 1, OrderType.LIMIT, 10_000))
+
+    # Then
+    assert order.status is OrderStatus.ACCEPTED
+    assert order.client_id.endswith("000008")
+
+def test_restored_rate_window_is_enforced(tmp_path) -> None:
+    # Given: 60초 내 10건 복원
+    import datetime as dt
+
+    from src.execution.contracts import OrderIntent, OrderStatus, OrderType, Side
+    from tests.unit.execution.fakes import T0, ScriptedGateway, make_limits, make_manager
+
+    gateway = ScriptedGateway()
+    manager, _ = make_manager(
+        tmp_path, gateway, limits=make_limits(max_orders_per_minute=10),
+        recovered=_recovered_session(submit_times=tuple(T0 - dt.timedelta(seconds=i) for i in range(10))),
+    )
+
+    # When
+    order = manager.submit(OrderIntent("005930", Side.BUY, 1, OrderType.LIMIT, 10_000))
+
+    # Then
+    assert order.status is OrderStatus.REJECTED
+    assert order.reject_code == "order_rate_limit"
+
+def test_restored_realized_loss_is_enforced(tmp_path) -> None:
+    # Given
+    from src.core.config import ExecutionMode
+    from src.execution.contracts import BrokerOutcome, OrderIntent, OrderStatus, OrderType, OutcomeKind, Side
+    from src.execution.ledger import CostModel
+    from src.execution.recovery import restore_session
+    from tests.unit.execution.test_recovery import _intent_rec, _rec
+    from tests.unit.execution.fakes import ScriptedGateway, make_limits, make_manager
+
+    records = [
+        _rec("session_start", holdings=[{"symbol": "005930", "qty": 4, "cost_krw": 800_000}]),
+        _intent_rec("live-20260911-000001", intent={"side": "sell", "qty": 3}),
+        _rec("fill", client_id="live-20260911-000001", delta_qty=3, delta_amount_krw=300_000,
+             cumulative_qty=3, cumulative_amount_krw=300_000),
+        _rec("status", client_id="live-20260911-000001", status="filled", filled_qty=3),
+    ]
+    recovered = restore_session(records, mode=ExecutionMode.LIVE, costs=CostModel(1.5, 20.0))
+    assert recovered.ledger is not None
+    assert recovered.ledger.realized_pnl_krw == -300_645
+    gateway = ScriptedGateway(outcomes=[BrokerOutcome(kind=OutcomeKind.ACCEPTED, broker_order_no="2")])
+    manager, _ = make_manager(
+        tmp_path, gateway, limits=make_limits(max_daily_loss_krw=300_000),
+        recovered=recovered, ledger=recovered.ledger,
+    )
+
+    # When / Then: 매수는 거부, 매도는 통과(리스크 다음 단계로)
+    buy = manager.submit(OrderIntent("005930", Side.BUY, 1, OrderType.LIMIT, 10_000))
+    assert buy.status is OrderStatus.REJECTED
+    assert buy.reject_code == "daily_loss_limit"
+    sell = manager.submit(OrderIntent("005930", Side.SELL, 1, OrderType.LIMIT, 10_000))
+    assert sell.status is OrderStatus.ACCEPTED
+    assert gateway.submitted == [sell]
+
+def test_restored_open_order_reconciled_to_fill(tmp_path) -> None:
+    # Given
+    import json
+
+    from src.execution.contracts import BrokerOrderStatus, Order, OrderIntent, OrderStatus, OrderType, Side
+    from tests.unit.execution.fakes import T0, ScriptedGateway, make_manager
+
+    gateway = ScriptedGateway()
+    accepted = Order(
+        client_id="live-20260911-000007",
+        intent=OrderIntent("005930", Side.BUY, 10, OrderType.LIMIT, 10_000),
+        status=OrderStatus.ACCEPTED,
+        created_at=T0,
+        broker_order_no="0000000007",
+        broker_org_no="91252",
+        broker_order_time="090001",
+    )
+    manager, _ = make_manager(tmp_path, gateway, recovered=_recovered_session(orders={accepted.client_id: accepted}))
+    gateway.statuses = [
+        BrokerOrderStatus(
+            broker_order_no="0000000007", original_order_no="", org_no="91252", symbol="005930", side=Side.BUY,
+            ordered_qty=10, price=10_000, filled_qty=10, filled_amount_krw=100_000, remaining_qty=0, rejected_qty=0,
+            cancelled=False, order_time="090001",
+        )
+    ]
+
+    # When
+    manager.reconcile()
+
+    # Then
+    assert accepted.status is OrderStatus.FILLED
+    assert manager.ledger.qty("005930") == 10
+    lines = (tmp_path / "journal" / "2026-09-11.jsonl").read_text(encoding="utf-8").splitlines()
+    fills = [json.loads(line) for line in lines if json.loads(line)["event"] == "fill"]
+    assert len(fills) == 1
+    assert fills[0]["cumulative_amount_krw"] == 100_000
+
+def test_blocked_manager_rejects_submits_but_still_cancels(tmp_path) -> None:
+    # Given
+    from src.execution.contracts import BrokerOutcome, OrderIntent, OrderStatus, OrderType, OutcomeKind, Side
+    from tests.unit.execution.fakes import ScriptedGateway, make_manager
+
+    gateway = ScriptedGateway(outcomes=[
+        BrokerOutcome(kind=OutcomeKind.ACCEPTED, broker_order_no="0000000001", broker_org_no="91252", order_time="090001")
+    ])
+    manager, _ = make_manager(tmp_path, gateway)
+    open_order = manager.submit(OrderIntent("005930", Side.BUY, 1, OrderType.LIMIT, 10_000))
+    manager.block_submits("position mismatch")
+
+    # When
+    rejected = manager.submit(OrderIntent("005930", Side.BUY, 1, OrderType.LIMIT, 10_000))
+    cancelled = manager.cancel(open_order.client_id)
+
+    # Then
+    assert rejected.status is OrderStatus.REJECTED
+    assert rejected.reject_code == "account_mismatch"
+    assert len(gateway.submitted) == 1
+    assert cancelled is open_order
+    assert len(gateway.cancelled) == 1
+
+def test_submit_journals_latency(tmp_path) -> None:
+    # Given
+    import json
+
+    from src.execution.contracts import BrokerOutcome, OrderIntent, OrderStatus, OrderType, OutcomeKind, Side
+    from tests.unit.execution.fakes import ScriptedGateway, make_manager
+
+    gateway = ScriptedGateway(outcomes=[
+        BrokerOutcome(kind=OutcomeKind.ACCEPTED, broker_order_no="0000000001", broker_org_no="91252", order_time="090001")
+    ])
+    ticks = iter([100.0, 100.25, 100.5])
+    manager, _ = make_manager(tmp_path, gateway)
+    manager._monotonic = lambda: next(ticks)
+
+    # When
+    order = manager.submit(OrderIntent("005930", Side.BUY, 1, OrderType.LIMIT, 10_000))
+
+    # Then
+    assert order.status is OrderStatus.ACCEPTED
+    lines = (tmp_path / "journal" / "2026-09-11.jsonl").read_text(encoding="utf-8").splitlines()
+    results = [json.loads(line) for line in lines if json.loads(line)["event"] == "submit_result"]
+    assert len(results) == 1
+    assert results[0]["pretrade_ms"] == 250.0
+    assert results[0]["gateway_ms"] == 250.0
+
+def test_close_is_idempotent(tmp_path) -> None:
+    # Given
+    from tests.unit.execution.fakes import ScriptedGateway, make_manager
+
+    manager, _ = make_manager(tmp_path, ScriptedGateway())
+    calls = []
+    manager._on_close = lambda: calls.append(1)
+
+    # When
+    manager.close()
+    manager.close()
+
+    # Then
+    assert calls == [1]
+
+
+def test_closed_manager_cannot_bypass_session_lock(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import ExecutionError, OrderIntent, OrderType, Side
+    from tests.unit.execution.fakes import ScriptedGateway, make_manager
+
+    gateway = ScriptedGateway()
+    manager, _ = make_manager(tmp_path, gateway)
+    manager.close()
+    with pytest.raises(ExecutionError, match="session is closed"):
+        manager.submit(OrderIntent("005930", Side.BUY, 1, OrderType.LIMIT, 10_000))
+    with pytest.raises(ExecutionError, match="session is closed"):
+        manager.cancel("live-20260911-000001")
+    with pytest.raises(ExecutionError, match="session is closed"):
+        manager.reconcile()
+    assert gateway.submitted == []
+    assert gateway.cancelled == []

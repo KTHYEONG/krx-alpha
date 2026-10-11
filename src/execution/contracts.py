@@ -53,6 +53,7 @@ class RejectCode(StrEnum):
     POSITION_LIMIT = "position_limit"
     INSUFFICIENT_CASH = "insufficient_cash"
     INSUFFICIENT_POSITION = "insufficient_position"
+    ACCOUNT_MISMATCH = "account_mismatch"
 
 
 class ExecutionError(KrxAlphaError):
@@ -87,6 +88,10 @@ class KisApiError(ExecutionError):
 
 class AccountCheckError(ExecutionError):
     """계좌 자기검증 실패 fail-closed 신호."""
+
+
+class SessionLockError(ExecutionError):
+    """Another order session already holds the data-root lock."""
 
 
 @dataclass(frozen=True)

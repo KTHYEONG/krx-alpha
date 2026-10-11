@@ -23,6 +23,7 @@ def test_order_cli_submits_intent_and_maps_exit_codes(tmp_path, monkeypatch) -> 
             self.reconcile_error = reconcile_error
             self.intents = []
             self.reconciled = 0
+            self.closed = 0
 
         def submit(self, intent):
             self.intents.append(intent)
@@ -35,6 +36,9 @@ def test_order_cli_submits_intent_and_maps_exit_codes(tmp_path, monkeypatch) -> 
             if self.reconcile_error:
                 raise KisApiError("TRANSPORT", "ReadTimeout")
             return []
+
+        def close(self):
+            self.closed += 1
 
     limit_args = argparse.Namespace(symbol="005930", side="buy", qty=3, type="limit", price=10_000)
     cases = [
@@ -60,6 +64,7 @@ def test_order_cli_submits_intent_and_maps_exit_codes(tmp_path, monkeypatch) -> 
         # Then
         assert result == rc
         assert manager.reconciled == reconciled
+        assert manager.closed == 1
         assert manager.intents[0].side is Side.BUY
         assert manager.intents[0].order_type is OrderType.LIMIT
         assert manager.intents[0].limit_price == 10_000
@@ -121,3 +126,55 @@ def test_order_cli_returns_rc4_on_missing_config_unarmed_live_or_account_failure
     with caplog.at_level(logging.ERROR):
         assert order_cli.run(args) == 4
     assert any("account_check" in record.message for record in caplog.records)
+
+
+def test_order_cli_maps_venue_and_session_failures(tmp_path, monkeypatch, caplog) -> None:
+    # Given
+    import argparse
+    import logging
+
+    from src.cli import order as order_cli
+    from src.execution.contracts import SessionLockError
+
+    args = argparse.Namespace(symbol="005930", side="buy", qty=1, type="limit", price=10_000)
+
+    def _never(**kwargs):
+        raise AssertionError("manager must not be built")
+
+    # When / Then: mock venue 자격증명 누락
+    for name in ("KIS_APP_KEY", "KIS_APP_SECRET", "KIS_ACCOUNT_NO", "KIS_ACCOUNT_PRODUCT_CODE",
+                 "KIS_MOCK_APP_KEY", "KIS_MOCK_APP_SECRET", "KIS_MOCK_ACCOUNT_NO"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("KRX_ALPHA_EXEC_MODE", "mock")
+    monkeypatch.setenv("KRX_ALPHA_EXEC_DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(order_cli, "build_order_manager", _never)
+    with caplog.at_level(logging.ERROR):
+        assert order_cli.run(args) == 4
+    assert any("missing_config" in record.message for record in caplog.records)
+
+    # When / Then: venue 키 충돌
+    caplog.clear()
+    for name, value in {
+        "KIS_APP_KEY": "same", "KIS_APP_SECRET": "same-secret",
+        "KIS_ACCOUNT_NO": "12345678", "KIS_ACCOUNT_PRODUCT_CODE": "01",
+        "KIS_MOCK_APP_KEY": "same", "KIS_MOCK_APP_SECRET": "mock-secret",
+        "KIS_MOCK_ACCOUNT_NO": "87654321",
+    }.items():
+        monkeypatch.setenv(name, value)
+    with caplog.at_level(logging.ERROR):
+        assert order_cli.run(args) == 4
+    assert any("venue_credentials" in record.message for record in caplog.records)
+
+    # When / Then: 세션 잠금
+    caplog.clear()
+    monkeypatch.delenv("KRX_ALPHA_EXEC_MODE")
+    for name in ("KIS_MOCK_APP_KEY", "KIS_MOCK_APP_SECRET", "KIS_MOCK_ACCOUNT_NO"):
+        monkeypatch.delenv(name, raising=False)
+
+    def _locked(**kwargs):
+        raise SessionLockError("order session already active")
+
+    monkeypatch.setattr(order_cli, "build_order_manager", _locked)
+    with caplog.at_level(logging.ERROR):
+        assert order_cli.run(args) == 4
+    assert any("session_locked" in record.message for record in caplog.records)

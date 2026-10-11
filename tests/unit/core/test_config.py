@@ -823,6 +823,17 @@ def test_non_positive_mock_rate_is_rejected() -> None:
         ExecutionSettings(mock_rest_rate_per_s=-1.0)
 
 
+def test_non_positive_parity_attempts_is_rejected() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import ExecutionSettings
+
+    assert ExecutionSettings().position_parity_attempts == 2
+    with pytest.raises(ValidationError):
+        ExecutionSettings(position_parity_attempts=0)
+
+
 def test_mock_credentials_never_fall_back_to_live_variables(monkeypatch) -> None:
     import pytest
 
