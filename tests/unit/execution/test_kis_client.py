@@ -270,7 +270,7 @@ def test_get_holdings_and_orderable_cash_parse_account_trs(tmp_path) -> None:
         ]),
         FakeResponse({
             "rt_cd": "0", "msg_cd": "KIOK0000", "msg1": "ok",
-            "output": {"ord_psbl_cash": "900000", "nrcv_buy_amt": "850000", "max_buy_amt": "5"},
+            "output": {"ord_psbl_cash": "900000", "nrcvb_buy_amt": "850000", "max_buy_amt": "5"},
         }),
     ])
 
@@ -286,7 +286,7 @@ def test_get_holdings_and_orderable_cash_parse_account_trs(tmp_path) -> None:
 
     # When / Then: 매수가능금액 (미수 없는 매수금액)
     assert client.get_orderable_cash("005930", 259_500, OrderType.LIMIT) == 850_000
-    assert session.calls[1]["headers"]["tr_id"] == "TTTC8408R"
+    assert session.calls[1]["headers"]["tr_id"] == "TTTC8908R"
     assert session.calls[1]["params"] == {
         "CANO": "12345678", "ACNT_PRDT_CD": "01", "PDNO": "005930", "ORD_UNPR": "259500", "ORD_DVSN": "00",
         "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N",
@@ -2054,3 +2054,290 @@ def test_unsupported_venue_code_rejected_before_any_request(tmp_path) -> None:
         client.get_fluctuation_ranking(market_div='UN')
 
     assert session.calls == []
+
+
+def _venue_trading_client(venue, *, get_body=None, paged_rows=None, post_bodies=None):
+    from src.brokers.kis.trading import KIS_LIVE_BASE_URL, KIS_MOCK_BASE_URL, KisTradingClient
+    from tests.unit.execution.fakes import make_creds
+
+    base_url = KIS_MOCK_BASE_URL if str(venue) == "mock" else KIS_LIVE_BASE_URL
+
+    class _Transport:
+        def __init__(self) -> None:
+            self.tr_ids: list[str] = []
+            self.paths: list[str] = []
+
+        def get(self, path, tr_id, params, tr_cont=""):
+            self.tr_ids.append(tr_id)
+            self.paths.append(path)
+            return dict(get_body or {}), ""
+
+        def get_paged(self, path, tr_id, params, list_key="output1"):
+            self.tr_ids.append(tr_id)
+            self.paths.append(path)
+            return [dict(r) for r in (paged_rows or [])]
+
+        def authorized_headers(self, tr_id, tr_cont=""):
+            self.tr_ids.append(tr_id)
+            return {"tr_id": tr_id}, "tok"
+
+        def refresh_token(self, rejected_token):
+            return "tok"
+
+    class _Limiter:
+        def acquire(self) -> None:
+            return None
+
+    class _Session:
+        def __init__(self) -> None:
+            self.posts: list[dict] = []
+            self.queue = list(post_bodies or [])
+
+        def post(self, url, *, headers, json, timeout):
+            self.posts.append({"url": url, "headers": dict(headers), "json": dict(json)})
+            item = self.queue.pop(0) if self.queue else None
+            return item
+
+    transport = _Transport()
+    session = _Session()
+    trading = KisTradingClient(
+        transport=transport,
+        session=session,
+        credentials=make_creds(),
+        limiter=_Limiter(),
+        timeout_s=5.0,
+        base_url=base_url,
+        venue=venue,
+    )
+    return trading, transport, session
+
+
+def _daily_row(**overrides):
+    row = {
+        "odno": "0000000001", "orgn_odno": "", "ord_gno_brno": "91252", "pdno": "005930",
+        "sll_buy_dvsn_cd": "02", "ord_qty": "10", "ord_unpr": "10000", "tot_ccld_qty": "4",
+        "tot_ccld_amt": "40000", "rmn_qty": "6", "rjct_qty": "0", "cncl_yn": "N", "ord_tmd": "090001",
+    }
+    row.update(overrides)
+    return row
+
+
+def _accepted_post(odno="0000117057"):
+    from tests.unit.execution.fakes import FakeResponse
+
+    return FakeResponse({
+        "rt_cd": "0", "msg_cd": "APBK0013", "msg1": "ok",
+        "output": {"KRX_FWDG_ORD_ORGNO": "91252", "ODNO": odno, "ORD_TMD": "090001"},
+    })
+
+
+def test_wire_tr_id_mapping_is_identity_on_live_and_v_prefixed_on_mock() -> None:
+    from src.brokers.kis.trading import (
+        TR_BALANCE, TR_BUY, TR_CANCEL, TR_DAILY_ORDERS, TR_ORDERABLE, TR_SELL,
+        wire_tr_id,
+    )
+    from src.core.config import KisVenue
+
+    for canonical in (TR_BUY, TR_SELL, TR_CANCEL, TR_DAILY_ORDERS, TR_BALANCE, TR_ORDERABLE):
+        assert wire_tr_id(KisVenue.LIVE, canonical) == canonical
+        wired = wire_tr_id(KisVenue.MOCK, canonical)
+        assert wired == "V" + canonical[1:]
+        assert wired.startswith("VTTC")
+
+
+def test_unmappable_tr_is_refused_for_mock() -> None:
+    import pytest
+
+    from src.brokers.kis.trading import wire_tr_id
+    from src.core.config import KisVenue
+
+    with pytest.raises(ValueError, match="unmappable"):
+        wire_tr_id(KisVenue.MOCK, "FHKST01010100")
+    with pytest.raises(ValueError, match="unmappable"):
+        wire_tr_id(KisVenue.MOCK, "")
+
+
+def test_mock_client_sends_v_prefixed_ids_on_every_trading_request() -> None:
+    import datetime as dt
+
+    from src.brokers.kis.trading import TR_BUY, TR_CANCEL, TR_SELL, build_cancel_body, build_order_body
+    from src.core.config import KisVenue
+    from src.execution.contracts import Order, OrderIntent, OrderStatus, OrderType, Side
+    from tests.unit.execution.fakes import T0, make_creds
+
+    trading, transport, session = _venue_trading_client(
+        KisVenue.MOCK,
+        get_body={"rt_cd": "0", "output": {"nrcvb_buy_amt": "850000"}},
+        paged_rows=[{"pdno": "005930", "hldg_qty": "3", "pchs_amt": "750000"}],
+        post_bodies=[_accepted_post("1"), _accepted_post("2"), _accepted_post("3")],
+    )
+    trading.get_holdings()
+    trading.get_orderable_cash("005930", 10000, OrderType.LIMIT)
+
+    daily, dtransport, _ = _venue_trading_client(KisVenue.MOCK, paged_rows=[_daily_row()])
+    daily.get_daily_orders(dt.date(2026, 9, 11))
+
+    creds = make_creds()
+    buy = Order(client_id="c1", intent=OrderIntent("005930", Side.BUY, 1, OrderType.LIMIT, 10000),
+                status=OrderStatus.PENDING_SUBMIT, created_at=T0)
+    sell = Order(client_id="c2", intent=OrderIntent("005930", Side.SELL, 1, OrderType.MARKET),
+                 status=OrderStatus.PENDING_SUBMIT, created_at=T0)
+    trading.post_order(TR_BUY, build_order_body(creds, buy))
+    trading.post_order(TR_SELL, build_order_body(creds, sell))
+    buy.broker_order_no = "0000117057"
+    buy.broker_org_no = "91252"
+    trading.post_order(TR_CANCEL, build_cancel_body(creds, buy))
+
+    assert transport.tr_ids[:2] == ["VTTC8434R", "VTTC8908R"]
+    assert dtransport.tr_ids == ["VTTC0081R"]
+    assert [p["headers"]["tr_id"] for p in session.posts] == ["VTTC0012U", "VTTC0011U", "VTTC0013U"]
+    assert session.posts[2]["url"].endswith("/uapi/domestic-stock/v1/trading/order-rvsecncl")
+
+
+def test_live_client_ids_unchanged_except_buying_power(tmp_path) -> None:
+    import datetime as dt
+
+    from src.brokers.kis.auth import KisAppAuth
+    from src.brokers.kis.stack import build_kis_rest_stack
+    from src.brokers.kis.trading import TR_BUY, TR_CANCEL, TR_SELL, venue_base_url
+    from src.core.config import KisVenue
+    from src.execution.contracts import OrderType, OutcomeKind
+    from tests.unit.execution.fakes import T0, FakeResponse, FakeSession, balance_body, make_creds, token_response
+
+    for venue, prefix in ((KisVenue.LIVE, "T"), (KisVenue.MOCK, "V")):
+        creds = make_creds()
+        cache = tmp_path / venue.value
+        cache.mkdir()
+        (cache / ".host-admission").touch()
+        session = FakeSession([
+            token_response(),
+            balance_body([{"pdno": "005930", "hldg_qty": "3", "pchs_amt": "750000"}]),
+            FakeResponse({"rt_cd": "0", "output": {"nrcvb_buy_amt": "850000"}}),
+            FakeResponse({"rt_cd": "0", "output1": [_daily_row()]}),
+            _accepted_post("1"), _accepted_post("2"), _accepted_post("3"),
+        ])
+        stack = build_kis_rest_stack(
+            auth=KisAppAuth(creds.kis_app_key, creds.kis_app_secret),
+            cache_dir=cache, session=session, now=lambda: T0,
+            rate_per_s=1.0, max_lead_s=None, timeout_s=5.0,
+            allow_issue=True, venue=venue, clock=lambda: T0.timestamp(), sleep=lambda _: None,
+        )
+        trading = stack.trading_client(creds)
+        assert trading.get_holdings()[0].qty == 3
+        assert trading.get_orderable_cash("005930", 10000, OrderType.LIMIT) == 850000
+        assert trading.get_daily_orders(dt.date(2026, 9, 11))[0].filled_qty == 4
+        for tr in (TR_BUY, TR_SELL, TR_CANCEL):
+            assert trading.post_order(tr, {"PDNO": "005930"}).kind is OutcomeKind.ACCEPTED
+        assert [call["headers"]["tr_id"] for call in session.calls[1:]] == [
+            prefix + suffix for suffix in ("TTC8434R", "TTC8908R", "TTC0081R", "TTC0012U", "TTC0011U", "TTC0013U")
+        ]
+        assert all(call["url"].startswith(venue_base_url(venue) + "/") for call in session.calls)
+        assert session.calls[-1]["url"].endswith("/order-rvsecncl")
+
+
+def test_buying_power_reads_nrcvb_buy_amt() -> None:
+    from src.core.config import KisVenue
+    from src.execution.contracts import OrderType
+
+    trading, _, _ = _venue_trading_client(
+        KisVenue.LIVE,
+        get_body={"rt_cd": "0", "output": {"ord_psbl_cash": "900000", "nrcvb_buy_amt": "850000"}},
+    )
+    assert trading.get_orderable_cash("005930", 259500, OrderType.LIMIT) == 850000
+
+
+def test_missing_buying_power_field_fails_closed() -> None:
+    import pytest
+
+    from src.core.config import KisVenue
+    from src.execution.contracts import KisApiError, OrderType
+
+    for output in ({"ord_psbl_cash": "900000"}, {"ord_psbl_cash": "1", "nrcv_buy_amt": "850000"}):
+        trading, _, _ = _venue_trading_client(KisVenue.LIVE, get_body={"rt_cd": "0", "output": output})
+        with pytest.raises(KisApiError) as excinfo:
+            trading.get_orderable_cash("005930", 259500, OrderType.LIMIT)
+        assert excinfo.value.msg_cd == "SCHEMA"
+
+
+def test_daily_order_row_with_missing_or_unknown_fields_fails_closed() -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.core.config import KisVenue
+    from src.execution.contracts import KisApiError
+
+    bad_rows = [
+        {k: v for k, v in _daily_row().items() if k != "tot_ccld_qty"},
+        _daily_row(odno=""),
+        _daily_row(sll_buy_dvsn_cd="00"),
+    ]
+    for idx, bad in enumerate(bad_rows):
+        trading, _, _ = _venue_trading_client(KisVenue.LIVE, paged_rows=[bad])
+        with pytest.raises(KisApiError) as excinfo:
+            trading.get_daily_orders(dt.date(2026, 9, 11))
+        assert excinfo.value.msg_cd == "SCHEMA", idx
+
+
+def test_empty_numeric_string_is_zero_garbage_is_schema_error() -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.core.config import KisVenue
+    from src.execution.contracts import KisApiError
+
+    trading, _, _ = _venue_trading_client(KisVenue.LIVE, paged_rows=[_daily_row(rjct_qty="")])
+    assert trading.get_daily_orders(dt.date(2026, 9, 11))[0].rejected_qty == 0
+
+    trading, _, _ = _venue_trading_client(KisVenue.LIVE, paged_rows=[_daily_row(ord_qty="abc")])
+    with pytest.raises(KisApiError) as excinfo:
+        trading.get_daily_orders(dt.date(2026, 9, 11))
+    assert excinfo.value.msg_cd == "SCHEMA"
+
+
+def test_holdings_validate_cost_even_when_quantity_is_zero(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import balance_body, make_client
+
+    for i, cost in enumerate(("garbage", "NaN", "Infinity", None)):
+        client, _, _ = make_client(tmp_path / str(i), [balance_body([
+            {"pdno": "005930", "hldg_qty": "0", "pchs_amt": cost},
+        ])])
+        with pytest.raises(KisApiError, match="inquire-balance missing/invalid pchs_amt"):
+            client.get_holdings()
+
+
+def test_account_numeric_schema_and_empty_strings(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import KisApiError, OrderType
+    from tests.unit.execution.fakes import FakeResponse, make_client
+
+    for i, output in enumerate((None, [], "bad", {}, {"nrcvb_buy_amt": "abc"}, {"nrcvb_buy_amt": "NaN"}, {"nrcvb_buy_amt": "Infinity"}, {"nrcvb_buy_amt": None})):
+        client, _, _ = make_client(tmp_path / str(i), [FakeResponse({"rt_cd": "0", "output": output})])
+        with pytest.raises(KisApiError, match="inquire-psbl-order missing/invalid nrcvb_buy_amt"):
+            client.get_orderable_cash("005930", 10000, OrderType.LIMIT)
+    client, _, _ = make_client(tmp_path / "empty", [FakeResponse({"rt_cd": "0", "output": {"nrcvb_buy_amt": ""}})])
+    assert client.get_orderable_cash("005930", 10000, OrderType.LIMIT) == 0
+
+
+def test_daily_order_requires_every_field_and_nonblank_order_number(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import FakeResponse, make_client
+
+    for field in _daily_row():
+        row = _daily_row()
+        del row[field]
+        client, _, _ = make_client(tmp_path / field, [FakeResponse({"rt_cd": "0", "output1": [row]})])
+        with pytest.raises(KisApiError, match=f"inquire-daily-ccld missing/invalid {field}"):
+            client.get_daily_orders(dt.date(2026, 9, 11))
+    client, _, _ = make_client(tmp_path / "blank", [FakeResponse({"rt_cd": "0", "output1": [_daily_row(odno="   ")]})])
+    with pytest.raises(KisApiError, match="inquire-daily-ccld missing/invalid odno"):
+        client.get_daily_orders(dt.date(2026, 9, 11))

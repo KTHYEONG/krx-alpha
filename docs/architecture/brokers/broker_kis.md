@@ -321,12 +321,13 @@ custtype: P
   * `CTX_AREA_NK100`: `""`
 * **Output (`output1`):** `odno` (주문번호), `orgn_odno` (원주문번호), `ord_tmd` (주문시각), `sll_buy_dvsn_cd_name` (매매구분), `pdno`, `ord_qty` (주문수량), `ord_unpr` (주문단가), `tot_ccld_qty` (총체결수량), `tot_ccld_amt` (총체결금액), `rmn_qty` (미체결잔량).
 
-### 6.6 `TTTC8408R` / `VTTC8408R` — 예수금 / 주문가능현금 조회 (Buying Power)
+### 6.6 `TTTC8908R` / `VTTC8908R` — 예수금 / 주문가능현금 조회 (Buying Power)
 * **Path:** `GET /uapi/domestic-stock/v1/trading/inquire-psbl-order`
-* **Headers:** `tr_id: "TTTC8408R"` (실전) / `"VTTC8408R"` (모의투자)
+* **Headers:** `tr_id: "TTTC8908R"` (실전) / `"VTTC8908R"` (모의투자)
 * **Query Params:** `CANO`, `ACNT_PRDT_CD`, `PDNO`, `ORD_UNPR`, `ORD_DVSN`, `CMA_EVLU_AMT_ICLD_YN`, `OVRS_ICLD_YN`.
 * **Output (`output`):**
   * `ord_psbl_cash`: 주문가능현금
-  * `nrcv_buy_amt`: 미수없는매수금액
+  * `nrcvb_buy_amt`: 미수없는매수금액
   * `max_buy_amt`: 최대매수금액
   * `dnca_tot_amt`: 예수금총금액 (D+2 예수금)
+* `TTTC8408R`은 `inquire-psbl-sell` 소속이며 매수가능금액 조회에 사용하지 않는다.

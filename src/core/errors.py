@@ -21,3 +21,7 @@ class ScheduleOrderError(KrxAlphaError):
 
 class LiveNotArmedError(KrxAlphaError):
     """live 모드 무장 플래그 누락 fail-closed 신호."""
+
+
+class VenueCredentialError(KrxAlphaError):
+    """Credentials cannot be proven to belong to the requested KIS venue."""

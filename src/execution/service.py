@@ -34,6 +34,8 @@ def build_order_manager(
 
     The pacing clock is wall time (see `build_kis_rest_stack`).
     """
+    if settings.mode is ExecutionMode.MOCK:
+        raise ValueError("mock execution requires venue-aware gateway wiring")
     paths = settings.paths
     journal = OrderJournal(root=paths.order_journal_dir, mode=settings.mode, now=now)
     token_settings = KisTokenSettings()

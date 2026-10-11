@@ -85,3 +85,19 @@ def test_build_order_manager_live_seeds_positions_and_fails_closed_on_account_er
             settings=settings, creds=make_creds(), session=bad, now=FixedClock(T0),
             clock=lambda: 0.0, sleep=lambda seconds: None,
         )
+
+
+def test_mock_mode_cannot_fall_through_to_live_gateway(tmp_path) -> None:
+    import pytest
+
+    from src.core.config import ExecutionMode, ExecutionSettings
+    from src.execution.service import build_order_manager
+    from tests.unit.execution.fakes import T0, FakeSession, make_creds
+
+    settings = ExecutionSettings(mode=ExecutionMode.MOCK, data_root=tmp_path)
+    session = FakeSession([])
+    before = set(tmp_path.rglob("*"))
+    with pytest.raises(ValueError, match="mock execution requires venue-aware gateway wiring"):
+        build_order_manager(settings=settings, creds=make_creds(), session=session, now=lambda: T0)
+    assert session.calls == []
+    assert set(tmp_path.rglob("*")) == before
