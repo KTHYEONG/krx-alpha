@@ -71,7 +71,7 @@ def build_order_manager(
             now=now,
             rate_per_s=settings.venue_rest_rate_per_s,
             max_lead_s=settings.rest_max_lead_s,
-            timeout_s=settings.request_timeout_s,
+            timeout_s=settings.venue_request_timeout_s,
             allow_issue=token_settings.allow_issue,
             venue=settings.venue,
             clock=clock,

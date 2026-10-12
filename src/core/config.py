@@ -400,6 +400,7 @@ class ExecutionSettings(BaseSettings):
     rest_rate_per_s: float = 18.0
     mock_rest_rate_per_s: float = Field(default=1.0, allow_inf_nan=False)
     request_timeout_s: float = 5.0
+    mock_request_timeout_s: float = Field(default=20.0, allow_inf_nan=False)
     commission_bps: float = 0.36396
     sell_tax_bps: float = 20.0
     paper_initial_cash_krw: int = 10_000_000
@@ -427,6 +428,10 @@ class ExecutionSettings(BaseSettings):
     def venue_rest_rate_per_s(self) -> float:
         return self.mock_rest_rate_per_s if self.venue is KisVenue.MOCK else self.rest_rate_per_s
 
+    @property
+    def venue_request_timeout_s(self) -> float:
+        return self.mock_request_timeout_s if self.venue is KisVenue.MOCK else self.request_timeout_s
+
     @model_validator(mode="before")
     @classmethod
     def ignore_mock_arming(cls, values: Any) -> Any:
@@ -442,6 +447,8 @@ class ExecutionSettings(BaseSettings):
             raise ValueError("rest_max_lead_s must be positive or None")
         if self.mock_rest_rate_per_s <= 0:
             raise ValueError("mock_rest_rate_per_s must be positive")
+        if self.mock_request_timeout_s <= 0:
+            raise ValueError("mock_request_timeout_s must be positive")
         if self.position_parity_attempts < 1:
             raise ValueError("position_parity_attempts must be >= 1")
         if self.fill_poll_interval_s <= 0:
