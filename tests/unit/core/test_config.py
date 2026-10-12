@@ -946,3 +946,24 @@ def test_equal_empty_cross_venue_variables_are_rejected(monkeypatch, field) -> N
     for venue in (KisVenue.LIVE, KisVenue.MOCK):
         with pytest.raises(VenueCredentialError):
             load_venue_credentials(venue)
+
+
+def test_mock_venue_uses_longer_request_timeout(monkeypatch) -> None:
+    from src.core.config import ExecutionMode, ExecutionSettings
+
+    _clear_exec_env(monkeypatch)
+    live = ExecutionSettings()
+    mock = ExecutionSettings(mode=ExecutionMode.MOCK)
+
+    assert live.venue_request_timeout_s == live.request_timeout_s
+    assert mock.venue_request_timeout_s == mock.mock_request_timeout_s > mock.request_timeout_s
+
+
+def test_non_positive_mock_timeout_is_rejected() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import ExecutionSettings
+
+    with pytest.raises(ValidationError):
+        ExecutionSettings(mock_request_timeout_s=0)

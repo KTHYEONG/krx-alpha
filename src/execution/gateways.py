@@ -194,10 +194,9 @@ class LiveGateway:
     def submit(self, order: Order, quote: Quote) -> BrokerOutcome:
         canonical = order_tr_id(order.intent.side)
         body = build_order_body(self._creds, order)
-        self._journal.append(
-            "live_send", client_id=order.client_id, tr_id=wire_tr_id(self._client.venue, canonical), body=body
-        )
-        logger.info("[EXEC] stage=live_send client_id=%s tr_id=%s", order.client_id, canonical)
+        wire_tr = wire_tr_id(self._client.venue, canonical)
+        self._journal.append("live_send", client_id=order.client_id, tr_id=wire_tr, body=body)
+        logger.info("[EXEC] stage=live_send client_id=%s tr_id=%s", order.client_id, wire_tr)
         return self._client.post_order(canonical, body)
 
     def cancel(self, order: Order) -> BrokerOutcome:
