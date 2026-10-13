@@ -329,9 +329,8 @@ class OrderManager:
                 raise BrokerIntegrityError(
                     f"cumulative fill moved backwards or exceeded: {status.filled_qty}"
                 )
-            new_status = derive_status(
-                status, has_cancel_child=order.broker_order_no in child_parents
-            )
+            has_cancel_child = order.broker_order_no in child_parents
+            new_status = derive_status(status, has_cancel_child=has_cancel_child)
             delta_qty = status.filled_qty - order.filled_qty
             delta_amount = status.filled_amount_krw - order.filled_amount_krw
             if delta_qty > 0:
@@ -359,6 +358,12 @@ class OrderManager:
                     client_id=order.client_id,
                     status=order.status.value,
                     filled_qty=order.filled_qty,
+                    evidence={
+                        "cncl_yn": status.cancelled,
+                        "cancel_child": has_cancel_child,
+                        "rmn_qty": status.remaining_qty,
+                        "rejected_qty": status.rejected_qty,
+                    },
                 )
                 changed[order.client_id] = order
         return list(changed.values())
