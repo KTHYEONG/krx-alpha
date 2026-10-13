@@ -201,10 +201,9 @@ class LiveGateway:
 
     def cancel(self, order: Order) -> BrokerOutcome:
         body = build_cancel_body(self._creds, order)
-        self._journal.append(
-            "live_send", client_id=order.client_id, tr_id=wire_tr_id(self._client.venue, TR_CANCEL), body=body
-        )
-        logger.info("[EXEC] stage=live_send_cancel client_id=%s", order.client_id)
+        wire_tr = wire_tr_id(self._client.venue, TR_CANCEL)
+        self._journal.append("live_send", client_id=order.client_id, tr_id=wire_tr, body=body)
+        logger.info("[EXEC] stage=live_send_cancel client_id=%s tr_id=%s", order.client_id, wire_tr)
         return self._client.post_order(TR_CANCEL, body)
 
     def fetch_statuses(self) -> list[BrokerOrderStatus]:

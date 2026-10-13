@@ -260,3 +260,39 @@ def test_gateway_mode_and_venue_must_agree(tmp_path) -> None:
         _gateway(KisVenue.MOCK, ExecutionMode.LIVE)
     with pytest.raises(ValueError, match="paper"):
         _gateway(KisVenue.LIVE, ExecutionMode.PAPER)
+
+
+def test_mock_gateway_cancel_logs_wire_tr(tmp_path, caplog) -> None:
+    # Given: mock venue 클라이언트
+    import datetime as dt
+    import logging
+
+    from src.core.config import ExecutionMode, KisVenue
+    from src.execution.contracts import BrokerOutcome, Order, OrderIntent, OrderStatus, OrderType, OutcomeKind, Side
+    from src.execution.gateways import LiveGateway
+    from src.execution.journal import OrderJournal
+    from tests.unit.execution.fakes import T0, FixedClock, make_creds
+
+    class _MockClient:
+        venue = KisVenue.MOCK
+
+        def post_order(self, tr_id, body):
+            return BrokerOutcome(kind=OutcomeKind.ACCEPTED)
+
+    journal = OrderJournal(root=tmp_path, mode=ExecutionMode.MOCK, now=FixedClock(T0))
+    gateway = LiveGateway(
+        client=_MockClient(), creds=make_creds(), journal=journal, today=lambda: dt.date(2026, 9, 11),
+        mode=ExecutionMode.MOCK,
+    )
+    order = Order(
+        client_id="mock-20260911-000001", intent=OrderIntent("005930", Side.BUY, 1, OrderType.LIMIT, 10_000),
+        status=OrderStatus.ACCEPTED, created_at=T0, broker_order_no="0000117057", broker_org_no="91252",
+    )
+
+    # When
+    with caplog.at_level(logging.INFO):
+        gateway.cancel(order)
+
+    # Then: 로그 TR 은 전송선 TR(VTTC0013U) 이며 저널과 일치한다
+    line = next(r.getMessage() for r in caplog.records if "stage=live_send_cancel" in r.getMessage())
+    assert "tr_id=VTTC0013U" in line

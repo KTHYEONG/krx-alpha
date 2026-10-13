@@ -502,3 +502,45 @@ def test_closed_manager_cannot_bypass_session_lock(tmp_path) -> None:
         manager.reconcile()
     assert gateway.submitted == []
     assert gateway.cancelled == []
+
+
+def test_reconcile_journals_cancel_evidence_on_status_change(tmp_path) -> None:
+    # Given: 자식 취소 행이 있는 접수 주문
+    import json
+
+    from src.execution.contracts import BrokerOrderStatus, Order, OrderIntent, OrderStatus, OrderType, Side
+    from tests.unit.execution.fakes import T0, ScriptedGateway, make_manager
+
+    gateway = ScriptedGateway()
+    accepted = Order(
+        client_id="live-20260911-000009",
+        intent=OrderIntent("005930", Side.BUY, 1, OrderType.LIMIT, 10_000),
+        status=OrderStatus.ACCEPTED,
+        created_at=T0,
+        broker_order_no="0000000009",
+        broker_org_no="91252",
+        broker_order_time="090001",
+    )
+    manager, _ = make_manager(tmp_path, gateway, recovered=_recovered_session(orders={accepted.client_id: accepted}))
+    gateway.statuses = [
+        BrokerOrderStatus(
+            broker_order_no="0000000009", original_order_no="", org_no="91252", symbol="005930", side=Side.BUY,
+            ordered_qty=1, price=10_000, filled_qty=0, filled_amount_krw=0, remaining_qty=1, rejected_qty=0,
+            cancelled=False, order_time="090001",
+        ),
+        BrokerOrderStatus(
+            broker_order_no="0000000010", original_order_no="0000000009", org_no="91252", symbol="005930",
+            side=Side.BUY, ordered_qty=1, price=10_000, filled_qty=0, filled_amount_krw=0, remaining_qty=0,
+            rejected_qty=0, cancelled=False, order_time="090100",
+        ),
+    ]
+
+    # When
+    manager.reconcile()
+
+    # Then: 어떤 증거로 CANCELLED 가 되었는지 저널에 남는다
+    assert accepted.status is OrderStatus.CANCELLED
+    lines = (tmp_path / "journal" / "2026-09-11.jsonl").read_text(encoding="utf-8").splitlines()
+    status = [json.loads(line) for line in lines if json.loads(line)["event"] == "status"]
+    assert status[-1]["status"] == "cancelled"
+    assert status[-1]["evidence"] == {"cncl_yn": False, "cancel_child": True, "rmn_qty": 1, "rejected_qty": 0}
