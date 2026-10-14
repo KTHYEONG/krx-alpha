@@ -61,10 +61,12 @@ def test_oms_risk_reject_is_journaled_without_gateway_call(tmp_path) -> None:
     # Given: kill-switch 활성
     import json
 
-    from src.execution.contracts import OrderIntent, OrderStatus, OrderType, Side
+    from src.execution.contracts import BrokerOutcome, OrderIntent, OrderStatus, OrderType, OutcomeKind, Side
     from tests.unit.execution.fakes import ScriptedGateway, make_manager
 
-    gateway = ScriptedGateway()
+    gateway = ScriptedGateway(
+        outcomes=[BrokerOutcome(kind=OutcomeKind.ACCEPTED, broker_order_no="0000000002", broker_org_no="91252")]
+    )
     manager, _ = make_manager(tmp_path, gateway, kill=True)
 
     # When
@@ -544,3 +546,61 @@ def test_reconcile_journals_cancel_evidence_on_status_change(tmp_path) -> None:
     status = [json.loads(line) for line in lines if json.loads(line)["event"] == "status"]
     assert status[-1]["status"] == "cancelled"
     assert status[-1]["evidence"] == {"cncl_yn": False, "cancel_child": True, "rmn_qty": 1, "rejected_qty": 0}
+
+
+def test_resolve_unknown_retires_unmatched_order_and_unblocks_symbol(tmp_path) -> None:
+    # Given: broker list empty, restored UNKNOWN blocks the key
+    import json
+
+    from src.execution.contracts import BrokerOutcome, OrderIntent, OrderStatus, OrderType, OutcomeKind, Side
+    from tests.unit.execution.fakes import ScriptedGateway, make_manager
+
+    gateway = ScriptedGateway(
+        outcomes=[BrokerOutcome(kind=OutcomeKind.ACCEPTED, broker_order_no="0000000002", broker_org_no="91252")]
+    )
+    manager, _ = make_manager(
+        tmp_path, gateway, recovered=_recovered_session(orders={"live-20260911-000001": _unknown_buy()}, next_seq=1)
+    )
+    blocked = manager.submit(OrderIntent("005930", Side.BUY, 1, OrderType.LIMIT, 10_000))
+    assert blocked.reject_code == "unknown_pending"
+
+    # When
+    order = manager.resolve_unknown("live-20260911-000001", reason="HTS shows no order")
+
+    # Then: terminal, journaled, and the key is free again
+    assert order.status is OrderStatus.REJECTED
+    assert order.reject_code == "unknown_resolved"
+    events = [json.loads(x)["event"] for x in (tmp_path / "journal" / "2026-09-11.jsonl").read_text().splitlines()]
+    assert "unknown_resolved" in events
+    again = manager.submit(OrderIntent("005930", Side.BUY, 1, OrderType.LIMIT, 10_000))
+    assert again.status is OrderStatus.ACCEPTED
+
+
+def test_resolve_unknown_refuses_non_unknown_and_matched_orders(tmp_path) -> None:
+    import pytest
+
+    from src.execution.contracts import BrokerOrderStatus, ExecutionError, OrderStatus, Side
+    from tests.unit.execution.fakes import T0, ScriptedGateway, make_manager
+
+    manager, _ = make_manager(
+        tmp_path,
+        ScriptedGateway(
+            statuses=[
+                BrokerOrderStatus(
+                    broker_order_no="0000000009", original_order_no="", org_no="91252", symbol="005930",
+                    side=Side.BUY, ordered_qty=3, price=10_000, filled_qty=0, filled_amount_krw=0,
+                    remaining_qty=3, rejected_qty=0, cancelled=False, order_time=T0.strftime("%H%M%S"),
+                )
+            ]
+        ),
+        recovered=_recovered_session(orders={"live-20260911-000001": _unknown_buy()}, next_seq=1),
+    )
+
+    # When/Then: the broker has it, so reconcile adopts and resolve refuses
+    with pytest.raises(ExecutionError, match="matched a broker record"):
+        manager.resolve_unknown("live-20260911-000001", reason="x")
+    assert manager.orders["live-20260911-000001"].status is OrderStatus.ACCEPTED
+    with pytest.raises(ExecutionError, match="not unknown"):
+        manager.resolve_unknown("live-20260911-000001", reason="x")
+    with pytest.raises(ExecutionError, match="unknown client_id"):
+        manager.resolve_unknown("nope", reason="x")

@@ -220,6 +220,28 @@ class OrderManager:
         logger.info("[EXEC] stage=cancel client_id=%s code=%s", client_id, outcome.code)
         return order
 
+    def resolve_unknown(self, client_id: str, *, reason: str) -> Order:
+        """Operator override: retire an UNKNOWN order the broker verifiably never received.
+
+        Reconciles first; an order the broker list adopts or matches is not resolvable.
+        Raises ExecutionError when the order is not an unadopted UNKNOWN.
+        """
+        self._ensure_open()
+        order = self.orders.get(client_id)
+        if order is None:
+            raise ExecutionError(f"unknown client_id: {client_id}")
+        if order.status is not OrderStatus.UNKNOWN:
+            raise ExecutionError(f"order is {order.status.value}, not unknown")
+        self.reconcile()
+        if order.status is not OrderStatus.UNKNOWN or order.broker_order_no is not None:
+            raise ExecutionError("order matched a broker record; resolve through reconcile/cancel")
+        order.status = transition(order.status, OrderStatus.REJECTED)
+        order.reject_code = "unknown_resolved"
+        order.reject_message = reason
+        self._journal.append("unknown_resolved", client_id=client_id, reason=reason)
+        logger.warning("[EXEC] stage=unknown_resolved client_id=%s reason=%s", client_id, reason)
+        return order
+
     def await_terminal(self, client_id: str, *, timeout_s: float, interval_s: float,
                        sleep: Callable[[float], None] = time.sleep) -> Order:
         """Reconcile until the order is terminal or the timeout elapses; raises ExecutionError for an unknown client_id."""

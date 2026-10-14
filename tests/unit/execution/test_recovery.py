@@ -381,3 +381,19 @@ def test_recovery_rejects_accounting_and_causality_corruption() -> None:
     for records in corruptions:
         with pytest.raises(ExecutionError):
             restore_session(records, mode=ExecutionMode.MOCK, costs=_costs())
+
+
+def test_unknown_resolved_restores_as_terminal_rejected() -> None:
+    from src.core.config import ExecutionMode
+    from src.execution.contracts import OrderStatus
+    from src.execution.recovery import restore_session
+
+    records = [
+        _intent_rec("mock-20260911-000001"),
+        _rec("unknown_resolved", 2, client_id="mock-20260911-000001", reason="HTS shows no order"),
+    ]
+    recovered = restore_session(records, mode=ExecutionMode.MOCK, costs=_costs())
+    [order] = recovered.orders.values()
+    assert order.status is OrderStatus.REJECTED
+    assert order.reject_code == "unknown_resolved"
+    assert order.reject_message == "HTS shows no order"
