@@ -62,6 +62,7 @@ class SnapshotJobResult:
     failed: int
     rows_added: int
     truncated: bool
+    first_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,7 @@ class _JobBudget:
     succeeded: int = 0
     failed: int = 0
     truncated: bool = False
+    first_error: str | None = None
 
     def call(self, fetch: Callable[[], _T]) -> tuple[_T, int] | None:
         """Return ``(result, observed_at_ns)``, or None when the deadline passed or the vendor failed."""
@@ -137,8 +139,10 @@ class _JobBudget:
         self.attempted += 1
         try:
             result = fetch()
-        except KisApiError:
+        except KisApiError as exc:
             self.failed += 1
+            if self.first_error is None:
+                self.first_error = str(exc)
             return None
         self.succeeded += 1
         return result, self.wall_ns()
@@ -303,6 +307,7 @@ def run_snapshot_job(
         failed=budget.failed,
         rows_added=rows_added,
         truncated=budget.truncated,
+        first_error=budget.first_error,
     )
 
 
@@ -377,12 +382,14 @@ def run_snapshot_session(
             if result.attempted > 0 and result.succeeded == 0:
                 failed_jobs += 1
                 logger.warning(
-                    "[DATA] stage=snapshot_job job=%s attempted=%d failed=%d rows=%d truncated=%s status=NO_SUCCESS",
+                    "[DATA] stage=snapshot_job job=%s attempted=%d failed=%d rows=%d truncated=%s status=NO_SUCCESS"
+                    " reason=%s",
                     result.job_id,
                     result.attempted,
                     result.failed,
                     result.rows_added,
                     result.truncated,
+                    result.first_error,
                 )
             elif job.kind in (SnapshotJobKind.RANKING, SnapshotJobKind.INDEX_SNAPSHOT, SnapshotJobKind.NEWS_TITLE):
                 logger.debug(
@@ -394,13 +401,15 @@ def run_snapshot_session(
                     result.truncated,
                 )
             else:
-                logger.info(
-                    "[DATA] stage=snapshot_job job=%s attempted=%d failed=%d rows=%d truncated=%s",
+                logger.log(
+                    logging.WARNING if result.failed else logging.INFO,
+                    "[DATA] stage=snapshot_job job=%s attempted=%d failed=%d rows=%d truncated=%s reason=%s",
                     result.job_id,
                     result.attempted,
                     result.failed,
                     result.rows_added,
                     result.truncated,
+                    result.first_error,
                 )
         if stop:
             break
