@@ -238,6 +238,7 @@ def test_auction_job_stamps_phase_and_survives_symbol_failure(tmp_path) -> None:
     )
 
     assert (result.attempted, result.succeeded, result.failed) == (3, 2, 1)
+    assert result.first_error == "EGW00000: bad"
     assert result.rows_added == 2
     assert result.truncated is False
     frame = store.frame(SnapshotDataset.AUCTION_BOOK)
