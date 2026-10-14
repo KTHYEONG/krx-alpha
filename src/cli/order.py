@@ -82,6 +82,11 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     cancel = subparsers.add_parser("order-cancel")
     cancel.add_argument("--client-id", required=True)
     cancel.set_defaults(handler=run_cancel)
+    resolve = subparsers.add_parser("order-resolve")
+    resolve.add_argument("--client-id", required=True)
+    resolve.add_argument("--reason", required=True)
+    resolve.add_argument("--confirm-not-at-broker", action="store_true", default=False)
+    resolve.set_defaults(handler=run_resolve)
     status = subparsers.add_parser("order-status")
     status.set_defaults(handler=run_status)
 
@@ -244,6 +249,30 @@ def run_status(args: argparse.Namespace) -> int:
             return 7
         if unknown:
             return 5
+        return 0
+    finally:
+        manager.close()
+
+
+def run_resolve(args: argparse.Namespace) -> int:
+    """Retire an UNKNOWN order the operator verified is absent at the broker."""
+    if not bool(getattr(args, "confirm_not_at_broker", False)):
+        logger.error("[EXEC] stage=order_resolve status=FAIL reason=invalid_args:confirmation_required")
+        return 4
+    assembled = _assemble("order_resolve")
+    if assembled is None:
+        return 4
+    settings, manager = assembled
+    try:
+        try:
+            order = manager.resolve_unknown(str(args.client_id), reason=str(args.reason))
+        except KisApiError as exc:
+            logger.error("[EXEC] stage=order_resolve status=FAIL reason=reconcile:%s", str(exc))
+            return 4
+        except ExecutionError as exc:
+            logger.error("[EXEC] stage=order_resolve status=FAIL reason=%s", str(exc))
+            return 4
+        _summarize_order("order_resolve", settings, order)
         return 0
     finally:
         manager.close()

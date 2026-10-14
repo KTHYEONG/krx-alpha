@@ -19,7 +19,7 @@ from src.execution.contracts import (
 )
 from src.execution.ledger import CostModel, Ledger, Position
 
-_ORDER_EVENTS = frozenset({"submit_result", "unknown_adopted", "fill", "status"})
+_ORDER_EVENTS = frozenset({"submit_result", "unknown_adopted", "unknown_resolved", "fill", "status"})
 
 
 @dataclass(frozen=True)
@@ -132,6 +132,10 @@ def restore_session(
                 order.broker_order_no = rec.get("broker_order_no")
                 order.broker_org_no = rec.get("broker_org_no")
                 order.broker_order_time = rec.get("order_time")
+            elif event == "unknown_resolved":
+                order.status = OrderStatus.REJECTED
+                order.reject_code = "unknown_resolved"
+                order.reject_message = str(rec.get("reason") or "") or None
             elif event == "fill":
                 if "cumulative_amount_krw" not in rec:
                     raise ExecutionError("fill without cumulative_amount_krw")

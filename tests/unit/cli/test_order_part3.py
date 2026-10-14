@@ -497,7 +497,7 @@ def test_add_parser_registers_all_commands() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     order_cli.add_parser(sub)
-    for cmd, extra in [("order", ["--symbol", "005930", "--side", "buy", "--qty", "1"]), ("order-cancel", ["--client-id", "x"]), ("order-status", [])]:
+    for cmd, extra in [("order", ["--symbol", "005930", "--side", "buy", "--qty", "1"]), ("order-cancel", ["--client-id", "x"]), ("order-status", []), ("order-resolve", ["--client-id", "x", "--reason", "r"])]:
         ns = parser.parse_args([cmd, *extra])
         assert callable(ns.handler)
     ns = parser.parse_args(["order", "--symbol", "005930", "--side", "buy", "--qty", "1", "--wait-s", "5", "--cancel-on-timeout"])
@@ -514,3 +514,48 @@ def test_config_poll_validation() -> None:
         ExecutionSettings(fill_poll_interval_s=0)
     with pytest.raises(ValidationError):
         ExecutionSettings(cancel_confirm_wait_s=-1)
+
+
+def test_resolve_requires_confirmation_and_maps_outcomes(tmp_path, monkeypatch) -> None:
+    from src.execution.contracts import ExecutionError, KisApiError
+
+    _env(monkeypatch, tmp_path)
+    unconfirmed = argparse.Namespace(client_id="x", reason="r", confirm_not_at_broker=False)
+    assert order_cli.run_resolve(unconfirmed) == 4
+
+    class _Resolver(_Manager):
+        def __init__(self, order, error=None):
+            super().__init__(order)
+            self.error = error
+
+        def resolve_unknown(self, client_id, *, reason):
+            if self.error is not None:
+                raise self.error
+            self.orders[client_id].status = OrderStatus.REJECTED
+            return self.orders[client_id]
+
+    args = argparse.Namespace(client_id="paper-20260911-000001", reason="no order at HTS", confirm_not_at_broker=True)
+    order = _order(OrderStatus.UNKNOWN, odno=None)
+    ok_mgr = _Resolver(order)
+    monkeypatch.setattr(order_cli, "build_order_manager", lambda **k: ok_mgr)
+    assert order_cli.run_resolve(args) == 0
+    assert ok_mgr.closed == 1
+
+    for exc in (ExecutionError("matched"), KisApiError("EGW00000", "down")):
+        failing = _Resolver(_order(OrderStatus.UNKNOWN, odno=None), error=exc)
+        monkeypatch.setattr(order_cli, "build_order_manager", lambda *, _m=failing, **k: _m)
+        assert order_cli.run_resolve(args) == 4
+        assert failing.closed == 1
+
+
+def test_resolve_assembly_failure_maps_to_4(tmp_path, monkeypatch) -> None:
+    from src.execution.contracts import SessionLockError
+
+    _env(monkeypatch, tmp_path)
+
+    def _locked(**kwargs):
+        raise SessionLockError("held")
+
+    monkeypatch.setattr(order_cli, "build_order_manager", _locked)
+    args = argparse.Namespace(client_id="x", reason="r", confirm_not_at_broker=True)
+    assert order_cli.run_resolve(args) == 4
