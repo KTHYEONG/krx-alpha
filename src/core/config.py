@@ -63,6 +63,10 @@ class CollectorSettings(BaseSettings):
     ls_capacity_pairs: int = 200
     # Rotation of a fresh token is a transport problem, not expiry.
     ls_token_rotation_cooldown_s: float = Field(default=300.0, ge=0)
+    db_capacity_pairs: int = Field(default=50, ge=1)
+    db_token_rotation_cooldown_s: float = Field(default=300.0, ge=0)
+    db_subscribe_spacing_s: float = Field(default=0.12, ge=0.1)
+    db_ack_timeout_s: float = Field(default=10.0, gt=0)
     # Symbols per session universe. Unset derives ``ls_capacity_pairs // len(streams)`` so the cap cannot drift from vendor capacity (a literal caused the 2026-09-10 and 2026-10-02 incidents). An explicit value (env ``KRX_ALPHA_UNIVERSE_SLOT_BUDGET`` or kwarg) may only tighten it.
     universe_slot_budget: int = Field(default=0, ge=0)
     bars_window_days: int = 90
@@ -102,9 +106,7 @@ class CollectorSettings(BaseSettings):
         if "universe_slot_budget" not in self.model_fields_set:
             self.universe_slot_budget = self.ls_capacity_pairs // len(self.streams)
         elif self.universe_slot_budget < 1:
-            raise ValueError(
-                f"universe_slot_budget {self.universe_slot_budget} must be >= 1"
-            )
+            raise ValueError(f"universe_slot_budget {self.universe_slot_budget} must be >= 1")
         if self.universe_slot_budget > self.subscription_symbol_budget:
             raise SlotBudgetExceededError(
                 f"universe_slot_budget {self.universe_slot_budget} exceeds "
@@ -227,6 +229,15 @@ class LsCredentials(BaseSettings):
 
     ls_app_key: str
     ls_app_secret: str
+
+
+class DbCredentials(BaseSettings):
+    """DB증권 자격증명 (필수, 빈 기본값 금지)."""
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+    db_app_key: str
+    db_app_secret: str
 
 
 class RcloneArchiveSettings(BaseSettings):
@@ -369,7 +380,13 @@ class SnapshotSettings(BaseSettings):
         if not (max(self.investor_estimate_times) < self.intraday_end):
             raise ValueError("investor_estimate_times must precede intraday_end")
         validate_snapshot_order(self, market_close=SessionSchedule().market_close)
-        for name in ("ranking_interval_s", "index_interval_s", "index_minute_interval_s", "news_interval_s", "program_trade_interval_s"):
+        for name in (
+            "ranking_interval_s",
+            "index_interval_s",
+            "index_minute_interval_s",
+            "news_interval_s",
+            "program_trade_interval_s",
+        ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
         if not 0 < self.index_minute_interval_s <= 5400:
@@ -567,9 +584,7 @@ def resolve_collector_runtime(
         resolved_aftermarket = AftermarketSettings(enabled=resolved_collector.after_market_enabled)
     else:
         if aftermarket.enabled != resolved_collector.after_market_enabled:
-            raise ValueError(
-                "aftermarket enabled conflicts with collector after_market_enabled"
-            )
+            raise ValueError("aftermarket enabled conflicts with collector after_market_enabled")
         resolved_aftermarket = aftermarket
     if resolved_premarket.enabled and resolved_premarket.credential_slot == resolved_snapshot.kis_data_slot:
         raise ValueError("premarket credential_slot must not equal snapshot kis_data_slot")

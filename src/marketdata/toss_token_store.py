@@ -63,6 +63,11 @@ def ls_token_path(cache_dir: pathlib.Path, app_key: str) -> pathlib.Path:
     return token_store_path(cache_dir, "ls", app_key)
 
 
+def db_token_path(cache_dir: pathlib.Path, app_key: str) -> pathlib.Path:
+    """Return the shared DB token store path for one client credential."""
+    return token_store_path(cache_dir, "db", app_key)
+
+
 def _lock_path_for(path: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(f"{path}.lock")
 
@@ -95,9 +100,7 @@ def _parse_record(payload: object) -> TokenRecord | None:
             expires_at = dt.datetime.fromisoformat(expires_raw)
             if expires_at.tzinfo is None:
                 return None
-        return TokenRecord(
-            access_token=access_token, issued_at=issued_at, expires_at=expires_at, generation=generation
-        )
+        return TokenRecord(access_token=access_token, issued_at=issued_at, expires_at=expires_at, generation=generation)
     except (ValueError, TypeError):
         return None
 
@@ -165,7 +168,9 @@ class TossTokenStore:
         except FileNotFoundError:
             return None
         except OSError as exc:
-            logger.warning("[SYS] stage=shared_token status=UNREADABLE path=%s reason=%s", self._path.name, type(exc).__name__)
+            logger.warning(
+                "[SYS] stage=shared_token status=UNREADABLE path=%s reason=%s", self._path.name, type(exc).__name__
+            )
             return None
         try:
             payload = json.loads(raw)
@@ -198,7 +203,9 @@ class TossTokenStore:
             with contextlib.suppress(OSError):
                 os.unlink(tmp_name)
             raise
-        logger.info("[SYS] stage=shared_token status=PUBLISHED path=%s generation=%d", self._path.name, record.generation)
+        logger.info(
+            "[SYS] stage=shared_token status=PUBLISHED path=%s generation=%d", self._path.name, record.generation
+        )
 
     def _build_record(self, issued: IssuedToken, previous: TokenRecord | None) -> TokenRecord:
         now = self._clock()
@@ -206,7 +213,9 @@ class TossTokenStore:
         if issued.expires_in_seconds is not None:
             expires_at = now + dt.timedelta(seconds=float(issued.expires_in_seconds))
         generation = previous.generation + 1 if previous is not None else 1
-        return TokenRecord(access_token=issued.access_token, issued_at=now, expires_at=expires_at, generation=generation)
+        return TokenRecord(
+            access_token=issued.access_token, issued_at=now, expires_at=expires_at, generation=generation
+        )
 
     def _hold_lock(self) -> int:
         lock_path = _lock_path_for(self._path)
@@ -338,6 +347,7 @@ __all__ = [
     "TokenRecord",
     "TokenStoreLockTimeout",
     "TossTokenStore",
+    "db_token_path",
     "ls_token_path",
     "token_store_path",
     "toss_token_path",
