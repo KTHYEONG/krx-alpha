@@ -1927,3 +1927,66 @@ def test_streamer_all_rejected_is_not_a_silent_run(caplog) -> None:
     assert any("reason=auth_rejected" in m and "auth_rejected:all_acks_rejected:01234" in m for m in criticals)
     assert sink.gaps
     assert sink.gaps[0][3] == "auth_rejected"
+
+
+def test_outage_gap_ends_when_all_pairs_are_subscribed_not_at_first_frame() -> None:
+    import asyncio
+
+    from src.realtime.contracts import L0Frame, VendorAck, VendorDisconnected
+    from src.realtime.streamer import RealtimeStreamer
+
+    stop = asyncio.Event()
+    clock = iter([2_000, 9_000])  # subscribe-complete wall time for cycle 1, then cycle 2
+
+    class _Adapter:
+        name = "ls"
+        capacity_pairs = 200
+        cycle = 0
+
+        async def connect(self):
+            self.cycle += 1
+            self.sent = 0
+
+        async def subscribe(self, pairs):
+            return [VendorAck(s, t, True, "00000") for s, t in pairs]
+
+        async def recv(self):
+            self.sent += 1
+            if self.cycle == 1:
+                if self.sent == 1:
+                    return L0Frame("ls", "H0STCNT0", "005930", "a", 1, 100, 1, "ls-1")
+                raise VendorDisconnected("closed")
+            stop.set()
+            return L0Frame("ls", "H0STCNT0", "005930", "b", 2, 5_000, 1, "ls-2")
+
+        async def aclose(self):
+            return None
+
+    class _Sink:
+        def __init__(self):
+            self.gaps = []
+
+        def record(self, f):
+            return None
+
+        def note_ack(self, v, a):
+            return None
+
+        def note_gap(self, symbol, start, end, reason):
+            self.gaps.append((symbol, start, end, reason))
+
+        def flush(self):
+            return 0
+
+    async def _nosleep(_):
+        return None
+
+    sink = _Sink()
+    streamer = RealtimeStreamer(
+        adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0")],
+        wall_ns=lambda: next(clock, 9_000), rng=lambda: 1.0,
+    )
+    asyncio.run(streamer.run_forever(stop, sleep=_nosleep))
+
+    # First frame after reconnect arrived at 5_000 but subscribe completed at 9_000.
+    assert sink.gaps == [("005930", 100, 9_000, "disconnect")]

@@ -245,6 +245,7 @@ class RealtimeStreamer:
             acks = await self._adapter.subscribe(self._replay_pairs)
             for ack in acks:
                 self._sink.note_ack(self._adapter.name, ack)
+            subscribed_ns = self._wall_ns()
             accepted = sum(1 for a in acks if a.accepted)
             logger.info(
                 "[DATA] stage=stream_connect pairs=%d accepted=%d rejected=%d",
@@ -288,7 +289,9 @@ class RealtimeStreamer:
                         frame = recv_task.result()
                         recv_task = asyncio.ensure_future(self._adapter.recv())
                         if frames == 0:
-                            self._close_outage(frame.recv_wall_ns, recovered=True)
+                            # Pairs are subscribed one by one; a frame read mid-subscribe proves only
+                            # that some pair is live, so the gap ends once every pair is subscribed.
+                            self._close_outage(max(frame.recv_wall_ns, subscribed_ns), recovered=True)
                         self._sink.record(frame)
                         self._last_frame_wall_ns = frame.recv_wall_ns
                         frames += 1
