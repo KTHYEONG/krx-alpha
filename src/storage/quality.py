@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -12,13 +12,16 @@ import polars as pl
 
 from src.core.config import DataQualitySettings
 from src.storage.market_phase import _VALID_HHMMSS_RE, MarketPhase
+from src.storage.quality_db import decode_db_quotes, decode_db_ticks
 from src.storage.quality_kis import decode_kis_quotes, decode_kis_ticks
 from src.storage.quality_ls import decode_ls_quotes, decode_ls_ticks
 
-_decode_tick_chunk = decode_ls_ticks
-_decode_ls_quote_chunk = decode_ls_quotes
-_decode_kis_tick_chunk = decode_kis_ticks
-_decode_kis_quote_frame = decode_kis_quotes
+_VENDOR_ORDER: tuple[str, ...] = ("kis", "ls", "db")
+_VENDOR_DECODERS: dict[str, tuple[Callable[[pl.DataFrame], pl.DataFrame], Callable[[pl.DataFrame], pl.DataFrame]]] = {
+    "kis": (decode_kis_ticks, decode_kis_quotes),
+    "ls": (decode_ls_ticks, decode_ls_quotes),
+    "db": (decode_db_ticks, decode_db_quotes),
+}
 
 _TICK_STREAM: str = "H0STCNT0"
 _TICK_STREAMS: tuple[str, ...] = ("H0STCNT0", "H0NXCNT0")
@@ -185,22 +188,23 @@ def evaluate_stream_quality(
     return DqVerdict(status=status, tick=tick, quote=quote, reasons=tuple(reasons))
 
 
-def _split_kis_ls(chunk: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
+def _split_by_vendor(chunk: pl.DataFrame) -> dict[str, pl.DataFrame]:
     if "vendor" not in chunk.columns:
-        return chunk.slice(0, 0), chunk
-    kis = chunk.filter(pl.col("vendor") == "kis")
-    ls = chunk.filter((pl.col("vendor") != "kis") | pl.col("vendor").is_null())
-    return kis, ls
+        return {"ls": chunk}
+    for name in chunk.get_column("vendor").drop_nulls().unique().to_list():
+        if name not in _VENDOR_DECODERS:
+            raise ValueError(f"unsupported L1 vendor {name!r}")
+    parts: dict[str, pl.DataFrame] = {}
+    vendor = pl.col("vendor").fill_null("ls")
+    for name in _VENDOR_ORDER:
+        part = chunk.filter(vendor == name)
+        if part.height > 0:
+            parts[name] = part
+    return parts
 
 
 def _decode_tick_chunk_mixed(chunk: pl.DataFrame) -> pl.DataFrame:
-    kis, ls = _split_kis_ls(chunk)
-    parts: list[pl.DataFrame] = []
-    if kis.height > 0:
-        parts.append(_decode_kis_tick_chunk(kis))
-    if ls.height > 0:
-        parts.append(_decode_tick_chunk(ls))
-    return pl.concat(parts)
+    return pl.concat([_VENDOR_DECODERS[vendor][0](part) for vendor, part in _split_by_vendor(chunk).items()])
 
 
 def _summarize_tick_fields(
@@ -482,19 +486,13 @@ def decode_and_flag_quotes(df: pl.DataFrame, *, chunk_rows: int = _QUOTE_CHUNK_R
     total_remain_short = 0
     for offset in range(0, quotes.height, chunk_rows):
         chunk = quotes.slice(offset, chunk_rows)
-        kis, ls = _split_kis_ls(chunk)
         carried = [c for c in ("market_phase", "exchange_event_time") if c in chunk.columns]
         frames: list[pl.DataFrame] = []
-        if kis.height > 0:
-            decoded_kis = _decode_kis_quote_frame(kis)
+        for vendor, part in _split_by_vendor(chunk).items():
+            decoded_part = _VENDOR_DECODERS[vendor][1](part)
             if carried:
-                decoded_kis = decoded_kis.with_columns(kis.select(carried).get_columns())
-            frames.append(decoded_kis)
-        if ls.height > 0:
-            decoded_ls = _decode_ls_quote_chunk(ls)
-            if carried:
-                decoded_ls = decoded_ls.with_columns(ls.select(carried).get_columns())
-            frames.append(decoded_ls)
+                decoded_part = decoded_part.with_columns(part.select(carried).get_columns())
+            frames.append(decoded_part)
         frame = pl.concat(frames) if len(frames) > 1 else frames[0]
         flagged = _flag_quote_invariants(frame)
         decode_fail += int(flagged["dq_decode_fail"].sum())

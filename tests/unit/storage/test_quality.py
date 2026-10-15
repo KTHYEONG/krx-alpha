@@ -655,13 +655,13 @@ def test_decode_and_flag_ticks_never_decodes_more_than_chunk_rows(monkeypatch) -
         })
     frame = pl.DataFrame(rows)
     observed_heights = []
-    original = quality_mod._decode_tick_chunk
+    original_ticks, original_quotes = quality_mod._VENDOR_DECODERS["ls"]
 
     def observed(chunk):
         observed_heights.append(chunk.height)
-        return original(chunk)
+        return original_ticks(chunk)
 
-    monkeypatch.setattr(quality_mod, "_decode_tick_chunk", observed)
+    monkeypatch.setitem(quality_mod._VENDOR_DECODERS, "ls", (observed, original_quotes))
 
     summary = quality_mod.decode_and_flag_ticks(frame, chunk_rows=2)
 
@@ -1375,3 +1375,172 @@ def test_custom_listing_band_is_honoured_by_both_summaries() -> None:
     fields = decode_tick_raw_fields(frame)
     assert fields is not None
     assert summarize_tick_fields_bucketed(fields.lazy(), rows=frame.height, buckets=3, settings=settings, listing_symbols=listing) == summary
+
+
+def _db_tick_raw_for_routing(price='71000', change='1000', sign='2', drate='1.43') -> str:
+    import json
+
+    body = {
+        'ShrnIscd': '005930', 'StckPrpr': price, 'CntgVol': '10', 'AcmlVol': '100',
+        'PrdyVrss': change, 'PrdyVrsssign': sign, 'PrdyCtrt': drate,
+        'SelnCntgcsnu': '1', 'ShnuCntgcsnu': '1',
+    }
+    return json.dumps({'header': {'tr_cd': 'S00', 'tr_key': '005930'}, 'body': body}, ensure_ascii=False)
+
+
+def test_quality_routes_db_vendor_to_db_decoder() -> None:
+    import json
+
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_ticks, decode_tick_raw_fields
+
+    ls_body = {'shcode': '005930', 'price': '70000', 'cvolume': '10', 'volume': '100', 'change': '0', 'sign': '3', 'drate': '0.00', 'mdchecnt': '1', 'mschecnt': '1'}
+    ls_raw = json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': ls_body}, ensure_ascii=False)
+    df = pl.DataFrame({
+        'raw': [ls_raw, _db_tick_raw_for_routing()],
+        'tr_id': ['H0STCNT0', 'H0STCNT0'],
+        'vendor': ['ls', 'db'],
+        'recv_wall_ns': [100, 200],
+    })
+    fields = decode_tick_raw_fields(df)
+    assert fields is not None
+    assert fields.height == 2
+    assert fields.filter(pl.col('price_raw') == '71000').height == 1
+    summary = decode_and_flag_ticks(df)
+    assert summary is not None
+    assert summary.decode_fail == 0
+
+
+def test_quality_routes_db_quotes_to_db_decoder() -> None:
+    import json
+
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_quotes
+
+    def _ls_quote(hotime):
+        clean_offer = [70100 + k * 100 for k in range(10)]
+        clean_bid = [69900 - k * 100 for k in range(10)]
+        b = {'shcode': '005930', 'hotime': str(hotime).zfill(6)}
+        for k in range(10):
+            b[f'offerho{k + 1}'] = str(clean_offer[k])
+            b[f'bidho{k + 1}'] = str(clean_bid[k])
+            b[f'offerrem{k + 1}'] = '100'
+            b[f'bidrem{k + 1}'] = '100'
+        b['totofferrem'] = '1000'
+        b['totbidrem'] = '1000'
+        return json.dumps({'header': {'tr_cd': 'H1_', 'tr_key': '005930'}, 'body': b}, ensure_ascii=False)
+
+    def _db_quote():
+        b = {'ShrnIscd': '005930', 'BsopHour': '101500', 'TotalAskprsqn': '1000', 'TotalBidprsqn': '1000'}
+        for k in range(1, 11):
+            b[f'askp{k}'] = str(70100 + (k - 1) * 100)
+            b[f'bidp{k}'] = str(69900 - (k - 1) * 100)
+            b[f'AskpRsqn{k}'] = '100'
+            b[f'BidpRsqn{k}'] = '100'
+        return json.dumps({'header': {'tr_cd': 'S01', 'tr_key': '005930'}, 'body': b}, ensure_ascii=False)
+
+    df = pl.DataFrame({
+        'raw': [_ls_quote(101500), _db_quote()],
+        'tr_id': ['H0STASP0', 'H0STASP0'],
+        'vendor': ['ls', 'db'],
+        'recv_wall_ns': [100, 200],
+    })
+    summary = decode_and_flag_quotes(df)
+    assert summary is not None
+    assert summary.rows == 2
+    assert summary.decode_fail == 0
+
+
+def test_quality_unknown_vendor_fails_closed() -> None:
+    import polars as pl
+    import pytest
+
+    from src.storage.quality import decode_and_flag_quotes, decode_and_flag_ticks
+
+    tick = pl.DataFrame({'raw': ['x'], 'tr_id': ['H0STCNT0'], 'vendor': ['toss'], 'recv_wall_ns': [100]})
+    with pytest.raises(ValueError, match="toss"):
+        decode_and_flag_ticks(tick)
+    quote = pl.DataFrame({'raw': ['x'], 'tr_id': ['H0STASP0'], 'vendor': ['toss'], 'recv_wall_ns': [100]})
+    with pytest.raises(ValueError, match="toss"):
+        decode_and_flag_quotes(quote)
+
+
+def test_quality_legacy_rows_without_vendor_stay_ls() -> None:
+    import json
+
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_ticks, decode_tick_raw_fields
+
+    body = {'shcode': '005930', 'price': '70000', 'cvolume': '10', 'volume': '100', 'change': '0', 'sign': '3', 'drate': '0.00', 'mdchecnt': '1', 'mschecnt': '1'}
+    raw = json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': body}, ensure_ascii=False)
+    df = pl.DataFrame({'raw': [raw], 'tr_id': ['H0STCNT0'], 'recv_wall_ns': [100]})
+    fields = decode_tick_raw_fields(df)
+    assert fields is not None
+    assert fields['price_raw'].to_list() == ['70000']
+    summary = decode_and_flag_ticks(df)
+    assert summary is not None
+    assert summary.decode_fail == 0
+
+
+def test_quality_existing_kis_ls_outputs_unchanged() -> None:
+    import json
+
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_quotes, decode_and_flag_ticks
+
+    ls_body = {'shcode': '005930', 'price': '70000', 'cvolume': '10', 'volume': '100', 'change': '0', 'sign': '3', 'drate': '0.00', 'mdchecnt': '1', 'mschecnt': '1'}
+    ls_raw = json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': ls_body}, ensure_ascii=False)
+    df = pl.DataFrame({
+        'raw': [_kis_tick_raw(), ls_raw],
+        'tr_id': ['H0STCNT0', 'H0STCNT0'],
+        'vendor': ['kis', 'ls'],
+        'recv_wall_ns': [100, 200],
+    })
+    tick_summary = decode_and_flag_ticks(df)
+    assert tick_summary is not None
+    assert tick_summary.rows == 2
+    assert tick_summary.decode_fail == 0
+    assert tick_summary.zero_volume == 0
+
+    def _ls_quote(hotime):
+        clean_offer = [70100 + k * 100 for k in range(10)]
+        clean_bid = [69900 - k * 100 for k in range(10)]
+        b = {'shcode': '005930', 'hotime': str(hotime).zfill(6)}
+        for k in range(10):
+            b[f'offerho{k + 1}'] = str(clean_offer[k])
+            b[f'bidho{k + 1}'] = str(clean_bid[k])
+            b[f'offerrem{k + 1}'] = '100'
+            b[f'bidrem{k + 1}'] = '100'
+        b['totofferrem'] = '1000'
+        b['totbidrem'] = '1000'
+        return json.dumps({'header': {'tr_cd': 'H1_', 'tr_key': '005930'}, 'body': b}, ensure_ascii=False)
+
+    qdf = pl.DataFrame({
+        'raw': [_kis_quote_raw(), _ls_quote(101500)],
+        'tr_id': ['H0STASP0', 'H0STASP0'],
+        'vendor': ['kis', 'ls'],
+        'recv_wall_ns': [100, 200],
+    })
+    quote_summary = decode_and_flag_quotes(qdf)
+    assert quote_summary is not None
+    assert quote_summary.rows == 2
+    assert quote_summary.decode_fail == 0
+    assert quote_summary.ladder_disorder == 0
+    assert quote_summary.crossed_book == 0
+
+
+def test_quality_split_orders_kis_ls_db_and_null_vendor_is_ls() -> None:
+    import polars as pl
+
+    from src.storage.quality import _split_by_vendor
+
+    chunk = pl.DataFrame({'raw': ['d', 'n', 'k', 'l'], 'vendor': ['db', None, 'kis', 'ls']})
+    parts = _split_by_vendor(chunk)
+
+    assert list(parts) == ['kis', 'ls', 'db']
+    assert parts['ls']['raw'].to_list() == ['n', 'l']
+    assert sum(p.height for p in parts.values()) == chunk.height
