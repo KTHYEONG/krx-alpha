@@ -112,6 +112,9 @@ class DataPaths:
     def manifest_path(self, day: dt.date) -> pathlib.Path:
         return self.manifest_dir / f"{day.isoformat()}.json"
 
+    def db_crosscheck_manifest_path(self, day: dt.date) -> pathlib.Path:
+        return self.manifest_dir / f"{day.isoformat()}.db.json"
+
     def aftermarket_manifest_path(self, day: dt.date, venue: object, shard_index: int) -> pathlib.Path:
         venue_s = str(getattr(venue, "value", venue))
         return self.manifest_dir / "aftermarket" / f"{day.isoformat()}.{venue_s}.shard-{shard_index:02d}.json"

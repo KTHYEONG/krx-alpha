@@ -68,6 +68,7 @@ class SessionConfig:
     ntp_fallback_hosts: tuple[str, ...] = ()
     route: StreamRoute | None = None
     shard: AftermarketShard | None = None
+    symbol_limit: int | None = None
     min_free_disk_gb: float = 3.0
     journal_retain_days: int = 3
 
@@ -161,6 +162,8 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
         raise ValueError("min_free_disk_gb must be positive")
     if cfg.journal_retain_days < 0:
         raise ValueError("journal_retain_days must be nonnegative")
+    if cfg.symbol_limit is not None and cfg.symbol_limit < 1:
+        raise ValueError(f"symbol_limit {cfg.symbol_limit} must be positive")
     hosts = (cfg.ntp_host, *cfg.ntp_fallback_hosts)
     offset_ns: int | None = None
     for host in hosts:
@@ -229,6 +232,8 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
         manifest.credential_key_id = cfg.shard.credential_key_id
         desired = {str(symbol): tuple(cfg.shard.streams) for symbol in cfg.shard.symbols}
     else:
+        if cfg.symbol_limit is not None:
+            rows = rows[: cfg.symbol_limit]
         desired = {str(row["symbol"]): tuple(cfg.desired_streams) for row in rows}
     registry = SubscriptionRegistry(slot_budget=cfg.slot_budget)
     diff: SubscriptionDiff = registry.plan(desired)
