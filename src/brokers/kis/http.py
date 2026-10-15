@@ -11,7 +11,7 @@ from src.brokers.kis.auth import KisAppAuth, KisTokenProvider, TokenSource
 from src.brokers.kis.rate import Pacer
 from src.execution.contracts import KisApiError
 
-_RATE_LIMIT_CODES: frozenset[str] = frozenset({"EGW00201"})
+_RATE_LIMIT_CODES: frozenset[str] = frozenset({"EGW00201", "EGW00215"})  # live, VTS per-second limit
 _EXPIRED_TOKEN_CODES: frozenset[str] = frozenset({"EGW00121", "EGW00123"})
 MAX_SAFE_RETRIES: int = 2
 """Retry budget for requests the vendor provably did not execute."""

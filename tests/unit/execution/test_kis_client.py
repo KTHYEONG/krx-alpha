@@ -1636,7 +1636,7 @@ def test_forced_refresh_with_same_token_keeps_daily_limit(tmp_path) -> None:
 def test_classify_kis_retry_table() -> None:
     from src.brokers.kis.http import MAX_SAFE_RETRIES, KisRetryDecision, classify_kis_retry
 
-    for code in ("EGW00201",):
+    for code in ("EGW00201", "EGW00215"):
         for retries in (0, MAX_SAFE_RETRIES):
             for refreshed in (False, True):
                 decision = classify_kis_retry(code, retries=retries, refreshed=refreshed)
