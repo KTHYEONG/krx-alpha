@@ -2341,3 +2341,27 @@ def test_daily_order_requires_every_field_and_nonblank_order_number(tmp_path) ->
     client, _, _ = make_client(tmp_path / "blank", [FakeResponse({"rt_cd": "0", "output1": [_daily_row(odno="   ")]})])
     with pytest.raises(KisApiError, match="inquire-daily-ccld missing/invalid odno"):
         client.get_daily_orders(dt.date(2026, 9, 11))
+
+
+def test_get_daily_orders_normalizes_zero_filled_parent_number(tmp_path) -> None:
+    # Given: VTS sends orgn_odno "0000000000" on a non-child row (observed 2026-10-15)
+    import datetime as dt
+
+    from tests.unit.execution.fakes import FakeResponse, make_client
+
+    row = {
+        "odno": "0000000001", "orgn_odno": "0000000000", "ord_gno_brno": "91252", "pdno": "005930",
+        "sll_buy_dvsn_cd": "02", "ord_qty": "1", "ord_unpr": "10000", "tot_ccld_qty": "1",
+        "tot_ccld_amt": "10000", "rmn_qty": "0", "rjct_qty": "0", "cncl_yn": "N", "ord_tmd": "090001",
+    }
+    page = FakeResponse(
+        {"rt_cd": "0", "msg_cd": "KIOK0460", "msg1": "ok", "output1": [row], "ctx_area_fk100": "", "ctx_area_nk100": ""},
+        headers={"tr_cont": "D"},
+    )
+    client, _, _ = make_client(tmp_path, [page])
+
+    # When
+    [parsed] = client.get_daily_orders(dt.date(2026, 10, 15))
+
+    # Then: treated as a parent row so UNKNOWN adoption can match it
+    assert parsed.original_order_no == ""

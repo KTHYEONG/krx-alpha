@@ -80,6 +80,12 @@ def _strict_int(row: Mapping[str, Any], field: str, endpoint: str) -> int:
     return int(value)
 
 
+def _original_order_no(row: Mapping[str, Any]) -> str:
+    """Return the parent order number, or "" for a non-child row (VTS sends "0000000000")."""
+    raw = str(row.get("orgn_odno", "")).strip()
+    return raw if raw.strip("0") else ""
+
+
 def order_tr_id(side: Side) -> str:
     """매수/매도 방향의 실전 주문 TR 을 반환한다."""
     if side is Side.BUY:
@@ -258,7 +264,7 @@ class KisTradingClient:
             statuses.append(
                 BrokerOrderStatus(
                     broker_order_no=str(row.get("odno", "")),
-                    original_order_no=str(row.get("orgn_odno", "")),
+                    original_order_no=_original_order_no(row),
                     org_no=str(row.get("ord_gno_brno", "")),
                     symbol=str(row.get("pdno", "")),
                     side=Side.SELL if dvsn == "01" else Side.BUY,
