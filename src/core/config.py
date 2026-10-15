@@ -67,6 +67,7 @@ class CollectorSettings(BaseSettings):
     db_token_rotation_cooldown_s: float = Field(default=300.0, ge=0)
     db_subscribe_spacing_s: float = Field(default=0.12, ge=0.1)
     db_ack_timeout_s: float = Field(default=10.0, gt=0)
+    db_crosscheck_enabled: bool = False
     # Symbols per session universe. Unset derives ``ls_capacity_pairs // len(streams)`` so the cap cannot drift from vendor capacity (a literal caused the 2026-09-10 and 2026-10-02 incidents). An explicit value (env ``KRX_ALPHA_UNIVERSE_SLOT_BUDGET`` or kwarg) may only tighten it.
     universe_slot_budget: int = Field(default=0, ge=0)
     bars_window_days: int = 90
@@ -100,6 +101,10 @@ class CollectorSettings(BaseSettings):
     @property
     def subscription_symbol_budget(self) -> int:
         return self.ls_capacity_pairs // len(self.streams)
+
+    @property
+    def db_crosscheck_symbol_budget(self) -> int:
+        return self.db_capacity_pairs // len(self.streams)
 
     @model_validator(mode="after")
     def check_universe_budget_within_technical_capacity(self) -> CollectorSettings:

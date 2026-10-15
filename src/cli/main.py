@@ -23,6 +23,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
         collect_snapshots,
         collect_status,
         collect_stream,
+        collect_stream_db,
         order,
         probe_db_stream,
         toss_program_trades_backfill,
@@ -33,6 +34,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
     collect_status.add_parser(subparsers)
     collect_init.add_parser(subparsers)
     collect_stream.add_parser(subparsers)
+    collect_stream_db.add_parser(subparsers)
     probe_db_stream.add_parser(subparsers)
     collect_aftermarket.add_parser(subparsers)
     collect_premarket.add_parser(subparsers)

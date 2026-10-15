@@ -945,3 +945,56 @@ def test_aftermarket_manifest_close_unchanged(tmp_path, monkeypatch) -> None:
 
     assert nxt.manifest.expected_close_ns == expected
     assert krx.manifest.expected_close_ns == expected
+
+
+def test_bootstrap_symbol_limit_keeps_first_candidates_in_file_order(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    import src.realtime.session as session_mod
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", lambda host, *, client=None: 0)
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": s, "selection_reasons": ["limit_up"]} for s in ["005930", "000660", "035420", "051910", "068270"]], rev=1)
+    cfg = SessionConfig(session_date=dt.date(2026, 9, 14), journal_root=tmp_path / "l0",
+                        manifest_path=tmp_path / "s.json", candidates_path=cp, ntp_host="h",
+                        slot_budget=200, max_clock_offset_ns=2_000_000_000,
+                        desired_streams=("H0STCNT0", "H0STASP0"), vendor="db", symbol_limit=2)
+    session = bootstrap_session(cfg, now_ns=1)
+    assert sorted(session.replay_pairs()) == [("000660", "H0STASP0"), ("000660", "H0STCNT0"), ("005930", "H0STASP0"), ("005930", "H0STCNT0")]
+
+
+def test_bootstrap_without_symbol_limit_unchanged(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    import src.realtime.session as session_mod
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", lambda host, *, client=None: 0)
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": s, "selection_reasons": ["limit_up"]} for s in ["005930", "000660", "035420"]], rev=1)
+    cfg = SessionConfig(session_date=dt.date(2026, 9, 14), journal_root=tmp_path / "l0",
+                        manifest_path=tmp_path / "s.json", candidates_path=cp, ntp_host="h",
+                        slot_budget=200, max_clock_offset_ns=2_000_000_000,
+                        desired_streams=("H0STCNT0",), vendor="db")
+    session = bootstrap_session(cfg, now_ns=1)
+    assert sorted(s for s, _ in session.replay_pairs()) == ["000660", "005930", "035420"]
+
+
+def test_bootstrap_rejects_non_positive_symbol_limit(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.realtime.session import SessionConfig, bootstrap_session
+
+    for bad in (0, -1):
+        cfg = SessionConfig(session_date=dt.date(2026, 9, 14), journal_root=tmp_path / "l0",
+                            manifest_path=tmp_path / "s.json", candidates_path=tmp_path / "c.json", ntp_host="h",
+                            slot_budget=200, max_clock_offset_ns=2_000_000_000,
+                            desired_streams=("H0STCNT0",), vendor="db", symbol_limit=bad)
+        with pytest.raises(ValueError, match="symbol_limit"):
+            bootstrap_session(cfg, now_ns=1)
+    assert not (tmp_path / "s.json").exists()

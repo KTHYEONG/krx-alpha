@@ -574,6 +574,23 @@ def _snapshot_cmd(today: dt.date, paths: DataPaths) -> list[str]:
     ]
 
 
+def _db_crosscheck_cmd(today: dt.date, paths: DataPaths) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "src.cli.main",
+        "collect-stream-db",
+        "--session-date",
+        today.isoformat(),
+        "--journal-root",
+        str(paths.journal_root),
+        "--manifest-path",
+        str(paths.db_crosscheck_manifest_path(today)),
+        "--candidates-path",
+        str(paths.candidates),
+    ]
+
+
 def _aftermarket_stream_cmd(today: dt.date, paths: DataPaths, *, shard: AftermarketShard) -> list[str]:
     return [
         sys.executable,
@@ -659,6 +676,7 @@ class DaemonState:
     streamer_restarts: int = 0
     last_supervisor_result: str | None = None
     last_snapshot_result: str | None = None
+    last_db_crosscheck_result: str | None = None
     aftermarket_plan: tuple[AftermarketShard, ...] = ()
     aftermarket_plan_day: dt.date | None = None
     aftermarket_refresh_day: dt.date | None = None
@@ -680,6 +698,7 @@ class DaemonState:
 class DaemonChildren:
     regular: ProcessSupervisor | None = None
     snapshot: ProcessSupervisor | None = None
+    db_crosscheck: ProcessSupervisor | None = None
     aftermarket: dict[str, ProcessSupervisor] = field(default_factory=dict)
     premarket: ProcessSupervisor | None = None
     program_sync: Any | None = None
@@ -810,6 +829,8 @@ class DaemonRunner:
         targets.extend(self._children.aftermarket.values())
         if self._children.snapshot is not None:
             targets.append(self._children.snapshot)
+        if self._children.db_crosscheck is not None:
+            targets.append(self._children.db_crosscheck)
         if self._children.premarket is not None:
             targets.append(self._children.premarket)
         sync = self._children.program_sync
@@ -1043,6 +1064,7 @@ class DaemonRunner:
         self._maybe_orchestrate(now, state, day)
         self._supervise_regular()
         self._supervise_snapshot(now, anchors)
+        self._supervise_db_crosscheck(now, anchors)
         self._run_ingest_watchdog(now, state, day, anchors)
         self._run_first_frame_watchdog(now, state, day, anchors)
         self._maybe_reselect_aftermarket(now, state, today, anchors)
@@ -1055,6 +1077,7 @@ class DaemonRunner:
         if ch.regular is not None:
             self._stop_regular_streamer()
         self._stop_snapshot_child()
+        self._stop_db_crosscheck_child()
         self._stop_aftermarket_children(clear_circuit_alerts=False)
 
     def _holiday_sleep_s(self, now: dt.datetime, state: SessionState) -> float:
@@ -1078,6 +1101,7 @@ class DaemonRunner:
             stale_stop = self._stop_regular_streamer()
             logger.warning("[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s", stale_stop)
         self._stop_snapshot_child()
+        self._stop_db_crosscheck_child()
         st.orchestration_day = today
         st.next_orchestration_at = None
         st.orchestration_attempts = 0
@@ -1189,6 +1213,24 @@ class DaemonRunner:
         )
         st.last_snapshot_result = None
 
+    def _install_db_crosscheck(self, cmd: list[str]) -> None:
+        """Install a new DB crosscheck supervisor, stopping any predecessor first."""
+        ch = self._children
+        st = self._state
+        predecessor = ch.db_crosscheck
+        if predecessor is not None:
+            stop_result = predecessor.stop(timeout_s=15.0)
+            logger.critical(
+                self._REPLACE_LIVE_LOG,
+                "db_crosscheck",
+                stop_result,
+            )
+        ch.db_crosscheck = ProcessSupervisor(
+            cmd=cmd,
+            breaker=RestartCircuitBreaker(),
+        )
+        st.last_db_crosscheck_result = None
+
     def _install_aftermarket(self, key: str, cmd: list[str]) -> None:
         """Install the aftermarket supervisor for `key`, stopping and CRITICAL-logging any predecessor."""
         ch = self._children
@@ -1216,6 +1258,8 @@ class DaemonRunner:
         self._install_regular(_stream_cmd(today, paths, degraded_reason=None), degraded=False)
         if snapshot_cfg.enabled:
             self._install_snapshot(_snapshot_cmd(today, paths), replaces_degraded=replacing_degraded)
+        if self._cfg.db_crosscheck_enabled:
+            self._install_db_crosscheck(_db_crosscheck_cmd(today, paths))
 
     def _handle_orchestration_failure(self, now: dt.datetime, today: dt.date) -> None:
         """Schedule the next orchestration retry and start a degraded streamer from recent candidates.
@@ -1286,6 +1330,25 @@ class DaemonRunner:
             elif snapshot_result == "circuit_open" and sup.take_circuit_alert():
                 logger.critical("[DAEMON] stage=snapshots status=FAIL reason=circuit_open")
             st.last_snapshot_result = snapshot_result
+
+    def _supervise_db_crosscheck(self, now: dt.datetime, anchors: SessionAnchors) -> None:
+        """Supervise the DB crosscheck child while the regular session is open."""
+        st = self._state
+        ch = self._children
+        sup = ch.db_crosscheck
+        if sup is None or ch.regular is None:
+            return
+        if not now.astimezone(_KST).time() < anchors.regular_close:
+            return
+        result = sup.ensure_running()
+        if result == "restarted":
+            logger.warning(
+                "[DAEMON] stage=db_crosscheck status=RESTARTED exit_code=%s",
+                sup.last_exit_code,
+            )
+        elif result == "circuit_open" and sup.take_circuit_alert():
+            logger.warning("[DAEMON] stage=db_crosscheck status=FAIL reason=circuit_open")
+        st.last_db_crosscheck_result = result
 
     def _run_ingest_watchdog(
         self, now: dt.datetime, state: SessionState, day: TradingDayView, anchors: SessionAnchors
@@ -1714,6 +1777,7 @@ class DaemonRunner:
             result = self._stop_regular_streamer()
             logger.info("[DAEMON] stage=streamer_stop result=%s", result, extra=EVENT)
         self._stop_snapshot_child()
+        self._stop_db_crosscheck_child()
         ref_day = now.astimezone(_KST).date()
         if st.eod_attempted_for != ref_day:
             st.eod_attempted_for = ref_day
@@ -1889,6 +1953,14 @@ class DaemonRunner:
         ch.snapshot.stop(timeout_s=15.0)
         ch.snapshot = None
         self._state.last_snapshot_result = None
+
+    def _stop_db_crosscheck_child(self) -> None:
+        ch = self._children
+        if ch.db_crosscheck is None:
+            return
+        ch.db_crosscheck.stop(timeout_s=15.0)
+        ch.db_crosscheck = None
+        self._state.last_db_crosscheck_result = None
 
     def _stop_aftermarket_children(self, *, clear_circuit_alerts: bool) -> None:
         """Stop all aftermarket shard supervisors and clear their per-key results.
