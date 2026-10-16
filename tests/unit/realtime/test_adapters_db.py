@@ -172,6 +172,31 @@ def test_db_recv_builds_krx_regular_frame_with_verbatim_raw(tmp_path) -> None:
     assert frame.session is MarketSession.REGULAR
 
 
+@pytest.mark.parametrize(
+    ("tr_cd", "field", "value", "expected"),
+    [
+        ("S00", "StckCntghour", "090742", "090742"),
+        ("S01", "BsopHour", "153000", "153000"),
+        ("S00", "StckCntghour", "99", ""),
+        ("S00", "StckCntghour", "256100", ""),
+        ("S00", "BsopHour", "090742", ""),
+    ],
+)
+def test_db_recv_stamps_valid_exchange_event_time(tmp_path, tr_cd, field, value, expected) -> None:
+    raw = json.dumps({"header": {"tr_cd": tr_cd, "tr_key": None}, "body": {"ShrnIscd": "005930", field: value}})
+
+    class _Msg:
+        type = aiohttp.WSMsgType.TEXT
+        data = raw
+
+    class _WS:
+        async def receive(self):
+            return _Msg()
+
+    frame = asyncio.run(_adapter(tmp_path, _WS()).recv())
+    assert frame.exchange_event_time == expected
+
+
 def test_db_recv_falls_back_to_header_tr_key_symbol(tmp_path) -> None:
     raw = json.dumps({"header": {"tr_cd": "S01", "tr_key": "J 000660"}, "body": {}})
 
