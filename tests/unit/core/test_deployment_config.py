@@ -153,6 +153,19 @@ def test_compose_enables_snapshot_collection() -> None:
     assert "KRX_ALPHA_SNAPSHOT_ENABLED=true" in compose
 
 
+def test_compose_keeps_db_crosscheck_dormant() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    raw_text = Path("docker-compose.yml").read_text(encoding="utf-8")
+    raw = yaml.safe_load(raw_text)
+    env = dict(item.split("=", 1) for item in raw["services"]["krx-collector"]["environment"])
+
+    assert "KRX_ALPHA_DB_CROSSCHECK_ENABLED" not in env
+    assert "DB_CROSSCHECK" not in raw_text
+
+
 def test_deploy_installs_host_backup_and_retires_shared_timer_only_when_krx_only() -> None:
     from pathlib import Path
 
