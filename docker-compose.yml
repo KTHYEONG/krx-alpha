@@ -28,6 +28,8 @@ services:
       - KRX_ALPHA_PREMARKET_ENABLED=true
       - KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT=5
       - KRX_ALPHA_PREMARKET_PAIR_CAPACITY_PER_CONNECTION=41
+      # DB금융투자 정규장 호가·체결 크로스체크 자식(25종목, l0/db). 2026-10-16 프로브 게이트 통과·kse 20:40 공유키 실행 정상 확인 후 활성화.
+      - KRX_ALPHA_DB_CROSSCHECK_ENABLED=true
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
