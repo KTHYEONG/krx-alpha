@@ -37,8 +37,8 @@ def _db_quote_body() -> dict[str, str]:
         "TotalBidprsqn": "1000",
     }
     for k in range(1, 11):
-        body[f"askp{k}"] = str(70100 + (k - 1) * 100)
-        body[f"bidp{k}"] = str(69900 - (k - 1) * 100)
+        body[f"Askp{k}"] = str(70100 + (k - 1) * 100)
+        body[f"Bidp{k}"] = str(69900 - (k - 1) * 100)
         body[f"AskpRsqn{k}"] = "100"
         body[f"BidpRsqn{k}"] = "100"
     return body
@@ -113,7 +113,7 @@ def test_decode_db_quotes_maps_ten_levels() -> None:
 
 def test_decode_db_quotes_missing_level_is_decode_failure() -> None:
     body = _db_quote_body()
-    del body["askp7"]
+    del body["Askp7"]
     raw = json.dumps({"header": {"tr_cd": "S01", "tr_key": "005930"}, "body": body})
     out = decode_db_quotes(pl.DataFrame({"raw": [raw], "recv_wall_ns": [100]}))
 
@@ -124,7 +124,7 @@ def test_decode_db_quotes_missing_level_is_decode_failure() -> None:
 def test_decode_db_quotes_malformed_rows_are_null_not_dropped() -> None:
     valid = json.dumps({"header": {"tr_cd": "S01", "tr_key": "005930"}, "body": _db_quote_body()})
     missing = _db_quote_body()
-    del missing["askp7"]
+    del missing["Askp7"]
     missing_raw = json.dumps({"header": {"tr_cd": "S01", "tr_key": "005930"}, "body": missing})
     non_object = json.dumps({"header": {"tr_cd": "S01", "tr_key": "005930"}, "body": "str"})
     chunk = pl.DataFrame({"raw": [valid, missing_raw, non_object, "not-json"], "recv_wall_ns": [100, 200, 300, 400]})
@@ -138,7 +138,7 @@ def test_decode_db_quotes_malformed_rows_are_null_not_dropped() -> None:
 
 def test_decode_db_quotes_explicit_null_level_is_all_null_on_both_paths() -> None:
     nulled = _db_quote_body()
-    nulled["askp7"] = None  # type: ignore[assignment]
+    nulled["Askp7"] = None  # type: ignore[assignment]
     nulled_raw = json.dumps({"header": {"tr_cd": "S01", "tr_key": "005930"}, "body": nulled})
     valid = json.dumps({"header": {"tr_cd": "S01", "tr_key": "005930"}, "body": _db_quote_body()})
 
