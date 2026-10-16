@@ -228,7 +228,7 @@ jobs:
             fi
             unexpected_key="\$(awk -F= '
               /^[[:space:]]*(#|$)/ { next }
-              \$1 !~ /^(KRX_OPENAPI_KEY|TOSS_APP_KEY|TOSS_APP_SECRET|LS_APP_KEY|LS_APP_SECRET|KIS_APP_KEY|KIS_APP_SECRET|KIS_ACCOUNT_NO|KIS_ACCOUNT_PRODUCT_CODE|ALERT_GMAIL_USER|ALERT_GMAIL_APP_PASSWORD|ALERT_GMAIL_TO|KRX_ALPHA_LIVENESS_HEALTHCHECK_URL|KRX_HOST_BACKUP_HEALTHCHECK_URL)$/ { print \$1; exit 1 }
+              \$1 !~ /^(KRX_OPENAPI_KEY|TOSS_APP_KEY|TOSS_APP_SECRET|LS_APP_KEY|LS_APP_SECRET|KIS_APP_KEY|KIS_APP_SECRET|KIS_ACCOUNT_NO|KIS_ACCOUNT_PRODUCT_CODE|ALERT_GMAIL_USER|ALERT_GMAIL_APP_PASSWORD|ALERT_GMAIL_TO|KRX_ALPHA_LIVENESS_HEALTHCHECK_URL|KRX_HOST_BACKUP_HEALTHCHECK_URL|DB_APP_KEY|DB_APP_SECRET)$/ { print \$1; exit 1 }
             ' "\$file")"
             if [ -n "\$unexpected_key" ]; then
               echo "Runtime env contains an unexpected key: \$unexpected_key" >&2

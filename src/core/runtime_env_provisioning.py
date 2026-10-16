@@ -48,6 +48,9 @@ RUNTIME_ENV_SPEC: tuple[RuntimeEnvKey, ...] = (
     RuntimeEnvKey(target="KRX_HOST_BACKUP_HEALTHCHECK_URL", sources=("KRX_HOST_BACKUP_HEALTHCHECK_URL",)),
 )
 
+# DB crosscheck credentials are optional: CI accepts them but never requires them.
+OPTIONAL_RUNTIME_ENV_KEYS: tuple[str, ...] = ("DB_APP_KEY", "DB_APP_SECRET")
+
 REMOTE_RUNTIME_INSTALL_SCRIPT = """set -euo pipefail
 dest="/home/ubuntu/quant-secrets/krx-alpha.env"
 mkdir -p "$(dirname "$dest")"
@@ -63,8 +66,10 @@ chown ubuntu:ubuntu "$dest"
 
 
 def build_runtime_fragment(source_path: Path) -> str:
-    """Build the canonical 14-line runtime fragment from a workstation source file."""
-    accepted_keys = frozenset(source for key in RUNTIME_ENV_SPEC for source in key.sources)
+    """Build the canonical runtime fragment (14 required keys plus any optional keys present)."""
+    accepted_keys = frozenset(source for key in RUNTIME_ENV_SPEC for source in key.sources) | frozenset(
+        OPTIONAL_RUNTIME_ENV_KEYS
+    )
     parsed = parse_workstation_assignments(source_path, accepted_keys)
     lines: list[str] = []
     for key in RUNTIME_ENV_SPEC:
@@ -77,6 +82,7 @@ def build_runtime_fragment(source_path: Path) -> str:
         if not value:
             raise KrxAlphaError(f"missing required runtime key: {key.target}")
         lines.append(f"{key.target}={value}")
+    lines.extend(f"{name}={parsed[name]}" for name in OPTIONAL_RUNTIME_ENV_KEYS if parsed.get(name))
     return "\n".join(lines) + "\n"
 
 
