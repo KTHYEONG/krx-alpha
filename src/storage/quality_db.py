@@ -22,8 +22,8 @@ _DB_QUOTE_BODY_FIELDS: tuple[str, ...] = (
     "BsopHour",
     "TotalAskprsqn",
     "TotalBidprsqn",
-    *[f"askp{k}" for k in range(1, 11)],
-    *[f"bidp{k}" for k in range(1, 11)],
+    *[f"Askp{k}" for k in range(1, 11)],
+    *[f"Bidp{k}" for k in range(1, 11)],
     *[f"AskpRsqn{k}" for k in range(1, 11)],
     *[f"BidpRsqn{k}" for k in range(1, 11)],
 )
@@ -134,8 +134,8 @@ def decode_db_quotes(chunk: pl.DataFrame) -> pl.DataFrame:
             ("hotime", "BsopHour"),
             ("totofferrem", "TotalAskprsqn"),
             ("totbidrem", "TotalBidprsqn"),
-            *[(f"offerho{k}", f"askp{k}") for k in range(1, 11)],
-            *[(f"bidho{k}", f"bidp{k}") for k in range(1, 11)],
+            *[(f"offerho{k}", f"Askp{k}") for k in range(1, 11)],
+            *[(f"bidho{k}", f"Bidp{k}") for k in range(1, 11)],
             *[(f"offerrem{k}", f"AskpRsqn{k}") for k in range(1, 11)],
             *[(f"bidrem{k}", f"BidpRsqn{k}") for k in range(1, 11)],
         ]
@@ -155,8 +155,8 @@ def decode_db_quotes(chunk: pl.DataFrame) -> pl.DataFrame:
                 "totbidrem": row["TotalBidprsqn"],
             }
             for k in range(1, 11):
-                mapped[f"offerho{k}"] = row[f"askp{k}"]
-                mapped[f"bidho{k}"] = row[f"bidp{k}"]
+                mapped[f"offerho{k}"] = row[f"Askp{k}"]
+                mapped[f"bidho{k}"] = row[f"Bidp{k}"]
             for k in range(1, 11):
                 mapped[f"offerrem{k}"] = row[f"AskpRsqn{k}"]
                 mapped[f"bidrem{k}"] = row[f"BidpRsqn{k}"]

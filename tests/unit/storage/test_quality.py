@@ -1435,8 +1435,8 @@ def test_quality_routes_db_quotes_to_db_decoder() -> None:
     def _db_quote():
         b = {'ShrnIscd': '005930', 'BsopHour': '101500', 'TotalAskprsqn': '1000', 'TotalBidprsqn': '1000'}
         for k in range(1, 11):
-            b[f'askp{k}'] = str(70100 + (k - 1) * 100)
-            b[f'bidp{k}'] = str(69900 - (k - 1) * 100)
+            b[f'Askp{k}'] = str(70100 + (k - 1) * 100)
+            b[f'Bidp{k}'] = str(69900 - (k - 1) * 100)
             b[f'AskpRsqn{k}'] = '100'
             b[f'BidpRsqn{k}'] = '100'
         return json.dumps({'header': {'tr_cd': 'S01', 'tr_key': '005930'}, 'body': b}, ensure_ascii=False)
