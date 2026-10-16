@@ -26,15 +26,19 @@ def _install(monkeypatch, ws, acks, frames, token="SECRET-TOKEN"):
     from src.realtime.contracts import VendorDisconnected
 
     class _WS:
+        """Mirrors aiohttp: receive_str() delegates to self.receive(timeout) positionally."""
+
         def __init__(self):
-            self._ack_q = list(ws.get("acks", []))
-            self._msg_q = list(ws.get("msgs", []))
+            self._q = [_Msg(aiohttp.WSMsgType.TEXT, a) for a in ws.get("acks", [])] + list(ws.get("msgs", []))
 
-        async def receive_str(self):
-            return self._ack_q.pop(0)
+        async def receive_str(self, **_kw):
+            msg = await self.receive(None)
+            if msg.type is not aiohttp.WSMsgType.TEXT:
+                raise TypeError(f"not text: {msg.type}")
+            return msg.data
 
-        async def receive(self):
-            return self._msg_q.pop(0)
+        async def receive(self, *_a):
+            return self._q.pop(0)
 
     fake_ws = _WS()
 
@@ -180,10 +184,12 @@ def test_probe_taps_ws_receive_texts_and_counts_ping(tmp_path, monkeypatch, caps
             self._acks = [ack]
             self._msgs = [_Msg(aiohttp.WSMsgType.PING), _Msg(aiohttp.WSMsgType.TEXT, raw)]
 
-        async def receive_str(self):
-            return self._acks.pop(0)
+        async def receive_str(self, **_kw):
+            return (await self.receive(None)).data
 
-        async def receive(self):
+        async def receive(self, *_a):
+            if self._acks:
+                return _Msg(aiohttp.WSMsgType.TEXT, self._acks.pop(0))
             try:
                 return self._msgs.pop(0)
             except IndexError:
@@ -240,10 +246,12 @@ def test_probe_subscribe_failure_flushes_tap_and_fails(tmp_path, monkeypatch) ->
         def __init__(self):
             self._acks = [ack]
 
-        async def receive_str(self):
-            return self._acks.pop(0)
+        async def receive_str(self, **_kw):
+            return (await self.receive(None)).data
 
-        async def receive(self):
+        async def receive(self, *_a):
+            if self._acks:
+                return _Msg(aiohttp.WSMsgType.TEXT, self._acks.pop(0))
             raise AssertionError("recv must not run after subscribe failure")
 
     fake_ws = _WS()
