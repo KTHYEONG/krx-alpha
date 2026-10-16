@@ -102,17 +102,12 @@ async def _run_probe(args: argparse.Namespace) -> int:
             redacted = text.replace(token, "<token>") if token else text
             tap.append({"recv_wall_ns": time.time_ns(), "text": redacted})
 
-        orig_receive_str = ws.receive_str
         orig_receive = ws.receive
 
-        async def _tapped_receive_str() -> str:
-            text = await orig_receive_str()
-            _record(str(text))
-            return str(text)
-
-        async def _tapped_receive() -> Any:
+        async def _tapped_receive(*args: Any) -> Any:
+            # aiohttp's receive_str() calls self.receive(timeout) positionally; this is the only tap point.
             nonlocal ping_count
-            msg = await orig_receive()
+            msg = await orig_receive(*args)
             mtype = getattr(msg, "type", None)
             data = getattr(msg, "data", None)
             if mtype is aiohttp.WSMsgType.PING:
@@ -121,7 +116,6 @@ async def _run_probe(args: argparse.Namespace) -> int:
                 _record(data)
             return msg
 
-        ws.receive_str = _tapped_receive_str
         ws.receive = _tapped_receive
         try:
             acks = await adapter.subscribe([(s, t) for s in symbols for t in streams])
