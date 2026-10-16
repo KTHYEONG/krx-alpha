@@ -905,7 +905,8 @@ class DaemonRunner:
             logger.critical("[DAEMON] stage=program_trades_sync status=FAIL exit_code=launch reason=%s", str(exc))
             ch.program_sync = None
             return
-        ch.program_sync_started_at = now
+        # `now` is the cycle-start instant; EOD maintenance may have blocked this cycle for tens of minutes.
+        ch.program_sync_started_at = self._now()
         st.program_sync_day = today
         logger.info("[DAEMON] stage=program_trades_sync status=STARTED date=%s", today.isoformat())
 
