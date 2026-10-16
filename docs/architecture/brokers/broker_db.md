@@ -151,9 +151,9 @@ DB Securities natively supports Nextrade (NXT) ATS alternative trading venue sid
   * `InputHourClsCode`: Time window selection code:
     * `"4"`: Regular continuous session (장중)
     * **`"8"`: Closing auction match price / Indicative auction (`예상` — MOC capture)**
-    * `"1"`: After-hours single price (시간외단일가체결)
-    * `"2"`: Pre-market + Regular + Post-market (장전+장중+장후)
-    * `"5"`: All sessions including expected match (장전+장중+장후+장종료 예상포함)
+    * `"1"`: Aftermarket single price (post-close single-price execution)
+    * `"2"`: Pre-market + Regular + Post-market
+    * `"5"`: All sessions including expected match
 * **Output (`Out` array):**
   * `Hour`: Timestamp (`HHMMSS`)
   * `Prpr`: Executed price or indicative auction match price
@@ -319,9 +319,9 @@ DB Securities natively supports Nextrade (NXT) ATS alternative trading venue sid
     * `"06"`: Best Limit (최유리지정가)
     * `"07"`: First Priority Limit (최우선지정가)
     * `"14"`: Midpoint Order (중간가호가)
-    * `"61"`: Pre-Market Off-Hours (장개시전시간외)
-    * `"81"`: Post-Market Closing Price (시간외종가)
-    * `"82"`: Post-Market Single Price (시간외단일가)
+    * `"61"`: Pre-Market Off-Hours
+    * `"81"`: Post-Market Closing Price
+    * `"82"`: Post-Market Single Price
   * `MgntrnCode`: `"000"` (Cash / 일반현금주문).
   * `LoanDt`: `"00000000"` (Cash).
   * `OrdCndiTpCode`: `"0"` (None), `"1"` (IOC), `"2"` (FOK).
@@ -468,7 +468,7 @@ DB Securities natively supports Nextrade (NXT) ATS alternative trading venue sid
 | `2611` | 장시작 전 또는 장마감 되었습니다. | Session closed for requested order type. |
 | `2714` | 주문수량이 매매가능수량을 초과했습니다. | Order quantity exceeds available buying/selling power. |
 | `2752` | 증거금부족으로 주문이 불가합니다. | Margin shortage. |
-| `3563` | 정규매매장이 종료되었습니다. 시간외 호가구분을 입력하십시오. | Regular session closed. Switch to off-hours order code. |
+| `3563` | 정규매매장이 종료되었습니다. (이하 호가구분 재입력 안내) | Regular session closed. Switch to off-hours order code. |
 | `3735` | 해당종목 NXT거래 불가합니다. | Target asset is not eligible for Nextrade ATS trading. |
 
 ---
