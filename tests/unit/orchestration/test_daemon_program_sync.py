@@ -144,6 +144,31 @@ def test_sync_launched_once_after_business_day_eod(tmp_path, monkeypatch) -> Non
     assert runner._children.program_sync is _FakePopen.instances[0]
 
 
+def test_sync_timeout_clock_starts_at_launch_not_cycle_start(tmp_path, monkeypatch) -> None:
+    # Given: EOD 후처리가 사이클을 38분 막아 launch 시점의 벽시계가 사이클 시작보다 늦다
+    import datetime as dt
+
+    from src.orchestration import daemon as daemon_mod
+
+    _FakePopen.instances.clear()
+    day = dt.date(2026, 9, 24)
+    cycle_start = dt.datetime(2026, 9, 24, 20, 0, tzinfo=_KST)
+    launch_time = cycle_start + dt.timedelta(minutes=38)
+    runner = _runner(tmp_path, monkeypatch, now=launch_time)
+    runner._state.eod_attempted_for = day
+    monkeypatch.setattr(runner._gate, "view", lambda today, at: _business_view(day))
+    monkeypatch.setattr(daemon_mod.subprocess, "Popen", _FakePopen)
+
+    # When: 사이클 시작 시각을 now로 받은 스텝이 자식을 띄운다
+    runner._maybe_launch_program_sync(cycle_start)
+
+    # Then: 타임아웃 기준은 launch 시점이라 2분 뒤 폴링에서 조기 종료되지 않는다
+    assert runner._children.program_sync_started_at == launch_time
+    runner._poll_program_sync(launch_time + dt.timedelta(minutes=2))
+    assert runner._children.program_sync is _FakePopen.instances[0]
+    assert _FakePopen.instances[0].terminated is False
+
+
 def test_sync_not_launched_on_holidays(tmp_path, monkeypatch) -> None:
     # Given: 휴장일 EOD 상태
     import datetime as dt
