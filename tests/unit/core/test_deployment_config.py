@@ -290,7 +290,7 @@ def test_runtime_fragment_keys_match_ci_allowlist_without_values() -> None:
     import re
     from pathlib import Path
 
-    from src.core.runtime_env_provisioning import RUNTIME_ENV_SPEC
+    from src.core.runtime_env_provisioning import OPTIONAL_RUNTIME_ENV_KEYS, RUNTIME_ENV_SPEC
 
     workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
     body = _workflow_function_body(workflow, "validate_runtime_env")
@@ -298,7 +298,7 @@ def test_runtime_fragment_keys_match_ci_allowlist_without_values() -> None:
 
     allowlist = re.search(r"\$1 !~ /\^\(([^)]+)\)\$/", body)
     assert allowlist is not None
-    assert sorted(allowlist.group(1).split("|")) == sorted(targets)
+    assert sorted(allowlist.group(1).split("|")) == sorted([*targets, *OPTIONAL_RUNTIME_ENV_KEYS])
 
     required = _shell_word_list(body, "for required_key in")
     assert sorted(required) == sorted(targets)

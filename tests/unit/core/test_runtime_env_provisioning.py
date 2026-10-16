@@ -195,3 +195,18 @@ def test_install_runtime_fragment_sends_values_only_on_ssh_stdin(monkeypatch) ->
     assert "chmod 600" in remote_script
     assert "chown ubuntu:ubuntu" in remote_script
     assert "mv -f" in remote_script
+
+
+def test_build_runtime_fragment_appends_optional_db_keys_only_when_present(tmp_path) -> None:
+    from src.core.runtime_env_provisioning import RUNTIME_ENV_SPEC, build_runtime_fragment
+
+    required = "\n".join(f"{key.target}=v-{key.target}" for key in RUNTIME_ENV_SPEC) + "\n"
+    source = tmp_path / ".quant.env"
+
+    source.write_text(required, encoding="utf-8")
+    assert len(build_runtime_fragment(source).splitlines()) == 14
+
+    source.write_text(required + "DB_APP_KEY=db-key\nDB_APP_SECRET=db-secret\n", encoding="utf-8")
+    lines = build_runtime_fragment(source).splitlines()
+    assert len(lines) == 16
+    assert lines[-2:] == ["DB_APP_KEY=db-key", "DB_APP_SECRET=db-secret"]
