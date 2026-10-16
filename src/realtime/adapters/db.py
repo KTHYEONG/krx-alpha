@@ -35,6 +35,9 @@ _AUTH_REJECT_CODES: frozenset[str] = frozenset({"IGW00121", "IGW00123", "10009"}
 
 _SYMBOL_RE = re.compile(r"[0-9A-Z]{6}")
 
+_EVENT_TIME_FIELD: Mapping[str, str] = {"S00": "StckCntghour", "S01": "BsopHour"}
+_HHMMSS_RE = re.compile(r"(?:[01]\d|2[0-3])[0-5]\d[0-5]\d")
+
 
 class DbRealtimeAdapter:
     """DB Securities KRX-venue realtime adapter (S00 trades, S01 L10 book) behind the VendorAdapter contract."""
@@ -173,6 +176,8 @@ class DbRealtimeAdapter:
         symbol = self._extract_symbol(o)
         if symbol is None:
             return None
+        body = o.get("body")
+        event_time = body.get(_EVENT_TIME_FIELD[str(tr_cd)]) if isinstance(body, dict) else None
         self._seq += 1
         return L0Frame(
             "db",
@@ -185,6 +190,7 @@ class DbRealtimeAdapter:
             conn_id=self._conn_id,
             venue=MarketVenue.KRX,
             session=MarketSession.REGULAR,
+            exchange_event_time=event_time if isinstance(event_time, str) and _HHMMSS_RE.fullmatch(event_time) else "",
         )
 
     async def subscribe(self, pairs: list[tuple[str, str]]) -> list[VendorAck]:
