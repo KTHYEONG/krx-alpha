@@ -99,7 +99,7 @@ from src.realtime.kis_sharding import (
     plan_aftermarket_shards,
     plan_premarket_shard,
 )
-from src.storage.layout import l0_day_journal_glob
+from src.storage.layout import L0_VENDOR_DB, l0_day_journal_glob
 from src.storage.remote import RemoteArchiveError
 from src.storage.retention import check_disk_watermark
 from src.storage.snapshot_store import SnapshotStore
@@ -704,6 +704,8 @@ class StreamChildSpec:
     requires_primary: bool = False
     starts_in_degraded: bool = False
     silent_on_degraded_upgrade: bool = False
+    journal_vendor: Callable[[CollectorSettings], str] | None = None
+    manifest_path: Callable[[DataPaths, dt.date], pathlib.Path] | None = None
 
     def __post_init__(self) -> None:
         is_session = self.lifecycle is ChildLifecycle.SESSION
@@ -725,6 +727,12 @@ class StreamChildSpec:
             self.requires_primary or self.starts_in_degraded or self.silent_on_degraded_upgrade
         ):
             raise ValueError(f"{self.key.value} must not set primary-only supervision flags")
+        journals_session = self.role in (StreamRole.PRIMARY, StreamRole.CROSSCHECK)
+        has_journal_fields = self.journal_vendor is not None and self.manifest_path is not None
+        if journals_session and not has_journal_fields:
+            raise ValueError(f"{self.key.value} must define journal_vendor and manifest_path")
+        if not journals_session and (self.journal_vendor is not None or self.manifest_path is not None):
+            raise ValueError(f"{self.key.value} must not define journal_vendor or manifest_path")
 
 
 @dataclass
@@ -870,6 +878,99 @@ def _stop_sync_child(proc: Any, *, grace_s: float, already_signalled: bool = Fal
             logger.warning("[DAEMON] stage=program_trades_sync status=KILL_FAIL reason=%s", str(kill_exc))
 
 
+@dataclass
+class CrosscheckWatch:
+    """Per-child liveness latch for one CROSSCHECK stream (runner-private, not part of DaemonState)."""
+
+    last_ingest_check: dt.datetime | None = None
+    stale_for: dt.date | None = None
+    last_first_frame_check: dt.datetime | None = None
+    first_frame_alerted_for: dt.date | None = None
+
+
+def _crosscheck_ingest_tick(
+    watch: CrosscheckWatch,
+    *,
+    child: StreamChildKey,
+    vendor: str,
+    journal_root: pathlib.Path,
+    today: dt.date,
+    now: dt.datetime,
+) -> None:
+    """Rate-limited staleness check of one crosscheck journal; logs at most WARNING."""
+    last = watch.last_ingest_check
+    if last is not None and (now - last).total_seconds() < INGEST_CHECK_S:
+        return
+    watch.last_ingest_check = now
+    age = _journal_age_s(journal_root, vendor, today, now)
+    stale = age is None or age > INGEST_STALE_S
+    if stale and watch.stale_for != today:
+        logger.warning(
+            "[DATA] stage=crosscheck_watchdog status=STALE child=%s vendor=%s date=%s age_s=%s",
+            child.value,
+            vendor,
+            today.isoformat(),
+            "none" if age is None else str(int(age)),
+        )
+        watch.stale_for = today
+    elif not stale and watch.stale_for == today:
+        assert age is not None
+        logger.info(
+            "[DATA] stage=crosscheck_watchdog status=RECOVERED child=%s vendor=%s date=%s age_s=%d",
+            child.value,
+            vendor,
+            today.isoformat(),
+            int(age),
+        )
+        watch.stale_for = None
+
+
+def _crosscheck_first_frame_tick(
+    watch: CrosscheckWatch,
+    *,
+    child: StreamChildKey,
+    vendor: str,
+    journal_root: pathlib.Path,
+    today: dt.date,
+    now: dt.datetime,
+    due: dt.time,
+) -> None:
+    """Rate-limited pre-open first-frame check of one crosscheck journal; logs at most WARNING."""
+    last = watch.last_first_frame_check
+    if last is not None and (now - last).total_seconds() < INGEST_CHECK_S:
+        return
+    watch.last_first_frame_check = now
+    if not _journal_has_frames(journal_root, vendor, today):
+        if watch.first_frame_alerted_for != today:
+            logger.warning(
+                "[DATA] stage=crosscheck_watchdog status=NO_FIRST_FRAME child=%s vendor=%s date=%s due=%s",
+                child.value,
+                vendor,
+                today.isoformat(),
+                due.isoformat(),
+            )
+            watch.first_frame_alerted_for = today
+        return
+    if watch.first_frame_alerted_for == today:
+        logger.info(
+            "[DATA] stage=crosscheck_watchdog status=FIRST_FRAME_RECOVERED child=%s vendor=%s date=%s",
+            child.value,
+            vendor,
+            today.isoformat(),
+        )
+        watch.first_frame_alerted_for = None
+
+
+def _log_crosscheck_reconciliation_failure(child: str, exc: OSError) -> None:
+    """Emit the WARNING for one crosscheck reconciliation OSError outside DaemonRunner."""
+    logger.warning(
+        "[DATA] stage=crosscheck_reconciliation status=FAIL child=%s error=%s",
+        child,
+        str(exc),
+        exc_info=True,
+    )
+
+
 class DaemonRunner:
     """Own one daemon process's date-scoped state and supervised children.
 
@@ -897,6 +998,8 @@ class DaemonRunner:
                 circuit_open="[DAEMON] stage=streamer status=FAIL reason=circuit_open",
                 circuit_level=logging.CRITICAL,
             ),
+            journal_vendor=lambda cfg: cfg.vendor,
+            manifest_path=lambda paths, day: paths.manifest_path(day),
         ),
         StreamChildSpec(
             key=StreamChildKey.SNAPSHOT,
@@ -927,6 +1030,8 @@ class DaemonRunner:
                 circuit_level=logging.WARNING,
             ),
             requires_primary=True,
+            journal_vendor=lambda cfg: L0_VENDOR_DB,
+            manifest_path=lambda paths, day: paths.db_crosscheck_manifest_path(day),
         ),
         StreamChildSpec(
             key=StreamChildKey.AFTERMARKET,
@@ -1000,6 +1105,7 @@ class DaemonRunner:
         )
         self._last_first_frame_check: dt.datetime | None = None
         self._first_frame_alerted_for: dt.date | None = None
+        self._crosscheck_watch: dict[StreamChildKey, CrosscheckWatch] = {}
         self._run_id: str | None = None
 
     def _maybe_ping(self, now_mono: float) -> None:
@@ -1271,6 +1377,7 @@ class DaemonRunner:
         self._supervise_session_children(now, anchors)
         self._run_ingest_watchdog(now, state, day, anchors)
         self._run_first_frame_watchdog(now, state, day, anchors)
+        self._run_crosscheck_watchdogs(now, state, day, anchors)
         self._maybe_reselect_aftermarket(now, state, today, anchors)
         if state == SessionState.AFTER_MARKET_ACTIVE and self._cfg.after_market_enabled:
             self._supervise_aftermarket(now, today, anchors)
@@ -1526,6 +1633,9 @@ class DaemonRunner:
         st = self._state
         cfg = self._cfg
         paths = self._paths
+        journal_vendor = self._stream_spec(StreamChildKey.REGULAR).journal_vendor
+        assert journal_vendor is not None
+        vendor = journal_vendor(cfg)
         today = day.date
         watch_start = _shifted_time(anchors.regular_open, INGEST_WATCH_START_OFFSET)
         watch_end = _shifted_time(anchors.closing_auction_start, INGEST_WATCH_END_OFFSET)
@@ -1535,7 +1645,7 @@ class DaemonRunner:
             and (st.last_ingest_check is None or (now - st.last_ingest_check).total_seconds() >= INGEST_CHECK_S)
         ):
             st.last_ingest_check = now
-            age = _journal_age_s(paths.journal_root, cfg.vendor, today, now)
+            age = _journal_age_s(paths.journal_root, vendor, today, now)
             stale = age is None or age > INGEST_STALE_S
             if stale and not st.ingest_stale and age is None and day.status is TradingDayStatus.UNKNOWN:
                 if st.possible_holiday_warned_for != today:
@@ -1588,7 +1698,10 @@ class DaemonRunner:
         self._last_first_frame_check = now
         cfg = self._cfg
         paths = self._paths
-        if _journal_has_frames(paths.journal_root, cfg.vendor, today):
+        journal_vendor = self._stream_spec(StreamChildKey.REGULAR).journal_vendor
+        assert journal_vendor is not None
+        vendor = journal_vendor(cfg)
+        if _journal_has_frames(paths.journal_root, vendor, today):
             if self._first_frame_alerted_for == today:
                 logger.warning(
                     "[DAEMON] stage=ingest_watchdog status=FIRST_FRAME_RECOVERED date=%s",
@@ -1603,6 +1716,52 @@ class DaemonRunner:
                 due.isoformat(),
             )
             self._first_frame_alerted_for = today
+
+    def _run_crosscheck_watchdogs(
+        self, now: dt.datetime, state: SessionState, day: TradingDayView, anchors: SessionAnchors
+    ) -> None:
+        """Run ingest and first-frame checks for every live CROSSCHECK child; never touches primary state."""
+        if day.status is not TradingDayStatus.BUSINESS:
+            return
+        now_time = now.astimezone(_KST).time()
+        ingest_start = _shifted_time(anchors.regular_open, INGEST_WATCH_START_OFFSET)
+        ingest_end = _shifted_time(anchors.closing_auction_start, INGEST_WATCH_END_OFFSET)
+        ingest_due = state == SessionState.FULL_ACTIVE and ingest_start <= now_time < ingest_end
+        due = _shifted_time(anchors.regular_open, -FIRST_FRAME_LEAD + FIRST_FRAME_GRACE)
+        handover = _shifted_time(anchors.regular_open, INGEST_WATCH_START_OFFSET)
+        frame_due = state in (SessionState.STREAMER_ACTIVE, SessionState.FULL_ACTIVE) and due <= now_time < handover
+        if not (ingest_due or frame_due):
+            return
+        cfg = self._cfg
+        paths = self._paths
+        today = day.date
+        for spec in self._session_specs():
+            if spec.role is not StreamRole.CROSSCHECK:
+                continue
+            if self._children.get(spec.key) is None:
+                continue
+            assert spec.journal_vendor is not None
+            watch = self._crosscheck_watch.setdefault(spec.key, CrosscheckWatch())
+            vendor = spec.journal_vendor(cfg)
+            if ingest_due:
+                _crosscheck_ingest_tick(
+                    watch,
+                    child=spec.key,
+                    vendor=vendor,
+                    journal_root=paths.journal_root,
+                    today=today,
+                    now=now,
+                )
+            if frame_due:
+                _crosscheck_first_frame_tick(
+                    watch,
+                    child=spec.key,
+                    vendor=vendor,
+                    journal_root=paths.journal_root,
+                    today=today,
+                    now=now,
+                    due=due,
+                )
 
     def _maybe_reselect_aftermarket(
         self, now: dt.datetime, state: SessionState, today: dt.date, anchors: SessionAnchors
@@ -1981,6 +2140,7 @@ class DaemonRunner:
         self._log_premarket_eod(ref_day)
         housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=self._eod_progress)
         reconcile_ok, reconciled = self._reconcile_regular_session(ref_day, day, anchors)
+        crosscheck = self._reconcile_crosscheck_sessions(ref_day, day, anchors)
         backup_missing, backup_ok, host_backup = _check_backup(
             cfg.host_backup_status_path,
             paths,
@@ -2021,6 +2181,7 @@ class DaemonRunner:
                 f"streamer_restarts={st.streamer_restarts}",
                 f"aftermarket_restarts={st.aftermarket_restarts}",
                 f"orchestration_attempts={st.orchestration_attempts}",
+                *[f"crosscheck_{k.value}={v}" for k, v in crosscheck.items()],
             ]
         )
         send_digest(f"[krx-alpha] EOD {ref_day.isoformat()} {eod_status}", digest_body)
@@ -2085,6 +2246,41 @@ class DaemonRunner:
                 return False, False
         logger.warning("[DAEMON] stage=eod_reconciliation status=SKIP reason=calendar_unknown")
         return True, False
+
+    def _reconcile_crosscheck_sessions(
+        self, ref_day: dt.date, day: TradingDayView, anchors: SessionAnchors
+    ) -> dict[StreamChildKey, str]:
+        """Return per-crosscheck-child outcome in {"ok","gap","error","skipped"}; never affects primary EOD status."""
+        cfg = self._cfg
+        paths = self._paths
+        outcomes: dict[StreamChildKey, str] = {}
+        for spec in self._session_specs():
+            if spec.role is not StreamRole.CROSSCHECK:
+                continue
+            if day.status is not TradingDayStatus.BUSINESS or self._state.orchestrated_for != ref_day:
+                outcomes[spec.key] = "skipped"
+                continue
+            assert spec.manifest_path is not None
+            assert spec.journal_vendor is not None
+            try:
+                reconciled = check_session_reconciliation(
+                    manifest_path=spec.manifest_path(paths, ref_day),
+                    date=ref_day,
+                    journal_root=paths.journal_root,
+                    streams=cfg.streams,
+                    vendor=spec.journal_vendor(cfg),
+                    venue=MarketVenue.KRX.value,
+                    session=MarketSession.REGULAR.value,
+                    regular_open=anchors.regular_open,
+                    regular_close=anchors.regular_close,
+                    failure_level=logging.WARNING,
+                )
+            except OSError as exc:
+                outcomes[spec.key] = "error"
+                _log_crosscheck_reconciliation_failure(spec.key.value, exc)
+            else:
+                outcomes[spec.key] = "ok" if reconciled else "gap"
+        return outcomes
 
     def _stop_aftermarket_children(self, *, clear_circuit_alerts: bool) -> None:
         """Stop all aftermarket shard supervisors and clear their per-key results.

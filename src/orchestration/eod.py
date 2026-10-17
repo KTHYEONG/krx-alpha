@@ -346,6 +346,7 @@ def check_session_reconciliation(
     regular_open: dt.time,
     regular_close: dt.time,
     max_gap_s: float = MAX_SESSION_GAP_S,
+    failure_level: int = logging.CRITICAL,
 ) -> bool:
     """Verify that a business-day regular session left a complete collection trail.
 
@@ -371,12 +372,18 @@ def check_session_reconciliation(
         regular_open: Regular-session open bound for gap clipping (KST).
         regular_close: Regular-session close bound for gap clipping (KST).
         max_gap_s: Maximum tolerated regular-session gap in seconds.
+        failure_level: Log level for the failure line; WARNING, ERROR or CRITICAL.
 
     Returns:
-        True when every check holds; otherwise False, after one CRITICAL
-        ``[DATA] stage=session_reconciliation status=FAIL`` log listing the
-        failed checks.
+        True when every check holds; otherwise False, after one
+        ``[DATA] stage=session_reconciliation status=FAIL`` log at ``failure_level``
+        listing the failed checks.
+
+    Raises:
+        ValueError: ``failure_level`` is not WARNING, ERROR or CRITICAL.
     """
+    if failure_level not in (logging.WARNING, logging.ERROR, logging.CRITICAL):
+        raise ValueError(f"failure_level must be WARNING, ERROR or CRITICAL: {failure_level}")
     manifest = pathlib.Path(manifest_path)
     root = pathlib.Path(journal_root)
     issues: list[str] = []
@@ -395,7 +402,8 @@ def check_session_reconciliation(
         except (ValueError, KeyError, TypeError):
             issues.append("manifest_unreadable")
     if issues:
-        logger.critical(
+        logger.log(
+            failure_level,
             "[DATA] stage=session_reconciliation status=FAIL date=%s reasons=%s",
             date.isoformat(),
             ",".join(issues),
