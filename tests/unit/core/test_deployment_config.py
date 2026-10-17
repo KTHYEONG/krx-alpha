@@ -300,28 +300,35 @@ def _shell_word_list(body: str, loop_head: str) -> list[str]:
 
 
 def test_runtime_fragment_keys_match_ci_allowlist_without_values() -> None:
-    import re
     from pathlib import Path
 
     from src.core.runtime_env_provisioning import OPTIONAL_RUNTIME_ENV_KEYS, RUNTIME_ENV_SPEC
 
     workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
     body = _workflow_function_body(workflow, "validate_runtime_env")
-    targets = [key.target for key in RUNTIME_ENV_SPEC]
+    script = Path("deploy/host/krx-validate-runtime-env.sh").read_text(encoding="utf-8")
 
-    allowlist = re.search(r"\$1 !~ /\^\(([^)]+)\)\$/", body)
-    assert allowlist is not None
-    assert sorted(allowlist.group(1).split("|")) == sorted([*targets, *OPTIONAL_RUNTIME_ENV_KEYS])
+    assert "python3 -m src.core.runtime_env_provisioning emit-key-manifest" in workflow
+    assert "runtime-env-keys.txt" in workflow
+    assert "krx-validate-runtime-env.sh" in workflow
+    assert "\\$STAGING_DIR/krx-validate-runtime-env.sh" in body
+    upload = next(line for line in workflow.splitlines() if "scp " in line and "runtime-env-keys.txt" in line)
+    assert '"$RUNNER_TEMP/runtime-env-keys.txt" deploy/host/krx-validate-runtime-env.sh' in upload
+    assert '"$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"' in upload
+    assert workflow.index("emit-key-manifest --out") < workflow.index(upload)
+    assert workflow.index('validate_runtime_env "\\$RUNTIME_ENV_FILE"') < workflow.index("vps_stage pull")
 
-    required = _shell_word_list(body, "for required_key in")
-    assert sorted(required) == sorted(targets)
-    assert len(set(required)) == len(targets)
+    declared = [*[key.target for key in RUNTIME_ENV_SPEC], *OPTIONAL_RUNTIME_ENV_KEYS]
+    assert [name for name in declared if name in body] == []
 
-    echo_lines = [line for line in body.splitlines() if "echo" in line]
-    assert echo_lines
-    assert not any("credential_value" in line for line in echo_lines)
-    assert 'cat "$file"' not in body
-    assert "cat $file" not in body
+    assert [line for line in script.splitlines() if "echo" in line]
+    for source in (body, script):
+        echo_lines = [line for line in source.splitlines() if "echo" in line]
+        assert not any("credential_value" in line for line in echo_lines)
+        assert 'cat "$file"' not in source
+        assert "cat $file" not in source
+        assert 'cat "$env_file"' not in source
+        assert "cat $env_file" not in source
 
 
 def test_keypool_slot_keys_match_ci_validation_exactly_once() -> None:
@@ -521,12 +528,14 @@ def test_kca_warmup_timer_optional() -> None:
 def test_healthcheck_keys_required_at_deploy() -> None:
     from pathlib import Path
 
-    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
-    body = _workflow_function_body(workflow, "validate_runtime_env")
+    from src.core.runtime_env_provisioning import render_key_manifest
 
-    assert "KRX_ALPHA_LIVENESS_HEALTHCHECK_URL" in body
-    assert "KRX_HOST_BACKUP_HEALTHCHECK_URL" in body
-    assert "Runtime env validated: 14 keys" in body
+    script = Path("deploy/host/krx-validate-runtime-env.sh").read_text(encoding="utf-8")
+    manifest_lines = render_key_manifest().splitlines()
+
+    assert "required KRX_ALPHA_LIVENESS_HEALTHCHECK_URL" in manifest_lines
+    assert "required KRX_HOST_BACKUP_HEALTHCHECK_URL" in manifest_lines
+    assert "Runtime env validated:" in script
 
 
 def test_backup_unit_loads_runtime_env_optionally() -> None:

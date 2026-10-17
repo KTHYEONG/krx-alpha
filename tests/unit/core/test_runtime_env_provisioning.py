@@ -210,3 +210,40 @@ def test_build_runtime_fragment_appends_optional_db_keys_only_when_present(tmp_p
     lines = build_runtime_fragment(source).splitlines()
     assert len(lines) == 16
     assert lines[-2:] == ["DB_APP_KEY=db-key", "DB_APP_SECRET=db-secret"]
+
+
+def test_render_key_manifest_rejects_invalid_then_duplicate_names(monkeypatch) -> None:
+    import pytest
+
+    import src.core.runtime_env_provisioning as provisioning
+    from src.core.errors import KrxAlphaError
+
+    monkeypatch.setattr(
+        provisioning, "RUNTIME_ENV_SPEC", (provisioning.RuntimeEnvKey(target="lower_case", sources=("x",)),)
+    )
+    with pytest.raises(KrxAlphaError, match="invalid runtime env key name"):
+        provisioning.render_key_manifest()
+
+    monkeypatch.setattr(
+        provisioning, "RUNTIME_ENV_SPEC", (provisioning.RuntimeEnvKey(target="DUP_KEY", sources=("x",)),)
+    )
+    monkeypatch.setattr(provisioning, "OPTIONAL_RUNTIME_ENV_KEYS", ("DUP_KEY",))
+    with pytest.raises(KrxAlphaError, match="duplicate runtime env key"):
+        provisioning.render_key_manifest()
+
+
+def test_main_cleans_up_temp_file_when_manifest_write_fails(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    import src.core.runtime_env_provisioning as provisioning
+
+    def fail_replace(src: object, dst: object) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(provisioning.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        provisioning.main(["emit-key-manifest", "--out", str(tmp_path / "runtime-env-keys.txt")])
+
+    leftovers = [path for path in tmp_path.iterdir() if path.name.startswith("runtime-env-keys.txt")]
+    assert leftovers == []
