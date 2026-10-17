@@ -1,28 +1,92 @@
+# canonical: krx-alpha/deploy/shared/kis_slot_assignments.toml schema=1
 schema_version = 1
+pool = [1, 2, 3, 4, 5]
+host_data_slots = [1, 2, 3, 4]
+
+[selectors.kca]
+KIS_DECISION_SHARD_SLOTS = [1, 5]
+COLLECTION_RESEARCH_SLOTS = [3, 4]
+COLLECTION_ALTDATA_EXTRA_SLOTS = [2, 3]
+COLLECTION_BACKFILL_SLOTS = [2, 3]
+COLLECTION_AFTERMARKET_BOOK_SLOTS = [2, 3]
+
+[selectors.krx]
+KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT = 2
+KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT = 5
 
 [[assignment]]
-owner = "krx-alpha"
+slot = 1
+project = "kca"
+purpose = "decision role REST: 15:20 collect lead, 15:30 finalize-close, paper"
+channel = "rest"
+windows = ["00:00-24:00"]
+
+[[assignment]]
+slot = 2
+project = "krx"
 purpose = "snapshot_rest"
 channel = "rest"
-slots = ["2"]
-window_kst = ["08:00", "15:39"]
-config_key = "KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT"
-derivation = "explicit"
+windows = ["08:00-15:39"]
 
 [[assignment]]
-owner = "krx-alpha"
+slot = 2
+project = "kca"
+purpose = "extended-session backfill, aftermarket book, altdata extra fan-out"
+channel = "rest"
+windows = ["23:05-24:00", "00:00-06:50", "15:40-20:00", "21:35-22:05"]
+
+[[assignment]]
+slot = 3
+project = "kca"
+purpose = "auction research capture, backfill, aftermarket book, altdata extra"
+channel = "rest"
+windows = ["08:39-09:03", "15:21-15:30", "23:05-24:00", "00:00-06:50", "15:40-20:00", "21:35-22:05"]
+
+[[assignment]]
+slot = 4
+project = "kca"
+purpose = "batch role plus research aux"
+channel = "rest"
+windows = ["00:00-24:00"]
+
+[[assignment]]
+slot = 5
+project = "kca"
+purpose = "decision shard 2"
+channel = "rest"
+windows = ["15:20-15:29"]
+
+[[assignment]]
+slot = 5
+project = "krx"
 purpose = "premarket_ws"
 channel = "ws"
-slots = ["5"]
-window_kst = ["07:58", "08:50"]
-config_key = "KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT"
-derivation = "explicit"
+windows = ["07:58-08:50"]
 
 [[assignment]]
-owner = "krx-alpha"
+slot = 1
+project = "krx"
 purpose = "aftermarket_ws"
 channel = "ws"
-slots = ["1", "2", "3", "4"]
-window_kst = ["15:40", "20:00"]
-config_key = "KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION"
-derivation = "kis_data_slots_prefix"
+windows = ["15:40-20:00"]
+
+[[assignment]]
+slot = 2
+project = "krx"
+purpose = "aftermarket_ws"
+channel = "ws"
+windows = ["15:40-20:00"]
+
+[[assignment]]
+slot = 3
+project = "krx"
+purpose = "aftermarket_ws"
+channel = "ws"
+windows = ["15:40-20:00"]
+
+[[assignment]]
+slot = 4
+project = "krx"
+purpose = "aftermarket_ws"
+channel = "ws"
+windows = ["15:40-20:00"]
