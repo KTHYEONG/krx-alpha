@@ -88,7 +88,7 @@ def test_db_crosscheck_install_replaces_live_predecessor(tmp_path, monkeypatch, 
 
     runner.children.db_crosscheck = _Old()  # type: ignore[assignment]
     with caplog.at_level(logging.CRITICAL):
-        runner._install_db_crosscheck(["cmd"])
+        runner._install_stream_child(daemon_mod.StreamChildKey.DB_CROSSCHECK, ["cmd"])
     assert stops == [15.0]
     assert runner.children.db_crosscheck is not None
     assert any("REPLACE_LIVE" in r.getMessage() and "slot=db_crosscheck" in r.getMessage() for r in caplog.records)
@@ -111,7 +111,7 @@ def test_db_crosscheck_circuit_open_warns_not_critical(tmp_path, monkeypatch, ca
     runner.children.db_crosscheck = _Tripping()  # type: ignore[assignment]
     now = dt.datetime(2026, 9, 14, 9, 0, tzinfo=_KST)
     with caplog.at_level(logging.WARNING):
-        runner._supervise_db_crosscheck(now, _anchors(day))
+        runner._supervise_stream_child(daemon_mod.StreamChildKey.DB_CROSSCHECK, now, _anchors(day))
     assert any("stage=db_crosscheck" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
     assert not any("stage=db_crosscheck" in r.getMessage() and r.levelno == logging.CRITICAL for r in caplog.records)
     assert runner.state.last_db_crosscheck_result == "circuit_open"
@@ -135,14 +135,20 @@ def test_db_crosscheck_restart_warns_and_after_close_skips(tmp_path, monkeypatch
     runner.children.regular = object()
     runner.children.db_crosscheck = _Flap()  # type: ignore[assignment]
     with caplog.at_level(logging.WARNING):
-        runner._supervise_db_crosscheck(dt.datetime(2026, 9, 14, 9, 0, tzinfo=_KST), _anchors(day))
+        runner._supervise_stream_child(
+            daemon_mod.StreamChildKey.DB_CROSSCHECK, dt.datetime(2026, 9, 14, 9, 0, tzinfo=_KST), _anchors(day)
+        )
     assert calls == ["ensure"]
     assert "stage=db_crosscheck status=RESTARTED" in caplog.text
     calls.clear()
-    runner._supervise_db_crosscheck(dt.datetime(2026, 9, 14, 16, 0, tzinfo=_KST), _anchors(day))
+    runner._supervise_stream_child(
+        daemon_mod.StreamChildKey.DB_CROSSCHECK, dt.datetime(2026, 9, 14, 16, 0, tzinfo=_KST), _anchors(day)
+    )
     assert calls == []
     runner.children.regular = None
-    runner._supervise_db_crosscheck(dt.datetime(2026, 9, 14, 9, 0, tzinfo=_KST), _anchors(day))
+    runner._supervise_stream_child(
+        daemon_mod.StreamChildKey.DB_CROSSCHECK, dt.datetime(2026, 9, 14, 9, 0, tzinfo=_KST), _anchors(day)
+    )
     assert calls == []
 
 
@@ -182,7 +188,7 @@ def test_db_crosscheck_stopped_with_snapshot_child(tmp_path, monkeypatch) -> Non
         assert "db" in stops
         assert runner.children.db_crosscheck is None
         assert runner.state.last_db_crosscheck_result is None
-    runner._stop_db_crosscheck_child()
+    runner._stop_stream_child(daemon_mod.StreamChildKey.DB_CROSSCHECK)
 
 
 def test_db_crosscheck_absent_from_degraded_mode(tmp_path, monkeypatch) -> None:

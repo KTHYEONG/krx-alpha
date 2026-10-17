@@ -577,8 +577,12 @@ def test_degraded_derived_by_identity(tmp_path, monkeypatch) -> None:
             [{"symbol": "005930", "selection_reasons": ["limit_up"]}],
             rev=20260915,
         )
-        h.runner._install_regular(["collect-stream", "--session-date", "2026-09-16"], degraded=True)
-        h.runner._install_snapshot(["collect-snapshots", "--session-date", "2026-09-16"], replaces_degraded=False)
+        h.runner._install_stream_child(
+            daemon_mod.StreamChildKey.REGULAR, ["collect-stream", "--session-date", "2026-09-16"], degraded=True
+        )
+        h.runner._install_stream_child(
+            daemon_mod.StreamChildKey.SNAPSHOT, ["collect-snapshots", "--session-date", "2026-09-16"]
+        )
         assert h.runner.children.regular_is_degraded is True
         assert h.runner.state.degraded_active is True
         h.calls.clear()
