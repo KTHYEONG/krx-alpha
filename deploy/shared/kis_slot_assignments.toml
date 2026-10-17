@@ -1,0 +1,28 @@
+schema_version = 1
+
+[[assignment]]
+owner = "krx-alpha"
+purpose = "snapshot_rest"
+channel = "rest"
+slots = ["2"]
+window_kst = ["08:00", "15:39"]
+config_key = "KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT"
+derivation = "explicit"
+
+[[assignment]]
+owner = "krx-alpha"
+purpose = "premarket_ws"
+channel = "ws"
+slots = ["5"]
+window_kst = ["07:58", "08:50"]
+config_key = "KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT"
+derivation = "explicit"
+
+[[assignment]]
+owner = "krx-alpha"
+purpose = "aftermarket_ws"
+channel = "ws"
+slots = ["1", "2", "3", "4"]
+window_kst = ["15:40", "20:00"]
+config_key = "KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION"
+derivation = "kis_data_slots_prefix"
