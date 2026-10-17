@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-import logging
 import re
 import time
 from collections.abc import Mapping
 from typing import Any, Final
 
-import aiohttp
-
-from src.marketdata.toss_token_store import IssuedToken, TokenStoreLockTimeout, TossTokenStore
+from src.marketdata.toss_token_store import TossTokenStore
+from src.realtime.adapters.json_ws import JsonWsOAuthAdapter
 from src.realtime.contracts import (
     L0Frame,
     MarketSession,
@@ -21,8 +17,6 @@ from src.realtime.contracts import (
     VendorAuthRejected,
     VendorDisconnected,
 )
-
-logger = logging.getLogger(__name__)
 
 DB_WS_URL: Final = "wss://openapi.dbsec.co.kr:7070/websocket"
 DB_TOKEN_URL: Final = "https://openapi.dbsec.co.kr:8443/oauth2/token"  # noqa: S105 - public endpoint, not a secret
@@ -39,12 +33,16 @@ _EVENT_TIME_FIELD: Mapping[str, str] = {"S00": "StckCntghour", "S01": "BsopHour"
 _HHMMSS_RE = re.compile(r"(?:[01]\d|2[0-3])[0-5]\d[0-5]\d")
 
 
-class DbRealtimeAdapter:
+class DbRealtimeAdapter(JsonWsOAuthAdapter):
     """DB Securities KRX-venue realtime adapter (S00 trades, S01 L10 book) behind the VendorAdapter contract."""
 
-    name: str
-    capacity_pairs: int
-    unparsable_frames: int
+    VENDOR = "db"
+    UNPARSABLE_LOG = "[DATA] stage=db_frame status=UNPARSEABLE conn_id=%s frame_len=%d"
+    CLOSE_LOG = "[DATA] stage=db_close status=SUPPRESSED error_type=%s"
+    SUBSCRIBE_TR_TYPE = "1"
+    MALFORMED_ACK_FATAL = False
+    ECHO_PINGPONG = False
+    REPLACE_TOKEN_ON_WS_AUTH_REJECT = False
 
     def __init__(
         self,
@@ -64,92 +62,46 @@ class DbRealtimeAdapter:
         """Bind one DB websocket session to a host-shared token store."""
         if set(streams) - set(DB_TR_CD):
             raise ValueError(f"unsupported streams: {streams}")
-        self.name = "db"
-        self.capacity_pairs = capacity_pairs
-        self._app_key = app_key
-        self._app_secret = app_secret
-        self._http = http
-        self._streams = streams
-        self._token_url = token_url
-        self._ws_url = ws_url
-        self._heartbeat_s = heartbeat_s
-        self._ack_timeout_s = ack_timeout_s
-        self._subscribe_spacing_s = subscribe_spacing_s
-        self._token_store = token_store
-        self._ws: Any = None
-        self._token: str | None = None
-        self._seq = 0
-        self._conn_id = ""
-        self._pending: list[L0Frame] = []
-        self.unparsable_frames = 0
-        self._unparsable_warned = False
-
-    async def _issue_token(self) -> IssuedToken:
-        try:
-            async with self._http.post(
-                self._token_url,
-                data={
-                    "grant_type": "client_credentials",
-                    "appkey": self._app_key,
-                    "appsecretkey": self._app_secret,
-                    "scope": "oob",
-                },
-            ) as resp:
-                data = await resp.json()
-                if not isinstance(data, dict):
-                    raise VendorDisconnected("connect_failed:token_response_not_object")
-                status = getattr(resp, "status", None)
-                if "access_token" not in data:
-                    code = str(data.get("error_code", ""))
-                    if code == "IGW00201":
-                        raise VendorDisconnected("token_throttled")
-                    if status in (401, 403) or code:
-                        raise VendorAuthRejected(f"auth_rejected:{status}:{code}")
-                    raise VendorDisconnected(f"connect_failed:token_rejected:{status}:{code}")
-                token = str(data["access_token"])
-        except (VendorAuthRejected, VendorDisconnected):
-            raise
-        except (TimeoutError, aiohttp.ClientError, ValueError, KeyError, OSError) as exc:
-            raise VendorDisconnected(f"connect_failed:{type(exc).__name__}") from exc
-        expires_in = data.get("expires_in") if isinstance(data, dict) else None
-        lifetime = (
-            float(expires_in)
-            if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool) and expires_in > 0
-            else None
+        super().__init__(
+            app_key=app_key,
+            app_secret=app_secret,
+            http=http,
+            token_store=token_store,
+            streams=streams,
+            capacity_pairs=capacity_pairs,
+            token_url=token_url,
+            ws_url=ws_url,
+            heartbeat_s=heartbeat_s,
+            ack_timeout_s=ack_timeout_s,
+            subscribe_spacing_s=subscribe_spacing_s,
         )
-        return IssuedToken(token, lifetime)
 
-    async def connect(self) -> None:
-        try:
-            token = await self._token_store.aget_or_issue(self._issue_token)
-        except (TokenStoreLockTimeout, OSError) as exc:
-            raise VendorDisconnected(f"token_store_failed:{type(exc).__name__}") from exc
-        self._token = token
-        try:
-            self._ws = await (self._http.ws_connect(self._ws_url, heartbeat=self._heartbeat_s)).__aenter__()
-        except (TimeoutError, aiohttp.ClientError, ValueError, KeyError, OSError) as exc:
-            raise VendorDisconnected(f"connect_failed:{type(exc).__name__}") from exc
-        self._seq = 0
-        self._conn_id = f"db-{time.time_ns()}"
-        self._pending = []
-        self.unparsable_frames = 0
-        self._unparsable_warned = False
+    def _subscribe_body(self, symbol: str, stream: str) -> dict[str, str]:
+        return {"tr_cd": DB_TR_CD[stream], "tr_key": f"J {symbol}"}
 
-    async def _replace_rejected_token(self, token: str) -> None:
-        try:
-            await self._token_store.areplace_rejected(token, self._issue_token)
-        except (TokenStoreLockTimeout, OSError) as exc:
-            raise VendorDisconnected(f"token_store_failed:{type(exc).__name__}") from exc
+    def _data_frame(self, o: dict[str, Any], header: dict[str, Any], raw: str) -> L0Frame | None:
+        return self._build_frame(o, header, raw)
 
-    def _note_unparsable(self, frame_len: int) -> None:
-        self.unparsable_frames += 1
-        if not self._unparsable_warned:
-            self._unparsable_warned = True
-            logger.warning(
-                "[DATA] stage=db_frame status=UNPARSEABLE conn_id=%s frame_len=%d",
-                self._conn_id,
-                frame_len,
-            )
+    def _token_failure(self, status: int | None, code: str) -> VendorDisconnected | None:
+        if code == "IGW00201":
+            return VendorDisconnected("token_throttled")
+        if status in (401, 403) or code:
+            return VendorAuthRejected(f"auth_rejected:{status}:{code}")
+        return VendorDisconnected(f"connect_failed:token_rejected:{status}:{code}")
+
+    def _check_capacity(self, pairs: list[tuple[str, str]]) -> None:
+        if len(pairs) > self.capacity_pairs:
+            raise VendorDisconnected(f"capacity_exceeded:{len(pairs)}>{self.capacity_pairs}")
+
+    def _check_ack_code(self, rsp_cd: str) -> None:
+        if rsp_cd == "10011":
+            raise VendorDisconnected("session_limit")
+
+    def _all_rejected_is_auth(self, acks: list[VendorAck]) -> bool:
+        return all(a.code in _AUTH_REJECT_CODES for a in acks)
+
+    def _counts_as_unparsable(self, header: dict[str, Any]) -> bool:
+        return "rsp_cd" not in header and header.get("tr_cd") in _REV_TR_CD
 
     @staticmethod
     def _extract_symbol(o: dict[str, Any]) -> str | None:
@@ -178,7 +130,6 @@ class DbRealtimeAdapter:
             return None
         body = o.get("body")
         event_time = body.get(_EVENT_TIME_FIELD[str(tr_cd)]) if isinstance(body, dict) else None
-        self._seq += 1
         return L0Frame(
             "db",
             _REV_TR_CD[str(tr_cd)],
@@ -186,107 +137,9 @@ class DbRealtimeAdapter:
             raw,
             time.monotonic_ns(),
             time.time_ns(),
-            self._seq,
+            self._next_seq(),
             conn_id=self._conn_id,
             venue=MarketVenue.KRX,
             session=MarketSession.REGULAR,
             exchange_event_time=event_time if isinstance(event_time, str) and _HHMMSS_RE.fullmatch(event_time) else "",
         )
-
-    async def subscribe(self, pairs: list[tuple[str, str]]) -> list[VendorAck]:
-        """Subscribe symbols one pair at a time, matching acks by send order."""
-        if len(pairs) > self.capacity_pairs:
-            raise VendorDisconnected(f"capacity_exceeded:{len(pairs)}>{self.capacity_pairs}")
-        acks: list[VendorAck] = []
-        for idx, (symbol, stream) in enumerate(pairs):
-            if idx:
-                await asyncio.sleep(self._subscribe_spacing_s)
-            try:
-                await self._ws.send_str(
-                    json.dumps(
-                        {
-                            "header": {"token": self._token, "tr_type": "1"},
-                            "body": {"tr_cd": DB_TR_CD[stream], "tr_key": f"J {symbol}"},
-                        }
-                    )
-                )
-            except (aiohttp.ClientError, OSError) as exc:
-                raise VendorDisconnected(f"subscribe_failed:{type(exc).__name__}") from exc
-            resp: dict[str, Any] | None = None
-            while resp is None:
-                try:
-                    raw = await asyncio.wait_for(self._ws.receive_str(), timeout=self._ack_timeout_s)
-                except TimeoutError as exc:
-                    raise VendorDisconnected(f"ack_timeout:{symbol}:{stream}") from exc
-                except TypeError as exc:
-                    raise VendorDisconnected("subscribe_non_text") from exc
-                try:
-                    o = json.loads(raw)
-                except ValueError:
-                    self._note_unparsable(len(raw))
-                    continue
-                if not isinstance(o, dict):
-                    self._note_unparsable(len(raw))
-                    continue
-                header = o.get("header")
-                if not isinstance(header, dict):
-                    continue
-                if "rsp_cd" in header:
-                    resp = o
-                    continue
-                frame = self._build_frame(o, header, raw)
-                if frame is not None:
-                    self._pending.append(frame)
-            rsp_cd = str(resp["header"].get("rsp_cd"))
-            if rsp_cd == "10011":
-                raise VendorDisconnected("session_limit")
-            acks.append(VendorAck(symbol, stream, rsp_cd == "00000", rsp_cd))
-        if acks and not any(a.accepted for a in acks) and all(a.code in _AUTH_REJECT_CODES for a in acks):
-            codes = ",".join(sorted({a.code for a in acks}))
-            if self._token is not None:
-                await self._replace_rejected_token(self._token)
-            raise VendorAuthRejected(f"auth_rejected:all_acks_rejected:{codes}")
-        return acks
-
-    async def recv(self) -> L0Frame:
-        if self._pending:
-            return self._pending.pop(0)
-        while True:
-            msg = await self._ws.receive()
-            if msg.type == aiohttp.WSMsgType.PING:
-                try:
-                    await self._ws.pong()
-                except (aiohttp.ClientError, OSError) as exc:
-                    raise VendorDisconnected(f"pingpong_echo_failed:{type(exc).__name__}") from exc
-                continue
-            if msg.type == aiohttp.WSMsgType.TEXT:
-                data = msg.data
-                try:
-                    o = json.loads(data)
-                except ValueError:
-                    self._note_unparsable(len(data) if isinstance(data, str) else 0)
-                    continue
-                if not isinstance(o, dict):
-                    self._note_unparsable(len(data) if isinstance(data, str) else 0)
-                    continue
-                header = o.get("header")
-                if not isinstance(header, dict):
-                    continue
-                if "rsp_cd" in header:
-                    continue
-                frame = self._build_frame(o, header, data)
-                if frame is None:
-                    if header.get("tr_cd") in _REV_TR_CD:
-                        self._note_unparsable(len(data) if isinstance(data, str) else 0)
-                    continue
-                return frame
-            raise VendorDisconnected(str(msg.type))
-
-    async def aclose(self) -> None:
-        ws, self._ws = self._ws, None
-        if ws is None:
-            return
-        try:
-            await ws.close()
-        except (aiohttp.ClientError, OSError) as exc:
-            logger.debug("[DATA] stage=db_close status=SUPPRESSED error_type=%s", type(exc).__name__)

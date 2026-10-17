@@ -1,4 +1,4 @@
-"""벤더 추상화 + 구독 플래너 (실시간 수집기 v1)."""
+"""벤더 추상화 (실시간 수집기 v1)."""
 
 from __future__ import annotations
 
@@ -6,18 +6,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
-from src.core.errors import KrxAlphaError, SlotBudgetExceededError
+from src.core.errors import KrxAlphaError
 
 __all__ = [
     "HeartbeatProbe",
     "L0Frame",
     "MarketSession",
     "MarketVenue",
-    "SubscriptionPlanner",
     "VendorAck",
     "VendorAdapter",
     "VendorAuthRejected",
-    "VendorCapacity",
     "VendorDisconnected",
 ]
 
@@ -58,12 +56,6 @@ class VendorAck:
     code: str
 
 
-@dataclass(frozen=True)
-class VendorCapacity:
-    vendor: str
-    capacity_pairs: int
-
-
 class VendorDisconnected(KrxAlphaError):  # noqa: N818 - contract-pinned signal name
     """WS 절단 신호."""
 
@@ -93,38 +85,3 @@ class HeartbeatProbe(Protocol):
 
     pingpong_count: int
     last_pingpong_wall_ns: int | None
-
-
-class SubscriptionPlanner:
-    def __init__(self, *, streams: tuple[str, ...]) -> None:
-        self._streams = streams
-
-    def symbol_budget(self, capacities: list[VendorCapacity]) -> int:
-        return sum(cap.capacity_pairs // len(self._streams) for cap in capacities)
-
-    def plan(
-        self,
-        symbols: list[str],
-        primary: list[VendorCapacity],
-        crosscheck: list[tuple[VendorCapacity, int]] | None = None,
-    ) -> dict[str, list[tuple[str, str]]]:
-        n_streams = len(self._streams)
-        per_vendor = [cap.capacity_pairs // n_streams for cap in primary]
-        if len(symbols) > sum(per_vendor):
-            raise SlotBudgetExceededError(
-                f"want {len(symbols)} symbols exceeds primary capacity {sum(per_vendor)}"
-            )
-        out: dict[str, list[tuple[str, str]]] = {}
-        rest = list(symbols)
-        for cap, budget in zip(primary, per_vendor, strict=True):
-            take = rest[:budget]
-            rest = rest[budget:]
-            pairs = sorted((sym, stream) for sym in take for stream in self._streams)
-            if pairs:
-                out[cap.vendor] = pairs
-        for cap, top_n in crosscheck or []:
-            limit = min(top_n, len(symbols), cap.capacity_pairs // n_streams)
-            pairs = sorted((sym, stream) for sym in symbols[:limit] for stream in self._streams)
-            if pairs:
-                out[cap.vendor] = pairs
-        return out
