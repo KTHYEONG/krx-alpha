@@ -10,7 +10,7 @@ from pathlib import Path
 
 from deploy.shared import host_broker_contract as contract
 
-CANONICAL_SHA256 = "21dacdbbcb55c87c2698d9c32a4a9d43935bc2759157d8e93ac40fb6c9eaf31b"
+CANONICAL_SHA256 = "0bfab4ccae0f0921a32493492683014e1e080e708db3d92473731a5c4eb0b0c1"
 CANONICAL_PATH = Path(__file__).resolve().parents[3] / "deploy" / "shared" / "host_broker_contract.py"
 
 
