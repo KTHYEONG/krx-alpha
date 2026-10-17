@@ -10,9 +10,10 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any
+from enum import StrEnum
+from typing import Any, ClassVar
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -123,6 +124,7 @@ FIRST_FRAME_GRACE: dt.timedelta = dt.timedelta(minutes=5)
 SHUTDOWN_CHILD_DEADLINE_S: float = 20.0
 HOLIDAY_SLEEP_CAP_S: float = 3600.0
 PROGRAM_SYNC_POLL_S: float = 60.0
+CHILD_STOP_TIMEOUT_S: float = 15.0
 
 
 def _shifted_time(base: dt.time, offset: dt.timedelta) -> dt.time:
@@ -656,6 +658,75 @@ def _resolve_trading_day_with_cache(
     return None
 
 
+class StreamRole(StrEnum):
+    PRIMARY = "primary"
+    CROSSCHECK = "crosscheck"
+    SNAPSHOT = "snapshot"
+    AFTERMARKET = "aftermarket"
+    PREMARKET = "premarket"
+
+
+class StreamChildKey(StrEnum):
+    REGULAR = "regular"
+    SNAPSHOT = "snapshot"
+    DB_CROSSCHECK = "db_crosscheck"
+    AFTERMARKET = "aftermarket"
+    PREMARKET = "premarket"
+
+
+class ChildLifecycle(StrEnum):
+    SESSION = "session"
+    SHARDED = "sharded"
+    WINDOWED = "windowed"
+
+
+@dataclass(frozen=True)
+class SupervisionLogs:
+    """Literal log templates for one SESSION child's supervise outcomes."""
+
+    restarted: str
+    circuit_open: str
+    circuit_level: int
+    started: str | None = None
+
+
+@dataclass(frozen=True)
+class StreamChildSpec:
+    """Declarative contract of one daemon-owned streaming child."""
+
+    key: StreamChildKey
+    role: StreamRole
+    lifecycle: ChildLifecycle
+    enabled: Callable[[CollectorRuntime], bool]
+    cmd: Callable[[dt.date, DataPaths, str | None], list[str]] | None = None
+    active: Callable[[CollectorRuntime, dt.datetime, SessionAnchors], bool] | None = None
+    logs: SupervisionLogs | None = None
+    requires_primary: bool = False
+    starts_in_degraded: bool = False
+    silent_on_degraded_upgrade: bool = False
+
+    def __post_init__(self) -> None:
+        is_session = self.lifecycle is ChildLifecycle.SESSION
+        callables = (self.cmd, self.active, self.logs)
+        if is_session and not all(c is not None for c in callables):
+            raise ValueError(f"SESSION child {self.key.value} requires cmd, active and logs")
+        if not is_session and any(c is not None for c in callables):
+            raise ValueError(f"{self.lifecycle.value} child {self.key.value} must not define cmd, active or logs")
+        if self.logs is not None and self.logs.started is not None and self.role is not StreamRole.PRIMARY:
+            raise ValueError(f"only PRIMARY children may log a started event: {self.key.value}")
+        if self.role is StreamRole.CROSSCHECK:
+            if self.logs is None:
+                raise ValueError(f"CROSSCHECK child {self.key.value} requires session supervision logs")
+            if not self.requires_primary:
+                raise ValueError(f"CROSSCHECK child {self.key.value} requires a primary child")
+            if self.logs.circuit_level > logging.WARNING:
+                raise ValueError(f"CROSSCHECK child {self.key.value} must not alert above WARNING")
+        if (self.role is StreamRole.PRIMARY or not is_session) and (
+            self.requires_primary or self.starts_in_degraded or self.silent_on_degraded_upgrade
+        ):
+            raise ValueError(f"{self.key.value} must not set primary-only supervision flags")
+
+
 @dataclass
 class DaemonState:
     cycle: int = 0
@@ -693,17 +764,74 @@ class DaemonState:
     premarket_shard: AftermarketShard | None = None
     premarket_circuit_alerted_day: dt.date | None = None
 
+    _CHILD_RESULT_FIELDS: ClassVar[Mapping[StreamChildKey, str]] = {
+        StreamChildKey.REGULAR: "last_supervisor_result",
+        StreamChildKey.SNAPSHOT: "last_snapshot_result",
+        StreamChildKey.DB_CROSSCHECK: "last_db_crosscheck_result",
+    }
+
+    def child_result(self, key: StreamChildKey) -> str | None:
+        """Return the last supervise result of a SESSION child."""
+        value: str | None = getattr(self, self._CHILD_RESULT_FIELDS[key])
+        return value
+
+    def set_child_result(self, key: StreamChildKey, value: str | None) -> None:
+        """Store the last supervise result of a SESSION child."""
+        setattr(self, self._CHILD_RESULT_FIELDS[key], value)
+
 
 @dataclass
 class DaemonChildren:
-    regular: ProcessSupervisor | None = None
-    snapshot: ProcessSupervisor | None = None
-    db_crosscheck: ProcessSupervisor | None = None
+    streams: dict[StreamChildKey, ProcessSupervisor] = field(default_factory=dict)
     aftermarket: dict[str, ProcessSupervisor] = field(default_factory=dict)
-    premarket: ProcessSupervisor | None = None
     program_sync: Any | None = None
     program_sync_started_at: dt.datetime | None = None
     degraded_regular: ProcessSupervisor | None = None
+
+    def get(self, key: StreamChildKey) -> ProcessSupervisor | None:
+        """Return the live supervisor for a single-instance child or None."""
+        return self.streams.get(key)
+
+    def set(self, key: StreamChildKey, supervisor: ProcessSupervisor | None) -> None:
+        """Install (or with None remove) a single-instance child."""
+        if key is StreamChildKey.AFTERMARKET:
+            raise ValueError("aftermarket shards live in the aftermarket mapping")
+        if supervisor is None:
+            self.streams.pop(key, None)
+        else:
+            self.streams[key] = supervisor
+
+    @property
+    def regular(self) -> ProcessSupervisor | None:
+        return self.get(StreamChildKey.REGULAR)
+
+    @regular.setter
+    def regular(self, supervisor: ProcessSupervisor | None) -> None:
+        self.set(StreamChildKey.REGULAR, supervisor)
+
+    @property
+    def snapshot(self) -> ProcessSupervisor | None:
+        return self.get(StreamChildKey.SNAPSHOT)
+
+    @snapshot.setter
+    def snapshot(self, supervisor: ProcessSupervisor | None) -> None:
+        self.set(StreamChildKey.SNAPSHOT, supervisor)
+
+    @property
+    def db_crosscheck(self) -> ProcessSupervisor | None:
+        return self.get(StreamChildKey.DB_CROSSCHECK)
+
+    @db_crosscheck.setter
+    def db_crosscheck(self, supervisor: ProcessSupervisor | None) -> None:
+        self.set(StreamChildKey.DB_CROSSCHECK, supervisor)
+
+    @property
+    def premarket(self) -> ProcessSupervisor | None:
+        return self.get(StreamChildKey.PREMARKET)
+
+    @premarket.setter
+    def premarket(self, supervisor: ProcessSupervisor | None) -> None:
+        self.set(StreamChildKey.PREMARKET, supervisor)
 
     @property
     def regular_is_degraded(self) -> bool:
@@ -754,6 +882,81 @@ class DaemonRunner:
     """
 
     _REPLACE_LIVE_LOG = "[DAEMON] stage=child_ownership status=REPLACE_LIVE slot=%s stop_result=%s"
+
+    _STREAM_SPECS: ClassVar[tuple[StreamChildSpec, ...]] = (
+        StreamChildSpec(
+            key=StreamChildKey.REGULAR,
+            role=StreamRole.PRIMARY,
+            lifecycle=ChildLifecycle.SESSION,
+            enabled=lambda runtime: True,
+            cmd=lambda today, paths, reason: _stream_cmd(today, paths, degraded_reason=reason),
+            active=lambda runtime, now, anchors: True,
+            logs=SupervisionLogs(
+                started="[DAEMON] stage=streamer status=STARTED",
+                restarted="[DAEMON] stage=streamer status=RESTARTED exit_code=%s restarts=%d",
+                circuit_open="[DAEMON] stage=streamer status=FAIL reason=circuit_open",
+                circuit_level=logging.CRITICAL,
+            ),
+        ),
+        StreamChildSpec(
+            key=StreamChildKey.SNAPSHOT,
+            role=StreamRole.SNAPSHOT,
+            lifecycle=ChildLifecycle.SESSION,
+            enabled=lambda runtime: runtime.snapshot.enabled,
+            cmd=lambda today, paths, reason: _snapshot_cmd(today, paths),
+            active=lambda runtime, now, anchors: now.astimezone(_KST).time()
+            < shift_snapshot_settings(runtime.snapshot, anchors).run_end,
+            logs=SupervisionLogs(
+                restarted="[DAEMON] stage=snapshots status=RESTARTED exit_code=%s",
+                circuit_open="[DAEMON] stage=snapshots status=FAIL reason=circuit_open",
+                circuit_level=logging.CRITICAL,
+            ),
+            starts_in_degraded=True,
+            silent_on_degraded_upgrade=True,
+        ),
+        StreamChildSpec(
+            key=StreamChildKey.DB_CROSSCHECK,
+            role=StreamRole.CROSSCHECK,
+            lifecycle=ChildLifecycle.SESSION,
+            enabled=lambda runtime: runtime.collector.db_crosscheck_enabled,
+            cmd=lambda today, paths, reason: _db_crosscheck_cmd(today, paths),
+            active=lambda runtime, now, anchors: now.astimezone(_KST).time() < anchors.regular_close,
+            logs=SupervisionLogs(
+                restarted="[DAEMON] stage=db_crosscheck status=RESTARTED exit_code=%s",
+                circuit_open="[DAEMON] stage=db_crosscheck status=FAIL reason=circuit_open",
+                circuit_level=logging.WARNING,
+            ),
+            requires_primary=True,
+        ),
+        StreamChildSpec(
+            key=StreamChildKey.AFTERMARKET,
+            role=StreamRole.AFTERMARKET,
+            lifecycle=ChildLifecycle.SHARDED,
+            enabled=lambda runtime: runtime.collector.after_market_enabled,
+        ),
+        StreamChildSpec(
+            key=StreamChildKey.PREMARKET,
+            role=StreamRole.PREMARKET,
+            lifecycle=ChildLifecycle.WINDOWED,
+            enabled=lambda runtime: runtime.premarket.enabled,
+        ),
+    )
+
+    @classmethod
+    def _stream_spec(cls, key: StreamChildKey) -> StreamChildSpec:
+        """Return the table row for key; raises KeyError when absent."""
+        for spec in cls._STREAM_SPECS:
+            if spec.key is key:
+                return spec
+        raise KeyError(key)
+
+    def _session_specs(self) -> tuple[StreamChildSpec, ...]:
+        """SESSION-lifecycle rows in table order whose enabled(runtime) is True."""
+        return tuple(
+            spec
+            for spec in self._STREAM_SPECS
+            if spec.lifecycle is ChildLifecycle.SESSION and spec.enabled(self._runtime)
+        )
 
     def __init__(
         self,
@@ -824,15 +1027,17 @@ class DaemonRunner:
     def stop_children(self) -> None:
         """Stop all owned child processes within the existing shutdown deadline."""
         targets: list[ProcessSupervisor] = []
-        if self._children.regular is not None:
-            targets.append(self._children.regular)
-        targets.extend(self._children.aftermarket.values())
-        if self._children.snapshot is not None:
-            targets.append(self._children.snapshot)
-        if self._children.db_crosscheck is not None:
-            targets.append(self._children.db_crosscheck)
-        if self._children.premarket is not None:
-            targets.append(self._children.premarket)
+        ch = self._children
+        regular = ch.regular
+        if regular is not None:
+            targets.append(regular)
+        targets.extend(ch.aftermarket.values())
+        for spec in self._STREAM_SPECS:
+            if spec.role is StreamRole.PRIMARY or spec.lifecycle is ChildLifecycle.SHARDED:
+                continue
+            supervisor = ch.get(spec.key)
+            if supervisor is not None:
+                targets.append(supervisor)
         sync = self._children.program_sync
         sync_running = sync is not None and sync.poll() is None
         # 모든 자식에 먼저 SIGTERM 을 보내 대기를 겹쳐야 compose 30s 유예 안에 끝난다 (순차 대기 시 최대 40s).
@@ -1063,9 +1268,7 @@ class DaemonRunner:
         if state is not SessionState.AFTER_MARKET_ACTIVE and today != st.orchestration_day:
             self._reset_for_new_session_day(today)
         self._maybe_orchestrate(now, state, day)
-        self._supervise_regular()
-        self._supervise_snapshot(now, anchors)
-        self._supervise_db_crosscheck(now, anchors)
+        self._supervise_session_children(now, anchors)
         self._run_ingest_watchdog(now, state, day, anchors)
         self._run_first_frame_watchdog(now, state, day, anchors)
         self._maybe_reselect_aftermarket(now, state, today, anchors)
@@ -1074,11 +1277,7 @@ class DaemonRunner:
         return 10.0
 
     def _stop_holiday_children(self) -> None:
-        ch = self._children
-        if ch.regular is not None:
-            self._stop_regular_streamer()
-        self._stop_snapshot_child()
-        self._stop_db_crosscheck_child()
+        self._stop_session_children()
         self._stop_aftermarket_children(clear_circuit_alerts=False)
 
     def _holiday_sleep_s(self, now: dt.datetime, state: SessionState) -> float:
@@ -1099,10 +1298,9 @@ class DaemonRunner:
         st = self._state
         ch = self._children
         if ch.regular is not None:
-            stale_stop = self._stop_regular_streamer()
+            stale_stop = self._stop_stream_child(StreamChildKey.REGULAR)
             logger.warning("[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s", stale_stop)
-        self._stop_snapshot_child()
-        self._stop_db_crosscheck_child()
+        self._stop_session_children()
         st.orchestration_day = today
         st.next_orchestration_at = None
         st.orchestration_attempts = 0
@@ -1156,111 +1354,71 @@ class DaemonRunner:
     def _sync_degraded_mirror(self) -> None:
         self._state.degraded_active = self._children.regular_is_degraded
 
-    def _install_regular(self, cmd: list[str], *, degraded: bool) -> None:
-        """Install a new regular streamer supervisor, stopping any predecessor first.
-
-        A degraded predecessor is an expected replacement (REPLACE_DEGRADED, INFO event). Any other
-        non-None predecessor is an ownership-invariant breach: it is still stopped (never dropped, since a
-        dropped supervisor's child keeps writing the same L0 journal and escapes shutdown) and logged
-        CRITICAL as REPLACE_LIVE. The successor is constructed only after the predecessor stop returns.
-        Resets `last_supervisor_result` and refreshes the `degraded_active` mirror.
-        """
-        ch = self._children
-        st = self._state
-        predecessor = ch.regular
+    def _replace_supervisor(
+        self, predecessor: ProcessSupervisor | None, cmd: list[str]
+    ) -> tuple[ProcessSupervisor, str | None]:
+        """Stop predecessor then build the successor; returns (successor, stop_result or None)."""
+        stop_result: str | None = None
         if predecessor is not None:
-            stop_result = predecessor.stop(timeout_s=15.0)
-            if ch.regular_is_degraded:
+            stop_result = predecessor.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
+        successor = ProcessSupervisor(cmd=cmd, breaker=RestartCircuitBreaker())
+        return successor, stop_result
+
+    def _install_stream_child(
+        self, key: StreamChildKey, cmd: list[str], *, degraded: bool = False, replaces_degraded: bool = False
+    ) -> None:
+        """Install a SESSION child supervisor with ownership logging."""
+        spec = self._stream_spec(key)
+        if spec.lifecycle is not ChildLifecycle.SESSION:
+            raise ValueError(f"cannot install a non-session child: {key.value}")
+        if degraded and spec.role is not StreamRole.PRIMARY:
+            raise ValueError(f"only the PRIMARY child may be installed degraded: {key.value}")
+        ch = self._children
+        is_primary = spec.role is StreamRole.PRIMARY
+        was_degraded = ch.regular_is_degraded if is_primary else False
+        predecessor = ch.get(key)
+        successor, stop_result = self._replace_supervisor(predecessor, cmd)
+        if predecessor is not None:
+            if is_primary and was_degraded:
                 logger.info(
                     "[DAEMON] stage=streamer status=REPLACE_DEGRADED stop_result=%s",
                     stop_result,
                     extra=EVENT,
                 )
+            elif not is_primary and replaces_degraded and spec.silent_on_degraded_upgrade:
+                pass
             else:
-                logger.critical(
-                    self._REPLACE_LIVE_LOG,
-                    "regular",
-                    stop_result,
-                )
-        ch.regular = ProcessSupervisor(
-            cmd=cmd,
-            breaker=RestartCircuitBreaker(),
-        )
-        ch.degraded_regular = ch.regular if degraded else None
-        st.last_supervisor_result = None
-        self._sync_degraded_mirror()
-
-    def _install_snapshot(self, cmd: list[str], *, replaces_degraded: bool) -> None:
-        """Install a new snapshot supervisor, stopping any predecessor first.
-
-        A predecessor is silently stopped when `replaces_degraded` (it belongs to the degraded session
-        being upgraded); otherwise it is stopped and logged CRITICAL as REPLACE_LIVE. Resets
-        `last_snapshot_result`.
-        """
-        ch = self._children
-        st = self._state
-        predecessor = ch.snapshot
-        if predecessor is not None:
-            stop_result = predecessor.stop(timeout_s=15.0)
-            if not replaces_degraded:
-                logger.critical(
-                    self._REPLACE_LIVE_LOG,
-                    "snapshot",
-                    stop_result,
-                )
-        ch.snapshot = ProcessSupervisor(
-            cmd=cmd,
-            breaker=RestartCircuitBreaker(),
-        )
-        st.last_snapshot_result = None
-
-    def _install_db_crosscheck(self, cmd: list[str]) -> None:
-        """Install a new DB crosscheck supervisor, stopping any predecessor first."""
-        ch = self._children
-        st = self._state
-        predecessor = ch.db_crosscheck
-        if predecessor is not None:
-            stop_result = predecessor.stop(timeout_s=15.0)
-            logger.critical(
-                self._REPLACE_LIVE_LOG,
-                "db_crosscheck",
-                stop_result,
-            )
-        ch.db_crosscheck = ProcessSupervisor(
-            cmd=cmd,
-            breaker=RestartCircuitBreaker(),
-        )
-        st.last_db_crosscheck_result = None
+                logger.critical(self._REPLACE_LIVE_LOG, key.value, stop_result)
+        ch.set(key, successor)
+        if is_primary:
+            ch.degraded_regular = successor if degraded else None
+        self._state.set_child_result(key, None)
+        if is_primary:
+            self._sync_degraded_mirror()
 
     def _install_aftermarket(self, key: str, cmd: list[str]) -> None:
         """Install the aftermarket supervisor for `key`, stopping and CRITICAL-logging any predecessor."""
         ch = self._children
         predecessor = ch.aftermarket.get(key)
+        successor, stop_result = self._replace_supervisor(predecessor, cmd)
         if predecessor is not None:
-            stop_result = predecessor.stop(timeout_s=15.0)
             logger.critical(
                 self._REPLACE_LIVE_LOG,
                 f"aftermarket:{key}",
                 stop_result,
             )
-        ch.aftermarket[key] = ProcessSupervisor(
-            cmd=cmd,
-            breaker=RestartCircuitBreaker(),
-        )
+        ch.aftermarket[key] = successor
 
     def _start_ready_children(self, today: dt.date) -> None:
         st = self._state
-        ch = self._children
-        paths = self._paths
-        snapshot_cfg = self._snapshot_cfg
         st.orchestrated_for = today
         st.next_orchestration_at = None
-        replacing_degraded = ch.regular_is_degraded
-        self._install_regular(_stream_cmd(today, paths, degraded_reason=None), degraded=False)
-        if snapshot_cfg.enabled:
-            self._install_snapshot(_snapshot_cmd(today, paths), replaces_degraded=replacing_degraded)
-        if self._cfg.db_crosscheck_enabled:
-            self._install_db_crosscheck(_db_crosscheck_cmd(today, paths))
+        replacing_degraded = self._children.regular_is_degraded
+        for spec in self._session_specs():
+            assert spec.cmd is not None
+            self._install_stream_child(
+                spec.key, spec.cmd(today, self._paths, None), replaces_degraded=replacing_degraded
+            )
 
     def _handle_orchestration_failure(self, now: dt.datetime, today: dt.date) -> None:
         """Schedule the next orchestration retry and start a degraded streamer from recent candidates.
@@ -1273,7 +1431,6 @@ class DaemonRunner:
         ch = self._children
         cfg = self._cfg
         paths = self._paths
-        snapshot_cfg = self._snapshot_cfg
         st.next_orchestration_at = now + dt.timedelta(seconds=cfg.orchestration_retry_s)
         log_fn = logger.critical if st.orchestration_attempts == 1 else logger.warning
         log_fn(
@@ -1285,71 +1442,78 @@ class DaemonRunner:
         if ch.regular is None:
             rev = _degraded_candidates_rev(paths.candidates, today, max_age_days=cfg.degraded_candidates_max_age_days)
             if rev is not None:
-                self._install_regular(
-                    _stream_cmd(today, paths, degraded_reason="orchestration_failed"),
+                primary_spec = self._stream_spec(StreamChildKey.REGULAR)
+                assert primary_spec.cmd is not None
+                self._install_stream_child(
+                    StreamChildKey.REGULAR,
+                    primary_spec.cmd(today, paths, "orchestration_failed"),
                     degraded=True,
                 )
-                if snapshot_cfg.enabled and ch.snapshot is None:
-                    self._install_snapshot(_snapshot_cmd(today, paths), replaces_degraded=False)
+                for spec in self._session_specs():
+                    if not spec.starts_in_degraded or ch.get(spec.key) is not None:
+                        continue
+                    assert spec.cmd is not None
+                    self._install_stream_child(spec.key, spec.cmd(today, paths, None))
                 logger.critical(
                     "[DAEMON] stage=streamer status=DEGRADED reason=orchestration_failed candidates_rev=%d",
                     rev,
                 )
 
-    def _supervise_regular(self) -> None:
-        st = self._state
+    def _supervise_stream_child(self, key: StreamChildKey, now: dt.datetime, anchors: SessionAnchors) -> None:
+        """Run one ensure_running for a SESSION child inside its active window and log the outcome."""
+        spec = self._stream_spec(key)
+        assert spec.lifecycle is ChildLifecycle.SESSION
+        assert spec.active is not None
+        assert spec.logs is not None
         ch = self._children
-        sup = ch.regular
-        if sup is not None:
-            result = sup.ensure_running()
-            if result == "started":
-                logger.info("[DAEMON] stage=streamer status=STARTED", extra=EVENT)
-            elif result == "restarted":
-                st.streamer_restarts += 1
-                logger.warning(
-                    "[DAEMON] stage=streamer status=RESTARTED exit_code=%s restarts=%d",
-                    sup.last_exit_code,
-                    st.streamer_restarts,
-                )
-            elif result == "circuit_open" and sup.take_circuit_alert():
-                logger.critical("[DAEMON] stage=streamer status=FAIL reason=circuit_open")
-            st.last_supervisor_result = result
-
-    def _supervise_snapshot(self, now: dt.datetime, anchors: SessionAnchors) -> None:
-        st = self._state
-        ch = self._children
-        snapshot_cfg = self._snapshot_cfg
-        snapshot_run_end = shift_snapshot_settings(snapshot_cfg, anchors).run_end
-        sup = ch.snapshot
-        if sup is not None and now.astimezone(_KST).time() < snapshot_run_end:
-            snapshot_result = sup.ensure_running()
-            if snapshot_result == "restarted":
-                logger.warning(
-                    "[DAEMON] stage=snapshots status=RESTARTED exit_code=%s",
-                    sup.last_exit_code,
-                )
-            elif snapshot_result == "circuit_open" and sup.take_circuit_alert():
-                logger.critical("[DAEMON] stage=snapshots status=FAIL reason=circuit_open")
-            st.last_snapshot_result = snapshot_result
-
-    def _supervise_db_crosscheck(self, now: dt.datetime, anchors: SessionAnchors) -> None:
-        """Supervise the DB crosscheck child while the regular session is open."""
-        st = self._state
-        ch = self._children
-        sup = ch.db_crosscheck
-        if sup is None or ch.regular is None:
+        sup = ch.get(key)
+        if sup is None:
             return
-        if not now.astimezone(_KST).time() < anchors.regular_close:
+        if spec.requires_primary and ch.regular is None:
+            return
+        if not spec.active(self._runtime, now, anchors):
             return
         result = sup.ensure_running()
-        if result == "restarted":
-            logger.warning(
-                "[DAEMON] stage=db_crosscheck status=RESTARTED exit_code=%s",
-                sup.last_exit_code,
-            )
+        logs = spec.logs
+        if result == "started" and logs.started is not None:
+            logger.info(logs.started, extra=EVENT)
+        elif result == "restarted":
+            if spec.role is StreamRole.PRIMARY:
+                self._state.streamer_restarts += 1
+                logger.warning(logs.restarted, sup.last_exit_code, self._state.streamer_restarts)
+            else:
+                logger.warning(logs.restarted, sup.last_exit_code)
         elif result == "circuit_open" and sup.take_circuit_alert():
-            logger.warning("[DAEMON] stage=db_crosscheck status=FAIL reason=circuit_open")
-        st.last_db_crosscheck_result = result
+            logger.log(logs.circuit_level, logs.circuit_open)
+        self._state.set_child_result(key, result)
+
+    def _supervise_session_children(self, now: dt.datetime, anchors: SessionAnchors) -> None:
+        """Supervise every enabled SESSION child in table order."""
+        for spec in self._session_specs():
+            self._supervise_stream_child(spec.key, now, anchors)
+
+    def _stop_stream_child(self, key: StreamChildKey) -> str | None:
+        """Stop and drop a single-instance child; returns the stop result or None when absent."""
+        if key is StreamChildKey.AFTERMARKET:
+            raise ValueError("aftermarket shards are stopped via _stop_aftermarket_children")
+        ch = self._children
+        sup = ch.get(key)
+        if sup is None:
+            return None
+        result = sup.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
+        ch.set(key, None)
+        if key in DaemonState._CHILD_RESULT_FIELDS:
+            self._state.set_child_result(key, None)
+        if key is StreamChildKey.REGULAR:
+            ch.degraded_regular = None
+            self._sync_degraded_mirror()
+        return result
+
+    def _stop_session_children(self) -> None:
+        """Stop every SESSION child in table order (absent children are no-ops)."""
+        for spec in self._STREAM_SPECS:
+            if spec.lifecycle is ChildLifecycle.SESSION:
+                self._stop_stream_child(spec.key)
 
     def _run_ingest_watchdog(
         self, now: dt.datetime, state: SessionState, day: TradingDayView, anchors: SessionAnchors
@@ -1708,7 +1872,7 @@ class DaemonRunner:
                 if view.status is TradingDayStatus.HOLIDAY:
                     due = False
             if not due:
-                self._stop_premarket_child()
+                self._stop_stream_child(StreamChildKey.PREMARKET)
                 return
             self._ensure_premarket_plan(today)
             shard = st.premarket_shard
@@ -1733,14 +1897,6 @@ class DaemonRunner:
                 )
         except (KrxAlphaError, KisApiError, OSError, ValueError) as exc:
             logger.warning("[DATA] stage=premarket_supervise status=FAIL reason=%s", str(exc))
-
-    def _stop_premarket_child(self) -> None:
-        """Graceful stop (15 s) and removal of the premarket supervisor."""
-        ch = self._children
-        if ch.premarket is None:
-            return
-        ch.premarket.stop(timeout_s=15.0)
-        ch.premarket = None
 
     def _log_premarket_eod(self, ref_day: dt.date) -> None:
         cfg = self._premarket_cfg
@@ -1775,10 +1931,9 @@ class DaemonRunner:
         st = self._state
         ch = self._children
         if ch.regular is not None:
-            result = self._stop_regular_streamer()
+            result = self._stop_stream_child(StreamChildKey.REGULAR)
             logger.info("[DAEMON] stage=streamer_stop result=%s", result, extra=EVENT)
-        self._stop_snapshot_child()
-        self._stop_db_crosscheck_child()
+        self._stop_session_children()
         ref_day = now.astimezone(_KST).date()
         if st.eod_attempted_for != ref_day:
             st.eod_attempted_for = ref_day
@@ -1931,38 +2086,6 @@ class DaemonRunner:
         logger.warning("[DAEMON] stage=eod_reconciliation status=SKIP reason=calendar_unknown")
         return True, False
 
-    def _stop_regular_streamer(self) -> str:
-        """Stop the regular streamer and clear its supervision state; return the supervisor stop result.
-
-        Precondition: `self._children.regular is not None` (callers keep the guard because each site logs
-        the result differently). Clears `regular`, `degraded_regular`, `last_supervisor_result` and
-        refreshes the `degraded_active` mirror.
-        """
-        child = self._children.regular
-        assert child is not None
-        result = child.stop(timeout_s=15.0)
-        self._children.regular = None
-        self._children.degraded_regular = None
-        self._state.last_supervisor_result = None
-        self._sync_degraded_mirror()
-        return result
-
-    def _stop_snapshot_child(self) -> None:
-        ch = self._children
-        if ch.snapshot is None:
-            return
-        ch.snapshot.stop(timeout_s=15.0)
-        ch.snapshot = None
-        self._state.last_snapshot_result = None
-
-    def _stop_db_crosscheck_child(self) -> None:
-        ch = self._children
-        if ch.db_crosscheck is None:
-            return
-        ch.db_crosscheck.stop(timeout_s=15.0)
-        ch.db_crosscheck = None
-        self._state.last_db_crosscheck_result = None
-
     def _stop_aftermarket_children(self, *, clear_circuit_alerts: bool) -> None:
         """Stop all aftermarket shard supervisors and clear their per-key results.
 
@@ -1970,7 +2093,7 @@ class DaemonRunner:
         restart does not re-alert keys already reported.
         """
         for sup in self._children.aftermarket.values():
-            sup.stop(timeout_s=15.0)
+            sup.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
         self._children.aftermarket.clear()
         self._state.aftermarket_results.clear()
         if clear_circuit_alerts:

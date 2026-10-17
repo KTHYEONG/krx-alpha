@@ -878,14 +878,21 @@ def _episode_runner(tmp_path, monkeypatch, script: list[str]):
 
 
 def test_regular_circuit_alert_once_per_episode_with_probes(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
     import logging
+    from zoneinfo import ZoneInfo
+
+    from src.core.session_anchors import resolve_session_anchors
+    from src.orchestration import daemon as daemon_mod
 
     runner = _episode_runner(
         tmp_path, monkeypatch, ["circuit_open", "restarted", "circuit_open", "restarted", "circuit_open"]
     )
+    now = dt.datetime(2026, 9, 8, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    anchors = resolve_session_anchors(runner._paths.session_calendar_dir, now.date())
     with caplog.at_level(logging.DEBUG):
         for _ in range(5):
-            runner._supervise_regular()
+            runner._supervise_stream_child(daemon_mod.StreamChildKey.REGULAR, now, anchors)
     criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
     assert criticals == ["[DAEMON] stage=streamer status=FAIL reason=circuit_open"]
     assert runner.state.streamer_restarts == 2
@@ -926,16 +933,23 @@ def test_snapshot_circuit_alert_once_per_episode_with_probes(tmp_path, monkeypat
     )
     with caplog.at_level(logging.DEBUG):
         for _ in range(5):
-            runner._supervise_snapshot(now, None)
+            runner._supervise_stream_child(daemon_mod.StreamChildKey.SNAPSHOT, now, None)
     criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
     assert criticals == ["[DAEMON] stage=snapshots status=FAIL reason=circuit_open"]
 
 
 def test_heartbeat_treats_probe_restart_as_alive(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
     import logging
+    from zoneinfo import ZoneInfo
+
+    from src.core.session_anchors import resolve_session_anchors
+    from src.orchestration import daemon as daemon_mod
 
     runner = _episode_runner(tmp_path, monkeypatch, ["restarted"])
-    runner._supervise_regular()
+    now = dt.datetime(2026, 9, 8, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    anchors = resolve_session_anchors(runner._paths.session_calendar_dir, now.date())
+    runner._supervise_stream_child(daemon_mod.StreamChildKey.REGULAR, now, anchors)
     with caplog.at_level(logging.INFO):
         runner._log_heartbeat(runner.state.prev_state)
     assert "streamer_alive=True" in caplog.text
@@ -950,6 +964,7 @@ def test_circuit_alert_rearms_after_recovery(
     from zoneinfo import ZoneInfo
 
     from src.core.session_anchors import resolve_session_anchors
+    from src.orchestration import daemon as daemon_mod
     from src.orchestration import supervisor as sup_mod
     from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker
 
@@ -980,9 +995,9 @@ def test_circuit_alert_rearms_after_recovery(
     def _supervise(t: float) -> None:
         clock["t"] = t
         if slot == "regular":
-            runner._supervise_regular()
+            runner._supervise_stream_child(daemon_mod.StreamChildKey.REGULAR, now, anchors)
         else:
-            runner._supervise_snapshot(now, anchors)
+            runner._supervise_stream_child(daemon_mod.StreamChildKey.SNAPSHOT, now, anchors)
 
     with caplog.at_level(logging.INFO):
         for t in (0.0, 1.0, 2.0, 3.0, 61.0, 62.0):
