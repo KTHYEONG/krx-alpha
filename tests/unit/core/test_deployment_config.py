@@ -535,8 +535,10 @@ def test_kca_warmup_timer_optional() -> None:
     workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
 
     assert "systemctl --user cat kca-kis-token-warmup.timer" in workflow
-    assert "enable --now kca-kis-token-warmup.timer" in workflow
     assert "WARNING: kca-kis-token-warmup.timer not installed" in workflow
+    assert "enable --now kca-kis-token-warmup.timer" not in workflow
+    assert 'rm -f "\\$HOME/.config/systemd/user/kca-kis-token-warmup.service.d/10-kis-data-env.conf"' in workflow
+    assert "EnvironmentFile=%s" not in workflow
 
 
 def test_healthcheck_keys_required_at_deploy() -> None:
