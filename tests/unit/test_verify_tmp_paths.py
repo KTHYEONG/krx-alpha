@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -53,3 +56,29 @@ def test_config_change_selects_deployment_and_architecture_contracts() -> None:
 def test_unrelated_change_selects_no_contract_tests() -> None:
     verify = _load_verify()
     assert verify._contract_tests(["README.md", "tests/unit/core/test_paths.py"]) == []
+
+
+def test_canonical_change_selects_distribution_contract() -> None:
+    verify = _load_verify()
+    selected = verify._contract_tests(["deploy/shared/host_broker_contract.py"])
+    assert "tests/unit/core/test_host_broker_canonical.py" in selected
+
+
+def test_mypy_checks_canonical_alongside_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    verify = _load_verify()
+    commands: list[list[str]] = []
+
+    def run_cmd(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(verify, "run_cmd", run_cmd)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["verify.py", "--fast", "--files", "src/core/config.py", "deploy/shared/host_broker_contract.py"],
+    )
+    verify.main()
+    mypy_command = next(command for command in commands if "mypy" in command)
+    assert "src/core/config.py" in mypy_command
+    assert "deploy/shared/host_broker_contract.py" in mypy_command

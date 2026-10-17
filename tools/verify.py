@@ -153,6 +153,10 @@ def _check_scaffolding_leaks(py_files: list[str]) -> list[JsonDiag]:
 # source->test mapping cannot see them, so a change that can break one always runs it.
 _CONTRACT_TRIGGERS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (
+        ("deploy/shared/host_broker_contract.py",),
+        ("tests/unit/core/test_host_broker_canonical.py",),
+    ),
+    (
         ("docker-compose.yml", "Dockerfile", "deploy/", ".github/", "src/core/config.py", "src/core/paths.py"),
         ("tests/unit/core/test_deployment_config.py",),
     ),
@@ -399,7 +403,7 @@ def main() -> None:
     def check_mypy() -> tuple[str, int, list[JsonDiag], str]:
         if args.skip_mypy or not py_files:
             return "mypy", 0, [], ""
-        target_mypy = [f for f in py_files if f.startswith("src/")] or py_files
+        target_mypy = [f for f in py_files if f.startswith(("src/", "deploy/shared/"))] or py_files
         res = run_cmd(["uv", "run", "mypy", *target_mypy, "--ignore-missing-imports"])
         if res.returncode != 0:
             out = "\n".join((res.stdout or res.stderr).strip().splitlines()[:10])
