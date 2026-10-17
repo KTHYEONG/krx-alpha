@@ -13,6 +13,7 @@ def test_collect_stream_run_drives_streamer_one_cycle(tmp_path, monkeypatch) -> 
     import argparse
     import json
     from src.cli import collect_stream
+    from src.realtime.adapters import registry
     from src.universe.ipc import write_candidates
     from src.realtime.contracts import VendorAck, VendorDisconnected
 
@@ -43,7 +44,7 @@ def test_collect_stream_run_drives_streamer_one_cycle(tmp_path, monkeypatch) -> 
         async def close(self):
             self.closed = True
 
-    monkeypatch.setattr(collect_stream, 'LsRealtimeAdapter', _FakeAdapter)
+    monkeypatch.setattr(registry, "LsRealtimeAdapter", _FakeAdapter)
     monkeypatch.setattr('aiohttp.ClientSession', lambda *a, **k: _FakeHttp())
 
     args = argparse.Namespace(
@@ -63,6 +64,7 @@ def test_collect_stream_installs_sigterm_handler(tmp_path, monkeypatch) -> None:
     import json
     import signal
     from src.cli import collect_stream
+    from src.realtime.adapters import registry
     from src.universe.ipc import write_candidates
     from src.realtime.contracts import VendorAck, VendorDisconnected
 
@@ -112,7 +114,7 @@ def test_collect_stream_installs_sigterm_handler(tmp_path, monkeypatch) -> None:
         async def close(self):
             self.closed = True
 
-    monkeypatch.setattr(collect_stream, 'LsRealtimeAdapter', _FakeAdapter)
+    monkeypatch.setattr(registry, "LsRealtimeAdapter", _FakeAdapter)
     monkeypatch.setattr('aiohttp.ClientSession', lambda *a, **k: _FakeHttp())
 
     args = argparse.Namespace(
@@ -170,6 +172,7 @@ def test_collect_stream_wires_watchdog_ntp_fallback_and_shutdown_event(tmp_path,
     import logging
 
     from src.cli import collect_stream
+    from src.realtime.adapters import registry
     from src.universe.ipc import write_candidates
 
     monkeypatch.setenv("LS_APP_KEY", "k")
@@ -199,7 +202,7 @@ def test_collect_stream_wires_watchdog_ntp_fallback_and_shutdown_event(tmp_path,
 
     monkeypatch.setattr(collect_stream, "bootstrap_session", _bootstrap)
     monkeypatch.setattr(collect_stream, "RealtimeStreamer", _FakeStreamer)
-    monkeypatch.setattr(collect_stream, "LsRealtimeAdapter", lambda **kw: object())
+    monkeypatch.setattr(registry, "LsRealtimeAdapter", lambda **kw: object())
     monkeypatch.setattr("aiohttp.ClientSession", lambda *a, **k: _FakeHttp())
     args = argparse.Namespace(session_date="2026-09-14", journal_root=str(tmp_path / "l0"), manifest_path=str(tmp_path / "s.json"),
                               candidates_path=str(cp), market_map=str(mm), ntp_host="h", max_clock_offset_ns=2_000_000_000, max_cycles=1)
@@ -223,6 +226,7 @@ def test_collect_stream_aborts_before_connect_when_clock_unsynced(tmp_path, monk
     import pytest
 
     from src.cli import collect_stream
+    from src.realtime.adapters import registry
     from src.realtime.clock import ClockUnsyncedError
     from src.universe.ipc import write_candidates
 
@@ -241,7 +245,7 @@ def test_collect_stream_aborts_before_connect_when_clock_unsynced(tmp_path, monk
         def __init__(self, **kw):
             connected.append(True)
 
-    monkeypatch.setattr(collect_stream, "LsRealtimeAdapter", _NeverAdapter)
+    monkeypatch.setattr(registry, "LsRealtimeAdapter", _NeverAdapter)
 
     args = argparse.Namespace(
         session_date="2026-09-08", journal_root=str(tmp_path / "l0"),
@@ -254,3 +258,69 @@ def test_collect_stream_aborts_before_connect_when_clock_unsynced(tmp_path, monk
 
     assert connected == []
     assert not (tmp_path / "s.json").exists()
+
+
+def test_collect_stream_uses_settings_vendor_adapter(tmp_path, monkeypatch) -> None:
+    import argparse
+
+    from src.cli import collect_stream
+    from src.realtime.adapters import registry
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setenv("KRX_ALPHA_VENDOR", "db")
+    monkeypatch.setenv("DB_APP_KEY", "k")
+    monkeypatch.setenv("DB_APP_SECRET", "s")
+    monkeypatch.setattr("src.realtime.session.measure_ntp_offset_ns", lambda *a, **k: 0)
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
+    seen: dict[str, object] = {}
+    real_bootstrap = collect_stream.bootstrap_session
+
+    def _capture(cfg, **kw):
+        seen["cfg"] = cfg
+        return real_bootstrap(cfg, **kw)
+
+    class _FakeDbAdapter:
+        def __init__(self, **kw):
+            seen["adapter_kw"] = kw
+
+    class _FakeStreamer:
+        def __init__(self, **kw):
+            seen["adapter"] = kw.get("adapter")
+
+        async def run_forever(self, stop, *, max_cycles=None):
+            return None
+
+    class _FakeHttp:
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(collect_stream, "bootstrap_session", _capture)
+    monkeypatch.setattr(collect_stream, "RealtimeStreamer", _FakeStreamer)
+    monkeypatch.setattr(registry, "DbRealtimeAdapter", _FakeDbAdapter)
+    monkeypatch.setattr("aiohttp.ClientSession", lambda *a, **k: _FakeHttp())
+    args = argparse.Namespace(session_date="2026-09-08", journal_root=str(tmp_path / "l0"),
+                              manifest_path=str(tmp_path / "s.json"), candidates_path=str(cp),
+                              ntp_host="h", max_clock_offset_ns=2_000_000_000, max_cycles=1)
+    assert collect_stream.run(args) == 0
+    assert seen["cfg"].vendor == "db"
+    assert isinstance(seen["adapter"], _FakeDbAdapter)
+
+
+def test_collect_stream_missing_market_map_fails_closed(tmp_path, monkeypatch) -> None:
+    import argparse
+
+    import pytest
+
+    from src.cli import collect_stream
+    from src.core.errors import KrxAlphaError
+
+    monkeypatch.delenv("KRX_ALPHA_VENDOR", raising=False)
+    monkeypatch.setenv("LS_APP_KEY", "k")
+    monkeypatch.setenv("LS_APP_SECRET", "s")
+    monkeypatch.setattr(collect_stream, "bootstrap_session", lambda cfg: object())
+    args = argparse.Namespace(session_date="2026-09-08", journal_root=str(tmp_path / "l0"),
+                              manifest_path=str(tmp_path / "s.json"), candidates_path=str(tmp_path / "c.json"),
+                              ntp_host="h", max_clock_offset_ns=2_000_000_000, max_cycles=1)
+    with pytest.raises(KrxAlphaError, match="market-map"):
+        collect_stream.run(args)

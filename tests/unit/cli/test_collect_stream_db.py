@@ -21,12 +21,13 @@ def test_collect_stream_db_skips_when_disabled(tmp_path, monkeypatch, caplog) ->
     import logging
 
     from src.cli import collect_stream_db
+    from src.realtime.adapters import registry
 
     monkeypatch.setenv("KRX_ALPHA_DB_CROSSCHECK_ENABLED", "false")
     monkeypatch.delenv("DB_APP_KEY", raising=False)
     monkeypatch.delenv("DB_APP_SECRET", raising=False)
     constructed: list[bool] = []
-    monkeypatch.setattr(collect_stream_db, "DbRealtimeAdapter", lambda **kw: constructed.append(True))
+    monkeypatch.setattr(registry, "DbRealtimeAdapter", lambda **kw: constructed.append(True))
     args = argparse.Namespace(session_date="2026-09-08", journal_root=str(tmp_path / "l0"),
                               manifest_path=str(tmp_path / "s.db.json"), candidates_path=str(tmp_path / "c.json"),
                               ntp_host=None, max_clock_offset_ns=None, max_cycles=1, degraded_reason=None)
@@ -41,6 +42,7 @@ def test_collect_stream_db_uses_db_vendor_route_and_own_manifest(tmp_path, monke
     import json
 
     from src.cli import collect_stream_db
+    from src.realtime.adapters import registry
     from src.realtime.contracts import MarketSession, MarketVenue
     from src.universe.ipc import write_candidates
 
@@ -75,7 +77,7 @@ def test_collect_stream_db_uses_db_vendor_route_and_own_manifest(tmp_path, monke
 
     monkeypatch.setattr(collect_stream_db, "bootstrap_session", _capture)
     monkeypatch.setattr(collect_stream_db, "RealtimeStreamer", _FakeStreamer)
-    monkeypatch.setattr(collect_stream_db, "DbRealtimeAdapter", _FakeAdapter)
+    monkeypatch.setattr(registry, "DbRealtimeAdapter", _FakeAdapter)
     monkeypatch.setattr("aiohttp.ClientSession", lambda *a, **k: _FakeHttp())
     manifest = str(tmp_path / "2026-09-08.db.json")
     args = argparse.Namespace(session_date="2026-09-08", journal_root=str(tmp_path / "l0"),
@@ -117,6 +119,7 @@ def test_collect_stream_db_shutdown_log_uses_db_vendor(tmp_path, monkeypatch, ca
     import logging
 
     from src.cli import collect_stream_db
+    from src.realtime.adapters import registry
     from src.universe.ipc import write_candidates
 
     monkeypatch.setenv("KRX_ALPHA_DB_CROSSCHECK_ENABLED", "true")
@@ -138,7 +141,7 @@ def test_collect_stream_db_shutdown_log_uses_db_vendor(tmp_path, monkeypatch, ca
             return None
 
     monkeypatch.setattr(collect_stream_db, "RealtimeStreamer", _FakeStreamer)
-    monkeypatch.setattr(collect_stream_db, "DbRealtimeAdapter", lambda **kw: object())
+    monkeypatch.setattr(registry, "DbRealtimeAdapter", lambda **kw: object())
     monkeypatch.setattr("aiohttp.ClientSession", lambda *a, **k: _FakeHttp())
     args = argparse.Namespace(session_date="2026-09-08", journal_root=str(tmp_path / "l0"),
                               manifest_path=str(tmp_path / "s.db.json"), candidates_path=str(cp),

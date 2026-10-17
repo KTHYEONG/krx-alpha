@@ -8,19 +8,28 @@ import datetime as dt
 import json
 import logging
 import pathlib
-import signal
+from collections.abc import Callable
+from dataclasses import dataclass
 
-import aiohttp
-
-from src.core.config import CollectorSettings, KisTokenSettings, LsCredentials, load_credentials
+from src.core.config import CollectorSettings, KisTokenSettings
+from src.core.errors import KrxAlphaError
 from src.core.observability import EVENT
 from src.core.session_anchors import resolve_session_anchors
-from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
-from src.realtime.adapters.ls import LsRealtimeAdapter
-from src.realtime.session import SessionConfig, bootstrap_session
-from src.realtime.streamer import RealtimeStreamer, SessionFrameSink, regular_session_silence_limit_s
+from src.realtime.adapters.registry import RegularAdapterContext, regular_vendor
+from src.realtime.session import CollectorSession, SessionConfig, StreamRoute, bootstrap_session
+from src.realtime.streamer import RealtimeStreamer, regular_session_silence_limit_s
+from src.realtime.streaming_child import resolve_clock_overrides, run_streaming_child
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RegularStreamProfile:
+    vendor: str
+    slot_budget: int
+    symbol_limit: int | None
+    route: StreamRoute | None
+    shutdown_log: str
 
 
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -53,60 +62,63 @@ def run(args: argparse.Namespace) -> int:
     return asyncio.run(_run_stream(args))
 
 
-async def _run_stream(args: argparse.Namespace) -> int:
-    settings = CollectorSettings()
-    creds = load_credentials(LsCredentials)
+async def run_regular_stream(
+    args: argparse.Namespace,
+    settings: CollectorSettings,
+    profile: RegularStreamProfile,
+    *,
+    bootstrap: Callable[[SessionConfig], CollectorSession],
+    streamer_factory: Callable[..., RealtimeStreamer],
+) -> int:
+    """Run one regular-session streamer for profile.vendor and return 0 after a graceful stop."""
+    entry = regular_vendor(profile.vendor)
+    creds = entry.load_credentials()
     session_date = dt.date.fromisoformat(str(args.session_date))
     anchors = resolve_session_anchors(settings.paths.session_calendar_dir, session_date)
-    raw_ntp_host = getattr(args, "ntp_host", None)
-    raw_max_offset = getattr(args, "max_clock_offset_ns", None)
-    ntp_host = str(raw_ntp_host) if raw_ntp_host is not None else settings.ntp_host
-    max_clock_offset_ns = int(raw_max_offset) if raw_max_offset is not None else settings.max_clock_offset_ns
+    overrides = resolve_clock_overrides(
+        getattr(args, "ntp_host", None), getattr(args, "max_clock_offset_ns", None), settings
+    )
+    kwargs: dict[str, object] = {}
+    if profile.symbol_limit is not None:
+        kwargs["symbol_limit"] = profile.symbol_limit
+    if profile.route is not None:
+        kwargs["route"] = profile.route
     cfg = SessionConfig(
         session_date=session_date,
         journal_root=pathlib.Path(str(args.journal_root)),
         manifest_path=pathlib.Path(str(args.manifest_path)),
         candidates_path=pathlib.Path(str(args.candidates_path)),
-        ntp_host=ntp_host,
-        slot_budget=settings.subscription_pair_budget,  # SubscriptionRegistry 는 (symbol, tr_id) 쌍을 계수한다
-        max_clock_offset_ns=max_clock_offset_ns,
+        ntp_host=overrides.ntp_host,
+        slot_budget=profile.slot_budget,
+        max_clock_offset_ns=overrides.max_clock_offset_ns,
         desired_streams=settings.streams,
-        vendor=settings.vendor,
+        vendor=profile.vendor,
         degraded_reason=getattr(args, "degraded_reason", None),
         ntp_fallback_hosts=settings.ntp_fallback_hosts,
         min_free_disk_gb=settings.min_free_disk_gb,
         journal_retain_days=settings.journal_retain_days,
+        **kwargs,  # type: ignore[arg-type]
     )
-    session = bootstrap_session(cfg)
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    loop.add_signal_handler(signal.SIGTERM, stop.set)
-    market_of = json.loads(pathlib.Path(str(args.market_map)).read_text(encoding="utf-8"))  # noqa: ASYNC240 - one-shot startup read
-    http = aiohttp.ClientSession()
-    try:
-        token_store = TossTokenStore(
-            ls_token_path(KisTokenSettings().token_cache_dir, creds.ls_app_key),
-            rotation_cooldown_s=settings.ls_token_rotation_cooldown_s,
-        )
-        adapter = LsRealtimeAdapter(
-            app_key=creds.ls_app_key,
-            app_secret=creds.ls_app_secret,
-            http=http,
-            market_of=market_of,
-            token_store=token_store,
-        )
-        streamer = RealtimeStreamer(
-            adapter=adapter,
-            sink=SessionFrameSink(session=session),
-            replay_pairs=session.replay_pairs(),
-            silence_limit=lambda: regular_session_silence_limit_s(dt.datetime.now(dt.UTC), anchors=anchors),
-        )
-        await streamer.run_forever(stop, max_cycles=args.max_cycles)
-    finally:
-        await http.close()
-    session.persist()
+    session = bootstrap(cfg)
+    market_of: dict[str, str] | None = None
+    if entry.requires_market_map:
+        raw_map = getattr(args, "market_map", None)
+        if raw_map is None:
+            raise KrxAlphaError(f"market-map is required for vendor {profile.vendor}")
+        market_of = json.loads(pathlib.Path(str(raw_map)).read_text(encoding="utf-8"))  # noqa: ASYNC240 - one-shot startup read
+    token_cache_dir = KisTokenSettings().token_cache_dir
+    await run_streaming_child(
+        session=session,
+        adapter_factory=lambda http: entry.build(
+            creds, RegularAdapterContext(http, settings, token_cache_dir, market_of)
+        ),
+        replay_pairs=session.replay_pairs(),
+        silence_limit=lambda: regular_session_silence_limit_s(dt.datetime.now(dt.UTC), anchors=anchors),
+        max_cycles=getattr(args, "max_cycles", None),
+        streamer_factory=streamer_factory,
+    )
     logger.info(
-        "[DATA] stage=stream_shutdown manifest=%s acks=%d gaps=%d boots=%d",
+        profile.shutdown_log,
         str(cfg.manifest_path),
         len(session.manifest.subscription_acks),
         len(session.manifest.gaps),
@@ -114,3 +126,17 @@ async def _run_stream(args: argparse.Namespace) -> int:
         extra=EVENT,
     )
     return 0
+
+
+async def _run_stream(args: argparse.Namespace) -> int:
+    settings = CollectorSettings()
+    profile = RegularStreamProfile(
+        vendor=settings.vendor,
+        slot_budget=settings.subscription_pair_budget,
+        symbol_limit=None,
+        route=None,
+        shutdown_log="[DATA] stage=stream_shutdown manifest=%s acks=%d gaps=%d boots=%d",
+    )
+    return await run_regular_stream(
+        args, settings, profile, bootstrap=bootstrap_session, streamer_factory=RealtimeStreamer
+    )
