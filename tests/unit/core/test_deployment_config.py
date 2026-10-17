@@ -166,6 +166,20 @@ def test_compose_keeps_db_crosscheck_dormant() -> None:
     assert "DB_CROSSCHECK" not in raw_text
 
 
+def test_compose_stop_grace_covers_dbsec_issue_wait() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    from deploy.shared.host_broker_contract import MIN_ISSUE_INTERVAL_S
+
+    raw = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    grace = raw["services"]["krx-collector"]["stop_grace_period"]
+
+    assert grace.endswith("s")
+    assert int(grace[:-1]) >= MIN_ISSUE_INTERVAL_S["dbsec"] + 30
+
+
 def test_deploy_installs_host_backup_and_retires_shared_timer_only_when_krx_only() -> None:
     from pathlib import Path
 
