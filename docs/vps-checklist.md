@@ -3,12 +3,12 @@
 Agent-executable runbook. An AI auditor runs it on a schedule, verifies that every automated routine of the day ran **and that the data it produced is correct**, then reports. It is feature-agnostic: new automation is added as a check row (section 12), not as a new document.
 
 - Host `or-vps` (SSH alias, tailnet), container `krx-collector`, data root host `~/krx-alpha/data` = container `/app/data`.
-- Last verified against production: 2026-10-08 (third business day, M0–M3 exercised: LS token reissue generation 3 at 08:20:36, dashboard closing-auction fix confirmed at 15:27, dashboard `krx.data_quality` WARN cleared as predicted); 2026-10-07 (second business day with the hardened streamer: M0–M3 exercised, first LS token reissue at 08:20:31 observed, EOD heartbeat continuity observed); 2026-10-06 (first full business day: M0, M1, M2, M3 exercised; S2, S3, S6, S7, C1–C4, C7, Q1–Q6, H8, A1–A2, A5, NP2–NP6, X1 all ran against live data). M4 exercised 2026-10-06 (H7 still in progress at 23:47) and 2026-10-07 (backup finished 23:31:44, all green). Still unexercised: A3/A4 failure paths, the 22:00 deferred recreate with pending image changes, W-only rows beyond X1. Baselines in section 9 are dated; refresh them, never hard-code new ones.
+- Last verified against production: 2026-10-17 (post-refactor deploy `a5338c8`: stream-child spec table, host broker contract v1, `stop_grace_period` 95 s, DB crosscheck dormant); 2026-10-16 (full business day M0–M4: 15:12 LS disconnect gap 16.7 s, 16:36 NXT watchdog gap, `program_trades_sync` timeout defect fixed in `c8288e7`); 2026-10-08 (third business day, M0–M3 exercised: LS token reissue generation 3 at 08:20:36, dashboard closing-auction fix confirmed at 15:27, dashboard `krx.data_quality` WARN cleared as predicted); 2026-10-07 (second business day with the hardened streamer: M0–M3 exercised, first LS token reissue at 08:20:31 observed, EOD heartbeat continuity observed); 2026-10-06 (first full business day: M0, M1, M2, M3 exercised; S2, S3, S6, S7, C1–C4, C7, Q1–Q6, H8, A1–A2, A5, NP2–NP6, X1 all ran against live data). M4 exercised 2026-10-06 (H7 still in progress at 23:47) and 2026-10-07 (backup finished 23:31:44, all green). Still unexercised: A3/A4 failure paths, the 22:00 deferred recreate with pending image changes, W-only rows beyond X1. Baselines in section 9 are dated; refresh them, never hard-code new ones.
 - Output language: report in Korean; keys, IDs, badges stay English (section 10). This file stays English.
 
 ## 1. Operating rules (non-negotiable)
 
-1. **Read-only.** No restart, deploy, file write, `rclone` write, or config edit on the VPS. Analysis output goes to the local scratchpad / `scratch/`. Remediation is proposed, never executed, unless the user says so.
+1. **Read-only, leave nothing behind.** No restart, deploy, file write, `rclone` write, or config edit on the VPS, and no files locally either: run probes by piping a heredoc over `ssh` stdin and read results in the terminal; the only output is the chat reply (section 10). Remediation is proposed, never executed, unless the user says so (exception: a code defect the user has pre-authorized is fixed in the repo, verified, committed via the commit skill and pushed; deploys still obey rule 10).
 2. **No secrets.** Never print env files, tokens, app keys, rclone config, or `~/.cache/kis` contents (file names and mtimes only).
 3. **UNKNOWN is not PASS.** A missing file, unreachable host, expired evidence, or a probe error is `UNKNOWN` with the reason. A silent check is a defect of the audit.
 4. **Day kind first.** Decide `BUSINESS` / `HOLIDAY` / `WEEKEND` / `SHIFTED` (section 4) before judging anything; the same silence is PASS on a holiday and SEV1 on a business day.
@@ -36,11 +36,11 @@ Run the mode that matches the KST time. Every run starts with C0 (section 4) and
 
 | Mode | When (KST) | Purpose | Checks |
 |---|---|---|---|
-| M0 pre-open | business day 07:45–08:15 | Is the day armed? | C0, H1–H6, S1, S7 (stale-by-one is expected), C7, A1, NP1 (if premarket enabled) |
+| M0 pre-open | business day 07:45–08:15 | Is the day armed? | C0, H1–H6, H12, S1, S7 (stale-by-one is expected), C7, A1, NP1 (if premarket enabled), DB1 |
 | M1 open | business day 09:05–09:30 | Did collection actually start? | C0, S2–S4, S6–S8, C1 (current hour), C2 (regular), H2 |
 | M2 close | business day 15:45–16:15 | Regular session closed clean, aftermarket armed | C0, S2, C2, C4, C7 (aftermarket universe) |
 | **M3 EOD review** | business day 20:35–21:45 (**finish before 22:00**) | Full audit of the day incl. content | everything in sections 6–8 except weekly rows |
-| M4 night | every day 23:45–00:15 | Host backup, next-day readiness | H5–H8, C7 (next premarket pool), S1 for tomorrow |
+| M4 night | every day 23:45–00:15 | Host backup, next-day readiness | H5–H8, H12, H13, C7 (next premarket pool), S1 for tomorrow |
 | W weekly | Saturday 10:00 | Trends, deep content cross-checks, capacity | all `W` rows, X1, H3 trend |
 | X incident | on demand | Triage | section 11, then affected rows |
 
@@ -58,7 +58,7 @@ Run P-CTX (section 8). Derive:
 
 | Evidence | Lifetime | Consequence |
 |---|---|---|
-| `docker logs krx-collector` (INFO heartbeat, `stage=normalize`, digest, `stage=prune ... REUSED`) | until next container recreate (22:00 Mon–Fri, any deploy) and 30 MB cap | Collect in M3; export `docker logs --since 14h` to the scratchpad first |
+| `docker logs krx-collector` (INFO heartbeat, `stage=normalize`, digest, `stage=prune ... REUSED`) | until next container recreate (22:00 Mon–Fri, any deploy) and 30 MB cap | Read in M3 with `docker logs --since 14h \| grep ...` before 22:00; never save it |
 | `data/logs/events-*.jsonl` | persistent, rotating 5 MiB x5; **WARNING+ and flagged INFO only** | Absence of INFO is not evidence of absence; `state_change`, `start`, `streamer` INFO are retained |
 | `manifest/**`, `universe/**`, `candidates.json`, `calendar/**` | persistent | Primary evidence for plans and session boundaries |
 | L0 `l0/**` | until offload-verified and older than `journal_retain_days`=3 | Only source for same-day raw checks |
@@ -83,9 +83,24 @@ Times are standard anchors; shift per C0. "By" = latest acceptable time; missing
 | by 15:31 | Aftermarket universe written | `universe/aftermarket/D.json` | SEV1 for aftermarket collection |
 | 15:39 | Last snapshot REST job; 15:40 `AFTER_MARKET_ACTIVE`, NXT aftermarket starts (KRX aftermarket 16:00) | C4, C2 | SEV2 |
 | 20:00 | Aftermarket ends, EOD starts; writers close within ~10 s | C2 `closed` | SEV2 |
-| by 20:30 | EOD maintenance done (normalize, offload, reconcile); 20:20 program-trade sync; 20:30 next-day pool | S5, H8, C5, C7 | WARN at 20:30, **SEV1 at 21:00** |
+| by 20:45 | EOD maintenance done (normalize, offload, reconcile; 2026-10-16 finished 20:38); `program_trades_sync` STARTED right after it (timeout clock starts at launch since `c8288e7`); `NIGHT_SLEEP` entry writes the next-day premarket pool (`premarket_pool status=OK target=N`) | S5, H8, C5, C7 | WARN at 20:45, **SEV1 at 21:00**; `program_trades_sync status=FAIL reason=timeout` = SEV2 |
 | 22:00 Mon-Fri | Deferred recreate applies pending deploys | M4: container start ~22:00, `rev` as intended | SEV2 |
 | 23:30 | Host Drive backup | H7 | SEV2 if stale >26 h |
+
+Neighbors on the same host and keys (kca, kse; KST, Mon–Fri unless noted). They share `~/.cache/kis`, the single LS app key, the DB금융투자 app key, the Toss key and KIS data slots (`deploy/shared/kis_slot_assignments.toml`). A contention finding (H12) is attributed by matching its time to this table; their own failures are SEV3 INFO here and are audited by their own runbooks (`k-closing-alpha/docs/vps-checklist.md`, `k-stock-engine/docs/vps-checklist.md`).
+
+| Time | Job | Shared resource |
+|---|---|---|
+| 07:05 / 07:10 | `kca-kis-token-warmup` / `kca-kiwoom-token-rotate` | KIS token files (krx issues only if the cache is empty) |
+| 08:30, 11:30, 21:30 | `kca-price-ingest` | Kiwoom, Toss |
+| 08:32 / 08:39:30 | `kse-morning` / `kse-auction-open` | KIS slot 5 REST (krx premarket WS uses slot 5 07:58–08:50; REST and WS budgets are separate) |
+| 08:39:55 / 08:40:10 | `kca-auction-open` / `kca-order-exit` | KIS main account (orders) |
+| 15:20–15:21:15 | `kca-collect`, `kca-predict`, `kca-auction-close`, `kca-order-entry` | KIS slots 1·5 REST, Toss `STOCK_TRADING_TREND` bucket (shared with krx snapshots), Kiwoom |
+| 15:45 | `kca-auction-path` | DB금융투자 |
+| 18:30 (runs to ~19:40) | `kse-collect-eve` | LS REST (host-paced `admission_ls_*`), KIS slot 5 |
+| 20:05 / 20:35 | `kca-archive-intraday` / `kca-tape-sweep` | LS, DB금융투자, Kiwoom |
+| 20:40 | `kse-collect-dbsec` | DB금융투자 (1 token/min per key, 20 TPS app-wide) |
+| 22:15 / 23:05 daily / 02:30 daily | `kca-backup` / `kca-extended-backfill` / `kse-backup` | shared Drive lock with `krx-host-backup` 23:30 (lock waits lengthen H7) |
 
 ## 7. Check catalogue
 
@@ -95,7 +110,7 @@ Columns: ID, modes, what, how (probe in section 8 or command), PASS / WARN / FAI
 
 | ID | Modes | Check | How | PASS | WARN / FAIL |
 |---|---|---|---|---|---|
-| H1 | M0 M3 M4 | Container health | P-CTX | Up; `restarts=0`; `oom=false`; start = a recreate after 22:00 (CI deploys land any time after the freeze lifts: 2026-10-06 recreates at 22:00, 22:17, 22:20, 23:28) and `rev` = `git rev-parse origin/main` (docs/chore commits rebuild the image too) | any restart/OOM = SEV2; start inside 08:10–22:00 unexplained = SEV2 |
+| H1 | M0 M3 M4 | Container health | P-CTX | Up; `restarts=0`; `oom=false`; start = a recreate after 22:00 (CI deploys land any time after the freeze lifts: 2026-10-06 recreates at 22:00, 22:17, 22:20, 23:28) and `rev` = `git rev-parse origin/main` (docs/chore commits rebuild the image too) | any restart/OOM = SEV2; start inside 08:10–22:00 unexplained = SEV2; latest push's CI `deploy` job not `success` (`gh run list --limit 3` locally) = SEV2 even when the push succeeded (2026-10-16: two deploys failed silently on the runtime-env allowlist) |
 | H2 | M0 M3 W | Memory | `docker stats --no-stream krx-collector` | idle <200 MiB; EOD peak <900 MiB of 1 GiB | >800 MiB WARN; OOM = SEV2 |
 | H3 | M0 M3 W | Disk | `df -h /home/ubuntu`; `du -sh data/l0 data/l1` | <70% | 70–85% WARN; >85% FAIL SEV1 (>90%); weekly: project 30-day growth |
 | H4 | M0 M3 | Clock | `chronyc tracking` (System time) | abs offset <0.5 s | >0.5 s WARN; >2.0 s FAIL SEV1 (`ClockUnsyncedError`); also per-manifest `clock_offset_ns` (C2) |
@@ -106,6 +121,8 @@ Columns: ID, modes, what, how (probe in section 8 or command), PASS / WARN / FAI
 | H9 | M3 | Other containers present | `docker ps -a --format "{{.Names}} {{.Status}}"` | `krx-collector` Up | others: INFO only |
 | H10 | M0 M1 + 5-min | LS token age and ownership | P-HEALTH `ls_token_age_h` (file mtime of `~/.cache/kis/token_ls_*.json`; never read its content) and `ls_token_owner_bad` | Tokens issued since `fc22b36` carry the vendor `expires_in` (86400 s) and are reissued 10 min before it, so the age ceiling is 23 h; the 12 h ceiling applies only to legacy tokens without expiry. M0 (before 08:20) age is informational (a night-old token is expected); M1 (08:21–09:20 on a business day) requires `ls_token_age_h` <1 and one `shared_token status=PUBLISHED` at ~08:20 (reissue); afterwards `ls_token_age_h` <23. Verified 2026-10-07: reissue at 08:20:31 (generation 2); `ls_token_owner_bad=0` (store files must be owned by the container's uid; the container currently runs as root, uid 0, which can read and write any owner, so the probe reports 0 then, and a root-owned `token_ls_*.json` is normal; it matters only if the image is changed to a non-root user, where a foreign-owned file makes the store raise `PermissionError`) | no reissue at 08:20 (age ≥1 h at M1) or ≥23 h on a business day after 08:21 = SEV2; on weekends and holidays no streamer connects, so the age keeps growing (2026-10-09 holiday: 28 h) and is informational (stale token: LS closes the socket at subscribe; 2026-10-06 08:20 crash loop); remediation: rename the token file aside and restart the container. `ls_token_owner_bad>0` = SEV2; remediation: `docker exec krx-collector chown 1001:1001 /run/kis-token-cache/token_ls_*` (and the lock files), then confirm `ls_token_age_h` and the next `stream_connect` |
 | H11 | 5-min (09:05–15:30 regular, 16:05–20:00 aftermarket) | Live L0 freshness | P-HEALTH `l0 <stream> newest_age_s` | regular ≤180 s until 15:30, KIS aftermarket ≤300 s; after 15:30 regular ticks legitimately stop (last tick 15:30:29); after 20:00 all streams idle | stale in window = SEV1; streamer_alive=False in session = SEV1 |
+| H12 | M0 M4 W | Shared host broker dir (contract v1, shared with kca and kse) | P-BROKER | `marker=present`; `unexpected=` empty except the known `token_ls_<sha>.json.stale-20261006` (2026-10-06 rename-aside; deletion awaits user approval); `canonical_sha` identical for krx/kca/kse; `contract_errors_24h` 0 | marker missing = SEV1 (kse dbsec unit refuses to start; containers raise `HostBrokerDirNotSharedError`); SHA mismatch = SEV2 (one project redeployed without re-vendoring); any `IGW00201`/`EGW00201`/`TokenIssueThrottled`/`SCHEMA_INVALID` = SEV2 (cross-project key contention); new unexpected file = SEV3 |
+| H13 | M4 | Container stop grace | P-BROKER `stop_timeout` | 95 (≥ dbsec 61 s issue-guard wait + 30) | lower = SEV3 (a recreate can SIGKILL a token wait) |
 
 ### S: Scheduling and daemon
 
@@ -145,7 +162,7 @@ Columns: ID, modes, what, how (probe in section 8 or command), PASS / WARN / FAI
 | Q7 | M3 | Candidate content | `candidates.json` via P-SNAP2 line: unique symbols matching `^[0-9A-Z]{6}$`, each present in daily bars for P | all hold | any miss = SEV3 |
 | Q8 | M3 | Retention | `ls l0/*/*/*/*/ \| sort`; `ls quarantine` | L0 dates ≤ 4 newest per stream (3 retained + current); L0 older than that exists only when offload is unverified (H8 FAIL); `quarantine/` must contain no files (`find quarantine -type f` returns 0; empty subfolders are fine) | stale L0 without cause = SEV3; any new quarantine entry (mtime after 2026-09-15) = SEV2 (data moved out) |
 | X1 | W | Tick vs bar volume | X-VOL (local) | for every symbol subscribed for the whole session (final candidate set), max cumulative tick `volume` == daily bar `volume` (42/42 exact on 2026-10-01; 95/95 on 2026-10-02). Symbols present in L1 with only a few pre-open ticks come from a replaced candidate list after a mid-morning restart (2026-10-02: 24 such symbols) and are excluded, explained by the S4 restart | ≤2 final-set symbols within 1% = SEV3; otherwise SEV2 (tick loss or bar error) |
-| X2 | on Q1 FAIL | Reproduce a verdict | copy the L1 partition to `scratch/`, `PYTHONPATH=. uv run python` with `src.storage.quality.decode_tick_raw_fields`, group violations by `shcode`/`sign`/`ref` | root cause class named (feed, decoder, or rule) | unresolved = SEV2 |
+| X2 | on Q1 FAIL | Reproduce a verdict | in the container (after 20:35 or on a closed day, `nice -n 19 docker exec -i`), read the L1 partition in place with `src.storage.quality.decode_tick_raw_fields` and group violations by `shcode`/`sign`/`ref`; copy nothing | root cause class named (feed, decoder, or rule) | unresolved = SEV2 |
 
 ### A: Alerting and observability pipeline
 
@@ -159,9 +176,9 @@ Columns: ID, modes, what, how (probe in section 8 or command), PASS / WARN / FAI
 
 ## 8. Probes (tested 2026-10-05)
 
-Write each block to the scratchpad and run as shown. `D` = audit date. Host probes: `ssh or-vps "D=$D python3 -" < file`. Container probes: `ssh or-vps "nice -n 19 docker exec -i krx-collector /app/.venv/bin/python -" < file`.
+Run each block by piping it as a heredoc; never write it to a file. `D` = audit date. Host Python probes: `ssh or-vps "D=$D python3 -" <<'PY' … PY`. Container probes: `ssh or-vps "nice -n 19 docker exec -i krx-collector /app/.venv/bin/python -" <<'PY' … PY`. Shell probes: `ssh or-vps 'bash -s' <<'SH' … SH`.
 
-**P-CTX** (`ssh or-vps "bash -s" < p_ctx.sh`)
+**P-CTX** (shell)
 
 ```bash
 cd ~/krx-alpha/data
@@ -320,7 +337,7 @@ for s in streams:
 print("not_ok", bad)
 ```
 
-**P-HEALTH** (`ssh or-vps "bash -s" < p_health.sh`; run every 5 minutes during sessions. Silent when healthy, remediate and report only on a violation)
+**P-HEALTH** (shell; run every 5 minutes during sessions. Silent when healthy; report only on a violation, remediate only per rule 1)
 
 ```bash
 cd ~/krx-alpha/data
@@ -335,6 +352,17 @@ docker logs --since 6m krx-collector 2>&1 | grep -E 'level=CRITICAL|level=ERROR|
 t=$(ls -l --time-style=+%s ~/.cache/kis/token_ls_*.json 2>/dev/null | awk '{print $6}' | head -1); [ -n "$t" ] && echo "ls_token_age_h=$(( ($(date +%s)-t)/3600 ))"
 cu=$(docker exec krx-collector id -u); o=$([ "$cu" = 0 ] || stat -c '%u %n' ~/.cache/kis/token_ls_* 2>/dev/null | awk -v u="$cu" '$1!=u'); echo "ls_token_owner_bad=$(printf '%s' "$o" | grep -c '^')${o:+ files: $o}"
 echo "disk=$(df -h /home/ubuntu | awk 'NR==2{print $5}') mem=$(docker stats --no-stream --format '{{.MemUsage}}' krx-collector)"
+```
+
+**P-BROKER** (shell; shared `~/.cache/kis` census, names only, never contents)
+
+```bash
+d=~/.cache/kis
+echo "marker=$([ -f $d/.host-admission ] && echo present || echo MISSING)"
+echo "unexpected=$(ls -A $d | grep -vE '^(\.host-admission|token_(ls|toss|dbsec|kiwoom)_[0-9a-f]{12}\.json(\.lock)?|token_issue_(ls|toss|dbsec|kiwoom)_[0-9a-f]{12}\.state(\.lock)?|admission_(ls|toss|dbsec|kiwoom)_[0-9a-f]{12}(_[A-Za-z0-9_-]+)?\.state|token_[0-9a-f]{12}\.json(\.lock)?|tps_[0-9a-f]{12}\.state)$' | sed -E 's/[0-9a-f]{12}/<sha>/g' | tr '\n' ' ')"
+echo "canonical_sha krx=$(docker exec krx-collector sha256sum /app/deploy/shared/host_broker_contract.py | cut -c1-12) kca=$(sha256sum ~/k-closing-alpha/src/api/host_broker_contract.py | cut -c1-12) kse=$(docker run --rm --entrypoint sha256sum ghcr.io/kthyeong/k-stock-engine:latest /app/src/integrations/host_broker_contract.py | cut -c1-12)"
+echo "contract_errors_24h krx=$(docker logs --since 24h krx-collector 2>&1 | grep -cE 'IGW00201|EGW00201|TokenIssueThrottled|HostBrokerDirNotShared|SCHEMA_INVALID') units=$(journalctl --user --since '24 hours ago' --no-pager 2>/dev/null | grep -cE 'IGW00201|EGW00201|TokenIssueThrottled|HostBrokerDirNotShared|SCHEMA_INVALID')"
+echo "stop_timeout=$(docker inspect krx-collector --format '{{.Config.StopTimeout}}') db_crosscheck_env=$(docker exec krx-collector sh -c 'env | grep -c KRX_ALPHA_DB_CROSSCHECK')"
 ```
 
 Live monitoring pipelines must be unbuffered: end with `awk '{print substr($0,1,260); fflush()}'`, never `cut`/`sed` (they hold output until exit and silence the monitor; 2026-10-06). Prove a watcher fires once on a real event before trusting its silence.
@@ -355,18 +383,16 @@ print("generated", d.get("generated_at") or d.get("collected_at"), "krx_checks",
 for c in cs: print(c["level"], c["id"], "|", c["detail"][:90])
 ```
 
-**X-VOL** (local, weekly; `D` must have an L1 partition, i.e. at least 4 calendar days old)
+**X-VOL** (container, weekly or after 20:35; `D` must have an L1 partition, i.e. at least 4 calendar days old; reads in place, copies nothing)
 
 ```bash
-mkdir -p scratch/vps_probe && scp -q or-vps:~/krx-alpha/data/l1/ls/krx/regular/H0STCNT0/dt=$D.parquet scratch/vps_probe/ticks.parquet \
-  && scp -q or-vps:~/krx-alpha/data/bars/daily/${D%-??}.parquet scratch/vps_probe/bars.parquet
-D=$D PYTHONPATH=. uv run python - <<'PY'
+ssh or-vps "nice -n 19 docker exec -i -e D=$D krx-collector /app/.venv/bin/python -" <<'PY'
 import os, polars as pl
 from src.storage.quality import decode_tick_raw_fields
 D = os.environ["D"]
-f = decode_tick_raw_fields(pl.read_parquet("scratch/vps_probe/ticks.parquet"))
+f = decode_tick_raw_fields(pl.read_parquet(f"/app/data/l1/ls/krx/regular/H0STCNT0/dt={D}.parquet"))
 g = f.with_columns(volume=pl.col("volume_raw").cast(pl.Int64, strict=False)).group_by("shcode").agg(pl.col("volume").max().alias("tick_vol"))
-b = pl.read_parquet("scratch/vps_probe/bars.parquet").filter(pl.col("date").cast(pl.String) == D).select(pl.col("symbol").alias("shcode"), "volume")
+b = pl.read_parquet(f"/app/data/bars/daily/{D[:7]}.parquet").filter(pl.col("date").cast(pl.String) == D).select(pl.col("symbol").alias("shcode"), "volume")
 j = g.join(b, on="shcode", how="left").with_columns(ratio=pl.col("tick_vol") / pl.col("volume"))
 print("symbols", j.height, "unmatched", j["volume"].null_count(), "exact", int((j["ratio"] == 1.0).sum()))
 print(j.filter(pl.col("ratio") != 1.0).sort("ratio").head(10))
@@ -398,7 +424,7 @@ Seeds for sanity and for "is this WARN the usual one". Refresh monthly or when t
 | Host backup duration (H7) | 2026-10-05 run 45 min (lock_wait 2666 s), 10-06 run 1 h 45 min (lock_wait 6174 s, shared Drive lock held by another project's backup), 10-07 run 1 min 40 s (lock_wait 0). Run time is dominated by the lock wait; judge `rc`/`last_ok_at`, and treat lock_wait >2 h or a run still active at the next 23:30 as SEV3 |
 | Offload | local L1 size == remote size for every partition |
 | Clock | manifest `clock_offset_ns` within ±1 ms; chrony offset <1 ms |
-| Memory | idle ~80–100 MiB; EOD normalizer child ≤500 MiB |
+| Memory | idle ~60–100 MiB; regular session 380–420 MiB; aftermarket with 4 KIS children ~610 MiB incl. reclaimable cache (2026-10-16); EOD normalizer child ≤500 MiB |
 
 ## 10. Reporting
 
@@ -428,6 +454,7 @@ SEV1: notify immediately (section 2). A report is not complete until every ID of
 | Daemon restarted in session | `shutdown` event (`signal`, `graceful`), `daemon_lifecycle.json`, CI/deploy times vs freeze |
 | Manifest `degraded_reason`, ack shortfall | `subscription_acks[].code`; KIS 41-pair/connection cap; key lease `work/kis_ws_leases/<key_id>.lock` (`key_lease_busy`) |
 | L0 file stalled / zero size | `docker logs --since 30m`, `pgrep -af collect-` in container, disk (H3), clock (H4) |
+| Market-wide silence on all streams at once in session | first check for a KRX circuit breaker / trading halt (news, KRX notice) before calling SEV1: 2026-10-15 KOSDAQ/KOSPI CB halts silenced ticks ~30 min while every stream stayed connected; the watchdog is not halt-aware, so its disconnect/gap entries in that window are expected |
 | `StorageExhaustedError` | disk below floor; free space only after 22:00 |
 | `ClockUnsyncedError` | `chronyc tracking`, NTP reachability |
 | DQ FAIL | X2; check universe for new listings, vendor format change (decode_fail), then session clock |
@@ -463,3 +490,12 @@ Enabled by `KRX_ALPHA_PREMARKET_ENABLED` and `PREMARKET_CREDENTIAL_SLOT=5` in `d
 | NP12 | Calibration (W) | max in-window gap of the week; `grep key_lease_busy`; slot env names only | set `KRX_ALPHA_PREMARKET_SILENCE_LIMIT_S` ≈2.6x largest normal gap; no `key_lease_busy`; `KIS_DECISION_SHARD_SLOTS` / `KIS_HOST_DATA_SLOTS` unchanged |
 
 Disable switch: `KRX_ALPHA_PREMARKET_ENABLED` in `docker-compose.yml`; change only outside 08:10–22:00, then confirm CI deploy green and the container Up.
+
+## DB. Module: DB금융투자 crosscheck stream (lifecycle: dormant since 2026-10-17)
+
+Code ships as one stream-child spec row (`role=crosscheck`) gated by `KRX_ALPHA_DB_CROSSCHECK_ENABLED` (absent from `docker-compose.yml`, so off). DB S00 delivers only ~70–80% of LS trade records (2026-10-16 probe), so it is a quote/AcmlVol crosscheck, never a tick backup. Re-enabling is a user decision.
+
+| ID | Check | How | PASS |
+|---|---|---|---|
+| DB1 | Stays dormant (M0) | P-BROKER `db_crosscheck_env`; `docker logs --since 14h krx-collector \| grep -c db_crosscheck` | `0` and `0`; no `l0/db/` directory for D; any DB activity while dormant = SEV2 (unreviewed config drift) |
+
