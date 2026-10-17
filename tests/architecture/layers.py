@@ -56,6 +56,7 @@ LAYER_RANK['src/orchestration/premarket.py'] = 5
 LAYER_RANK['src/storage/listing_days.py'] = 2
 LAYER_RANK['src/execution/recovery.py'] = 3
 LAYER_RANK['src/realtime/adapters/db.py'] = 3
+LAYER_RANK['src/realtime/adapters/json_ws.py'] = 3
 LAYER_RANK['src/cli/probe_db_stream.py'] = 7
 LAYER_RANK['src/cli/collect_stream_db.py'] = 7
 LAYER_RANK['src/realtime/streaming_child.py'] = 5
