@@ -16,8 +16,9 @@ Initial SHA-256:
   `TokenRecord`; policy is not a per-call argument.
 - `token_record_path(directory, vendor, app_key)` names token records.
 - `resolve_host_broker_dir` accepts `require_shared` and optional bool
-  `in_container`; `DEFAULT_HOST_BROKER_DIR` and `HOST_ADMISSION_MARKER` name the
-  directory default and marker.
+  `in_container`; the directory is always caller-injected (no host-path default,
+  so vendored copies pass source-hygiene gates) and `HOST_ADMISSION_MARKER`
+  names the marker.
 - `DEFAULT_RATES` owns vendor rates, including case-preserving Toss scopes and
   Kiwoom per-TR wildcard lookup.
 
