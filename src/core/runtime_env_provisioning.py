@@ -8,11 +8,17 @@ never writes or prints credential values.
 
 from __future__ import annotations
 
+import argparse
 import logging
+import os
+import re
 import shlex
 import subprocess
+import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 from src.core.errors import KrxAlphaError
 from src.core.kis_keypool_provisioning import parse_workstation_assignments
@@ -20,6 +26,9 @@ from src.core.kis_keypool_provisioning import parse_workstation_assignments
 logger = logging.getLogger(__name__)
 
 REMOTE_RUNTIME_ENV_PATH = "/home/ubuntu/quant-secrets/krx-alpha.env"
+RUNTIME_ENV_KEY_MANIFEST_NAME: Final[str] = "runtime-env-keys.txt"
+
+_KEY_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -98,3 +107,47 @@ def install_runtime_fragment(host: str, fragment: str) -> None:
         text=True,
         check=True,
     )
+
+
+def render_key_manifest() -> str:
+    """Return the key-name manifest: 'required <KEY>' lines then 'optional <KEY>' lines, newline-terminated."""
+    required = [key.target for key in RUNTIME_ENV_SPEC]
+    optional = list(OPTIONAL_RUNTIME_ENV_KEYS)
+    seen: set[str] = set()
+    for name in (*required, *optional):
+        if not _KEY_NAME_RE.fullmatch(name):
+            raise KrxAlphaError(f"invalid runtime env key name: {name}")
+        if name in seen:
+            raise KrxAlphaError(f"duplicate runtime env key: {name}")
+        seen.add(name)
+    lines = [f"required {name}" for name in required]
+    lines.extend(f"optional {name}" for name in optional)
+    return "\n".join(lines) + "\n"
+
+
+def _write_key_manifest(path: Path) -> None:
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(render_key_manifest())
+        os.chmod(tmp_name, 0o644)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """CLI: 'emit-key-manifest --out PATH' writes render_key_manifest() to PATH and returns 0."""
+    parser = argparse.ArgumentParser(prog="runtime_env_provisioning")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    emit = subparsers.add_parser("emit-key-manifest", help="write the runtime env key-name manifest")
+    emit.add_argument("--out", type=Path, required=True)
+    args = parser.parse_args(argv)
+    if args.command == "emit-key-manifest":
+        _write_key_manifest(args.out)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - interpreter entry point only
+    raise SystemExit(main())
