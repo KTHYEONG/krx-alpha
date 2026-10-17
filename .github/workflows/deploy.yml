@@ -240,15 +240,11 @@ jobs:
           install -m 644 "\$STAGING_DIR/vps-image-gc.service" ~/.config/systemd/user/vps-image-gc.service.new && mv -f ~/.config/systemd/user/vps-image-gc.service.new ~/.config/systemd/user/vps-image-gc.service
           install -m 644 "\$STAGING_DIR/vps-image-gc.timer" ~/.config/systemd/user/vps-image-gc.timer.new && mv -f ~/.config/systemd/user/vps-image-gc.timer.new ~/.config/systemd/user/vps-image-gc.timer
 
-          # KCA reads the same shared fragment through its user-systemd unit.
-          DROPIN_DIR="\$HOME/.config/systemd/user/kca-kis-token-warmup.service.d"
-          if systemctl --user cat kca-kis-token-warmup.timer >/dev/null 2>&1; then
-            mkdir -p "\$DROPIN_DIR"
-            printf '[Service]\nEnvironmentFile=%s\n' "\$DATA_ENV_FILE" > "\$DROPIN_DIR/10-kis-data-env.conf"
-            chmod 600 "\$DROPIN_DIR/10-kis-data-env.conf"
-            systemctl --user daemon-reload
-            systemctl --user enable --now kca-kis-token-warmup.timer
-          else
+          # KCA owns its units: kca-run passes kis-data.env itself, so krx no longer writes into kca's unit tree.
+          # Remove the drop-in earlier krx deploys created there.
+          rm -f "\$HOME/.config/systemd/user/kca-kis-token-warmup.service.d/10-kis-data-env.conf"
+          rmdir "\$HOME/.config/systemd/user/kca-kis-token-warmup.service.d" 2>/dev/null || true
+          if ! systemctl --user cat kca-kis-token-warmup.timer >/dev/null 2>&1; then
             echo "WARNING: kca-kis-token-warmup.timer not installed; krx issues tokens itself (KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE=true)"
           fi
           chmod +x ~/krx-alpha/deploy/host/krx-host-backup.sh
