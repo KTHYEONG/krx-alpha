@@ -7,11 +7,8 @@ import asyncio
 import datetime as dt
 import logging
 import pathlib
-import signal
 import time
 from typing import Any
-
-import aiohttp
 
 from src.core.config import DataPaths, resolve_collector_runtime
 from src.core.errors import KrxAlphaError, MissingCredentialsError, SlotBudgetExceededError
@@ -22,7 +19,8 @@ from src.realtime.contracts import MarketSession, MarketVenue
 from src.realtime.kis_lease import KisWebSocketLease
 from src.realtime.kis_sharding import AftermarketShard, load_kis_data_credentials
 from src.realtime.session import SessionConfig, StreamRoute, bootstrap_session
-from src.realtime.streamer import RealtimeStreamer, SessionFrameSink, premarket_silence_limit_s
+from src.realtime.streamer import RealtimeStreamer, premarket_silence_limit_s
+from src.realtime.streaming_child import resolve_clock_overrides, run_streaming_child
 from src.universe.ipc import read_candidate_snapshot
 
 logger = logging.getLogger(__name__)
@@ -111,8 +109,9 @@ async def _run_stream(args: argparse.Namespace) -> int:
     )
     raw_ntp_host = getattr(args, "ntp_host", None)
     raw_max_offset = getattr(args, "max_clock_offset_ns", None)
-    ntp_host = str(raw_ntp_host) if raw_ntp_host is not None else str(settings.ntp_host)
-    max_clock_offset_ns = int(raw_max_offset) if raw_max_offset is not None else int(settings.max_clock_offset_ns)
+    overrides = resolve_clock_overrides(raw_ntp_host, raw_max_offset, settings)
+    ntp_host = overrides.ntp_host
+    max_clock_offset_ns = overrides.max_clock_offset_ns
     shard = AftermarketShard(MarketVenue.NXT, 0, symbols, streams, cred.slot, cred.key_id)
     cfg = SessionConfig(
         session_date=session_date,
@@ -152,24 +151,12 @@ async def _run_stream(args: argparse.Namespace) -> int:
         cred.key_id,
         extra=EVENT,
     )
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    loop.add_signal_handler(signal.SIGTERM, stop.set)
-
-    async def _deadline_watch() -> None:
-        delay_s = (deadline - time.time_ns()) / 1_000_000_000
-        if delay_s > 0:
-            await asyncio.sleep(delay_s)
-        stop.set()
-
-    deadline_task = asyncio.ensure_future(_deadline_watch())
-    http = aiohttp.ClientSession()
-    try:
+    def _adapter_factory(http: Any) -> Any:
         lease = KisWebSocketLease(
             root=DataPaths(pathlib.Path(str(args.journal_root)).parent).kis_ws_lease_dir,
             credential_key_id=cred.key_id,
         )
-        adapter = KisRealtimeAdapter(
+        return KisRealtimeAdapter(
             app_key=cred.app_key,
             app_secret=cred.app_secret,
             http=http,
@@ -178,25 +165,19 @@ async def _run_stream(args: argparse.Namespace) -> int:
             capacity_pairs=capacity,
             lease=lease,
         )
-        streamer = RealtimeStreamer(
-            adapter=adapter,
-            sink=SessionFrameSink(session=session),
-            replay_pairs=session.replay_pairs(),
-            silence_limit=lambda: premarket_silence_limit_s(
-                dt.datetime.now(dt.UTC), anchors=anchors, limit_s=premarket.silence_limit_s
-            ),
-        )
-        await streamer.run_forever(stop, max_cycles=getattr(args, "max_cycles", None))
-    finally:
-        deadline_task.cancel()
-        await http.close()
-    persist_fn2: Any = getattr(session, "persist", None)
-    if callable(persist_fn2):
-        persist_fn2()
-    if manifest is not None and hasattr(manifest, "writer_closed_at_ns"):
-        manifest.writer_closed_at_ns = time.time_ns()
-    if manifest is not None and callable(persist_fn2):
-        persist_fn2()
+
+    await run_streaming_child(
+        session=session,
+        adapter_factory=_adapter_factory,
+        replay_pairs=session.replay_pairs(),
+        silence_limit=lambda: premarket_silence_limit_s(
+            dt.datetime.now(dt.UTC), anchors=anchors, limit_s=premarket.silence_limit_s
+        ),
+        max_cycles=getattr(args, "max_cycles", None),
+        streamer_factory=RealtimeStreamer,
+        stop_deadline_ns=deadline,
+        close_writer=True,
+    )
     logger.info(
         "[DATA] stage=premarket_stream status=STOP date=%s symbols=%d pairs=%d credential_key_id=%s",
         session_date.isoformat(),

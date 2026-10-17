@@ -10,6 +10,7 @@ import pathlib
 from src.core.config import CollectorSettings
 from src.realtime.clock import ClockUnsyncedError
 from src.realtime.session import SessionConfig, bootstrap_session
+from src.realtime.streaming_child import resolve_clock_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +43,15 @@ def run(args: argparse.Namespace) -> int:
     raw_vendor = getattr(args, "vendor", None)
     raw_min_free = getattr(args, "min_free_disk_gb", None)
     raw_retain = getattr(args, "journal_retain_days", None)
+    clock = resolve_clock_overrides(raw_ntp_host, raw_max_offset, settings)
     cfg = SessionConfig(
         session_date=dt.date.fromisoformat(str(args.session_date)),
         journal_root=pathlib.Path(str(args.journal_root)),
         manifest_path=pathlib.Path(str(args.manifest_path)),
         candidates_path=pathlib.Path(str(args.candidates_path)),
-        ntp_host=str(raw_ntp_host) if raw_ntp_host is not None else settings.ntp_host,
+        ntp_host=clock.ntp_host,
         slot_budget=int(raw_slot_budget) if raw_slot_budget is not None else settings.subscription_pair_budget,
-        max_clock_offset_ns=int(raw_max_offset) if raw_max_offset is not None else settings.max_clock_offset_ns,
+        max_clock_offset_ns=clock.max_clock_offset_ns,
         desired_streams=tuple(str(raw_streams).split(",")) if raw_streams is not None else settings.streams,
         vendor=str(raw_vendor) if raw_vendor is not None else settings.vendor,
         archive_root=(pathlib.Path(str(args.archive_root)) if getattr(args, "archive_root", None) else None),
