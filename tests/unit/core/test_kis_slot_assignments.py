@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import tomllib
 from pathlib import Path
@@ -12,10 +13,8 @@ from src.core.kis_keypool_provisioning import CANONICAL_SLOTS_LINE, DATA_SLOTS
 TABLE_PATH = Path("deploy/shared/kis_slot_assignments.toml")
 COMPOSE_PATH = Path("docker-compose.yml")
 
-_OWNERS = frozenset({"krx-alpha", "k-closing-alpha", "k-stock-engine"})
+_OWNERS = frozenset({"krx", "kca", "kse"})
 _CHANNELS = frozenset({"rest", "ws"})
-_DERIVATIONS = frozenset({"explicit", "kis_data_slots_prefix"})
-_PURPOSE_RE = re.compile(r"[a-z0-9_]+")
 _CLOCK_RE = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
 
 
@@ -24,7 +23,23 @@ def _load_rows() -> list[dict[str, object]]:
 
 
 def _krx_rows() -> dict[str, dict[str, object]]:
-    return {row["purpose"]: row for row in _load_rows() if row["owner"] == "krx-alpha"}
+    document = tomllib.loads(TABLE_PATH.read_text(encoding="utf-8"))
+    selectors = document["selectors"]["krx"]
+    groups: dict[str, dict[str, object]] = {}
+    for row in _load_rows():
+        if row["project"] != "krx":
+            continue
+        if row["channel"] == "rest":
+            name = "snapshot_rest"
+            assert row["slot"] == selectors["KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT"]
+        elif row["slot"] == selectors["KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT"]:
+            name = "premarket_ws"
+        else:
+            name = "aftermarket_ws"
+        group = groups.setdefault(name, {"channel": row["channel"], "slots": [], "window_kst": row["windows"][0].split("-")})
+        assert row["windows"] == ["-".join(group["window_kst"])]
+        group["slots"].append(str(row["slot"]))
+    return groups
 
 
 def _compose_env() -> dict[str, str]:
@@ -43,29 +58,30 @@ def test_table_schema_valid() -> None:
     rows = document["assignment"]
     assert isinstance(rows, list)
     assert rows
-    canonical_slots = {str(slot) for slot in DATA_SLOTS}
-    seen: set[tuple[object, object]] = set()
+    canonical_slots = set(DATA_SLOTS)
+    assert set(document["pool"]) == canonical_slots
+    assert set(document["host_data_slots"]) <= canonical_slots
+    for selectors in document["selectors"].values():
+        for value in selectors.values():
+            assert set(value if isinstance(value, list) else [value]) <= canonical_slots
+    seen: set[tuple[object, ...]] = set()
     for row in rows:
-        assert row["owner"] in _OWNERS
+        assert row["project"] in _OWNERS
         assert isinstance(row["purpose"], str)
-        assert _PURPOSE_RE.fullmatch(row["purpose"])
-        assert (row["owner"], row["purpose"]) not in seen
-        seen.add((row["owner"], row["purpose"]))
+        assert row["purpose"].strip()
+        identity = (row["slot"], row["project"], row["channel"], tuple(row["windows"]))
+        assert identity not in seen
+        seen.add(identity)
         assert row["channel"] in _CHANNELS
-        slots = row["slots"]
-        assert isinstance(slots, list)
-        assert slots
-        assert len(set(slots)) == len(slots)
-        assert set(slots) <= canonical_slots
-        window = row["window_kst"]
-        assert isinstance(window, list)
-        assert len(window) == 2
-        assert all(isinstance(bound, str) for bound in window)
-        assert all(_CLOCK_RE.fullmatch(bound) for bound in window)
-        assert window[0] < window[1]
-        assert isinstance(row["config_key"], str)
-        assert row["config_key"].strip()
-        assert row["derivation"] in _DERIVATIONS
+        assert type(row["slot"]) is int
+        assert row["slot"] in canonical_slots
+        assert row["windows"]
+        for raw in row["windows"]:
+            window = raw.split("-")
+            assert len(window) == 2
+            assert _CLOCK_RE.fullmatch(window[0])
+            assert _CLOCK_RE.fullmatch(window[1]) or window[1] == "24:00"
+            assert window[0] < window[1]
 
 
 def test_table_has_no_conflicts() -> None:
@@ -74,9 +90,11 @@ def test_table_has_no_conflicts() -> None:
         for right in rows[index + 1 :]:
             if left["channel"] != right["channel"]:
                 continue
-            if not set(left["slots"]) & set(right["slots"]):
+            if left["slot"] != right["slot"] or left["project"] == right["project"]:
                 continue
-            assert not _window_overlaps(left["window_kst"], right["window_kst"])
+            for left_window in left["windows"]:
+                for right_window in right["windows"]:
+                    assert not _window_overlaps(left_window.split("-"), right_window.split("-"))
 
 
 @pytest.mark.parametrize(
@@ -100,20 +118,14 @@ def test_krx_rows_exact() -> None:
     assert krx["snapshot_rest"]["channel"] == "rest"
     assert krx["snapshot_rest"]["slots"] == ["2"]
     assert krx["snapshot_rest"]["window_kst"] == ["08:00", "15:39"]
-    assert krx["snapshot_rest"]["config_key"] == "KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT"
-    assert krx["snapshot_rest"]["derivation"] == "explicit"
 
     assert krx["premarket_ws"]["channel"] == "ws"
     assert krx["premarket_ws"]["slots"] == ["5"]
     assert krx["premarket_ws"]["window_kst"] == ["07:58", "08:50"]
-    assert krx["premarket_ws"]["config_key"] == "KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT"
-    assert krx["premarket_ws"]["derivation"] == "explicit"
 
     assert krx["aftermarket_ws"]["channel"] == "ws"
     assert krx["aftermarket_ws"]["slots"] == ["1", "2", "3", "4"]
     assert krx["aftermarket_ws"]["window_kst"] == ["15:40", "20:00"]
-    assert krx["aftermarket_ws"]["config_key"] == "KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION"
-    assert krx["aftermarket_ws"]["derivation"] == "kis_data_slots_prefix"
 
 
 def test_compose_snapshot_slot_matches_table() -> None:
@@ -165,3 +177,9 @@ def test_premarket_and_snapshot_slots_differ() -> None:
 def test_assignment_table_excluded_from_image() -> None:
     patterns = Path(".dockerignore").read_text(encoding="utf-8").splitlines()
     assert TABLE_PATH.as_posix() in patterns
+
+
+def test_canonical_table_hash_pinned() -> None:
+    raw = TABLE_PATH.read_bytes()
+    assert raw.splitlines()[0] == b"# canonical: krx-alpha/deploy/shared/kis_slot_assignments.toml schema=1"
+    assert hashlib.sha256(raw).hexdigest() == "49c39b9957a1fd64a91b0804cdfd1decdc26b6cb1a7e477805e9b75e8e93af9a"
