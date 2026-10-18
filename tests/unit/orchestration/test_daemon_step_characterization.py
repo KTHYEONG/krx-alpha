@@ -122,19 +122,22 @@ class _TimelineHarness:
         monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "ok"))
         monkeypatch.setattr(daemon_mod, "send_digest", lambda s, b: self.calls.append(["digest", s]) or True)
 
-        def _refresh(*, session_date, generated_at, client, out_path, capacity, excluded_symbols):
+        def _refresh(*, session_date, generated_at, client, out_path, capacity, venue, excluded_symbols):
+            from src.realtime.contracts import MarketVenue
             from src.universe.ipc import CandidateSnapshot, write_candidate_snapshot
 
-            self.calls.append(["refresh_aftermarket", session_date.isoformat(), len(excluded_symbols)])
+            self.calls.append(["refresh_aftermarket", session_date.isoformat(), venue.value, len(excluded_symbols)])
+            session = "aftermarket_nxt" if venue is MarketVenue.NXT else "aftermarket"
+            policy = "aftermarket_nxt_v1" if venue is MarketVenue.NXT else "aftermarket_v1"
             snapshot = CandidateSnapshot(
                 schema_version=1,
                 rev=int(session_date.strftime("%Y%m%d")),
                 session_date=session_date,
-                session="aftermarket",
+                session=session,
                 generated_at=generated_at,
                 source_asof=generated_at,
                 effective_from=generated_at,
-                policy_version="aftermarket_v1",
+                policy_version=policy,
                 capacity=capacity,
                 eligible_count=2,
                 selected_count=2,
@@ -160,11 +163,11 @@ class _TimelineHarness:
 
         monkeypatch.setattr(daemon_mod, "refresh_aftermarket_candidates", _refresh)
 
-        def _plan(*, symbols, credentials, pair_capacity_per_connection, krx_streams, nxt_streams):
+        def _plan(*, krx_symbols, nxt_symbols, credentials, pair_capacity_per_connection, krx_streams, nxt_streams):
             from src.realtime.contracts import MarketVenue
             from src.realtime.kis_sharding import AftermarketShard
 
-            self.calls.append(["plan_shards", [str(s) for s in symbols]])
+            self.calls.append(["plan_shards", [str(s) for s in krx_symbols], [str(s) for s in nxt_symbols]])
             return (
                 AftermarketShard(MarketVenue.NXT, 0, ("005930",), nxt_streams, "0", "id0"),
                 AftermarketShard(MarketVenue.KRX, 0, ("000660",), krx_streams, "1", "id1"),
@@ -420,6 +423,7 @@ def test_rollover_reset_set(tmp_path, monkeypatch, caplog) -> None:
         st.degraded_active = True
         st.last_ingest_check = dt.datetime(2026, 9, 15, 15, 0, tzinfo=KST)
         st.next_aftermarket_refresh_at = dt.datetime(2026, 9, 15, 15, 31, tzinfo=KST)
+        st.next_aftermarket_nxt_refresh_at = dt.datetime(2026, 9, 15, 15, 31, tzinfo=KST)
         st.aftermarket_plan_day = D - dt.timedelta(days=1)
         st.aftermarket_circuit_alerted = {"krx:0"}
         harness.runner._children.regular = daemon_mod.ProcessSupervisor(
@@ -451,6 +455,7 @@ def test_rollover_reset_set(tmp_path, monkeypatch, caplog) -> None:
     assert harness.runner.state.last_ingest_check is None
     assert harness.runner.state.ingest_stale is False
     assert harness.runner.state.next_aftermarket_refresh_at is None
+    assert harness.runner.state.next_aftermarket_nxt_refresh_at is None
     assert "krx:0" in harness.runner.children.aftermarket
     assert harness.runner.state.aftermarket_plan_day == D - dt.timedelta(days=1)
     assert harness.runner.state.aftermarket_circuit_alerted == {"krx:0"}

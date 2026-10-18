@@ -20,6 +20,34 @@ def test_premarket_paths_are_date_prefixed_and_isolated(tmp_path) -> None:
 
     assert candidates.name.split(".")[0] == day.isoformat()
     assert manifest.name.split(".")[0] == day.isoformat()
-    assert candidates != paths.aftermarket_candidates(day)
+    assert candidates != paths.aftermarket_candidates(day, "krx")
     assert manifest != paths.aftermarket_manifest_path(day, "nxt", 0)
     assert "aftermarket" not in manifest.parts
+
+
+def test_aftermarket_candidates_path_per_venue(tmp_path) -> None:
+    import datetime as dt
+    import pathlib
+
+    from src.core.paths import DataPaths
+    from src.realtime.contracts import MarketVenue
+
+    paths = DataPaths(pathlib.Path(tmp_path) / "data")
+    day = dt.date(2026, 10, 19)
+
+    assert paths.aftermarket_candidates(day, MarketVenue.KRX) == paths.universe_dir / "aftermarket" / "2026-10-19.json"
+    assert paths.aftermarket_candidates(day, "nxt") == paths.universe_dir / "aftermarket" / "2026-10-19.nxt.json"
+
+
+def test_aftermarket_candidates_rejects_unknown_venue(tmp_path) -> None:
+    import datetime as dt
+    import pathlib
+
+    import pytest
+
+    from src.core.paths import DataPaths
+
+    paths = DataPaths(pathlib.Path(tmp_path) / "data")
+
+    with pytest.raises(ValueError, match="unknown aftermarket venue"):
+        paths.aftermarket_candidates(dt.date(2026, 10, 19), "xyz")

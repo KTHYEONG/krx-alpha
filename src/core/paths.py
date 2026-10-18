@@ -106,8 +106,14 @@ class DataPaths:
         """
         return self.archive_root / "snapshot" / dataset / f"dt={day.isoformat()}.parquet"
 
-    def aftermarket_candidates(self, day: dt.date) -> pathlib.Path:
-        return self.universe_dir / "aftermarket" / f"{day.isoformat()}.json"
+    def aftermarket_candidates(self, day: dt.date, venue: object) -> pathlib.Path:
+        """Per-venue aftermarket candidate snapshot path; raises ValueError for an unknown venue."""
+        venue_s = str(getattr(venue, "value", venue))
+        if venue_s == "krx":
+            return self.universe_dir / "aftermarket" / f"{day.isoformat()}.json"
+        if venue_s == "nxt":
+            return self.universe_dir / "aftermarket" / f"{day.isoformat()}.nxt.json"
+        raise ValueError(f"unknown aftermarket venue: {venue_s!r}")
 
     def manifest_path(self, day: dt.date) -> pathlib.Path:
         return self.manifest_dir / f"{day.isoformat()}.json"

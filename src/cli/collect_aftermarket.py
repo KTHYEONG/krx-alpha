@@ -20,6 +20,7 @@ from src.realtime.kis_sharding import AftermarketShard, load_kis_data_credential
 from src.realtime.session import SessionConfig, StreamRoute, bootstrap_session
 from src.realtime.streamer import RealtimeStreamer, aftermarket_silence_limit_s
 from src.realtime.streaming_child import resolve_clock_overrides, run_streaming_child
+from src.universe.aftermarket import aftermarket_candidate_session
 from src.universe.ipc import read_candidate_snapshot
 
 logger = logging.getLogger(__name__)
@@ -67,12 +68,12 @@ async def _run_stream(args: argparse.Namespace) -> int:
     if cred is None or cred.key_id != key_id:
         raise MissingCredentialsError(f"credential fingerprint mismatch for slot {slot}")
     symbols = tuple(part for part in str(args.symbols).split(",") if part)
-    snapshot = read_candidate_snapshot(pathlib.Path(str(args.candidates_path)), expected_session_date=dt.date.fromisoformat(str(args.session_date)), expected_session="aftermarket", max_candidates=after.max_symbols)
+    snapshot = read_candidate_snapshot(pathlib.Path(str(args.candidates_path)), expected_session_date=dt.date.fromisoformat(str(args.session_date)), expected_session=aftermarket_candidate_session(route.venue), max_candidates=after.max_symbols)
     rows: list[dict[str, Any]] = list(snapshot.candidates)
     universe = {str(row["symbol"]) for row in rows}
     expected_symbols = tuple(str(row["symbol"]) for row in rows if str(row["symbol"]) in set(symbols))
     if not set(symbols) <= universe:
-        raise MissingCredentialsError(f"shard symbols not subset of candidates for slot {slot}")
+        raise MissingCredentialsError(f"shard symbols not subset of candidates for venue {route.venue.value} slot {slot}")
     if len(set(symbols)) != len(symbols) or symbols != expected_symbols:
         raise MissingCredentialsError(f"shard symbols do not exactly match candidate order for slot {slot}")
     shard = AftermarketShard(route.venue, int(args.shard_index), symbols, streams, cred.slot, cred.key_id)
