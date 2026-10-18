@@ -158,13 +158,54 @@ def test_collector_session_record_frame_routes_and_flushes(tmp_path):
     session = bootstrap_session(cfg, ntp_client=_FC(), now_ns=1)
 
     # When: 프레임 기록 후 flush
-    session.record_frame(vendor="kis", stream="H0STCNT0", raw="0|H0STCNT0|001|a^b",
+    session.record_frame(vendor="kis", stream="H0STCNT0", symbol="a", raw="0|H0STCNT0|001|a^b",
                          recv_mono_ns=10, recv_wall_ns=1_735_954_200_000_000_000, conn_id="c1", conn_seq=1)
     written = session.flush_journals()
 
     # Then: 1건 기록 + 파티션 파일 존재
     assert written == 1
     assert any((tmp_path / "l0").rglob("*.jsonl.zst"))
+
+
+def test_session_frame_sink_journals_frame_symbol(tmp_path) -> None:
+    # Given: sink 를 통해 LS·KIS 형식 프레임을 기록하는 세션
+    import datetime as dt
+    import json
+
+    import zstandard as zstd
+
+    from src.realtime.contracts import L0Frame
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.realtime.streamer import SessionFrameSink
+    from src.universe.ipc import write_candidates
+
+    class _FC:
+        def request(self, host, version=3, timeout=5):
+            class _S:
+                offset = 0.0
+
+            return _S()
+
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
+    cfg = SessionConfig(session_date=dt.date(2026, 9, 8), journal_root=tmp_path / "l0",
+                        manifest_path=tmp_path / "s.json", candidates_path=cp, ntp_host="h",
+                        slot_budget=41, max_clock_offset_ns=2_000_000_000,
+                        desired_streams=("H0STCNT0",), vendor="kis")
+    sink = SessionFrameSink(session=bootstrap_session(cfg, ntp_client=_FC(), now_ns=1))
+
+    # When: 종목이 다른 두 프레임을 기록하고 flush
+    for seq, symbol in enumerate(("005930", "000660"), start=1):
+        sink.record(L0Frame(vendor="kis", stream="H0STCNT0", symbol=symbol, raw=f"{symbol}^160001",
+                            recv_mono_ns=seq, recv_wall_ns=1_735_954_200_000_000_000 + seq,
+                            conn_seq=seq, conn_id="c1"))
+    assert sink.flush() == 2
+
+    # Then: 저널 envelope symbol 이 프레임 symbol 과 일치한다 (빈 문자열 금지)
+    zst = next((tmp_path / "l0").rglob("*.jsonl.zst"))
+    with open(zst, "rb") as fh, zstd.ZstdDecompressor().stream_reader(fh, read_across_frames=True) as reader:
+        lines = reader.read().decode("utf-8").strip().splitlines()
+    assert [json.loads(x)["symbol"] for x in lines] == ["005930", "000660"]
 
 
 def test_collector_session_record_frame_unknown_stream_raises_keyerror(tmp_path):
@@ -193,7 +234,7 @@ def test_collector_session_record_frame_unknown_stream_raises_keyerror(tmp_path)
 
     # When / Then: 미등록 스트림은 조용히 버리지 않고 KeyError
     with pytest.raises(KeyError, match="H0STASP0"):
-        session.record_frame(vendor="kis", stream="H0STASP0", raw="x", recv_mono_ns=1,
+        session.record_frame(vendor="kis", stream="H0STASP0", symbol="005930", raw="x", recv_mono_ns=1,
                              recv_wall_ns=1_735_954_200_000_000_000, conn_id="c", conn_seq=1)
 
 
@@ -332,7 +373,7 @@ def test_collector_session_record_frame_raises_storage_exhausted(tmp_path) -> No
     depleted_usage = shutil._ntuple_diskusage(50 * (1024**3), 49 * (1024**3), 1 * (1024**3))
     with patch('shutil.disk_usage', return_value=depleted_usage):  # noqa: SIM117 - spec skeleton keeps nested with
         with pytest.raises(StorageExhaustedError, match='watermark'):
-            session.record_frame(vendor='kis', stream='H0STCNT0', raw='dummy',
+            session.record_frame(vendor='kis', stream='H0STCNT0', symbol='005930', raw='dummy',
                                  recv_mono_ns=1, recv_wall_ns=1_735_954_200_000_000_000, conn_id='c', conn_seq=1)
 
 
@@ -682,7 +723,7 @@ def test_session_rejects_frame_for_other_route(monkeypatch, tmp_path):
     cfg = SessionConfig(session_date=dt.date(2026, 9, 15), journal_root=tmp_path/'l0', manifest_path=tmp_path/'m.json', candidates_path=tmp_path/'candidates.json', ntp_host='x', slot_budget=2, max_clock_offset_ns=2, desired_streams=('H0NXCNT0',), vendor='kis', route=StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER))
     session = bootstrap_session(cfg, now_ns=1)
     with pytest.raises(KeyError):
-        session.record_frame(vendor='kis', venue=MarketVenue.KRX, session=MarketSession.KRX_AFTER, stream='H0NXCNT0', raw='x', exchange_event_time='160000', recv_mono_ns=1, recv_wall_ns=1, conn_id='c', conn_seq=1)
+        session.record_frame(vendor='kis', venue=MarketVenue.KRX, session=MarketSession.KRX_AFTER, stream='H0NXCNT0', symbol='005930', raw='x', exchange_event_time='160000', recv_mono_ns=1, recv_wall_ns=1, conn_id='c', conn_seq=1)
 
 
 def test_bootstrap_session_records_shard_planned_pairs(tmp_path):

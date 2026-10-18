@@ -96,6 +96,7 @@ class CollectorSession:
         *,
         vendor: str,
         stream: str,
+        symbol: str,
         raw: str,
         recv_mono_ns: int,
         recv_wall_ns: int,
@@ -103,7 +104,6 @@ class CollectorSession:
         conn_seq: int,
         venue: MarketVenue | str | None = None,
         session: MarketSession | str | None = None,
-        symbol: str = "",
         exchange_event_time: str = "",
     ) -> None:
         if not check_disk_watermark(self.manifest_path.parent, min_free_gb=self.min_free_disk_gb): raise StorageExhaustedError('free disk below watermark')  # noqa: E701
