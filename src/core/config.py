@@ -21,6 +21,7 @@ from src.core.paths import (
     DEFAULT_KIS_TOKEN_CACHE_DIR,
     DataPaths,
 )
+from src.core.session_anchors import STANDARD_NXT_AFTER_MARKET_OPEN
 
 __all__ = ["DataPaths"]
 
@@ -130,6 +131,7 @@ class AftermarketSettings(BaseSettings):
     krx_streams: tuple[str, str] = ("H0STCNT0", "H0STASP0")
     nxt_streams: tuple[str, str] = ("H0NXCNT0", "H0NXASP0")
     selection_time: dt.time = dt.time(15, 31)
+    prearm_lead_s: float = Field(default=60.0, gt=0)
     max_symbols: int = Field(default=40, ge=1)
     # 2026-09 probe: max normal intra-connection silence 3.84s over ~30 conn-hours; 10s (~2.6x)
     # bounds half-dead socket loss without false reconnects.
@@ -139,6 +141,19 @@ class AftermarketSettings(BaseSettings):
     def check_verified_capacity_when_enabled(self) -> AftermarketSettings:
         if self.enabled and (self.pair_capacity_per_connection is None or self.pair_capacity_per_connection <= 0):
             raise ValueError("pair_capacity_per_connection must be a positive verified value when enabled")
+        return self
+
+    @model_validator(mode="after")
+    def check_prearm_after_selection(self) -> AftermarketSettings:
+        """Reject a lead that would arm NXT shards at or before the selection time."""
+        base = dt.date(2000, 1, 1)
+        selection_at = dt.datetime.combine(base, self.selection_time)
+        nxt_open = dt.datetime.combine(base, STANDARD_NXT_AFTER_MARKET_OPEN)
+        if not self.prearm_lead_s < (nxt_open - selection_at).total_seconds():
+            raise ValueError(
+                f"prearm_lead_s {self.prearm_lead_s} must arm NXT shards strictly after "
+                f"selection_time {self.selection_time} and before open {nxt_open.time()}"
+            )
         return self
 
 

@@ -1016,6 +1016,71 @@ def test_aftermarket_silence_limit_follows_shifted_close() -> None:
     assert aftermarket_silence_limit_s(dt.datetime(2026, 11, 19, 16, 45, tzinfo=kst), route=nxt, anchors=anchors) == 30.0
 
 
+def test_aftermarket_open_time_standard_day() -> None:
+    import datetime as dt
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.streamer import aftermarket_open_time
+
+    anchors = standard_session_anchors(dt.date(2026, 9, 15))
+    assert aftermarket_open_time(MarketVenue.NXT, anchors) == dt.time(15, 40)
+    assert aftermarket_open_time(MarketVenue.KRX, anchors) == dt.time(16, 0)
+
+
+def test_aftermarket_open_time_shifted_day() -> None:
+    import datetime as dt
+
+    from src.core.session_anchors import AnchorSource, SessionAnchors
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.streamer import aftermarket_open_time
+
+    anchors = SessionAnchors(
+        date=dt.date(2026, 11, 19),
+        regular_open=dt.time(10, 0),
+        closing_auction_start=dt.time(16, 20),
+        regular_close=dt.time(16, 30),
+        after_market_end=dt.time(20, 0),
+        source=AnchorSource.VENDOR,
+    )
+    assert aftermarket_open_time(MarketVenue.NXT, anchors) == dt.time(16, 40)
+    assert aftermarket_open_time(MarketVenue.KRX, anchors) == dt.time(17, 0)
+
+
+def test_aftermarket_open_time_rejects_unknown_venue() -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.realtime.streamer import aftermarket_open_time
+
+    anchors = standard_session_anchors(dt.date(2026, 9, 15))
+    with pytest.raises(ValueError, match="no aftermarket open"):
+        aftermarket_open_time("unknown", anchors)  # type: ignore[arg-type]
+
+
+def test_aftermarket_silence_limit_stays_disarmed_before_open() -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import StreamRoute
+    from src.realtime.streamer import aftermarket_silence_limit_s
+
+    kst = ZoneInfo("Asia/Seoul")
+    anchors = standard_session_anchors(dt.date(2026, 9, 15))
+    nxt = StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER)
+    assert aftermarket_silence_limit_s(dt.datetime(2026, 9, 15, 15, 39, 30, tzinfo=kst), route=nxt, anchors=anchors) is None
+    assert (
+        aftermarket_silence_limit_s(
+            dt.datetime(2026, 9, 15, 15, 40, 0, tzinfo=kst), route=nxt, anchors=anchors, limit_s=10.0
+        )
+        == 10.0
+    )
+
+
 class _GapSink:
     def __init__(self) -> None:
         self.gaps: list = []

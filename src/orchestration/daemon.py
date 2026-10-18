@@ -45,8 +45,6 @@ from src.core.healthcheck import HealthcheckPinger, NoopPinger
 from src.core.lifecycle import DaemonLifecycleRecord, crash_alert_allowed, read_lifecycle, write_lifecycle
 from src.core.observability import EVENT, configure_logging, send_digest, shutdown_logging
 from src.core.session_anchors import (
-    STANDARD_KRX_AFTER_MARKET_OPEN,
-    STANDARD_NXT_AFTER_MARKET_OPEN,
     STANDARD_NXT_PREMARKET_OPEN,
     AnchorSource,
     SessionAnchors,
@@ -99,6 +97,7 @@ from src.realtime.kis_sharding import (
     plan_aftermarket_shards,
     plan_premarket_shard,
 )
+from src.realtime.streamer import aftermarket_open_time
 from src.storage.layout import L0_VENDOR_DB, l0_day_journal_glob
 from src.storage.remote import RemoteArchiveError
 from src.storage.retention import check_disk_watermark
@@ -618,6 +617,16 @@ def _aftermarket_stream_cmd(today: dt.date, paths: DataPaths, *, shard: Aftermar
         "--symbols",
         ",".join(shard.symbols),
     ]
+
+
+def aftermarket_arm_at(
+    day: dt.date, venue: MarketVenue, *, anchors: SessionAnchors, prearm_lead_s: float
+) -> dt.datetime:
+    """KST instant at which ``venue``'s shards for ``day`` must be launched (shifted open minus lead)."""
+    if prearm_lead_s <= 0:
+        raise ValueError("prearm_lead_s must be positive")
+    open_at = dt.datetime.combine(day, aftermarket_open_time(venue, anchors), tzinfo=_KST)
+    return open_at - dt.timedelta(seconds=prearm_lead_s)
 
 
 def _resolve_trading_day_with_cache(
@@ -1379,8 +1388,8 @@ class DaemonRunner:
         self._run_first_frame_watchdog(now, state, day, anchors)
         self._run_crosscheck_watchdogs(now, state, day, anchors)
         self._maybe_reselect_aftermarket(now, state, today, anchors)
-        if state == SessionState.AFTER_MARKET_ACTIVE and self._cfg.after_market_enabled:
-            self._supervise_aftermarket(now, today, anchors)
+        if state in (SessionState.FULL_ACTIVE, SessionState.AFTER_MARKET_ACTIVE) and self._cfg.after_market_enabled:
+            self._supervise_aftermarket(now, state, today, anchors)
         return 10.0
 
     def _stop_holiday_children(self) -> None:
@@ -1863,27 +1872,40 @@ class DaemonRunner:
                 st.aftermarket_plan = ()
             st.aftermarket_plan_day = today
 
-    def _supervise_aftermarket(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
-        """Start due venue shards and supervise every aftermarket child.
+    def _supervise_aftermarket(
+        self, now: dt.datetime, state: SessionState, today: dt.date, anchors: SessionAnchors
+    ) -> None:
+        """Launch shards of venues whose arm instant has passed and supervise every aftermarket child.
 
-        NXT shards become due at the shifted NXT open and KRX shards at the shifted KRX open; a
-        circuit-open alert is emitted once per supervisor key until EOD clears the alert set.
+        Each venue becomes due ``prearm_lead_s`` before its shifted open; a circuit-open alert is
+        emitted once per supervisor key until EOD clears the alert set.
         """
         st = self._state
         ch = self._children
         paths = self._paths
-        self._ensure_aftermarket_plan(today)
-        kst_time = now.astimezone(_KST).time()
-        due: list[MarketVenue] = []
-        if kst_time >= anchors.shift_post_close(STANDARD_NXT_AFTER_MARKET_OPEN):
-            due.append(MarketVenue.NXT)
-        if kst_time >= anchors.shift_post_close(STANDARD_KRX_AFTER_MARKET_OPEN):
-            due.append(MarketVenue.KRX)
+        prearm_lead_s = self._after_cfg.prearm_lead_s
+        due = tuple(
+            venue
+            for venue in (MarketVenue.NXT, MarketVenue.KRX)
+            if now >= aftermarket_arm_at(today, venue, anchors=anchors, prearm_lead_s=prearm_lead_s)
+        )
+        if due and not (state is SessionState.FULL_ACTIVE and st.aftermarket_refresh_day != today):
+            # A pending reselection in FULL_ACTIVE must not latch an empty plan for the day.
+            self._ensure_aftermarket_plan(today)
         for shard in st.aftermarket_plan:
-            if shard.venue in due:
-                supervisor_key = f"{shard.venue.value}:{shard.shard_index}"
-                if supervisor_key not in ch.aftermarket:
-                    self._install_aftermarket(supervisor_key, _aftermarket_stream_cmd(today, paths, shard=shard))
+            if st.aftermarket_plan_day != today or shard.venue not in due:
+                continue
+            supervisor_key = f"{shard.venue.value}:{shard.shard_index}"
+            if supervisor_key in ch.aftermarket:
+                continue
+            self._install_aftermarket(supervisor_key, _aftermarket_stream_cmd(today, paths, shard=shard))
+            open_time = aftermarket_open_time(shard.venue, anchors)
+            logger.info(
+                "[DAEMON] stage=aftermarket_stream status=ARMED key=%s open=%s lead_s=%.1f",
+                supervisor_key,
+                open_time.isoformat(),
+                (dt.datetime.combine(today, open_time, tzinfo=_KST) - now).total_seconds(),
+            )
         for supervisor_key, sup in ch.aftermarket.items():
             result = sup.ensure_running()
             st.aftermarket_results[supervisor_key] = result
