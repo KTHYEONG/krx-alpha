@@ -102,6 +102,7 @@ class SessionFrameSink:
             venue=frame.venue,
             session=frame.session,
             stream=frame.stream,
+            symbol=frame.symbol,
             raw=frame.raw,
             exchange_event_time=frame.exchange_event_time,
             recv_mono_ns=frame.recv_mono_ns,
