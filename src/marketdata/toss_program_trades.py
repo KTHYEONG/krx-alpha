@@ -5,6 +5,8 @@ from __future__ import annotations
 import datetime as dt
 import pathlib
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 import polars as pl
@@ -305,3 +307,155 @@ def program_trade_coverage(
         str(symbol): (min_date, max_date)
         for symbol, min_date, max_date in bounds.iter_rows()
     }
+
+
+class ProgramTradeGapStatus(StrEnum):
+    """Outcome of an interior gap check against the certified trading calendar."""
+
+    COMPLETE = "COMPLETE"
+    GAPS = "GAPS"
+    CALENDAR_UNAVAILABLE = "CALENDAR_UNAVAILABLE"
+
+
+@dataclass(frozen=True)
+class ProgramTradeGapReport:
+    """Per-symbol missing traded business days inside the checked window."""
+
+    status: ProgramTradeGapStatus
+    window: tuple[dt.date, ...]
+    missing: Mapping[str, tuple[dt.date, ...]]
+
+    @property
+    def missing_pairs(self) -> int:
+        return sum(len(days) for days in self.missing.values())
+
+    @property
+    def earliest_missing(self) -> dt.date | None:
+        if not self.missing:
+            return None
+        return min(day for days in self.missing.values() for day in days)
+
+
+def _certified_gap_window(
+    bars_daily_dir: pathlib.Path, complete_through: dt.date, window_business_days: int
+) -> tuple[dt.date, ...] | None:
+    """Return a bounded business-day window ending exactly on ``complete_through``."""
+    try:
+        dates = (
+            scan_month_partitions(pathlib.Path(bars_daily_dir), max_date=complete_through)
+            .select("date")
+            .unique()
+            .sort("date")
+            .tail(window_business_days)
+            .collect(engine="streaming")
+            .get_column("date")
+            .to_list()
+        )
+    except (PartitionedStoreError, OSError, pl.exceptions.PolarsError):
+        return None
+    ordered = sorted(day for day in dates if isinstance(day, dt.date))
+    if not ordered:
+        return None
+    window = tuple(ordered[-window_business_days:])
+    if window[-1] != complete_through:
+        return None
+    return window
+
+
+def _expected_traded_pairs(
+    bars_daily_dir: pathlib.Path,
+    coverage: Mapping[str, tuple[dt.date, dt.date]],
+    window: tuple[dt.date, ...],
+) -> set[tuple[str, dt.date]]:
+    """Bar rows for covered symbols on positive-volume window days at or after each symbol's first stored date."""
+    frame = (
+        scan_month_partitions(pathlib.Path(bars_daily_dir), min_date=window[0], max_date=window[-1])
+        .filter(
+            pl.col("symbol").is_in(list(coverage))
+            & pl.col("date").is_in(list(window))
+            & (pl.col("volume") > 0)
+        )
+        .select("symbol", "date")
+        .join(
+            pl.DataFrame(
+                {"symbol": list(coverage), "first_date": [bounds[0] for bounds in coverage.values()]},
+                schema={"symbol": pl.String, "first_date": pl.Date},
+            ).lazy(),
+            on="symbol",
+        )
+        .filter(pl.col("date") >= pl.col("first_date"))
+        .select("symbol", "date")
+        .unique()
+        .collect(engine="streaming")
+    )
+    expected: set[tuple[str, dt.date]] = set()
+    for symbol, day in frame.iter_rows():
+        assert isinstance(day, dt.date)
+        if day >= coverage[str(symbol)][0]:
+            expected.add((str(symbol), day))
+    return expected
+
+
+def _stored_gap_pairs(
+    store_path: pathlib.Path,
+    coverage: Mapping[str, tuple[dt.date, dt.date]],
+    window: tuple[dt.date, ...],
+    complete_through: dt.date,
+) -> set[tuple[str, dt.date]]:
+    """Program-trade rows for covered symbols within the checked span, lazily pruned by month.
+
+    Raises:
+        TossProgramTradesError: If the store exists but cannot be read.
+    """
+    store = pathlib.Path(store_path)
+    if store.exists() and not store.is_dir():
+        raise TossProgramTradesError(f"toss program-trades store unreadable at {store_path}: not a directory")
+    try:
+        if store.exists():
+            # The shared scanner treats directory-listing failures as absent partitions.
+            list(store.iterdir())
+        frame = (
+            scan_month_partitions(store, min_date=window[0], max_date=complete_through)
+            .filter(pl.col("symbol").is_in(list(coverage)) & pl.col("date").is_in(list(window)))
+            .select("symbol", "date")
+            .unique()
+            .collect(engine="streaming")
+        )
+    except PartitionedStoreError:
+        return set()
+    except Exception as exc:
+        raise TossProgramTradesError(f"toss program-trades store unreadable at {store_path}: {exc}") from exc
+    return {(str(symbol), day) for symbol, day in frame.iter_rows()}
+
+
+def _group_missing_days(pairs: set[tuple[str, dt.date]]) -> dict[str, tuple[dt.date, ...]]:
+    grouped: dict[str, list[dt.date]] = {}
+    for symbol, day in pairs:
+        grouped.setdefault(symbol, []).append(day)
+    return {symbol: tuple(sorted(days)) for symbol, days in sorted(grouped.items())}
+
+
+def find_program_trade_gaps(
+    store_path: pathlib.Path,
+    *,
+    bars_daily_dir: pathlib.Path,
+    coverage: Mapping[str, tuple[dt.date, dt.date]],
+    complete_through: dt.date,
+    window_business_days: int,
+) -> ProgramTradeGapReport:
+    """Find missing traded business days; raise TossProgramTradesError for an unreadable program store."""
+    if window_business_days < 1:
+        raise ValueError("window_business_days must be positive")
+    window = _certified_gap_window(bars_daily_dir, complete_through, window_business_days)
+    if window is None:
+        return ProgramTradeGapReport(ProgramTradeGapStatus.CALENDAR_UNAVAILABLE, (), {})
+    if not coverage:
+        return ProgramTradeGapReport(ProgramTradeGapStatus.COMPLETE, window, {})
+    try:
+        expected = _expected_traded_pairs(bars_daily_dir, coverage, window)
+    except (PartitionedStoreError, OSError, pl.exceptions.PolarsError):
+        return ProgramTradeGapReport(ProgramTradeGapStatus.CALENDAR_UNAVAILABLE, (), {})
+    stored = _stored_gap_pairs(store_path, coverage, window, complete_through)
+    missing = _group_missing_days(expected - stored)
+    status = ProgramTradeGapStatus.GAPS if missing else ProgramTradeGapStatus.COMPLETE
+    return ProgramTradeGapReport(status, window, missing)
