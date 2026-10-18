@@ -109,6 +109,7 @@
       "state": {
         "aftermarket_circuit_alerted": [],
         "aftermarket_eligibility_day": null,
+        "aftermarket_nxt_refresh_day": null,
         "aftermarket_plan": [],
         "aftermarket_plan_day": null,
         "aftermarket_refresh_day": null,
@@ -120,27 +121,28 @@
         "eod_attempted_for": null,
         "holiday_skip_logged_for": null,
         "ingest_stale": false,
+        "last_db_crosscheck_result": null,
         "last_ingest_check": null,
         "last_snapshot_result": "running",
         "last_summary": "2026-09-16T08:25:00+09:00",
         "last_supervisor_result": "running",
+        "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": "2026-09-16T08:30:00+09:00",
+        "next_premarket_pool_at": null,
         "orchestrated_for": null,
         "orchestration_attempts": 1,
         "orchestration_day": "2026-09-16",
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
-        "prev_state": "STREAMER_ACTIVE",
-        "program_sync_day": null,
-        "streamer_restarts": 0,
-        "next_premarket_pool_at": null,
         "premarket_circuit_alerted_day": null,
         "premarket_plan_day": null,
         "premarket_pool_day": null,
         "premarket_pool_failed_day": null,
         "premarket_shard": null,
-        "last_db_crosscheck_result": null
+        "prev_state": "STREAMER_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T08:25:00+09:00"
     },
@@ -173,6 +175,7 @@
       "state": {
         "aftermarket_circuit_alerted": [],
         "aftermarket_eligibility_day": null,
+        "aftermarket_nxt_refresh_day": null,
         "aftermarket_plan": [],
         "aftermarket_plan_day": null,
         "aftermarket_refresh_day": null,
@@ -184,27 +187,28 @@
         "eod_attempted_for": null,
         "holiday_skip_logged_for": null,
         "ingest_stale": false,
+        "last_db_crosscheck_result": null,
         "last_ingest_check": null,
         "last_snapshot_result": "running",
         "last_summary": "2026-09-16T08:25:00+09:00",
         "last_supervisor_result": "running",
+        "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": "2026-09-16T08:30:00+09:00",
+        "next_premarket_pool_at": null,
         "orchestrated_for": null,
         "orchestration_attempts": 1,
         "orchestration_day": "2026-09-16",
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
-        "prev_state": "STREAMER_ACTIVE",
-        "program_sync_day": null,
-        "streamer_restarts": 0,
-        "next_premarket_pool_at": null,
         "premarket_circuit_alerted_day": null,
         "premarket_plan_day": null,
         "premarket_pool_day": null,
         "premarket_pool_failed_day": null,
         "premarket_shard": null,
-        "last_db_crosscheck_result": null
+        "prev_state": "STREAMER_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T08:26:00+09:00"
     },
@@ -294,6 +298,7 @@
       "state": {
         "aftermarket_circuit_alerted": [],
         "aftermarket_eligibility_day": null,
+        "aftermarket_nxt_refresh_day": null,
         "aftermarket_plan": [],
         "aftermarket_plan_day": null,
         "aftermarket_refresh_day": null,
@@ -305,27 +310,28 @@
         "eod_attempted_for": null,
         "holiday_skip_logged_for": null,
         "ingest_stale": false,
+        "last_db_crosscheck_result": null,
         "last_ingest_check": null,
         "last_snapshot_result": "running",
         "last_summary": "2026-09-16T08:25:00+09:00",
         "last_supervisor_result": "running",
+        "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
+        "next_premarket_pool_at": null,
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
-        "prev_state": "STREAMER_ACTIVE",
-        "program_sync_day": null,
-        "streamer_restarts": 0,
-        "next_premarket_pool_at": null,
         "premarket_circuit_alerted_day": null,
         "premarket_plan_day": null,
         "premarket_pool_day": null,
         "premarket_pool_failed_day": null,
         "premarket_shard": null,
-        "last_db_crosscheck_result": null
+        "prev_state": "STREAMER_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T08:31:00+09:00"
     },
@@ -388,6 +394,7 @@
       "state": {
         "aftermarket_circuit_alerted": [],
         "aftermarket_eligibility_day": null,
+        "aftermarket_nxt_refresh_day": null,
         "aftermarket_plan": [],
         "aftermarket_plan_day": null,
         "aftermarket_refresh_day": null,
@@ -399,27 +406,28 @@
         "eod_attempted_for": null,
         "holiday_skip_logged_for": null,
         "ingest_stale": true,
+        "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
         "last_snapshot_result": "running",
         "last_summary": "2026-09-16T09:10:00+09:00",
         "last_supervisor_result": "running",
+        "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
+        "next_premarket_pool_at": null,
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
-        "prev_state": "FULL_ACTIVE",
-        "program_sync_day": null,
-        "streamer_restarts": 0,
-        "next_premarket_pool_at": null,
         "premarket_circuit_alerted_day": null,
         "premarket_plan_day": null,
         "premarket_pool_day": null,
         "premarket_pool_failed_day": null,
         "premarket_shard": null,
-        "last_db_crosscheck_result": null
+        "prev_state": "FULL_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T09:10:00+09:00"
     },
@@ -452,6 +460,24 @@
           "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=no_bars_store",
           [],
           false
+        ],
+        [
+          "INFO",
+          "[DATA] stage=aftermarket_reselection status=OK venue=%s symbols=%d",
+          [
+            "krx",
+            2
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DATA] stage=aftermarket_reselection status=OK venue=%s symbols=%d",
+          [
+            "nxt",
+            2
+          ],
+          false
         ]
       ],
       "calls": [
@@ -468,12 +494,20 @@
         [
           "refresh_aftermarket",
           "2026-09-16",
+          "krx",
+          0
+        ],
+        [
+          "refresh_aftermarket",
+          "2026-09-16",
+          "nxt",
           0
         ]
       ],
       "state": {
         "aftermarket_circuit_alerted": [],
         "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_nxt_refresh_day": "2026-09-16",
         "aftermarket_plan": [],
         "aftermarket_plan_day": null,
         "aftermarket_refresh_day": "2026-09-16",
@@ -485,27 +519,28 @@
         "eod_attempted_for": null,
         "holiday_skip_logged_for": null,
         "ingest_stale": true,
+        "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
         "last_snapshot_result": "running",
         "last_summary": "2026-09-16T15:32:00+09:00",
         "last_supervisor_result": "running",
+        "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
+        "next_premarket_pool_at": null,
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
-        "prev_state": "FULL_ACTIVE",
-        "program_sync_day": null,
-        "streamer_restarts": 0,
-        "next_premarket_pool_at": null,
         "premarket_circuit_alerted_day": null,
         "premarket_plan_day": null,
         "premarket_pool_day": null,
         "premarket_pool_failed_day": null,
         "premarket_shard": null,
-        "last_db_crosscheck_result": null
+        "prev_state": "FULL_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T15:32:00+09:00"
     },
@@ -565,6 +600,10 @@
           [
             "005930",
             "000660"
+          ],
+          [
+            "005930",
+            "000660"
           ]
         ],
         [
@@ -582,7 +621,7 @@
             "--manifest-path",
             "<TMP>/data/manifest/aftermarket/2026-09-16.nxt.shard-00.json",
             "--candidates-path",
-            "<TMP>/data/universe/aftermarket/2026-09-16.json",
+            "<TMP>/data/universe/aftermarket/2026-09-16.nxt.json",
             "--venue",
             "nxt",
             "--shard-index",
@@ -604,6 +643,7 @@
       "state": {
         "aftermarket_circuit_alerted": [],
         "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_nxt_refresh_day": "2026-09-16",
         "aftermarket_plan": [
           {
             "credential_key_id": "id0",
@@ -644,27 +684,28 @@
         "eod_attempted_for": null,
         "holiday_skip_logged_for": null,
         "ingest_stale": true,
+        "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
         "last_snapshot_result": "running",
         "last_summary": "2026-09-16T15:45:00+09:00",
         "last_supervisor_result": "running",
+        "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
+        "next_premarket_pool_at": null,
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
-        "prev_state": "AFTER_MARKET_ACTIVE",
-        "program_sync_day": null,
-        "streamer_restarts": 0,
-        "next_premarket_pool_at": null,
         "premarket_circuit_alerted_day": null,
         "premarket_plan_day": null,
         "premarket_pool_day": null,
         "premarket_pool_failed_day": null,
         "premarket_shard": null,
-        "last_db_crosscheck_result": null
+        "prev_state": "AFTER_MARKET_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T15:45:00+09:00"
     },
@@ -770,6 +811,7 @@
           "nxt:0"
         ],
         "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_nxt_refresh_day": "2026-09-16",
         "aftermarket_plan": [
           {
             "credential_key_id": "id0",
@@ -811,27 +853,28 @@
         "eod_attempted_for": null,
         "holiday_skip_logged_for": null,
         "ingest_stale": true,
+        "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
         "last_snapshot_result": "running",
         "last_summary": "2026-09-16T16:05:00+09:00",
         "last_supervisor_result": "running",
+        "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
+        "next_premarket_pool_at": null,
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
-        "prev_state": "AFTER_MARKET_ACTIVE",
-        "program_sync_day": null,
-        "streamer_restarts": 0,
-        "next_premarket_pool_at": null,
         "premarket_circuit_alerted_day": null,
         "premarket_plan_day": null,
         "premarket_pool_day": null,
         "premarket_pool_failed_day": null,
         "premarket_shard": null,
-        "last_db_crosscheck_result": null
+        "prev_state": "AFTER_MARKET_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T16:05:00+09:00"
     },
@@ -969,6 +1012,7 @@
       "state": {
         "aftermarket_circuit_alerted": [],
         "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_nxt_refresh_day": "2026-09-16",
         "aftermarket_plan": [
           {
             "credential_key_id": "id0",
@@ -1007,27 +1051,28 @@
         "eod_attempted_for": "2026-09-16",
         "holiday_skip_logged_for": null,
         "ingest_stale": true,
+        "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
         "last_snapshot_result": null,
         "last_summary": "2026-09-16T20:05:00+09:00",
         "last_supervisor_result": null,
+        "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
+        "next_premarket_pool_at": null,
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
-        "prev_state": "POST_MARKET_EOD",
-        "program_sync_day": null,
-        "streamer_restarts": 0,
-        "next_premarket_pool_at": null,
         "premarket_circuit_alerted_day": null,
         "premarket_plan_day": null,
         "premarket_pool_day": null,
         "premarket_pool_failed_day": null,
         "premarket_shard": null,
-        "last_db_crosscheck_result": null
+        "prev_state": "POST_MARKET_EOD",
+        "program_sync_day": null,
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T20:05:00+09:00"
     },
@@ -1049,6 +1094,7 @@
       "state": {
         "aftermarket_circuit_alerted": [],
         "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_nxt_refresh_day": "2026-09-16",
         "aftermarket_plan": [
           {
             "credential_key_id": "id0",
@@ -1087,27 +1133,28 @@
         "eod_attempted_for": "2026-09-16",
         "holiday_skip_logged_for": null,
         "ingest_stale": true,
+        "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
         "last_snapshot_result": null,
         "last_summary": "2026-09-16T20:05:00+09:00",
         "last_supervisor_result": null,
+        "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
+        "next_premarket_pool_at": null,
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
-        "prev_state": "POST_MARKET_EOD",
-        "program_sync_day": null,
-        "streamer_restarts": 0,
-        "next_premarket_pool_at": null,
         "premarket_circuit_alerted_day": null,
         "premarket_plan_day": null,
         "premarket_pool_day": null,
         "premarket_pool_failed_day": null,
         "premarket_shard": null,
-        "last_db_crosscheck_result": null
+        "prev_state": "POST_MARKET_EOD",
+        "program_sync_day": null,
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T20:06:00+09:00"
     },
@@ -1150,6 +1197,7 @@
       "state": {
         "aftermarket_circuit_alerted": [],
         "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_nxt_refresh_day": "2026-09-16",
         "aftermarket_plan": [
           {
             "credential_key_id": "id0",
@@ -1188,27 +1236,28 @@
         "eod_attempted_for": "2026-09-16",
         "holiday_skip_logged_for": null,
         "ingest_stale": true,
+        "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
         "last_snapshot_result": null,
         "last_summary": "2026-09-16T22:00:00+09:00",
         "last_supervisor_result": null,
+        "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
+        "next_premarket_pool_at": null,
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
-        "prev_state": "NIGHT_SLEEP",
-        "program_sync_day": null,
-        "streamer_restarts": 0,
-        "next_premarket_pool_at": null,
         "premarket_circuit_alerted_day": null,
         "premarket_plan_day": null,
         "premarket_pool_day": null,
         "premarket_pool_failed_day": null,
         "premarket_shard": null,
-        "last_db_crosscheck_result": null
+        "prev_state": "NIGHT_SLEEP",
+        "program_sync_day": null,
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T22:00:00+09:00"
     },
@@ -1277,6 +1326,7 @@
           "krx:9"
         ],
         "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_nxt_refresh_day": "2026-09-16",
         "aftermarket_plan": [
           {
             "credential_key_id": "id0",
@@ -1315,27 +1365,28 @@
         "eod_attempted_for": "2026-09-16",
         "holiday_skip_logged_for": "2026-09-17",
         "ingest_stale": true,
+        "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
         "last_snapshot_result": null,
         "last_summary": "2026-09-17T09:00:00+09:00",
         "last_supervisor_result": null,
+        "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
+        "next_premarket_pool_at": null,
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
-        "prev_state": "FULL_ACTIVE",
-        "program_sync_day": null,
-        "streamer_restarts": 0,
-        "next_premarket_pool_at": null,
         "premarket_circuit_alerted_day": null,
         "premarket_plan_day": null,
         "premarket_pool_day": null,
         "premarket_pool_failed_day": null,
         "premarket_shard": null,
-        "last_db_crosscheck_result": null
+        "prev_state": "FULL_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
       },
       "instant": "2026-09-17T09:00:00+09:00"
     },
@@ -1394,6 +1445,7 @@
       "state": {
         "aftermarket_circuit_alerted": [],
         "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_nxt_refresh_day": "2026-09-16",
         "aftermarket_plan": [
           {
             "credential_key_id": "id0",
@@ -1432,27 +1484,28 @@
         "eod_attempted_for": "2026-09-17",
         "holiday_skip_logged_for": "2026-09-17",
         "ingest_stale": true,
+        "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
         "last_snapshot_result": null,
         "last_summary": "2026-09-17T20:05:00+09:00",
         "last_supervisor_result": null,
+        "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
+        "next_premarket_pool_at": null,
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
-        "prev_state": "POST_MARKET_EOD",
-        "program_sync_day": null,
-        "streamer_restarts": 0,
-        "next_premarket_pool_at": null,
         "premarket_circuit_alerted_day": null,
         "premarket_plan_day": null,
         "premarket_pool_day": null,
         "premarket_pool_failed_day": null,
         "premarket_shard": null,
-        "last_db_crosscheck_result": null
+        "prev_state": "POST_MARKET_EOD",
+        "program_sync_day": null,
+        "streamer_restarts": 0
       },
       "instant": "2026-09-17T20:05:00+09:00"
     },
@@ -1558,6 +1611,7 @@
       "state": {
         "aftermarket_circuit_alerted": [],
         "aftermarket_eligibility_day": "2026-09-16",
+        "aftermarket_nxt_refresh_day": "2026-09-16",
         "aftermarket_plan": [
           {
             "credential_key_id": "id0",
@@ -1596,27 +1650,28 @@
         "eod_attempted_for": "2026-09-17",
         "holiday_skip_logged_for": "2026-09-17",
         "ingest_stale": false,
+        "last_db_crosscheck_result": null,
         "last_ingest_check": null,
         "last_snapshot_result": "running",
         "last_summary": "2026-09-18T08:25:00+09:00",
         "last_supervisor_result": "running",
+        "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
+        "next_premarket_pool_at": null,
         "orchestrated_for": "2026-09-18",
         "orchestration_attempts": 1,
         "orchestration_day": "2026-09-18",
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-18",
-        "prev_state": "STREAMER_ACTIVE",
-        "program_sync_day": null,
-        "streamer_restarts": 0,
-        "next_premarket_pool_at": null,
         "premarket_circuit_alerted_day": null,
         "premarket_plan_day": null,
         "premarket_pool_day": null,
         "premarket_pool_failed_day": null,
         "premarket_shard": null,
-        "last_db_crosscheck_result": null
+        "prev_state": "STREAMER_ACTIVE",
+        "program_sync_day": null,
+        "streamer_restarts": 0
       },
       "instant": "2026-09-18T08:25:00+09:00"
     }
@@ -1624,8 +1679,9 @@
   "log_stage_multiset": [
     "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=bars_unreadable",
     "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=no_bars_store",
+    "[DAEMON] stage=aftermarket_plan status=EMPTY venue=%s reason=%s",
     "[DAEMON] stage=aftermarket_plan status=FAIL reason=%s",
-    "[DAEMON] stage=aftermarket_reselection status=FAIL reason=%s next_retry=%s",
+    "[DAEMON] stage=aftermarket_reselection status=FAIL venue=%s reason=%s next_retry=%s",
     "[DAEMON] stage=aftermarket_stream status=ARMED key=%s open=%s lead_s=%.1f",
     "[DAEMON] stage=aftermarket_stream status=FAIL reason=circuit_open key=%s",
     "[DAEMON] stage=aftermarket_stream status=RESTARTED key=%s exit_code=%s",
@@ -1634,6 +1690,7 @@
     "[DAEMON] stage=db_crosscheck status=RESTARTED exit_code=%s",
     "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=%s",
     "[DAEMON] stage=eod_maintenance status=DEGRADED reason=aftermarket_not_ready date=%s",
+    "[DAEMON] stage=eod_maintenance status=DEGRADED reason=aftermarket_venue_unplanned venue=%s date=%s",
     "[DAEMON] stage=eod_maintenance status=FAIL reason=session_data_gap date=%s",
     "[DAEMON] stage=eod_maintenance status=HOLIDAY deleted_partitions=%d uploaded=%d purged=%d date=%s",
     "[DAEMON] stage=eod_reconciliation status=FAIL error=%s",
@@ -1663,6 +1720,9 @@
     "[DAEMON] stage=streamer status=STARTED",
     "[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s",
     "[DAEMON] stage=streamer_stop result=%s",
+    "[DATA] stage=aftermarket_prearm status=%s armed=%d shards=%d date=%s",
+    "[DATA] stage=aftermarket_prearm status=%s venue=%s shard=%d open=%s start_lead_s=%s ack_lead_s=%s reason=%s",
+    "[DATA] stage=aftermarket_reselection status=OK venue=%s symbols=%d",
     "[DATA] stage=premarket_eod status=%s date=%s accepted=%d planned=%d",
     "[DATA] stage=premarket_eod status=SKIPPED date=%s accepted=%d planned=%d",
     "[DATA] stage=premarket_plan status=SKIP reason=%s date=%s",
@@ -1673,8 +1733,6 @@
     "[DATA] stage=premarket_pool status=SKIP reason=shifted_next_day target=%s",
     "[DATA] stage=premarket_stream status=FAIL reason=circuit_open date=%s",
     "[DATA] stage=premarket_stream status=RESTARTED exit_code=%s",
-    "[DATA] stage=premarket_supervise status=FAIL reason=%s",
-    "[DATA] stage=aftermarket_prearm status=%s armed=%d shards=%d date=%s",
-    "[DATA] stage=aftermarket_prearm status=%s venue=%s shard=%d open=%s start_lead_s=%s ack_lead_s=%s reason=%s"
+    "[DATA] stage=premarket_supervise status=FAIL reason=%s"
   ]
 }

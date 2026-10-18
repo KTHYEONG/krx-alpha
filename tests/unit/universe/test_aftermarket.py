@@ -79,6 +79,7 @@ def test_refresh_aftermarket_candidates_writes_snapshot(tmp_path) -> None:
     from zoneinfo import ZoneInfo
 
     from src.execution.kis_client import KisRankingRow
+    from src.realtime.contracts import MarketVenue
     from src.universe.aftermarket import refresh_aftermarket_candidates
     from src.universe.ipc import read_candidate_snapshot
 
@@ -86,14 +87,16 @@ def test_refresh_aftermarket_candidates_writes_snapshot(tmp_path) -> None:
     generated = dt.datetime(2026, 9, 16, 15, 31, tzinfo=kst)
 
     class FakeClient:
-        def get_trade_amount_ranking(self):
+        def get_trade_amount_ranking(self, *, market_div="J"):
+            assert market_div == "J"
             return (KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=1),)
 
-        def get_fluctuation_ranking(self):
+        def get_fluctuation_ranking(self, *, market_div="J"):
+            assert market_div == "J"
             return (KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=1),)
 
     out = tmp_path / 'aftermarket.json'
-    snapshot = refresh_aftermarket_candidates(session_date=generated.date(), generated_at=generated, client=FakeClient(), out_path=out, capacity=40)
+    snapshot = refresh_aftermarket_candidates(session_date=generated.date(), generated_at=generated, client=FakeClient(), out_path=out, capacity=40, venue=MarketVenue.KRX)
 
     assert snapshot.selected_count == 1
     assert read_candidate_snapshot(out, expected_session_date=generated.date(), expected_session='aftermarket', max_candidates=40) == snapshot
@@ -169,15 +172,17 @@ def test_refresh_aftermarket_candidates_round_trips_alphanumeric_symbol(tmp_path
 
     generated = dt.datetime(2026, 9, 16, 15, 31, tzinfo=ZoneInfo('Asia/Seoul'))
 
+    from src.realtime.contracts import MarketVenue
+
     class FakeClient:
-        def get_trade_amount_ranking(self):
+        def get_trade_amount_ranking(self, *, market_div="J"):
             return _aftermarket_rows(('0007J0',), change=29.9)
 
-        def get_fluctuation_ranking(self):
+        def get_fluctuation_ranking(self, *, market_div="J"):
             return _aftermarket_rows(('0007J0',), change=29.9)
 
     out = tmp_path / 'aftermarket.json'
-    snapshot = refresh_aftermarket_candidates(session_date=generated.date(), generated_at=generated, client=FakeClient(), out_path=out, capacity=40)
+    snapshot = refresh_aftermarket_candidates(session_date=generated.date(), generated_at=generated, client=FakeClient(), out_path=out, capacity=40, venue=MarketVenue.KRX)
 
     assert [row['symbol'] for row in snapshot.candidates] == ['0007J0']
     assert read_candidate_snapshot(out, expected_session_date=generated.date(), expected_session='aftermarket', max_candidates=40) == snapshot
@@ -252,4 +257,168 @@ def test_effective_time_before_generation_is_rejected() -> None:
             session_date=generated.date(), generated_at=generated,
             trade_amount_rows=(row,), fluctuation_rows=(row,), capacity=40,
             effective_from=generated - dt.timedelta(seconds=1),
+        )
+
+
+def _venue_fake_client(calls, *, trade_rows, fluc_rows=None, fluc_error=None):
+    class FakeClient:
+        def get_trade_amount_ranking(self, *, market_div="J"):
+            calls.append(("trade_amount", market_div))
+            return trade_rows[market_div]
+
+        def get_fluctuation_ranking(self, *, market_div="J"):
+            calls.append(("fluctuation", market_div))
+            if fluc_error is not None and market_div in fluc_error:
+                raise fluc_error[market_div]
+            return (fluc_rows or trade_rows)[market_div]
+
+    return FakeClient()
+
+
+def test_nxt_refresh_uses_nx_screens_only(tmp_path) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.realtime.contracts import MarketVenue
+    from src.universe.aftermarket import refresh_aftermarket_candidates
+
+    generated = dt.datetime(2026, 9, 16, 15, 31, tzinfo=ZoneInfo('Asia/Seoul'))
+    calls: list = []
+    client = _venue_fake_client(calls, trade_rows={"NX": _aftermarket_rows(('000001', '000002')), "J": _aftermarket_rows(('000003',))})
+    out = tmp_path / 'aftermarket.nxt.json'
+
+    snapshot = refresh_aftermarket_candidates(
+        session_date=generated.date(), generated_at=generated, client=client,
+        out_path=out, capacity=40, venue=MarketVenue.NXT,
+    )
+
+    assert calls == [("trade_amount", "NX"), ("fluctuation", "NX")]
+    assert snapshot.session == 'aftermarket_nxt'
+    assert snapshot.policy_version == 'aftermarket_nxt_v1'
+    assert out.exists()
+
+
+def test_krx_refresh_keeps_j_screens(tmp_path) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.realtime.contracts import MarketVenue
+    from src.universe.aftermarket import refresh_aftermarket_candidates
+
+    generated = dt.datetime(2026, 9, 16, 15, 31, tzinfo=ZoneInfo('Asia/Seoul'))
+    calls: list = []
+    client = _venue_fake_client(calls, trade_rows={"NX": _aftermarket_rows(('000001',)), "J": _aftermarket_rows(('000003', '000004'))})
+    out = tmp_path / 'aftermarket.json'
+
+    snapshot = refresh_aftermarket_candidates(
+        session_date=generated.date(), generated_at=generated, client=client,
+        out_path=out, capacity=40, venue=MarketVenue.KRX,
+    )
+
+    assert calls == [("trade_amount", "J"), ("fluctuation", "J")]
+    assert snapshot.session == 'aftermarket'
+    assert snapshot.policy_version == 'aftermarket_v1'
+
+
+def test_nxt_candidates_subset_of_nx_screens(tmp_path) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.realtime.contracts import MarketVenue
+    from src.universe.aftermarket import refresh_aftermarket_candidates
+
+    generated = dt.datetime(2026, 9, 16, 15, 31, tzinfo=ZoneInfo('Asia/Seoul'))
+    nx_rows = _aftermarket_rows(('000001', '000002', '000003'))
+    client = _venue_fake_client(
+        [], trade_rows={"NX": nx_rows, "J": _aftermarket_rows(('000004', '000005'))},
+        fluc_rows={"NX": nx_rows, "J": _aftermarket_rows(('000004', '000005'))},
+    )
+
+    snapshot = refresh_aftermarket_candidates(
+        session_date=generated.date(), generated_at=generated, client=client,
+        out_path=tmp_path / 'aftermarket.nxt.json', capacity=40, venue=MarketVenue.NXT,
+    )
+
+    assert {row['symbol'] for row in snapshot.candidates} <= {'000001', '000002', '000003'}
+
+
+def test_nx_ranking_failure_writes_nothing(tmp_path) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from src.realtime.contracts import MarketVenue
+    from src.universe.aftermarket import refresh_aftermarket_candidates
+
+    generated = dt.datetime(2026, 9, 16, 15, 31, tzinfo=ZoneInfo('Asia/Seoul'))
+    krx_path = tmp_path / 'aftermarket.json'
+    krx_path.write_bytes(b'{"pinned": true}')
+    before = krx_path.read_bytes()
+    nxt_path = tmp_path / 'aftermarket.nxt.json'
+    error = KisApiError('SCHEMA', 'nx fluctuation unavailable')
+    client = _venue_fake_client(
+        [], trade_rows={"NX": _aftermarket_rows(('000001',)), "J": _aftermarket_rows(('000002',))},
+        fluc_error={"NX": error},
+    )
+
+    with pytest.raises(KisApiError):
+        refresh_aftermarket_candidates(
+            session_date=generated.date(), generated_at=generated, client=client,
+            out_path=nxt_path, capacity=40, venue=MarketVenue.NXT,
+        )
+
+    assert not nxt_path.exists()
+    assert krx_path.read_bytes() == before
+
+
+def test_nx_empty_after_exclusions_fails_closed(tmp_path) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    import pytest
+
+    from src.realtime.contracts import MarketVenue
+    from src.universe.aftermarket import AftermarketUniverseError, refresh_aftermarket_candidates
+
+    generated = dt.datetime(2026, 9, 16, 15, 31, tzinfo=ZoneInfo('Asia/Seoul'))
+    nx_rows = _aftermarket_rows(('000001',))
+    client = _venue_fake_client([], trade_rows={"NX": nx_rows, "J": _aftermarket_rows(('000002',))})
+    out = tmp_path / 'aftermarket.nxt.json'
+
+    with pytest.raises(AftermarketUniverseError):
+        refresh_aftermarket_candidates(
+            session_date=generated.date(), generated_at=generated, client=client,
+            out_path=out, capacity=40, venue=MarketVenue.NXT,
+            excluded_symbols=frozenset({'000001'}),
+        )
+
+    assert not out.exists()
+
+
+def test_candidate_session_per_venue() -> None:
+    from src.realtime.contracts import MarketVenue
+    from src.universe.aftermarket import aftermarket_candidate_session
+
+    assert aftermarket_candidate_session(MarketVenue.KRX) == 'aftermarket'
+    assert aftermarket_candidate_session(MarketVenue.NXT) == 'aftermarket_nxt'
+
+
+def test_unknown_venue_rejected(tmp_path) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    import pytest
+
+    from src.universe.aftermarket import aftermarket_candidate_session, refresh_aftermarket_candidates
+
+    with pytest.raises(ValueError, match="unknown aftermarket venue"):
+        aftermarket_candidate_session("xyz")  # type: ignore[arg-type]
+
+    generated = dt.datetime(2026, 9, 16, 15, 31, tzinfo=ZoneInfo('Asia/Seoul'))
+    with pytest.raises(ValueError, match="unknown aftermarket venue"):
+        refresh_aftermarket_candidates(
+            session_date=generated.date(), generated_at=generated, client=object(),  # type: ignore[arg-type]
+            out_path=tmp_path / "aftermarket.json", capacity=40, venue="xyz",  # type: ignore[arg-type]
         )

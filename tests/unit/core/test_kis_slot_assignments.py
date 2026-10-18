@@ -158,7 +158,8 @@ def test_aftermarket_derived_slots_match_table(caplog, monkeypatch) -> None:
 
     with caplog.at_level(logging.WARNING, logger="src.realtime.kis_sharding"):
         plan = plan_aftermarket_shards(
-            symbols=symbols,
+            krx_symbols=symbols,
+            nxt_symbols=symbols,
             credentials=credentials,
             pair_capacity_per_connection=pair_capacity,
             krx_streams=settings.krx_streams,

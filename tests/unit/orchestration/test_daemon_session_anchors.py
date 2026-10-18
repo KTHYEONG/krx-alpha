@@ -196,7 +196,7 @@ def test_aftermarket_reselection_deferred_to_shifted_close(tmp_path, monkeypatch
     save_session_anchors(runtime.paths.session_calendar_dir, _csat_anchors(day))
     calls: list = []
     monkeypatch.setattr(
-        daemon_mod, "refresh_aftermarket_candidates", lambda **kw: calls.append(kw)
+        daemon_mod, "refresh_aftermarket_candidates", lambda **kw: calls.append(kw) or __import__("types").SimpleNamespace(selected_count=1)
     )
     monkeypatch.setattr(daemon_mod, "_build_kis_client", lambda paths: object())
 
@@ -206,7 +206,8 @@ def test_aftermarket_reselection_deferred_to_shifted_close(tmp_path, monkeypatch
 
     now_holder["now"] = dt.datetime(2026, 11, 19, 16, 32, tzinfo=ZoneInfo("Asia/Seoul"))
     runner.step(now_holder["now"])
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert sorted(kw["venue"].value for kw in calls) == ["krx", "nxt"]
 
 
 def test_standard_day_transitions_and_watchdog_unchanged(tmp_path, monkeypatch, caplog) -> None:

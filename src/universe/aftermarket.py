@@ -10,11 +10,29 @@ from typing import cast
 from src.brokers.kis.data import KisDataClient, KisRankingRow
 from src.core.errors import KrxAlphaError
 from src.core.symbols import is_krx_short_code
+from src.realtime.contracts import MarketVenue
 from src.universe.ipc import CandidateSnapshot, write_candidate_snapshot
 
 
 class AftermarketUniverseError(KrxAlphaError):
     """애프터마켓 선정 fail-closed 신호."""
+
+
+AFTERMARKET_SESSION_KRX: str = "aftermarket"
+AFTERMARKET_SESSION_NXT: str = "aftermarket_nxt"
+
+_VENUE_BINDINGS: dict[MarketVenue, tuple[str, str, str]] = {
+    MarketVenue.KRX: ("J", AFTERMARKET_SESSION_KRX, "aftermarket_v1"),
+    MarketVenue.NXT: ("NX", AFTERMARKET_SESSION_NXT, "aftermarket_nxt_v1"),
+}
+
+
+def aftermarket_candidate_session(venue: MarketVenue) -> str:
+    """Return the candidate-snapshot ``session`` value bound to ``venue``."""
+    try:
+        return _VENUE_BINDINGS[venue][1]
+    except KeyError:
+        raise ValueError(f"unknown aftermarket venue: {venue!r}") from None
 
 
 def build_aftermarket_snapshot(
@@ -103,10 +121,16 @@ def refresh_aftermarket_candidates(
     client: KisDataClient,
     out_path: pathlib.Path,
     capacity: int,
+    venue: MarketVenue,
     excluded_symbols: frozenset[str] = frozenset(),
 ) -> CandidateSnapshot:
-    trade_amount_rows = client.get_trade_amount_ranking()
-    fluctuation_rows = client.get_fluctuation_ranking()
-    snapshot = build_aftermarket_snapshot(session_date=session_date, generated_at=generated_at, trade_amount_rows=trade_amount_rows, fluctuation_rows=fluctuation_rows, capacity=capacity, excluded_symbols=excluded_symbols)
+    """Select ``venue``'s aftermarket universe from that venue's ranking screens and persist it atomically."""
+    try:
+        market_div, session, policy = _VENUE_BINDINGS[venue]
+    except KeyError:
+        raise ValueError(f"unknown aftermarket venue: {venue!r}") from None
+    trade_amount_rows = client.get_trade_amount_ranking(market_div=market_div)
+    fluctuation_rows = client.get_fluctuation_ranking(market_div=market_div)
+    snapshot = build_aftermarket_snapshot(session_date=session_date, generated_at=generated_at, trade_amount_rows=trade_amount_rows, fluctuation_rows=fluctuation_rows, capacity=capacity, excluded_symbols=excluded_symbols, policy_version=policy, session=session)
     write_candidate_snapshot(out_path, snapshot)
     return snapshot

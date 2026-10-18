@@ -73,27 +73,27 @@ def load_kis_data_credentials(env: Mapping[str, str] | None = None) -> tuple[Kis
 
 def plan_aftermarket_shards(
     *,
-    symbols: tuple[str, ...],
+    krx_symbols: tuple[str, ...],
+    nxt_symbols: tuple[str, ...],
     credentials: tuple[KisDataCredential, ...],
     pair_capacity_per_connection: int,
     krx_streams: tuple[str, str],
     nxt_streams: tuple[str, str],
 ) -> tuple[AftermarketShard, ...]:
-    """Assign candidates in rank order to NXT shards, then KRX shards.
-
-    When credentials cannot cover every symbol, the plan keeps the longest
-    rank-ordered prefix that fits and logs ``status=TRUNCATED``; the lowest-ranked
-    symbols are dropped rather than aborting the whole aftermarket session.
+    """Assign each venue's rank-ordered list to its own shards (NXT first, then KRX).
 
     Raises:
-        KrxAlphaError: On empty or duplicate symbols.
+        KrxAlphaError: On empty (both venues) or duplicate symbols within one venue.
         SlotBudgetExceededError: When capacity cannot hold one symbol or the
             credentials cannot cover even the top-ranked symbol.
     """
-    ordered = tuple(symbols)
-    if not ordered:
+    nxt_ordered = tuple(nxt_symbols)
+    krx_ordered = tuple(krx_symbols)
+    if not nxt_ordered and not krx_ordered:
         raise KrxAlphaError("empty aftermarket symbols")
-    if len(set(ordered)) != len(ordered):
+    if len(set(nxt_ordered)) != len(nxt_ordered):
+        raise KrxAlphaError("duplicate aftermarket symbols")
+    if len(set(krx_ordered)) != len(krx_ordered):
         raise KrxAlphaError("duplicate aftermarket symbols")
     nxt_per_shard = pair_capacity_per_connection // len(nxt_streams)
     krx_per_shard = pair_capacity_per_connection // len(krx_streams)
@@ -101,28 +101,36 @@ def plan_aftermarket_shards(
         raise SlotBudgetExceededError(
             f"aftermarket pair capacity {pair_capacity_per_connection} cannot hold one symbol"
         )
-    nxt_shard_count = (len(ordered) + nxt_per_shard - 1) // nxt_per_shard
-    krx_shard_count = (len(ordered) + krx_per_shard - 1) // krx_per_shard
+    nxt_shard_count = (len(nxt_ordered) + nxt_per_shard - 1) // nxt_per_shard if nxt_ordered else 0
+    krx_shard_count = (len(krx_ordered) + krx_per_shard - 1) // krx_per_shard if krx_ordered else 0
     required = nxt_shard_count + krx_shard_count
     available = len(credentials)
     if required > available:
-        kept = len(ordered)
-        while kept > 0:
-            shards_for_kept = (kept + nxt_per_shard - 1) // nxt_per_shard + (kept + krx_per_shard - 1) // krx_per_shard
-            if shards_for_kept <= available:
+        cap = max(len(nxt_ordered), len(krx_ordered))
+        while cap > 0:
+            n_nxt = min(cap, len(nxt_ordered)) if nxt_ordered else 0
+            n_krx = min(cap, len(krx_ordered)) if krx_ordered else 0
+            shards_for_cap = (0 if not n_nxt else (n_nxt + nxt_per_shard - 1) // nxt_per_shard) + (
+                0 if not n_krx else (n_krx + krx_per_shard - 1) // krx_per_shard
+            )
+            if shards_for_cap <= available:
                 break
-            kept -= 1
-        if kept < 1:
+            cap -= 1
+        if cap < 1:
             raise SlotBudgetExceededError(f"aftermarket shards required={required} available={available}")
-        dropped = len(ordered) - kept
+        kept_nxt = min(cap, len(nxt_ordered))
+        kept_krx = min(cap, len(krx_ordered))
+        dropped = (len(nxt_ordered) - kept_nxt) + (len(krx_ordered) - kept_krx)
         logger.warning(
-            "[DATA] stage=aftermarket_plan status=TRUNCATED kept=%d dropped=%d",
-            kept,
+            "[DATA] stage=aftermarket_plan status=TRUNCATED kept_nxt=%d kept_krx=%d dropped=%d",
+            kept_nxt,
+            kept_krx,
             dropped,
         )
-        ordered = ordered[:kept]
-        nxt_shard_count = (len(ordered) + nxt_per_shard - 1) // nxt_per_shard
-        krx_shard_count = (len(ordered) + krx_per_shard - 1) // krx_per_shard
+        nxt_ordered = nxt_ordered[:kept_nxt]
+        krx_ordered = krx_ordered[:kept_krx]
+        nxt_shard_count = (len(nxt_ordered) + nxt_per_shard - 1) // nxt_per_shard if nxt_ordered else 0
+        krx_shard_count = (len(krx_ordered) + krx_per_shard - 1) // krx_per_shard if krx_ordered else 0
     keys = list(credentials)
     plan: list[AftermarketShard] = []
     for index in range(nxt_shard_count):
@@ -131,7 +139,7 @@ def plan_aftermarket_shards(
             AftermarketShard(
                 MarketVenue.NXT,
                 index,
-                ordered[index * nxt_per_shard : (index + 1) * nxt_per_shard],
+                nxt_ordered[index * nxt_per_shard : (index + 1) * nxt_per_shard],
                 nxt_streams,
                 credential.slot,
                 credential.key_id,
@@ -143,7 +151,7 @@ def plan_aftermarket_shards(
             AftermarketShard(
                 MarketVenue.KRX,
                 index,
-                ordered[index * krx_per_shard : (index + 1) * krx_per_shard],
+                krx_ordered[index * krx_per_shard : (index + 1) * krx_per_shard],
                 krx_streams,
                 credential.slot,
                 credential.key_id,

@@ -93,7 +93,7 @@ def test_daemon_starts_nxt_then_krx_without_stopping_ls(monkeypatch, tmp_path):
     import datetime as _dt
     from zoneinfo import ZoneInfo as _ZI
     _stamp = _dt.datetime(2026, 9, 15, 15, 31, tzinfo=_ZI('Asia/Seoul'))
-    _wcs(cfg.paths.aftermarket_candidates(_dt.date(2026, 9, 15)), _CS(schema_version=1, rev=20260915, session_date=_dt.date(2026, 9, 15), session='aftermarket', generated_at=_stamp, source_asof=_stamp, effective_from=_stamp, policy_version='aftermarket_v1', capacity=40, eligible_count=1, selected_count=1, candidates=({'symbol': '000001', 'rank': 1, 'source_ranks': {'trade_amount': 1}, 'metrics': {'trade_value_krw': 1, 'change_pct': 1.0}, 'selection_reasons': ['trade_amount']},)))
+    _wcs(cfg.paths.aftermarket_candidates(_dt.date(2026, 9, 15), "krx"), _CS(schema_version=1, rev=20260915, session_date=_dt.date(2026, 9, 15), session='aftermarket', generated_at=_stamp, source_asof=_stamp, effective_from=_stamp, policy_version='aftermarket_v1', capacity=40, eligible_count=1, selected_count=1, candidates=({'symbol': '000001', 'rank': 1, 'source_ranks': {'trade_amount': 1}, 'metrics': {'trade_value_krw': 1, 'change_pct': 1.0}, 'selection_reasons': ['trade_amount']},)))
     daemon.run_collector_daemon(settings=cfg, now_fn=lambda: next(times), sleep_fn=lambda _: None, max_cycles=2)
     assert sum('collect-aftermarket' in cmd for cmd in commands) == 4
     venues = [cmd[cmd.index('--venue') + 1] for cmd in commands]
@@ -121,7 +121,7 @@ def test_daemon_starts_four_sharded_aftermarket_commands(monkeypatch, tmp_path) 
     _cfg2=CollectorSettings(data_root=tmp_path,after_market_enabled=True,universe_slot_budget=1,ls_capacity_pairs=2)
     from src.universe.ipc import CandidateSnapshot as _CS2, write_candidate_snapshot as _wcs2
     _stamp2=dt.datetime(2026,9,15,15,31,tzinfo=ZoneInfo('Asia/Seoul'))
-    _wcs2(_cfg2.paths.aftermarket_candidates(dt.date(2026,9,15)),_CS2(schema_version=1,rev=20260915,session_date=dt.date(2026,9,15),session='aftermarket',generated_at=_stamp2,source_asof=_stamp2,effective_from=_stamp2,policy_version='aftermarket_v1',capacity=40,eligible_count=1,selected_count=1,candidates=({'symbol':'000001','rank':1,'source_ranks':{'trade_amount':1},'metrics':{'trade_value_krw':1,'change_pct':1.0},'selection_reasons':['trade_amount']},)))
+    _wcs2(_cfg2.paths.aftermarket_candidates(dt.date(2026,9,15), "krx"),_CS2(schema_version=1,rev=20260915,session_date=dt.date(2026,9,15),session='aftermarket',generated_at=_stamp2,source_asof=_stamp2,effective_from=_stamp2,policy_version='aftermarket_v1',capacity=40,eligible_count=1,selected_count=1,candidates=({'symbol':'000001','rank':1,'source_ranks':{'trade_amount':1},'metrics':{'trade_value_krw':1,'change_pct':1.0},'selection_reasons':['trade_amount']},)))
     daemon.run_collector_daemon(settings=_cfg2,now_fn=lambda:next(times),sleep_fn=lambda _:None,max_cycles=2)
     assert len(commands) == 4
     assert [x[x.index('--credential-slot')+1] for x in commands] == ['0','1','2','3']
@@ -146,9 +146,12 @@ def test_daemon_refreshes_isolated_aftermarket_snapshot_before_nxt_start(monkeyp
     def refresh(**kwargs):
         refreshed.append(kwargs)
         stamp = kwargs['generated_at']
+        venue = kwargs['venue']
+        session = 'aftermarket_nxt' if venue is MarketVenue.NXT else 'aftermarket'
+        policy = 'aftermarket_nxt_v1' if venue is MarketVenue.NXT else 'aftermarket_v1'
         snapshot = CandidateSnapshot(
-            schema_version=1, rev=20260916, session_date=kwargs['session_date'], session='aftermarket',
-            generated_at=stamp, source_asof=stamp, effective_from=stamp, policy_version='aftermarket_v1',
+            schema_version=1, rev=20260916, session_date=kwargs['session_date'], session=session,
+            generated_at=stamp, source_asof=stamp, effective_from=stamp, policy_version=policy,
             capacity=40, eligible_count=1, selected_count=1,
             candidates=({'symbol': '005930', 'rank': 1, 'source_ranks': {'trade_amount': 1}, 'metrics': {'trade_value_krw': 1, 'change_pct': 1.0}, 'selection_reasons': ['trade_amount']},),
         )
@@ -175,11 +178,13 @@ def test_daemon_refreshes_isolated_aftermarket_snapshot_before_nxt_start(monkeyp
 
     daemon.run_collector_daemon(settings=settings, now_fn=lambda: next(times), sleep_fn=MagicMock(), max_cycles=2)
 
-    assert len(refreshed) == 1
-    assert refreshed[0]['out_path'] == settings.paths.aftermarket_candidates(dt.date(2026, 9, 16))
+    assert len(refreshed) == 2
+    by_venue = {kwargs['venue']: kwargs for kwargs in refreshed}
+    assert by_venue[MarketVenue.KRX]['out_path'] == settings.paths.aftermarket_candidates(dt.date(2026, 9, 16), MarketVenue.KRX)
+    assert by_venue[MarketVenue.NXT]['out_path'] == settings.paths.aftermarket_candidates(dt.date(2026, 9, 16), MarketVenue.NXT)
     aftermarket = [cmd for cmd in calls if 'collect-aftermarket' in cmd]
     assert len(aftermarket) == 1
-    assert aftermarket[0][aftermarket[0].index('--candidates-path') + 1] == str(settings.paths.aftermarket_candidates(dt.date(2026, 9, 16)))
+    assert aftermarket[0][aftermarket[0].index('--candidates-path') + 1] == str(settings.paths.aftermarket_candidates(dt.date(2026, 9, 16), MarketVenue.NXT))
 
 
 def test_daemon_blocks_aftermarket_when_reselection_fails(monkeypatch, tmp_path, caplog) -> None:
@@ -247,29 +252,30 @@ def test_daemon_retries_aftermarket_reselection_on_failure(monkeypatch, tmp_path
 
     def mock_refresh(**kwargs):
         nonlocal attempts
+        from src.universe.ipc import CandidateSnapshot, write_candidate_snapshot
+
+        venue = kwargs.get("venue")
+        nxt = venue is MarketVenue.NXT
         attempts += 1
         if attempts == 1:
             raise KisApiError('SCHEMA', 'temporary ranking schema failure')
         refreshed.append(kwargs)
-        # Write dummy snapshot
-        from src.universe.ipc import CandidateSnapshot, write_candidate_snapshot
-        write_candidate_snapshot(
-            kwargs['out_path'],
-            CandidateSnapshot(
-                schema_version=1,
-                rev=20260916,
-                session_date=kwargs['session_date'],
-                session='aftermarket',
-                generated_at=kwargs['generated_at'],
-                source_asof=kwargs['generated_at'],
-                effective_from=kwargs['generated_at'],
-                policy_version='aftermarket_v1',
-                capacity=40,
-                eligible_count=1,
-                selected_count=1,
-                candidates=({'symbol': '005930', 'rank': 1, 'source_ranks': {'trade_amount': 1}, 'metrics': {'trade_value_krw': 1, 'change_pct': 1.0}, 'selection_reasons': ['trade_amount']},),
-            ),
+        snapshot = CandidateSnapshot(
+            schema_version=1,
+            rev=20260916,
+            session_date=kwargs['session_date'],
+            session='aftermarket_nxt' if nxt else 'aftermarket',
+            generated_at=kwargs['generated_at'],
+            source_asof=kwargs['generated_at'],
+            effective_from=kwargs['generated_at'],
+            policy_version='aftermarket_nxt_v1' if nxt else 'aftermarket_v1',
+            capacity=40,
+            eligible_count=1,
+            selected_count=1,
+            candidates=({'symbol': '005930', 'rank': 1, 'source_ranks': {'trade_amount': 1}, 'metrics': {'trade_value_krw': 1, 'change_pct': 1.0}, 'selection_reasons': ['trade_amount']},),
         )
+        write_candidate_snapshot(kwargs['out_path'], snapshot)
+        return snapshot
 
     plan = (AftermarketShard(MarketVenue.NXT, 0, ('005930',), ('H0NXCNT0', 'H0NXASP0'), '1', 'id1'),)
     monkeypatch.setattr(daemon, 'refresh_aftermarket_candidates', mock_refresh)
@@ -282,16 +288,16 @@ def test_daemon_retries_aftermarket_reselection_on_failure(monkeypatch, tmp_path
 
     kst = ZoneInfo('Asia/Seoul')
     times = iter([
-        dt.datetime(2026, 9, 16, 15, 31, 0, tzinfo=kst),  # 1st attempt: fails
+        dt.datetime(2026, 9, 16, 15, 31, 0, tzinfo=kst),  # KRX fails, NXT succeeds
         dt.datetime(2026, 9, 16, 15, 31, 30, tzinfo=kst), # skipped: cooldown
-        dt.datetime(2026, 9, 16, 15, 32, 5, tzinfo=kst),  # 2nd attempt: succeeds
+        dt.datetime(2026, 9, 16, 15, 32, 5, tzinfo=kst),  # KRX retry succeeds
         dt.datetime(2026, 9, 16, 15, 40, 0, tzinfo=kst),  # aftermarket starts
     ])
 
     daemon.run_collector_daemon(settings=settings, now_fn=lambda: next(times), sleep_fn=MagicMock(), max_cycles=4)
 
-    assert attempts == 2
-    assert len(refreshed) == 1
+    assert attempts == 3
+    assert len(refreshed) == 2
     aftermarket = [cmd for cmd in commands if 'collect-aftermarket' in cmd]
     assert len(aftermarket) == 1
 
@@ -318,13 +324,13 @@ def test_daemon_reselection_passes_classification_exclusions(monkeypatch, tmp_pa
     }).write_parquet(settings.paths.bars_daily_dir / "2026-09.parquet")
 
     class FakeClient:
-        def get_trade_amount_ranking(self):
+        def get_trade_amount_ranking(self, *, market_div="J"):
             return (
                 KisRankingRow(symbol='005935', rank=1, change_pct=1.0, trade_value_krw=100),
                 KisRankingRow(symbol='005930', rank=2, change_pct=1.0, trade_value_krw=90),
             )
 
-        def get_fluctuation_ranking(self):
+        def get_fluctuation_ranking(self, *, market_div="J"):
             return (
                 KisRankingRow(symbol='005935', rank=1, change_pct=1.0, trade_value_krw=100),
                 KisRankingRow(symbol='005930', rank=2, change_pct=1.0, trade_value_krw=90),
@@ -348,7 +354,7 @@ def test_daemon_reselection_passes_classification_exclusions(monkeypatch, tmp_pa
     daemon.run_collector_daemon(settings=settings, now_fn=lambda: next(times), sleep_fn=MagicMock(), max_cycles=1)
 
     snapshot = read_candidate_snapshot(
-        settings.paths.aftermarket_candidates(dt.date(2026, 9, 16)),
+        settings.paths.aftermarket_candidates(dt.date(2026, 9, 16), "krx"),
         expected_session_date=dt.date(2026, 9, 16), expected_session='aftermarket', max_candidates=40,
     )
     assert [row['symbol'] for row in snapshot.candidates] == ['005930']
@@ -367,10 +373,10 @@ def test_daemon_reselection_degrades_once_without_bar_store(monkeypatch, tmp_pat
     settings = CollectorSettings(data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2)
 
     class FakeClient:
-        def get_trade_amount_ranking(self):
+        def get_trade_amount_ranking(self, *, market_div="J"):
             return (KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=100),)
 
-        def get_fluctuation_ranking(self):
+        def get_fluctuation_ranking(self, *, market_div="J"):
             return (KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=100),)
 
     attempts = 0
@@ -405,8 +411,8 @@ def test_daemon_reselection_degrades_once_without_bar_store(monkeypatch, tmp_pat
     with caplog.at_level(logging.WARNING):
         daemon.run_collector_daemon(settings=settings, now_fn=lambda: next(times), sleep_fn=MagicMock(), max_cycles=2)
 
-    assert attempts == 2
-    assert settings.paths.aftermarket_candidates(dt.date(2026, 9, 16)).exists()
+    assert attempts == 3
+    assert settings.paths.aftermarket_candidates(dt.date(2026, 9, 16), "krx").exists()
     degraded = [record for record in caplog.records if 'stage=aftermarket_eligibility' in record.getMessage()]
     assert len(degraded) == 1
     assert 'reason=no_bars_store' in degraded[0].getMessage()
@@ -426,10 +432,10 @@ def test_daemon_reselection_degrades_on_unreadable_bar_store(monkeypatch, tmp_pa
     (settings.paths.bars_daily_dir / "2026-09.parquet").write_bytes(b'\x00\x01broken-parquet')
 
     class FakeClient:
-        def get_trade_amount_ranking(self):
+        def get_trade_amount_ranking(self, *, market_div="J"):
             return (KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=100),)
 
-        def get_fluctuation_ranking(self):
+        def get_fluctuation_ranking(self, *, market_div="J"):
             return (KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=100),)
 
     class Supervisor:
@@ -450,7 +456,7 @@ def test_daemon_reselection_degrades_on_unreadable_bar_store(monkeypatch, tmp_pa
     with caplog.at_level(logging.WARNING):
         daemon.run_collector_daemon(settings=settings, now_fn=lambda: next(times), sleep_fn=MagicMock(), max_cycles=1)
 
-    assert settings.paths.aftermarket_candidates(dt.date(2026, 9, 16)).exists()
+    assert settings.paths.aftermarket_candidates(dt.date(2026, 9, 16), "krx").exists()
     degraded = [record for record in caplog.records if 'stage=aftermarket_eligibility' in record.getMessage()]
     assert len(degraded) == 1
     assert 'reason=bars_unreadable' in degraded[0].getMessage()
@@ -520,7 +526,7 @@ def test_daemon_holiday_active_stops_aftermarket_supervisors(tmp_path, monkeypat
     monkeypatch.setattr(daemon_mod, "load_kis_data_credentials", lambda: ())
     stamp = dt.datetime(2026, 9, 14, 15, 31, tzinfo=kst)
     write_candidate_snapshot(
-        settings.paths.aftermarket_candidates(dt.date(2026, 9, 14)),
+        settings.paths.aftermarket_candidates(dt.date(2026, 9, 14), "krx"),
         CandidateSnapshot(schema_version=1, rev=20260914, session_date=dt.date(2026, 9, 14), session="aftermarket", generated_at=stamp, source_asof=stamp, effective_from=stamp, policy_version="aftermarket_v1", capacity=40, eligible_count=1, selected_count=1, candidates=({"symbol": "000001", "rank": 1, "source_ranks": {"trade_amount": 1}, "metrics": {"trade_value_krw": 1, "change_pct": 1.0}, "selection_reasons": ["trade_amount"]},)),
     )
     stops: list[list[str]] = []
@@ -624,10 +630,10 @@ def test_daemon_reselection_degrades_on_monthless_bar_store(monkeypatch, tmp_pat
     (settings.paths.bars_daily_dir / "notes.parquet").write_bytes(b"x")
 
     class FakeClient:
-        def get_trade_amount_ranking(self):
+        def get_trade_amount_ranking(self, *, market_div="J"):
             return (KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=100),)
 
-        def get_fluctuation_ranking(self):
+        def get_fluctuation_ranking(self, *, market_div="J"):
             return (KisRankingRow(symbol='005930', rank=1, change_pct=1.0, trade_value_krw=100),)
 
     class Supervisor:
@@ -648,7 +654,7 @@ def test_daemon_reselection_degrades_on_monthless_bar_store(monkeypatch, tmp_pat
     with caplog.at_level(logging.WARNING):
         daemon.run_collector_daemon(settings=settings, now_fn=lambda: next(times), sleep_fn=MagicMock(), max_cycles=1)
 
-    assert settings.paths.aftermarket_candidates(dt.date(2026, 9, 16)).exists()
+    assert settings.paths.aftermarket_candidates(dt.date(2026, 9, 16), "krx").exists()
     degraded = [record for record in caplog.records if 'stage=aftermarket_eligibility' in record.getMessage()]
     assert len(degraded) == 1
     assert 'reason=bars_unreadable' in degraded[0].getMessage()
@@ -685,7 +691,7 @@ def _arm_plan():
     )
 
 
-def _arm_candidate_snapshot(day=None):
+def _arm_candidate_snapshot(day=None, venue=None):
     import datetime as dt
     from zoneinfo import ZoneInfo
 
@@ -693,15 +699,16 @@ def _arm_candidate_snapshot(day=None):
 
     session_date = day if day is not None else _ARM_DAY
     stamp = dt.datetime.combine(session_date, dt.time(15, 31), tzinfo=ZoneInfo("Asia/Seoul"))
+    nxt = venue is not None and str(getattr(venue, "value", venue)) == "nxt"
     return CandidateSnapshot(
         schema_version=1,
         rev=int(session_date.strftime("%Y%m%d")),
         session_date=session_date,
-        session="aftermarket",
+        session="aftermarket_nxt" if nxt else "aftermarket",
         generated_at=stamp,
         source_asof=stamp,
         effective_from=stamp,
-        policy_version="aftermarket_v1",
+        policy_version="aftermarket_nxt_v1" if nxt else "aftermarket_v1",
         capacity=40,
         eligible_count=1,
         selected_count=1,
@@ -738,8 +745,8 @@ def _arm_daemon(
     commands: list[list[str]] = []
     ensures: list[str] = []
 
-    def _default_refresh(*, out_path, **_kwargs):
-        snapshot = _arm_candidate_snapshot()
+    def _default_refresh(*, out_path, venue=None, **_kwargs):
+        snapshot = _arm_candidate_snapshot(venue=venue)
         write_candidate_snapshot(out_path, snapshot)
         return snapshot
 
@@ -777,11 +784,21 @@ def _arm_daemon(
         ls_capacity_pairs=2,
     )
     if candidate:
-        write_candidate_snapshot(settings.paths.aftermarket_candidates(_ARM_DAY), _arm_candidate_snapshot())
+        from src.realtime.contracts import MarketVenue
+
+        write_candidate_snapshot(
+            settings.paths.aftermarket_candidates(_ARM_DAY, MarketVenue.KRX),
+            _arm_candidate_snapshot(venue=MarketVenue.KRX),
+        )
+        write_candidate_snapshot(
+            settings.paths.aftermarket_candidates(_ARM_DAY, MarketVenue.NXT),
+            _arm_candidate_snapshot(venue=MarketVenue.NXT),
+        )
     runtime = resolve_collector_runtime(collector=settings)
     holder = {"now": dt.datetime(2026, 9, 16, 15, 30, tzinfo=kst)}
     runner = daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: holder["now"], sleep=lambda _: None)
     runner.state.aftermarket_refresh_day = refresh_day
+    runner.state.aftermarket_nxt_refresh_day = refresh_day
     return runner, commands, ensures
 
 
@@ -961,10 +978,20 @@ def test_shifted_day_does_not_arm_at_standard_times(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _Sup)
     from src.universe.ipc import write_candidate_snapshot
 
-    write_candidate_snapshot(settings.paths.aftermarket_candidates(day), _arm_candidate_snapshot(day))
+    from src.realtime.contracts import MarketVenue
+
+    write_candidate_snapshot(
+        settings.paths.aftermarket_candidates(day, MarketVenue.KRX),
+        _arm_candidate_snapshot(day, venue=MarketVenue.KRX),
+    )
+    write_candidate_snapshot(
+        settings.paths.aftermarket_candidates(day, MarketVenue.NXT),
+        _arm_candidate_snapshot(day, venue=MarketVenue.NXT),
+    )
     runtime = resolve_collector_runtime(collector=settings)
     runner = daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda _: None)
     runner.state.aftermarket_refresh_day = day
+    runner.state.aftermarket_nxt_refresh_day = day
 
     for hour, minute, second in ((15, 39, 5), (15, 59, 5)):
         now = dt.datetime(2026, 11, 19, hour, minute, second, tzinfo=dt.timezone(dt.timedelta(hours=9)))
@@ -993,7 +1020,9 @@ def test_pending_reselection_defers_plan_without_latching(tmp_path, monkeypatch)
         attempts.append(generated_at)
         if len(attempts) == 1:
             raise KisApiError("SCHEMA", "temporary ranking failure")
-        write_candidate_snapshot(out_path, _arm_candidate_snapshot())
+        snapshot = _arm_candidate_snapshot(venue=_kwargs.get("venue"))
+        write_candidate_snapshot(out_path, snapshot)
+        return snapshot
 
     runner, commands, _ = _arm_daemon(
         tmp_path,
@@ -1003,28 +1032,31 @@ def test_pending_reselection_defers_plan_without_latching(tmp_path, monkeypatch)
         refresh=refresh,
     )
     _arm_at(runner, 15, 38, 30)
-    assert len(attempts) == 1
+    assert len(attempts) == 2
     assert runner.state.next_aftermarket_refresh_at == attempts[0] + dt.timedelta(seconds=60)
 
     _arm_at(runner, 15, 39, 5)
     assert runner.state.aftermarket_plan_day is None
     assert runner.children.aftermarket == {}
     assert _installed_venues(commands) == []
-    assert len(attempts) == 1
+    assert len(attempts) == 2
 
     _arm_at(runner, 15, 39, 35)
-    assert len(attempts) == 2
+    assert len(attempts) == 3
     assert runner.state.aftermarket_plan_day == _ARM_DAY
     assert sorted(runner.children.aftermarket) == ["nxt:0"]
 
 
 def test_reselection_failing_through_open_keeps_existing_fail_path(tmp_path, monkeypatch, caplog) -> None:
     from src.execution.contracts import KisApiError
+    from src.orchestration import daemon as daemon_mod
+    from src.realtime.kis_sharding import plan_aftermarket_shards as _real_plan
 
     def fail(**_kwargs):
         raise KisApiError("SCHEMA", "ranking unavailable")
 
     runner, commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=False, refresh=fail)
+    monkeypatch.setattr(daemon_mod, "plan_aftermarket_shards", _real_plan)
 
     with caplog.at_level(logging.CRITICAL):
         _arm_at(runner, 15, 38, 30)
@@ -1107,7 +1139,9 @@ def test_pending_reselection_never_installs_previous_day_plan(tmp_path, monkeypa
         attempts.append(generated_at)
         if len(attempts) == 1:
             raise KisApiError("SCHEMA", "temporary ranking failure")
-        write_candidate_snapshot(out_path, _arm_candidate_snapshot())
+        snapshot = _arm_candidate_snapshot(venue=_kwargs.get("venue"))
+        write_candidate_snapshot(out_path, snapshot)
+        return snapshot
 
     runner, commands, _ = _arm_daemon(
         tmp_path, monkeypatch, refresh_day=None, candidate=False, refresh=refresh
@@ -1142,3 +1176,300 @@ def test_existing_aftermarket_children_supervised_while_plan_gate_closed(tmp_pat
     assert runner.state.aftermarket_restarts == 1
     assert runner.state.aftermarket_plan_day is None
     assert _installed_venues(commands) == []
+
+
+def _venue_snapshot(day, venue, symbols):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.universe.ipc import CandidateSnapshot
+
+    stamp = dt.datetime.combine(day, dt.time(15, 31), tzinfo=ZoneInfo("Asia/Seoul"))
+    nxt = str(getattr(venue, "value", venue)) == "nxt"
+    return CandidateSnapshot(
+        schema_version=1,
+        rev=int(day.strftime("%Y%m%d")),
+        session_date=day,
+        session="aftermarket_nxt" if nxt else "aftermarket",
+        generated_at=stamp,
+        source_asof=stamp,
+        effective_from=stamp,
+        policy_version="aftermarket_nxt_v1" if nxt else "aftermarket_v1",
+        capacity=40,
+        eligible_count=len(symbols),
+        selected_count=len(symbols),
+        candidates=tuple(
+            {
+                "symbol": symbol,
+                "rank": index + 1,
+                "source_ranks": {"trade_amount": index + 1},
+                "metrics": {"trade_value_krw": 1, "change_pct": 1.0},
+                "selection_reasons": ["trade_amount"],
+            }
+            for index, symbol in enumerate(symbols)
+        ),
+    )
+
+
+def test_nxt_failure_retries_without_rerunning_krx(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    from src.execution.contracts import KisApiError
+    from src.realtime.contracts import MarketVenue
+
+    attempts: dict[str, int] = {"krx": 0, "nxt": 0}
+
+    def refresh(*, out_path, generated_at, venue, **_kwargs):
+        attempts[venue.value] += 1
+        if venue is MarketVenue.NXT and attempts["nxt"] == 1:
+            raise KisApiError("SCHEMA", "nx ranking unavailable")
+        from src.universe.ipc import write_candidate_snapshot
+
+        write_candidate_snapshot(out_path, _venue_snapshot(_ARM_DAY, venue, ("005930",)))
+        from types import SimpleNamespace
+
+        return SimpleNamespace(selected_count=1)
+
+    runner, _, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=False, refresh=refresh)
+
+    with caplog.at_level(logging.CRITICAL):
+        _arm_at(runner, 15, 31, 0)
+        _arm_at(runner, 15, 31, 30)
+        _arm_at(runner, 15, 32, 5)
+
+    assert attempts == {"krx": 1, "nxt": 2}
+    assert runner.state.aftermarket_refresh_day == _ARM_DAY
+    assert runner.state.aftermarket_nxt_refresh_day == _ARM_DAY
+    venue_fails = [
+        r for r in caplog.records
+        if "stage=aftermarket_reselection" in r.getMessage() and "venue=nxt" in r.getMessage()
+    ]
+    assert len(venue_fails) == 1
+
+
+def test_nxt_failure_through_plan_time_leaves_nxt_empty_without_fallback(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    from src.execution.contracts import KisApiError
+    from src.orchestration import daemon as daemon_mod
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import KisDataCredential
+    from src.universe.ipc import write_candidate_snapshot
+
+    def refresh(*, out_path, generated_at, venue, **_kwargs):
+        if venue is MarketVenue.NXT:
+            raise KisApiError("SCHEMA", "nx ranking unavailable")
+        write_candidate_snapshot(out_path, _venue_snapshot(_ARM_DAY, venue, ("000660",)))
+        from types import SimpleNamespace
+
+        return SimpleNamespace(selected_count=1)
+
+    runner, commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=False, refresh=refresh)
+    from src.realtime.kis_sharding import plan_aftermarket_shards as _real_plan
+
+    monkeypatch.setattr(daemon_mod, "plan_aftermarket_shards", _real_plan)
+    monkeypatch.setattr(daemon_mod, "load_kis_data_credentials", lambda: (KisDataCredential("0", "k", "s", "h", "id0"),))
+
+    with caplog.at_level(logging.CRITICAL):
+        _arm_at(runner, 15, 31, 0)
+        _arm_at(runner, 15, 59, 5)
+
+    assert any(
+        "stage=aftermarket_plan status=EMPTY" in r.getMessage() and "venue=nxt" in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.CRITICAL
+    )
+    assert _installed_venues(commands) == ["krx"]
+    assert all(shard.venue is MarketVenue.KRX for shard in runner.state.aftermarket_plan)
+
+
+def test_nxt_command_points_at_nxt_snapshot(tmp_path, monkeypatch) -> None:
+    runner, commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=_ARM_DAY)
+
+    _arm_at(runner, 15, 59, 5)
+
+    by_venue: dict[str, str] = {}
+    for cmd in commands:
+        if "collect-aftermarket" in cmd:
+            by_venue[cmd[cmd.index("--venue") + 1]] = cmd[cmd.index("--candidates-path") + 1]
+    assert by_venue["nxt"].endswith(f"{_ARM_DAY.isoformat()}.nxt.json")
+    assert by_venue["krx"].endswith(f"{_ARM_DAY.isoformat()}.json")
+
+
+def test_plan_uses_venue_specific_symbol_lists(tmp_path, monkeypatch) -> None:
+    from src.orchestration import daemon as daemon_mod
+    from src.realtime.kis_sharding import KisDataCredential
+    from src.universe.ipc import write_candidate_snapshot
+
+    runner, _, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=_ARM_DAY, candidate=False)
+    write_candidate_snapshot(
+        runner._paths.aftermarket_candidates(_ARM_DAY, "krx"),
+        _venue_snapshot(_ARM_DAY, "krx", ("000001", "000002")),
+    )
+    write_candidate_snapshot(
+        runner._paths.aftermarket_candidates(_ARM_DAY, "nxt"),
+        _venue_snapshot(_ARM_DAY, "nxt", ("000003",)),
+    )
+    seen: dict = {}
+    from src.realtime.kis_sharding import plan_aftermarket_shards as _real_plan
+
+    def _capture(**kwargs):
+        seen.update(kwargs)
+        return _real_plan(**kwargs)
+
+    monkeypatch.setattr(daemon_mod, "plan_aftermarket_shards", _capture)
+    credentials = tuple(KisDataCredential(str(i), f"key{i}", "s", "h", f"id{i}") for i in range(2))
+    monkeypatch.setattr(daemon_mod, "load_kis_data_credentials", lambda: credentials)
+    runner._ensure_aftermarket_plan(_ARM_DAY)
+
+    assert seen["krx_symbols"] == ("000001", "000002")
+    assert seen["nxt_symbols"] == ("000003",)
+    assert [(shard.venue.value, shard.symbols) for shard in runner.state.aftermarket_plan] == [
+        ("nxt", ("000003",)),
+        ("krx", ("000001", "000002")),
+    ]
+
+
+def test_both_snapshots_missing_fails_the_plan(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    from src.execution.contracts import KisApiError
+
+    def _fail(**_kwargs):
+        raise KisApiError("SCHEMA", "ranking unavailable")
+
+    from src.orchestration import daemon as daemon_mod
+    from src.realtime.kis_sharding import plan_aftermarket_shards as _real_plan
+
+    runner, commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=False, refresh=_fail)
+    monkeypatch.setattr(daemon_mod, "plan_aftermarket_shards", _real_plan)
+
+    with caplog.at_level(logging.CRITICAL):
+        _arm_at(runner, 15, 31, 0)
+        _arm_at(runner, 15, 40, 5)
+
+    empties = [
+        r for r in caplog.records
+        if r.levelno == logging.CRITICAL and "stage=aftermarket_plan status=EMPTY" in r.getMessage()
+    ]
+    assert sorted(r.getMessage().split("venue=")[1].split()[0] for r in empties) == ["krx", "nxt"]
+    assert any("stage=aftermarket_plan status=FAIL" in r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL)
+    assert runner.state.aftermarket_plan == ()
+    assert _installed_venues(commands) == []
+
+
+@pytest.mark.parametrize("missing_venue", ["nxt", "krx"])
+def test_eod_degrades_when_a_venue_is_unplanned(tmp_path, monkeypatch, caplog, missing_venue) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration import daemon as daemon_mod
+
+    runner, _, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=_ARM_DAY)
+    monkeypatch.setattr(daemon_mod, "aftermarket_eod_ready", lambda **_kw: True)
+    runner.state.aftermarket_plan = tuple(shard for shard in _arm_plan() if shard.venue.value != missing_venue)
+    monkeypatch.setattr(
+        daemon_mod, "_run_eod_housekeeping",
+        lambda *a, **kw: daemon_mod._EodHousekeeping(0, 0, 0, True, True),
+    )
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **kw: ([], True, "ok"))
+    digests = []
+    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)))
+    now = dt.datetime(2026, 9, 16, 20, 5, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    with caplog.at_level(logging.CRITICAL):
+        blocked = runner._aftermarket_eod_blocked(now, _ARM_DAY, standard_session_anchors(_ARM_DAY))
+        from src.orchestration.trading_day_gate import TradingDayStatus, TradingDayView
+
+        runner._run_business_eod(
+            now, _ARM_DAY,
+            TradingDayView(date=_ARM_DAY, status=TradingDayStatus.BUSINESS, trading_day=_business_trading_day(_ARM_DAY)),
+            standard_session_anchors(_ARM_DAY),
+        )
+
+    assert blocked is True
+    assert any(
+        "reason=aftermarket_venue_unplanned" in r.getMessage() and f"venue={missing_venue}" in r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.CRITICAL
+    )
+    assert len(digests) == 1
+    assert digests[0][0].endswith("DEGRADED")
+    assert "aftermarket_ready=False" in digests[0][1]
+
+
+def test_shifted_day_selects_both_venues_at_shifted_time(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    from src.core.paths import DataPaths
+    from src.core.session_anchors import AnchorSource, SessionAnchors, save_session_anchors
+
+    day = dt.date(2026, 11, 19)
+    refreshed: list = []
+
+    def refresh(*, out_path, generated_at, venue, **_kwargs):
+        refreshed.append(venue)
+        from src.universe.ipc import write_candidate_snapshot
+
+        write_candidate_snapshot(out_path, _arm_candidate_snapshot(day, venue=venue))
+        from types import SimpleNamespace
+
+        return SimpleNamespace(selected_count=1)
+
+    runner, _, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=False, refresh=refresh)
+    save_session_anchors(
+        DataPaths(tmp_path).session_calendar_dir,
+        SessionAnchors(
+            date=day,
+            regular_open=dt.time(10, 0),
+            closing_auction_start=dt.time(16, 20),
+            regular_close=dt.time(16, 30),
+            after_market_end=dt.time(20, 0),
+            source=AnchorSource.VENDOR,
+        ),
+    )
+    kst9 = dt.timezone(dt.timedelta(hours=9))
+
+    _arm_at_shifted(runner, dt.datetime(2026, 11, 19, 15, 31, tzinfo=kst9))
+    assert refreshed == []
+    _arm_at_shifted(runner, dt.datetime(2026, 11, 19, 16, 31, tzinfo=kst9))
+    assert sorted(v.value for v in refreshed) == ["krx", "nxt"]
+    assert runner.state.aftermarket_refresh_day == day
+    assert runner.state.aftermarket_nxt_refresh_day == day
+
+
+def test_restart_after_selection_reuses_both_files(tmp_path, monkeypatch) -> None:
+    refreshed: list = []
+
+    def refresh(**_kwargs):
+        refreshed.append(_kwargs)
+        raise AssertionError("must not refresh")
+
+    runner, _, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=True, refresh=refresh)
+    runner.state.aftermarket_refresh_day = None
+    runner.state.aftermarket_nxt_refresh_day = None
+
+    _arm_at(runner, 15, 50, 0)
+
+    assert refreshed == []
+    assert runner.state.aftermarket_plan_day == _ARM_DAY
+    assert {shard.venue.value for shard in runner.state.aftermarket_plan} == {"krx", "nxt"}
+
+
+def test_holiday_performs_no_reselection(tmp_path, monkeypatch) -> None:
+    refreshed: list = []
+
+    def refresh(**kwargs):
+        refreshed.append(kwargs)
+        from types import SimpleNamespace
+
+        return SimpleNamespace(selected_count=1)
+
+    runner, _, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=False, refresh=refresh, holiday=True)
+
+    _arm_at(runner, 15, 31, 0)
+
+    assert refreshed == []

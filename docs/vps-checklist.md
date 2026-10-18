@@ -82,7 +82,7 @@ Standard anchors; shift per C0. "By" = latest acceptable time.
 | 09:00 | first regular ticks | H11, C1 | SEV1 |
 | 08:00–15:39 | Snapshot REST jobs (9 kinds) | C4 | SEV2 |
 | 15:20–15:30 | Closing auction (no trades in tick stream) | C2 gaps | SEV2 |
-| by 15:31 | `universe/aftermarket/D.json` | C7 | SEV1 for aftermarket |
+| by 15:31 | `universe/aftermarket/D.json` (KRX, J screens) and `D.nxt.json` (NXT, NX screens) | C7 | SEV1 for aftermarket |
 | 15:40 | `AFTER_MARKET_ACTIVE`; NXT aftermarket 15:40–20:00, KRX aftermarket 16:00–20:00 (KIS shards); LS regular stream keeps carrying KRX aftermarket prints until 20:00 | H11, C2 | SEV2 |
 | 20:00 | `POST_MARKET_EOD`: writers close within ~2 s, EOD normalize → offload → verified L0 delete → remote L0 purge → reconcile → backup freshness → digest | C2, S5 | SEV2 |
 | by 20:45 | `eod_maintenance status=OK` (2026-10-12..16: 20:27–20:51); then `program_trades_sync STARTED` (timeout 2400 s from launch); `premarket_pool status=OK target=N`; `NIGHT_SLEEP` | S5, C5, C7 | WARN 20:45, **SEV1 21:00**; sync FAIL = SEV2 |
@@ -147,7 +147,7 @@ Commands run on the host after `cd ~/krx-alpha/data` unless the probe says conta
 | C4 | M2 M3 | Snapshots (9 kinds) | P-SNAP; `docker logs --since 14h krx-collector 2>&1 \| grep -E 'snapshot_summary\|snapshot_dq\|NO_SUCCESS\|STORE_FAIL'` | every kind present for D, `bad_date=0`, `nulls=0`; candidate-scaled kinds `symdiff=0` and rows/expected: `security_status`, `auction_book` = 1.000, `program_trade` ≥0.99, `investor_estimate` ≥0.95; fixed kinds: `stock_minute_bar` 23460 and `index_minute_bar` 1173 exact, `index_snapshot` ≥0.99 of 234, `ranking` ≥0.96 of 23400, `news_title` 0.90–1.10 of median; `snapshot_summary failed_jobs=0 expired=0`; no `snapshot_dq status=FAIL` | missing kind/0 rows = SEV2; below threshold or `symdiff>0` = SEV2; `snapshot_dq WARN` = SEV3 |
 | C5 | M0 M4 | Program trades (`bars/program_trades/YYYY-MM.parquet`) | P-BARS `program_trades` lines; M3/M4: `docker logs --since 14h krx-collector 2>&1 \| grep program_trades_sync` | sync covers the session just closed: after `status=OK` latest date = D, else ≥ P; rows/date within ±2% of median (2449–2458); `program_trades_business_days_missing` empty except D before its sync logs OK (2026-10-18: `['2026-10-16']` = OI-1) | `STARTED` absent by 21:00 = SEV2; `FAIL`/`STALE` = SEV2; missing business day at next M0 = SEV2 (backfill lookback 120 d heals it on the next OK run; confirm) |
 | C6 | M0 M3 | Daily bars (`bars/daily/YYYY-MM.parquet`) | P-BARS | latest = P after 08:20 refresh; n within ±0.5% of median (2761–2766) and ≈ `market_map.json` entries; `bars_business_days_missing` ⊆ {D, P before 08:20} (weekend: last business day, normal) | missing older day = SEV2; see Q5 |
-| C7 | M0 M2 M3 M4 | Universe + plan consistency | P-UNIV with D (and N) | aftermarket D (by 15:31) and premarket D/N exist; `selected == n == unique == min(capacity, eligible)` (after 40, pre 20); `bad_sym=0`; shard `planned==universe True`, `acked==planned True`; premarket N `generated` ≤ 20:52 of the previous business day, `effective_from` 07:58; regular `same_set True` | missing = SEV1 for that session (premarket SEV3); inconsistency = SEV2 |
+| C7 | M0 M2 M3 M4 | Universe + plan consistency | P-UNIV with D (and N) | aftermarket D (by 15:31) and premarket D/N exist; per venue file (`D.json` KRX J screens, `D.nxt.json` NXT NX screens) `selected == n == unique == min(capacity, eligible)` (after 40, pre 20); `bad_sym=0`; per-venue shard `planned==universe True` (NXT shards checked against `D.nxt.json`), `acked==planned True`; premarket N `generated` ≤ 20:52 of the previous business day, `effective_from` 07:58; regular `same_set True` | missing = SEV1 for that session (premarket SEV3); inconsistency = SEV2 |
 | C8 | M3 | Symbol coverage on L0 | P-L0C with D | ls regular `no_data=0`, `unplanned=0`; krx_after `no_data` ≤2, `thin_lt100` ≤10 of 40; nxt_pre `no_data=0`; nxt_after `no_data` ≤ open item OI-2 baseline (17–18 of 40) | worse than band = SEV3 (selection, change after freeze); regular `no_data>0` = SEV2 |
 
 ### Q: Data content
@@ -273,18 +273,21 @@ D, N = os.environ["D"], os.environ.get("N", "")
 base = os.path.expanduser("~/krx-alpha/data"); ok = re.compile(r"^[0-9A-Z]{6}$")
 def acked(fs): return {a["symbol"] for f in fs for a in json.load(open(f))["subscription_acks"] if a.get("accepted")}
 def planned(fs): return {p["symbol"] for f in fs for p in json.load(open(f))["planned_pairs"]}
-def uni(kind, day):
-    f = f"{base}/universe/{kind}/{day}.json"
-    if not os.path.exists(f): print(kind, day, "MISSING"); return None
+def uni(kind, day, venue_suffix=""):
+    f = f"{base}/universe/{kind}/{day}{venue_suffix}.json"
+    if not os.path.exists(f): print(kind, day, venue_suffix or "-", "MISSING"); return None
     u = json.load(open(f)); s = [c["symbol"] for c in u["candidates"]]
-    print(kind, day, "selected", u["selected_count"], "n", len(s), "unique", len(set(s)), "capacity", u["capacity"], "eligible", u["eligible_count"],
+    print(kind, day, venue_suffix or "-", "selected", u["selected_count"], "n", len(s), "unique", len(set(s)), "capacity", u["capacity"], "eligible", u["eligible_count"],
           "bad_sym", sum(not ok.match(x) for x in s), "effective_from", u["effective_from"][11:19], "generated", u["generated_at"][:19])
     return set(s)
-a = uni("aftermarket", D)
+a = uni("aftermarket", D, "")
+a_nxt = uni("aftermarket", D, ".nxt")
 if a is not None:
-    for v in ("krx", "nxt"):
-        fs = sorted(glob.glob(f"{base}/manifest/aftermarket/{D}.{v}.shard-*.json"))
-        print(f"  {v} shards", len(fs), "planned==universe", planned(fs) == a, "acked==planned", acked(fs) == planned(fs))
+    fs = sorted(glob.glob(f"{base}/manifest/aftermarket/{D}.krx.shard-*.json"))
+    print(f"  krx shards", len(fs), "planned==universe", planned(fs) == a, "acked==planned", acked(fs) == planned(fs))
+if a_nxt is not None:
+    fs = sorted(glob.glob(f"{base}/manifest/aftermarket/{D}.nxt.shard-*.json"))
+    print(f"  nxt shards", len(fs), "planned==universe", planned(fs) == a_nxt, "acked==planned", acked(fs) == planned(fs))
 p = uni("premarket", D)
 if p is not None:
     fs = glob.glob(f"{base}/manifest/premarket/{D}.nxt.shard-*.json"); print("  premarket planned==universe", planned(fs) == p if fs else "NO_MANIFEST")
