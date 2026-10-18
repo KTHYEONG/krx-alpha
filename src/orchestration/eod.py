@@ -416,6 +416,67 @@ def check_aftermarket_prearm(
     return tuple(findings)
 
 
+@dataclass(frozen=True)
+class AftermarketCoverageFinding:
+    """Zero-frame accepted symbols of one aftermarket shard (None when unverifiable)."""
+
+    venue: str
+    shard_index: int
+    accepted_symbols: int
+    zero_frame_symbols: tuple[str, ...] | None
+    reason: str
+
+
+def check_aftermarket_symbol_coverage(
+    *,
+    expected: tuple[tuple[AftermarketShard, pathlib.Path], ...],
+    date: dt.date,
+) -> tuple[AftermarketCoverageFinding, ...]:
+    """Report accepted shard symbols with zero journaled frames on every stream; never raises on bad manifests."""
+    findings: list[AftermarketCoverageFinding] = []
+    for shard, path in expected:
+        venue = shard.venue.value
+        try:
+            if not pathlib.Path(path).exists():
+                findings.append(
+                    AftermarketCoverageFinding(venue, shard.shard_index, 0, None, "manifest_missing")
+                )
+                continue
+            manifest = SessionManifest.load(pathlib.Path(path))
+            accepted = {
+                str(ack.get("symbol")) for ack in manifest.subscription_acks if ack.get("accepted") is True
+            }
+            accepted_symbols = tuple(symbol for symbol in shard.symbols if symbol in accepted)
+        except (ValueError, KeyError, TypeError, OSError, AttributeError, OverflowError):
+            logger.debug("[DATA] stage=aftermarket_coverage status=UNVERIFIABLE venue=%s shard=%d", venue, shard.shard_index)
+            findings.append(
+                AftermarketCoverageFinding(venue, shard.shard_index, 0, None, "manifest_unreadable")
+            )
+            continue
+        if manifest.session_date != date:
+            logger.debug("[DATA] stage=aftermarket_coverage status=UNVERIFIABLE venue=%s shard=%d", venue, shard.shard_index)
+            findings.append(
+                AftermarketCoverageFinding(venue, shard.shard_index, 0, None, "date_mismatch")
+            )
+            continue
+        if manifest.frame_counts is None:
+            logger.debug("[DATA] stage=aftermarket_coverage status=UNVERIFIABLE venue=%s shard=%d", venue, shard.shard_index)
+            findings.append(
+                AftermarketCoverageFinding(venue, shard.shard_index, len(accepted_symbols), None, "untracked")
+            )
+            continue
+        zero = tuple(
+            symbol
+            for symbol in accepted_symbols
+            if manifest.symbol_frame_total(symbol) == 0
+        )
+        logger.debug("[DATA] stage=aftermarket_coverage status=CHECKED venue=%s shard=%d", venue, shard.shard_index)
+        findings.append(
+            AftermarketCoverageFinding(venue, shard.shard_index, len(accepted_symbols), zero, "-")
+        )
+    return tuple(findings)
+
+
 def check_backup_freshness(*, manifest_dir: pathlib.Path, today: dt.date, archiver: Any = None) -> list[str]:
     arc = archiver if archiver is not None else RcloneArchiver.try_from_env()
     if arc is None:

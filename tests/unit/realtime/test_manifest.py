@@ -176,3 +176,47 @@ def test_legacy_ack_without_time_loads(tmp_path) -> None:
     )
     loaded = SessionManifest.load(path)
     assert loaded.subscription_acks[0].get("acked_at_ns") is None
+
+
+def test_frame_counts_round_trip(tmp_path) -> None:
+    import datetime as dt
+
+    from src.realtime.manifest import SessionManifest
+
+    m = SessionManifest(session_date=dt.date(2026, 10, 18), clock_offset_ns=0, started_at_ns=1)
+    for _ in range(3):
+        m.record_frame_count("A", "H0NXCNT0")
+    path = tmp_path / "m.json"
+    m.save(path)
+    loaded = SessionManifest.load(path)
+    assert loaded.frame_counts == {"A": {"H0NXCNT0": 3}}
+
+
+def test_legacy_manifest_is_untracked(tmp_path) -> None:
+    import json
+
+    from src.realtime.manifest import SessionManifest
+
+    path = tmp_path / "legacy.json"
+    path.write_text(
+        json.dumps({"session_date": "2026-10-18", "clock_offset_ns": 0, "started_at_ns": 0}),
+        encoding="utf-8",
+    )
+    loaded = SessionManifest.load(path)
+    loaded.record_frame_count("A", "H0NXASP0")
+    assert loaded.frame_counts is None
+    assert loaded.symbol_frame_total("A") is None
+
+
+def test_frame_count_ignores_empty_symbol_and_counts_total() -> None:
+    import datetime as dt
+
+    from src.realtime.manifest import SessionManifest
+
+    m = SessionManifest(session_date=dt.date(2026, 10, 18), clock_offset_ns=0, started_at_ns=1)
+    m.record_frame_count("", "H0NXCNT0")
+    assert m.frame_counts == {}
+    assert m.symbol_frame_total("A") == 0
+    m.record_frame_count("A", "H0NXCNT0")
+    m.record_frame_count("A", "H0NXASP0")
+    assert m.symbol_frame_total("A") == 2

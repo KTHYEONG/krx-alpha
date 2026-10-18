@@ -1807,3 +1807,133 @@ def test_no_prearm_logs_without_plan(tmp_path, caplog) -> None:
     with caplog.at_level(logging.INFO):
         assert runner2._log_aftermarket_prearm(day, anchors) == 0
     assert "stage=aftermarket_prearm" not in caplog.text
+
+
+def _write_coverage_daemon_manifest(paths, day, shard, *, counts):
+    from src.realtime.manifest import SessionManifest
+
+    manifest = SessionManifest(
+        session_date=day,
+        clock_offset_ns=0,
+        started_at_ns=1,
+        venue=shard.venue.value,
+        session="nxt_after" if shard.venue.value == "nxt" else "krx_after",
+        expected_close_ns=1,
+        writer_closed_at_ns=2,
+        planned_pairs=[{"symbol": s, "tr_id": t} for s in shard.symbols for t in shard.streams],
+        shard_index=shard.shard_index,
+        credential_key_id=shard.credential_key_id,
+    )
+    for s in shard.symbols:
+        for t in shard.streams:
+            manifest.record_ack(vendor="kis", tr_id=t, symbol=s, rt_cd="0", accepted=True, acked_at_ns=1)
+    for symbol, per_stream in counts.items():
+        for stream, n in per_stream.items():
+            for _ in range(n):
+                manifest.record_frame_count(symbol, stream)
+    path = paths.aftermarket_manifest_path(day, shard.venue, shard.shard_index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    manifest.save(path)
+    return path
+
+
+def test_eod_warns_with_zero_frame_symbol_list(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+
+    day = dt.date(2026, 10, 18)
+    shard = AftermarketShard(MarketVenue.NXT, 0, ("A", "B", "C", "D"), ("H0NXCNT0", "H0NXASP0"), "0", "id0")
+    runner = _prearm_daemon_runner(tmp_path, (shard,))
+    _write_coverage_daemon_manifest(
+        runner._paths, day, shard, counts={"A": {"H0NXCNT0": 5}, "C": {"H0NXASP0": 2}}
+    )
+    with caplog.at_level(logging.INFO):
+        total = runner._log_aftermarket_coverage(day)
+    assert total == 2
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "stage=aftermarket_coverage" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "status=ZERO_FRAMES venue=nxt shard=0" in warnings[0].getMessage()
+    assert "symbols=B,D" in warnings[0].getMessage()
+
+
+def test_eod_digest_carries_zero_frame_count_and_keeps_ok(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    from zoneinfo import ZoneInfo
+    import src.orchestration.daemon as daemon_mod
+    from src.core.session_anchors import standard_session_anchors
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+
+    day = dt.date(2026, 10, 18)
+    anchors = standard_session_anchors(day)
+    now = dt.datetime(2026, 10, 18, 20, 5, tzinfo=ZoneInfo("Asia/Seoul"))
+    shard = AftermarketShard(MarketVenue.NXT, 0, ("A", "B", "C", "D"), ("H0NXCNT0", "H0NXASP0"), "0", "id0")
+    runner = _prearm_daemon_runner(tmp_path, (shard,))
+    runner._run_id = "test"
+    runner._eod_progress = lambda: None
+    _write_coverage_daemon_manifest(
+        runner._paths, day, shard, counts={"A": {"H0NXCNT0": 5}, "C": {"H0NXASP0": 2}}
+    )
+    monkeypatch.setattr(
+        daemon_mod,
+        "_run_eod_housekeeping",
+        lambda cfg, paths, ref_day, progress=None: type(
+            "H", (), {"deleted": 0, "uploaded": 0, "purged": 0, "maintenance_ok": True, "offload_ok": True}
+        )(),
+    )
+    monkeypatch.setattr(
+        daemon_mod.DaemonRunner, "_reconcile_regular_session", lambda self, ref_day, day_v, anchors_v: (True, True)
+    )
+    monkeypatch.setattr(
+        daemon_mod.DaemonRunner, "_reconcile_crosscheck_sessions", lambda self, ref_day, day_v, anchors_v: {}
+    )
+    monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "fresh"))
+    digests = []
+    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)))
+    monkeypatch.setattr(
+        daemon_mod.DaemonRunner, "_aftermarket_eod_blocked", lambda self, now_v, ref_day, anchors_v: False
+    )
+    from tests.unit.orchestration.daemon_fixtures import _business_trading_day
+
+    with caplog.at_level(logging.INFO):
+        runner._run_business_eod(now, day, _business_trading_day(day), anchors)
+    assert len(digests) == 1
+    assert "aftermarket_zero_frame_symbols=2" in digests[0][1].splitlines()
+    assert digests[0][0].endswith("OK")
+
+
+def test_eod_clean_coverage_logs_ok_summary_only(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+
+    day = dt.date(2026, 10, 18)
+    shard = AftermarketShard(MarketVenue.NXT, 0, ("A", "B"), ("H0NXCNT0", "H0NXASP0"), "0", "id0")
+    runner = _prearm_daemon_runner(tmp_path, (shard,))
+    _write_coverage_daemon_manifest(
+        runner._paths, day, shard, counts={"A": {"H0NXCNT0": 1}, "B": {"H0NXASP0": 1}}
+    )
+    with caplog.at_level(logging.INFO):
+        assert runner._log_aftermarket_coverage(day) == 0
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING and "stage=aftermarket_coverage" in r.getMessage()]
+    assert "stage=aftermarket_coverage status=OK zero=0" in caplog.text
+
+
+def test_eod_no_coverage_logs_without_plan(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    day = dt.date(2026, 10, 18)
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+
+    shard = AftermarketShard(MarketVenue.NXT, 0, ("A",), ("H0NXCNT0", "H0NXASP0"), "0", "id0")
+    for enabled, plan in ((False, (shard,)), (True, ())):
+        runner = _prearm_daemon_runner(tmp_path, plan, enabled=enabled)
+        with caplog.at_level(logging.INFO):
+            assert runner._log_aftermarket_coverage(day) == 0
+    assert "stage=aftermarket_coverage" not in caplog.text

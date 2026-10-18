@@ -117,6 +117,7 @@ class SessionFrameSink:
             conn_id=frame.conn_id,
             conn_seq=frame.conn_seq,
         )
+        self.session.manifest.record_frame_count(frame.symbol, frame.stream)
 
     def note_ack(self, vendor: str, ack: VendorAck) -> None:
         self.session.note_ack(

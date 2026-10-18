@@ -2283,3 +2283,102 @@ def test_sink_stamps_ack_with_injected_wall_clock(tmp_path) -> None:
     sink = SessionFrameSink(session=session, wall_clock_ns=lambda: 777)
     sink.note_ack("kis", VendorAck("005930", "H0NXCNT0", True, "0"))
     assert session.manifest.subscription_acks[0]["acked_at_ns"] == 777
+
+
+def test_sink_counts_only_journaled_frames(tmp_path) -> None:
+    import datetime as dt
+    from unittest.mock import Mock
+
+    import pytest
+
+    from src.realtime.contracts import L0Frame
+    from src.realtime.manifest import SessionManifest
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.realtime.streamer import SessionFrameSink
+    from src.storage.retention import StorageExhaustedError
+    from src.universe.ipc import write_candidates
+
+    class _FC:
+        def request(self, host, version=3, timeout=5):
+            return type("S", (), {"offset": 0.0})()
+
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["x"]}], rev=1)
+    cfg = SessionConfig(
+        session_date=dt.date(2026, 10, 18),
+        journal_root=tmp_path / "l0",
+        manifest_path=tmp_path / "s.json",
+        candidates_path=cp,
+        ntp_host="h",
+        slot_budget=200,
+        max_clock_offset_ns=2_000_000_000,
+        desired_streams=("H0NXCNT0",),
+        vendor="ls",
+    )
+    session = bootstrap_session(cfg, ntp_client=_FC(), now_ns=1)
+    sink = SessionFrameSink(session=session)
+    bad = L0Frame("ls", "UNKNOWN", "005930", "bad", 1, 2, 1, "c")
+    good = L0Frame("ls", "H0NXCNT0", "005930", "good", 1, 2, 1, "c")
+    with pytest.raises(KeyError):
+        sink.record(bad)
+    assert session.manifest.frame_counts == {}
+    sink.record(good)
+    assert session.manifest.symbol_frame_total("005930") == 1
+    assert SessionManifest.load(cfg.manifest_path).frame_counts == {}
+    assert session.journals[("ls", "H0NXCNT0")]._buffer[0]["symbol"] == "005930"
+    sink.flush()
+    assert SessionManifest.load(cfg.manifest_path).symbol_frame_total("005930") == 1
+    session.record_frame = Mock(side_effect=StorageExhaustedError("disk full"))
+    with pytest.raises(StorageExhaustedError):
+        sink.record(good)
+    assert session.manifest.symbol_frame_total("005930") == 1
+
+
+def test_counts_accumulate_across_same_day_restart(tmp_path) -> None:
+    import datetime as dt
+    import json
+    from src.realtime.contracts import L0Frame
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.realtime.streamer import SessionFrameSink
+    from src.universe.ipc import write_candidates
+
+    class _FC:
+        def request(self, host, version=3, timeout=5):
+            return type("S", (), {"offset": 0.0})()
+
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["x"]}], rev=1)
+    day = dt.date(2026, 10, 18)
+
+    def _cfg():
+        return SessionConfig(
+            session_date=day,
+            journal_root=tmp_path / "l0",
+            manifest_path=tmp_path / "s.json",
+            candidates_path=cp,
+            ntp_host="h",
+            slot_budget=200,
+            max_clock_offset_ns=2_000_000_000,
+            desired_streams=("H0NXCNT0",),
+            vendor="ls",
+        )
+
+    session = bootstrap_session(_cfg(), ntp_client=_FC(), now_ns=1)
+    sink = SessionFrameSink(session=session)
+    for _ in range(5):
+        sink.record(L0Frame("ls", "H0NXCNT0", "A", "x", 1, 2, 1, "c"))
+    session.persist()
+    resumed = bootstrap_session(_cfg(), ntp_client=_FC(), now_ns=2)
+    sink2 = SessionFrameSink(session=resumed)
+    for _ in range(2):
+        sink2.record(L0Frame("ls", "H0NXCNT0", "A", "x", 1, 2, 1, "c"))
+    assert resumed.manifest.symbol_frame_total("A") == 7
+    resumed.persist()
+    payload = json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))
+    payload.pop("frame_counts")
+    (tmp_path / "s.json").write_text(json.dumps(payload), encoding="utf-8")
+    legacy = bootstrap_session(_cfg(), ntp_client=_FC(), now_ns=3)
+    SessionFrameSink(session=legacy).record(L0Frame("ls", "H0NXCNT0", "A", "x", 1, 2, 1, "c"))
+    legacy.persist()
+    assert legacy.manifest.frame_counts is None
+    assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["frame_counts"] is None
