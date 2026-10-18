@@ -5,19 +5,27 @@ def test_run_eod_maintenance_threads_archive_root(tmp_path) -> None:
     from src.orchestration.eod import run_eod_maintenance
 
     # Given: 만료 파티션에 유효 프레임
-    part = tmp_path / 'l0' / 'kis' / 'H0STCNT0' / 'dt=2026-09-01'
+    part = tmp_path / "l0" / "kis" / "H0STCNT0" / "dt=2026-09-01"
     part.mkdir(parents=True, exist_ok=True)
-    rec = {'raw': 'a', 'recv_mono_ns': 1, 'recv_wall_ns': 2, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
-    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress((json.dumps(rec) + '\n').encode('utf-8')))
-    archive_root = tmp_path / 'l1'
+    rec = {
+        "raw": "a",
+        "recv_mono_ns": 1,
+        "recv_wall_ns": 2,
+        "conn_id": "c1",
+        "conn_seq": 1,
+        "vendor": "kis",
+        "tr_id": "H0STCNT0",
+    }
+    (part / "09.jsonl.zst").write_bytes(zstd.ZstdCompressor(level=3).compress((json.dumps(rec) + "\n").encode("utf-8")))
+    archive_root = tmp_path / "l1"
 
     # When
-    deleted = run_eod_maintenance(tmp_path / 'l0', retain_days=3, today=dt.date(2026, 9, 8), archive_root=archive_root)
+    deleted = run_eod_maintenance(tmp_path / "l0", retain_days=3, today=dt.date(2026, 9, 8), archive_root=archive_root)
 
     # Then: 검증 게이트 없이 정규화만 수행하고 L0를 보존한다
     assert deleted == 0
     assert part.exists()
-    assert (archive_root / 'kis' / 'H0STCNT0' / 'dt=2026-09-01.parquet').exists()
+    assert (archive_root / "kis" / "H0STCNT0" / "dt=2026-09-01.parquet").exists()
 
 
 def test_run_eod_maintenance_invokes_prune(tmp_path) -> None:
@@ -25,16 +33,16 @@ def test_run_eod_maintenance_invokes_prune(tmp_path) -> None:
     from src.orchestration.eod import run_eod_maintenance
 
     # Given: 만료 + 최근 파티션, archive_root 미지정
-    root = tmp_path / 'l0' / 'kis' / 'H0STCNT0'
-    old_part = root / 'dt=2026-09-01'
-    recent_part = root / 'dt=2026-09-07'
+    root = tmp_path / "l0" / "kis" / "H0STCNT0"
+    old_part = root / "dt=2026-09-01"
+    recent_part = root / "dt=2026-09-07"
     old_part.mkdir(parents=True, exist_ok=True)
     recent_part.mkdir(parents=True, exist_ok=True)
-    (old_part / '09.jsonl.zst').write_text('dummy')
-    (recent_part / '09.jsonl.zst').write_text('dummy')
+    (old_part / "09.jsonl.zst").write_text("dummy")
+    (recent_part / "09.jsonl.zst").write_text("dummy")
 
     # When
-    deleted = run_eod_maintenance(tmp_path / 'l0', retain_days=3, today=dt.date(2026, 9, 8))
+    deleted = run_eod_maintenance(tmp_path / "l0", retain_days=3, today=dt.date(2026, 9, 8))
 
     # Then: offload 대상 없음 -> 삭제 0, 원본 보존
     assert deleted == 0
@@ -46,28 +54,31 @@ def test_run_eod_offload_syncs_and_prunes_with_injected_archiver(tmp_path) -> No
     import datetime as dt
     from src.orchestration.eod import run_eod_offload
 
-    root = tmp_path / 'l1' / 'kis' / 'H0STCNT0'
+    root = tmp_path / "l1" / "kis" / "H0STCNT0"
     root.mkdir(parents=True)
-    old_pq = root / 'dt=2026-07-01.parquet'
-    old_pq.write_bytes(b'x')
+    old_pq = root / "dt=2026-07-01.parquet"
+    old_pq.write_bytes(b"x")
 
     class _Arc:
         def sync_l1_tree(self, archive_root, *, progress=None):
             from src.storage.remote import SyncStats
 
             return SyncStats(uploaded=1, skipped_verified=0, failed_verification=0)
+
         def sync_manifest_tree(self, manifest_root):
             from src.storage.remote import SyncStats
 
             return SyncStats(uploaded=0, skipped_verified=0, failed_verification=0)
+
         def remote_files(self, prefix):
-            return {'l1/kis/H0STCNT0/dt=2026-07-01.parquet'}
+            return {"l1/kis/H0STCNT0/dt=2026-07-01.parquet"}
+
         def remote_file_sizes(self, prefix):
             if prefix == "l1/":
-                return {'l1/kis/H0STCNT0/dt=2026-07-01.parquet': 1}
+                return {"l1/kis/H0STCNT0/dt=2026-07-01.parquet": 1}
             return {}
 
-    stats = run_eod_offload(tmp_path / 'l1', archiver=_Arc(), reference_date=dt.date(2026, 9, 8))
+    stats = run_eod_offload(tmp_path / "l1", archiver=_Arc(), reference_date=dt.date(2026, 9, 8))
 
     assert stats.l1.uploaded == 1
     assert stats.purged == 1
@@ -78,15 +89,15 @@ def test_run_eod_offload_returns_zeros_when_archiver_missing(tmp_path, caplog, m
     import logging
     from src.orchestration.eod import run_eod_offload
 
-    root = tmp_path / 'l1' / 'kis' / 'H0STCNT0'
+    root = tmp_path / "l1" / "kis" / "H0STCNT0"
     root.mkdir(parents=True)
-    old_pq = root / 'dt=2026-07-01.parquet'
-    old_pq.write_bytes(b'x')
+    old_pq = root / "dt=2026-07-01.parquet"
+    old_pq.write_bytes(b"x")
 
-    monkeypatch.setattr('src.storage.remote.RcloneArchiver.try_from_env', staticmethod(lambda: None))
+    monkeypatch.setattr("src.storage.remote.RcloneArchiver.try_from_env", staticmethod(lambda: None))
 
     with caplog.at_level(logging.CRITICAL):
-        stats = run_eod_offload(tmp_path / 'l1')
+        stats = run_eod_offload(tmp_path / "l1")
 
     assert stats.l1.uploaded == 0
     assert stats.purged == 0
@@ -106,34 +117,53 @@ def test_run_eod_maintenance_forwards_quarantine_root(tmp_path, monkeypatch) -> 
 
     seen: dict[str, object] = {}
 
-    def _fake_prune(root, archive_root=None, *, retain_days=3, reference_date=None, quarantine_root=None, normalizer=None, verified_remote_l1=None, progress=None, normalize=True, reuse_fresh_l1=False):
-        seen.update({
-            'root': root, 'archive_root': archive_root, 'retain_days': retain_days,
-            'reference_date': reference_date, 'quarantine_root': quarantine_root, 'normalizer': normalizer,
-            'verified_remote_l1': verified_remote_l1, 'reuse_fresh_l1': reuse_fresh_l1,
-        })
+    def _fake_prune(
+        root,
+        archive_root=None,
+        *,
+        retain_days=3,
+        reference_date=None,
+        quarantine_root=None,
+        normalizer=None,
+        verified_remote_l1=None,
+        progress=None,
+        normalize=True,
+        reuse_fresh_l1=False,
+    ):
+        seen.update(
+            {
+                "root": root,
+                "archive_root": archive_root,
+                "retain_days": retain_days,
+                "reference_date": reference_date,
+                "quarantine_root": quarantine_root,
+                "normalizer": normalizer,
+                "verified_remote_l1": verified_remote_l1,
+                "reuse_fresh_l1": reuse_fresh_l1,
+            }
+        )
         return 7
 
-    monkeypatch.setattr(eod_mod, 'prune_old_journals', _fake_prune)
+    monkeypatch.setattr(eod_mod, "prune_old_journals", _fake_prune)
 
     # When
     deleted = run_eod_maintenance(
-        pathlib.Path(tmp_path) / 'l0',
+        pathlib.Path(tmp_path) / "l0",
         retain_days=3,
         today=dt.date(2026, 9, 30),
-        archive_root=pathlib.Path(tmp_path) / 'l1',
-        quarantine_root=pathlib.Path(tmp_path) / 'quarantine',
-        work_root=pathlib.Path(tmp_path) / 'work',
+        archive_root=pathlib.Path(tmp_path) / "l1",
+        quarantine_root=pathlib.Path(tmp_path) / "quarantine",
+        work_root=pathlib.Path(tmp_path) / "work",
         reuse_fresh_l1=True,
     )
 
     # Then: 격리 경로 + 자식 프로세스 정규화기가 보존 계층까지 전달된다
     assert deleted == 7
-    assert seen['quarantine_root'] == pathlib.Path(tmp_path) / 'quarantine'
-    assert seen['reference_date'] == dt.date(2026, 9, 30)
-    assert seen['reuse_fresh_l1'] is True
-    assert seen['normalizer'].func is run_isolated_normalize
-    assert seen['normalizer'].keywords == {'work_root': pathlib.Path(tmp_path) / 'work'}
+    assert seen["quarantine_root"] == pathlib.Path(tmp_path) / "quarantine"
+    assert seen["reference_date"] == dt.date(2026, 9, 30)
+    assert seen["reuse_fresh_l1"] is True
+    assert seen["normalizer"].func is run_isolated_normalize
+    assert seen["normalizer"].keywords == {"work_root": pathlib.Path(tmp_path) / "work"}
 
 
 def test_run_eod_offload_uses_rclone_archiver_by_default(tmp_path, caplog, monkeypatch) -> None:
@@ -354,6 +384,7 @@ def test_check_session_reconciliation_ignores_bars_store(tmp_path) -> None:
     assert (tmp_path / "bars" / "daily.parquet").exists() is False
     assert ok is True
 
+
 def test_run_eod_maintenance_retains_partition_when_isolated_worker_is_killed(tmp_path, monkeypatch, caplog) -> None:
     # Given: 자식 정규화 프로세스가 cgroup OOM 으로 SIGKILL 되는 상황
     import datetime as dt
@@ -362,31 +393,34 @@ def test_run_eod_maintenance_retains_partition_when_isolated_worker_is_killed(tm
 
     from src.orchestration.eod import run_eod_maintenance
 
-    part = tmp_path / 'l0' / 'ls' / 'H0STCNT0' / 'dt=2026-09-01'
+    part = tmp_path / "l0" / "ls" / "H0STCNT0" / "dt=2026-09-01"
     part.mkdir(parents=True)
-    (part / '09.jsonl.zst').write_bytes(b'raw')
+    (part / "09.jsonl.zst").write_bytes(b"raw")
     calls = []
 
     def _killed(cmd, **kwargs):
         calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, -9, stdout='', stderr=None)
+        return subprocess.CompletedProcess(cmd, -9, stdout="", stderr=None)
 
-    monkeypatch.setattr(subprocess, 'run', _killed)
+    monkeypatch.setattr(subprocess, "run", _killed)
 
     # When
     with caplog.at_level(logging.CRITICAL):
         deleted = run_eod_maintenance(
-            tmp_path / 'l0', retain_days=3, today=dt.date(2026, 9, 30),
-            archive_root=tmp_path / 'l1', quarantine_root=tmp_path / 'quarantine', work_root=tmp_path / 'work',
+            tmp_path / "l0",
+            retain_days=3,
+            today=dt.date(2026, 9, 30),
+            archive_root=tmp_path / "l1",
+            quarantine_root=tmp_path / "quarantine",
+            work_root=tmp_path / "work",
         )
 
     # Then: 부모는 살아서 기록하고 원본을 격리하지 않는다
     assert deleted == 0
     assert len(calls) == 1
-    assert (part / '09.jsonl.zst').read_bytes() == b'raw'
-    assert (tmp_path / 'quarantine').exists() is False
-    assert 'reason=worker_crash' in caplog.text
-
+    assert (part / "09.jsonl.zst").read_bytes() == b"raw"
+    assert (tmp_path / "quarantine").exists() is False
+    assert "reason=worker_crash" in caplog.text
 
 
 def test_check_session_reconciliation_flags_gap_union_over_limit_in_regular_session(tmp_path, caplog) -> None:
@@ -423,12 +457,21 @@ def test_check_session_reconciliation_flags_gap_union_over_limit_in_regular_sess
     path = manifest_with([("005930", ns(9, 10), ns(9, 25)), ("000660", ns(9, 10), ns(9, 25))])
 
     with caplog.at_level(logging.CRITICAL):
-        ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
-                                          streams=("H0STCNT0", "H0STASP0"), vendor="ls",
-                                          venue="krx", session="regular", regular_open=dt.time(9, 0), regular_close=dt.time(15, 30))
+        ok = check_session_reconciliation(
+            manifest_path=path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+        )
 
     assert ok is False
     assert "[DATA] stage=session_reconciliation status=FAIL date=2026-09-14 reasons=gap_exceeded:900s" in caplog.text
+
 
 def test_check_session_reconciliation_clips_gaps_outside_regular_session(tmp_path) -> None:
 
@@ -460,13 +503,24 @@ def test_check_session_reconciliation_clips_gaps_outside_regular_session(tmp_pat
 
     journal("H0STCNT0")
     journal("H0STASP0")
-    path = manifest_with([("005930", ns(8, 20), ns(8, 59)), ("005930", ns(15, 31), ns(15, 40)), ("005930", ns(9, 0), ns(9, 5))])
+    path = manifest_with(
+        [("005930", ns(8, 20), ns(8, 59)), ("005930", ns(15, 31), ns(15, 40)), ("005930", ns(9, 0), ns(9, 5))]
+    )
 
-    ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
-                                      streams=("H0STCNT0", "H0STASP0"), vendor="ls",
-                                      venue="krx", session="regular", regular_open=dt.time(9, 0), regular_close=dt.time(15, 30))
+    ok = check_session_reconciliation(
+        manifest_path=path,
+        date=day,
+        journal_root=journal_root,
+        streams=("H0STCNT0", "H0STASP0"),
+        vendor="ls",
+        venue="krx",
+        session="regular",
+        regular_open=dt.time(9, 0),
+        regular_close=dt.time(15, 30),
+    )
 
     assert ok is True
+
 
 def test_check_session_reconciliation_flags_missing_stream_journal(tmp_path, caplog) -> None:
 
@@ -498,12 +552,21 @@ def test_check_session_reconciliation_flags_missing_stream_journal(tmp_path, cap
     path = manifest_with([])
 
     with caplog.at_level(logging.CRITICAL):
-        ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
-                                          streams=("H0STCNT0", "H0STASP0"), vendor="ls",
-                                          venue="krx", session="regular", regular_open=dt.time(9, 0), regular_close=dt.time(15, 30))
+        ok = check_session_reconciliation(
+            manifest_path=path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+        )
 
     assert ok is False
     assert "reasons=journal_missing:H0STASP0" in caplog.text
+
 
 def test_check_session_reconciliation_flags_unreadable_manifest_in_substantive_mode(tmp_path, caplog) -> None:
 
@@ -526,12 +589,21 @@ def test_check_session_reconciliation_flags_unreadable_manifest_in_substantive_m
     path.write_text("{}", encoding="utf-8")
 
     with caplog.at_level(logging.CRITICAL):
-        ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
-                                          streams=("H0STCNT0",), vendor="ls",
-                                          venue="krx", session="regular", regular_open=dt.time(9, 0), regular_close=dt.time(15, 30))
+        ok = check_session_reconciliation(
+            manifest_path=path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0",),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+        )
 
     assert ok is False
     assert "reasons=manifest_unreadable" in caplog.text
+
 
 def test_check_session_reconciliation_clips_gap_outside_shifted_window(tmp_path) -> None:
     import datetime as dt
@@ -559,10 +631,17 @@ def test_check_session_reconciliation_clips_gap_outside_shifted_window(tmp_path)
     manifest.record_gap(symbol="005930", gap_start_ns=ns(9, 0), gap_end_ns=ns(10, 0), reason="disconnect")
     manifest.save(path)
 
-    ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
-                                      streams=("H0STCNT0", "H0STASP0"), vendor="ls",
-                                      venue="krx", session="regular",
-                                      regular_open=dt.time(10, 0), regular_close=dt.time(16, 30))
+    ok = check_session_reconciliation(
+        manifest_path=path,
+        date=day,
+        journal_root=journal_root,
+        streams=("H0STCNT0", "H0STASP0"),
+        vendor="ls",
+        venue="krx",
+        session="regular",
+        regular_open=dt.time(10, 0),
+        regular_close=dt.time(16, 30),
+    )
 
     assert ok is True
 
@@ -595,11 +674,18 @@ def test_check_session_reconciliation_counts_gap_inside_shifted_window(tmp_path,
     manifest.save(path)
 
     with caplog.at_level(logging.CRITICAL):
-        ok = check_session_reconciliation(manifest_path=path, date=day, journal_root=journal_root,
-                                          streams=("H0STCNT0", "H0STASP0"), vendor="ls",
-                                          venue="krx", session="regular",
-                                          regular_open=dt.time(10, 0), regular_close=dt.time(16, 30),
-                                          max_gap_s=600)
+        ok = check_session_reconciliation(
+            manifest_path=path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(10, 0),
+            regular_close=dt.time(16, 30),
+            max_gap_s=600,
+        )
 
     assert ok is False
     assert "reasons=gap_exceeded:900s" in caplog.text
@@ -613,6 +699,7 @@ def test_classify_remote_failure_detects_auth_expiry() -> None:
     assert classify_remote_failure(measured) == "auth_expired"
     assert classify_remote_failure("lsjson failed: l1/ oauth2: couldn't fetch token") == "auth_expired"
     assert classify_remote_failure("lsjson failed: l1/ dial tcp: i/o timeout") == "remote_error"
+
 
 def test_check_backup_freshness_lists_local_manifests_missing_remotely(tmp_path) -> None:
     import datetime as dt
@@ -634,6 +721,7 @@ def test_check_backup_freshness_lists_local_manifests_missing_remotely(tmp_path)
 
     assert missing == ["2026-09-14.json"]
     assert prefixes == ["manifests/"]
+
 
 def test_check_backup_freshness_returns_empty_without_rclone(tmp_path, monkeypatch) -> None:
     import datetime as dt
@@ -657,10 +745,18 @@ def _write_due_journal(root):
     root = Path(root)
     part = root / "l0" / "kis" / "H0STCNT0" / "dt=2026-09-01"
     part.mkdir(parents=True, exist_ok=True)
-    rec = {'raw': 'a', 'recv_mono_ns': 1, 'recv_wall_ns': 2, 'conn_id': 'c1', 'conn_seq': 1, 'vendor': 'kis', 'tr_id': 'H0STCNT0'}
-    payload = (json.dumps(rec) + '\n').encode('utf-8')
-    (part / '09.jsonl.zst').write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
-    return part / '09.jsonl.zst'
+    rec = {
+        "raw": "a",
+        "recv_mono_ns": 1,
+        "recv_wall_ns": 2,
+        "conn_id": "c1",
+        "conn_seq": 1,
+        "vendor": "kis",
+        "tr_id": "H0STCNT0",
+    }
+    payload = (json.dumps(rec) + "\n").encode("utf-8")
+    (part / "09.jsonl.zst").write_bytes(zstd.ZstdCompressor(level=3).compress(payload))
+    return part / "09.jsonl.zst"
 
 
 import pytest
@@ -723,13 +819,23 @@ def test_aftermarket_eod_ready_requires_both_closed_manifests(tmp_path):
     from zoneinfo import ZoneInfo
     from src.orchestration.eod import aftermarket_eod_ready
     from src.realtime.manifest import SessionManifest
+
     paths = []
-    for venue, session, closed in [('nxt','nxt_after', 1), ('krx','krx_after', None)]:
-        path = tmp_path / f'{venue}.json'
-        manifest = SessionManifest(session_date=dt.date(2026,9,15), clock_offset_ns=0, started_at_ns=1, venue=venue, session=session, expected_close_ns=1, writer_closed_at_ns=closed)
-        manifest.save(path); paths.append(path)  # noqa: E702 - verbatim contract skeleton
-    now = dt.datetime(2026,9,15,20,1,tzinfo=ZoneInfo('Asia/Seoul'))
-    assert aftermarket_eod_ready(manifests=paths, date=dt.date(2026,9,15), now=now) is False
+    for venue, session, closed in [("nxt", "nxt_after", 1), ("krx", "krx_after", None)]:
+        path = tmp_path / f"{venue}.json"
+        manifest = SessionManifest(
+            session_date=dt.date(2026, 9, 15),
+            clock_offset_ns=0,
+            started_at_ns=1,
+            venue=venue,
+            session=session,
+            expected_close_ns=1,
+            writer_closed_at_ns=closed,
+        )
+        manifest.save(path)
+        paths.append(path)  # noqa: E702 - verbatim contract skeleton
+    now = dt.datetime(2026, 9, 15, 20, 1, tzinfo=ZoneInfo("Asia/Seoul"))
+    assert aftermarket_eod_ready(manifests=paths, date=dt.date(2026, 9, 15), now=now) is False
 
 
 def test_aftermarket_eod_ready_rejects_empty_accepted_streams(tmp_path):
@@ -740,11 +846,26 @@ def test_aftermarket_eod_ready_rejects_empty_accepted_streams(tmp_path):
     from src.realtime.manifest import SessionManifest
 
     paths = []
-    for venue, session in [('nxt', 'nxt_after'), ('krx', 'krx_after')]:
-        path = tmp_path / f'{venue}.json'
-        SessionManifest(session_date=dt.date(2026, 9, 15), clock_offset_ns=0, started_at_ns=1, venue=venue, session=session, expected_close_ns=1, writer_closed_at_ns=2).save(path)
+    for venue, session in [("nxt", "nxt_after"), ("krx", "krx_after")]:
+        path = tmp_path / f"{venue}.json"
+        SessionManifest(
+            session_date=dt.date(2026, 9, 15),
+            clock_offset_ns=0,
+            started_at_ns=1,
+            venue=venue,
+            session=session,
+            expected_close_ns=1,
+            writer_closed_at_ns=2,
+        ).save(path)
         paths.append(path)
-    assert aftermarket_eod_ready(manifests=paths, date=dt.date(2026, 9, 15), now=dt.datetime(2026, 9, 15, 20, 1, tzinfo=ZoneInfo('Asia/Seoul'))) is False
+    assert (
+        aftermarket_eod_ready(
+            manifests=paths,
+            date=dt.date(2026, 9, 15),
+            now=dt.datetime(2026, 9, 15, 20, 1, tzinfo=ZoneInfo("Asia/Seoul")),
+        )
+        is False
+    )
 
 
 def test_aftermarket_eod_ready_rejects_unreadable_manifest(tmp_path, caplog):
@@ -754,24 +875,31 @@ def test_aftermarket_eod_ready_rejects_unreadable_manifest(tmp_path, caplog):
 
     from src.orchestration.eod import aftermarket_eod_ready
 
-    bad = tmp_path / 'bad.json'
-    bad.write_text('{')
+    bad = tmp_path / "bad.json"
+    bad.write_text("{")
     with caplog.at_level(logging.CRITICAL):
-        ready = aftermarket_eod_ready(manifests=[bad], date=dt.date(2026, 9, 15), now=dt.datetime(2026, 9, 15, 20, 1, tzinfo=ZoneInfo('Asia/Seoul')))
+        ready = aftermarket_eod_ready(
+            manifests=[bad],
+            date=dt.date(2026, 9, 15),
+            now=dt.datetime(2026, 9, 15, 20, 1, tzinfo=ZoneInfo("Asia/Seoul")),
+        )
     assert ready is False
-    assert 'eod_readiness' in caplog.text
+    assert "eod_readiness" in caplog.text
 
 
 def test_backup_freshness_recognizes_nested_aftermarket_manifests(tmp_path):
     import datetime as dt
     from src.orchestration.eod import check_backup_freshness
+
     class Archive:
-        def remote_files(self, prefix): return {'manifests/2026-09-14.json'}
-    (tmp_path/'aftermarket').mkdir()
-    (tmp_path/'2026-09-14.json').write_text('{}')
-    (tmp_path/'aftermarket'/'2026-09-14.nxt.json').write_text('{}')
-    missing = check_backup_freshness(manifest_dir=tmp_path, today=dt.date(2026,9,15), archiver=Archive())
-    assert missing == ['aftermarket/2026-09-14.nxt.json']
+        def remote_files(self, prefix):
+            return {"manifests/2026-09-14.json"}
+
+    (tmp_path / "aftermarket").mkdir()
+    (tmp_path / "2026-09-14.json").write_text("{}")
+    (tmp_path / "aftermarket" / "2026-09-14.nxt.json").write_text("{}")
+    missing = check_backup_freshness(manifest_dir=tmp_path, today=dt.date(2026, 9, 15), archiver=Archive())
+    assert missing == ["aftermarket/2026-09-14.nxt.json"]
 
 
 def test_aftermarket_eod_ready_requires_all_shards_and_pairs(tmp_path) -> None:
@@ -780,8 +908,17 @@ def test_aftermarket_eod_ready_requires_all_shards_and_pairs(tmp_path) -> None:
     from src.orchestration.eod import aftermarket_eod_ready
     from src.realtime.contracts import MarketVenue
     from src.realtime.kis_sharding import AftermarketShard
-    expected=(AftermarketShard(MarketVenue.NXT,0,('005930',),('H0NXCNT0','H0NXASP0'),'1','id1'),)
-    assert aftermarket_eod_ready(manifests=[],date=dt.date(2026,9,15),now=dt.datetime(2026,9,15,20,1,tzinfo=ZoneInfo('Asia/Seoul')),expected_shards=expected) is False
+
+    expected = (AftermarketShard(MarketVenue.NXT, 0, ("005930",), ("H0NXCNT0", "H0NXASP0"), "1", "id1"),)
+    assert (
+        aftermarket_eod_ready(
+            manifests=[],
+            date=dt.date(2026, 9, 15),
+            now=dt.datetime(2026, 9, 15, 20, 1, tzinfo=ZoneInfo("Asia/Seoul")),
+            expected_shards=expected,
+        )
+        is False
+    )
 
 
 def test_aftermarket_eod_ready_verifies_expected_shards(tmp_path) -> None:
@@ -791,6 +928,7 @@ def test_aftermarket_eod_ready_verifies_expected_shards(tmp_path) -> None:
     from src.realtime.contracts import MarketVenue
     from src.realtime.kis_sharding import AftermarketShard
     from src.realtime.manifest import SessionManifest
+
     day = dt.date(2026, 9, 15)
     now = dt.datetime(2026, 9, 15, 20, 1, tzinfo=ZoneInfo("Asia/Seoul"))
     expected = (AftermarketShard(MarketVenue.NXT, 0, ("005930",), ("H0NXCNT0", "H0NXASP0"), "1", "id1"),)
@@ -799,11 +937,20 @@ def test_aftermarket_eod_ready_verifies_expected_shards(tmp_path) -> None:
     def write_manifest(shard, *, key_id=None, symbols=None, acked=True, closed=True, day_override=None):
         nonlocal counter
         manifest = SessionManifest(
-            session_date=day_override or day, clock_offset_ns=0, started_at_ns=1,
-            venue=shard.venue.value, session="nxt_after", expected_close_ns=1,
+            session_date=day_override or day,
+            clock_offset_ns=0,
+            started_at_ns=1,
+            venue=shard.venue.value,
+            session="nxt_after",
+            expected_close_ns=1,
             writer_closed_at_ns=2 if closed else None,
-            planned_pairs=[{"symbol": s, "tr_id": t} for s in (symbols if symbols is not None else shard.symbols) for t in shard.streams],
-            shard_index=shard.shard_index, credential_key_id=key_id or shard.credential_key_id,
+            planned_pairs=[
+                {"symbol": s, "tr_id": t}
+                for s in (symbols if symbols is not None else shard.symbols)
+                for t in shard.streams
+            ],
+            shard_index=shard.shard_index,
+            credential_key_id=key_id or shard.credential_key_id,
         )
         for symbol in shard.symbols:
             for stream in shard.streams:
@@ -815,11 +962,39 @@ def test_aftermarket_eod_ready_verifies_expected_shards(tmp_path) -> None:
 
     good = write_manifest(expected[0])
     assert aftermarket_eod_ready(manifests=[good], date=day, now=now, expected_shards=expected) is True
-    assert aftermarket_eod_ready(manifests=[write_manifest(expected[0], key_id="other")], date=day, now=now, expected_shards=expected) is False
-    assert aftermarket_eod_ready(manifests=[write_manifest(expected[0], day_override=dt.date(2026, 9, 14))], date=day, now=now, expected_shards=expected) is False
-    assert aftermarket_eod_ready(manifests=[write_manifest(expected[0], symbols=("000660",))], date=day, now=now, expected_shards=expected) is False
-    assert aftermarket_eod_ready(manifests=[write_manifest(expected[0], acked=False)], date=day, now=now, expected_shards=expected) is False
-    assert aftermarket_eod_ready(manifests=[write_manifest(expected[0], closed=False)], date=day, now=now, expected_shards=expected) is False
+    assert (
+        aftermarket_eod_ready(
+            manifests=[write_manifest(expected[0], key_id="other")], date=day, now=now, expected_shards=expected
+        )
+        is False
+    )
+    assert (
+        aftermarket_eod_ready(
+            manifests=[write_manifest(expected[0], day_override=dt.date(2026, 9, 14))],
+            date=day,
+            now=now,
+            expected_shards=expected,
+        )
+        is False
+    )
+    assert (
+        aftermarket_eod_ready(
+            manifests=[write_manifest(expected[0], symbols=("000660",))], date=day, now=now, expected_shards=expected
+        )
+        is False
+    )
+    assert (
+        aftermarket_eod_ready(
+            manifests=[write_manifest(expected[0], acked=False)], date=day, now=now, expected_shards=expected
+        )
+        is False
+    )
+    assert (
+        aftermarket_eod_ready(
+            manifests=[write_manifest(expected[0], closed=False)], date=day, now=now, expected_shards=expected
+        )
+        is False
+    )
     assert aftermarket_eod_ready(manifests=[], date=day, now=now, expected_shards=expected) is False
     extra = AftermarketShard(MarketVenue.KRX, 0, ("005930",), ("H0STCNT0", "H0STASP0"), "2", "id2")
     assert aftermarket_eod_ready(manifests=[good], date=day, now=now, expected_shards=(*expected, extra)) is False
@@ -835,12 +1010,31 @@ def test_aftermarket_eod_ready_rejects_wrong_aftermarket_session(tmp_path) -> No
     from src.realtime.manifest import SessionManifest
 
     shard = AftermarketShard(MarketVenue.NXT, 0, ("005930",), ("H0NXCNT0", "H0NXASP0"), "1", "id1")
-    manifest = SessionManifest(session_date=dt.date(2026, 9, 15), clock_offset_ns=0, started_at_ns=1, venue="nxt", session="regular", expected_close_ns=1, writer_closed_at_ns=2, shard_index=0, credential_key_id="id1", planned_pairs=[{"symbol": "005930", "tr_id": stream} for stream in shard.streams])
+    manifest = SessionManifest(
+        session_date=dt.date(2026, 9, 15),
+        clock_offset_ns=0,
+        started_at_ns=1,
+        venue="nxt",
+        session="regular",
+        expected_close_ns=1,
+        writer_closed_at_ns=2,
+        shard_index=0,
+        credential_key_id="id1",
+        planned_pairs=[{"symbol": "005930", "tr_id": stream} for stream in shard.streams],
+    )
     for stream in shard.streams:
         manifest.record_ack(vendor="kis", tr_id=stream, symbol="005930", rt_cd="0", accepted=True)
     path = tmp_path / "wrong-session.json"
     manifest.save(path)
-    assert aftermarket_eod_ready(manifests=[path], date=dt.date(2026, 9, 15), now=dt.datetime(2026, 9, 15, 20, 1, tzinfo=ZoneInfo("Asia/Seoul")), expected_shards=(shard,)) is False
+    assert (
+        aftermarket_eod_ready(
+            manifests=[path],
+            date=dt.date(2026, 9, 15),
+            now=dt.datetime(2026, 9, 15, 20, 1, tzinfo=ZoneInfo("Asia/Seoul")),
+            expected_shards=(shard,),
+        )
+        is False
+    )
 
 
 def test_run_eod_remote_l0_purge_delegates_with_journal_root(tmp_path) -> None:
@@ -899,9 +1093,7 @@ def test_check_host_backup_freshness_passes_when_fresh(tmp_path) -> None:
     now = dt.datetime(2026, 9, 24, 20, 0, tzinfo=dt.UTC)
     status = tmp_path / "host_backup_status.json"
     _write_host_status(status, (now - dt.timedelta(hours=20)).isoformat())
-    assert (
-        check_host_backup_freshness(status_path=status, now=now, max_age=dt.timedelta(hours=36)) is None
-    )
+    assert check_host_backup_freshness(status_path=status, now=now, max_age=dt.timedelta(hours=36)) is None
 
 
 def test_check_host_backup_freshness_reports_stale_with_age(tmp_path) -> None:
@@ -961,10 +1153,7 @@ def test_check_host_backup_freshness_reports_never_succeeded(tmp_path) -> None:
     status = tmp_path / "host_backup_status.json"
     _write_host_status(status, None)
 
-    assert (
-        check_host_backup_freshness(status_path=status, now=now, max_age=dt.timedelta(hours=36))
-        == "never_succeeded"
-    )
+    assert check_host_backup_freshness(status_path=status, now=now, max_age=dt.timedelta(hours=36)) == "never_succeeded"
 
 
 def test_check_host_backup_freshness_rejects_naive_now(tmp_path) -> None:
@@ -1125,8 +1314,13 @@ def test_aftermarket_eod_ready_waits_for_day_after_market_end(tmp_path):
         ("krx", "krx_after", ("H0STCNT0", "H0STASP0")),
     ]:
         manifest = SessionManifest(
-            session_date=dt.date(2026, 9, 15), clock_offset_ns=0, started_at_ns=1, venue=venue,
-            session=session, expected_close_ns=1, writer_closed_at_ns=2,
+            session_date=dt.date(2026, 9, 15),
+            clock_offset_ns=0,
+            started_at_ns=1,
+            venue=venue,
+            session=session,
+            expected_close_ns=1,
+            writer_closed_at_ns=2,
         )
         for stream in streams:
             manifest.record_ack(vendor="kis", tr_id=stream, symbol="005930", rt_cd="0", accepted=True)
@@ -1137,6 +1331,329 @@ def test_aftermarket_eod_ready_waits_for_day_after_market_end(tmp_path):
 
     # 20:00 하드코딩이 아니라 그날 앵커의 애프터마켓 종료를 기준으로 판정한다.
     assert aftermarket_eod_ready(manifests=paths, date=dt.date(2026, 9, 15), now=now) is False
-    assert aftermarket_eod_ready(
-        manifests=paths, date=dt.date(2026, 9, 15), now=now, after_market_end=dt.time(19, 0)
-    ) is True
+    assert (
+        aftermarket_eod_ready(manifests=paths, date=dt.date(2026, 9, 15), now=now, after_market_end=dt.time(19, 0))
+        is True
+    )
+
+
+@pytest.mark.parametrize("payload", ["[]", "null", '{"session_date":"2026-10-18","clock_offset_ns":0,"started_at_ns":Infinity}'])
+def test_prearm_invalid_manifest_shape_never_aborts_other_shards(tmp_path, payload) -> None:
+    import datetime as dt
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import check_aftermarket_prearm
+
+    day = dt.date(2026, 10, 18)
+    path = tmp_path / "bad.json"
+    path.write_text(payload, encoding="utf-8")
+    shard = _prearm_shard()
+    findings = check_aftermarket_prearm(
+        expected=((shard, path), (shard, tmp_path / "missing.json")),
+        date=day, anchors=standard_session_anchors(day),
+    )
+    assert [f.reason for f in findings] == ["manifest_unreadable", "manifest_missing"]
+    assert all(f.verdict == "UNVERIFIABLE" for f in findings)
+
+
+@pytest.mark.parametrize("bad_ack", [None, [], {"accepted": True, "symbol": "005930", "tr_id": "H0NXCNT0", "acked_at_ns": "bad"}, {"accepted": True, "symbol": "005930", "tr_id": "H0NXCNT0", "acked_at_ns": True}])
+def test_prearm_malformed_ack_is_unverifiable_and_read_only(tmp_path, bad_ack, caplog) -> None:
+    import datetime as dt
+    import json
+    import logging
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import check_aftermarket_prearm
+
+    day = dt.date(2026, 10, 18)
+    shard = _prearm_shard()
+    path = _write_prearm_manifest(tmp_path / "bad.json", day, shard, started_ns=_prearm_ns(day, 15, 39), acks=[])
+    raw = json.loads(path.read_text())
+    raw["subscription_acks"] = [bad_ack]
+    path.write_text(json.dumps(raw))
+    before = path.read_bytes()
+    with caplog.at_level(logging.INFO):
+        (finding,) = check_aftermarket_prearm(expected=((shard, path),), date=day, anchors=standard_session_anchors(day))
+    assert finding.verdict == "UNVERIFIABLE"
+    assert finding.reason == "manifest_unreadable"
+    assert path.read_bytes() == before
+    assert not caplog.records
+
+
+@pytest.mark.parametrize(("offset_ns", "verdict"), [(-1, "ARMED"), (0, "LATE_ACK"), (1, "LATE_ACK")])
+def test_prearm_ack_boundary_uses_last_pairs_first_accepted_time(tmp_path, offset_ns, verdict) -> None:
+    import datetime as dt
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import check_aftermarket_prearm
+
+    day = dt.date(2026, 10, 18)
+    shard = _prearm_shard(symbols=("005930", "000660"))
+    open_ns = _prearm_ns(day, 15, 40)
+    acks = [(s, t, True, open_ns - 10) for s in shard.symbols for t in shard.streams]
+    acks[-1] = (shard.symbols[-1], shard.streams[-1], True, open_ns + offset_ns)
+    acks += [(s, t, True, open_ns + 100) for s in shard.symbols for t in shard.streams]
+    acks += [(shard.symbols[0], shard.streams[0], False, None), ("unplanned", shard.streams[0], True, None)]
+    path = _write_prearm_manifest(tmp_path / "m.json", day, shard, started_ns=open_ns - 100, acks=list(reversed(acks)))
+    (finding,) = check_aftermarket_prearm(expected=((shard, path),), date=day, anchors=standard_session_anchors(day))
+    assert finding.verdict == verdict
+    assert finding.initial_ack_ns == open_ns + offset_ns
+
+
+def _prearm_ns(day, h, m, s=0):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    return int(
+        dt.datetime(day.year, day.month, day.day, h, m, s, tzinfo=ZoneInfo("Asia/Seoul")).timestamp() * 1_000_000_000
+    )
+
+
+def _prearm_shard(venue="nxt", index=0, symbols=("005930",), streams=("H0NXCNT0", "H0NXASP0")):
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+
+    return AftermarketShard(MarketVenue(venue), index, symbols, streams, "0", f"id{index}{venue}")
+
+
+def _write_prearm_manifest(path, day, shard, *, started_ns, acks, session=None, venue=None, date_override=None):
+    import pathlib
+    from src.realtime.manifest import SessionManifest
+
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = SessionManifest(
+        session_date=date_override or day,
+        clock_offset_ns=0,
+        started_at_ns=started_ns,
+        venue=venue or shard.venue.value,
+        session=session or ("nxt_after" if shard.venue.value == "nxt" else "krx_after"),
+        expected_close_ns=1,
+        writer_closed_at_ns=started_ns + 1,
+        planned_pairs=[{"symbol": s, "tr_id": t} for s in shard.symbols for t in shard.streams],
+        shard_index=shard.shard_index,
+        credential_key_id=shard.credential_key_id,
+    )
+    for symbol, tr_id, accepted, at_ns in acks:
+        manifest.record_ack(vendor="kis", tr_id=tr_id, symbol=symbol, rt_cd="0", accepted=accepted, acked_at_ns=at_ns)
+    manifest.save(path)
+    return path
+
+
+def test_prearm_armed_when_start_and_acks_precede_open(tmp_path) -> None:
+    import datetime as dt
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import check_aftermarket_prearm
+
+    day = dt.date(2026, 10, 18)
+    anchors = standard_session_anchors(day)
+    shard = _prearm_shard()
+    started = _prearm_ns(day, 15, 39, 2)
+    acks = [(s, t, True, _prearm_ns(day, 15, 39, 6)) for s in shard.symbols for t in shard.streams]
+    path = _write_prearm_manifest(tmp_path / "nxt.json", day, shard, started_ns=started, acks=acks)
+    (finding,) = check_aftermarket_prearm(expected=((shard, path),), date=day, anchors=anchors)
+    assert finding.verdict == "ARMED"
+
+
+def test_prearm_late_start_reproduces_observed_launch(tmp_path) -> None:
+    import datetime as dt
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import check_aftermarket_prearm
+
+    day = dt.date(2026, 10, 18)
+    anchors = standard_session_anchors(day)
+    shard = _prearm_shard()
+    started = _prearm_ns(day, 15, 40, 7)
+    acks = [(s, t, True, _prearm_ns(day, 15, 40, 8)) for s in shard.symbols for t in shard.streams]
+    path = _write_prearm_manifest(tmp_path / "nxt.json", day, shard, started_ns=started, acks=acks)
+    (finding,) = check_aftermarket_prearm(expected=((shard, path),), date=day, anchors=anchors)
+    assert finding.verdict == "LATE_START"
+
+
+def test_prearm_start_exactly_at_open_is_late(tmp_path) -> None:
+    import datetime as dt
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import check_aftermarket_prearm
+
+    day = dt.date(2026, 10, 18)
+    anchors = standard_session_anchors(day)
+    shard = _prearm_shard(venue="krx", streams=("H0STCNT0", "H0STASP0"))
+    started = _prearm_ns(day, 16, 0, 0)
+    acks = [(s, t, True, _prearm_ns(day, 15, 59, 0)) for s in shard.symbols for t in shard.streams]
+    path = _write_prearm_manifest(tmp_path / "krx.json", day, shard, started_ns=started, acks=acks)
+    (finding,) = check_aftermarket_prearm(expected=((shard, path),), date=day, anchors=anchors)
+    assert finding.verdict == "LATE_START"
+
+
+def test_prearm_late_ack(tmp_path) -> None:
+    import datetime as dt
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import check_aftermarket_prearm
+
+    day = dt.date(2026, 10, 18)
+    anchors = standard_session_anchors(day)
+    shard = _prearm_shard()
+    started = _prearm_ns(day, 15, 39, 58)
+    late = _prearm_ns(day, 15, 40, 1)
+    early = _prearm_ns(day, 15, 39, 5)
+    acks = [(shard.symbols[0], shard.streams[0], True, late), (shard.symbols[0], shard.streams[1], True, early)]
+    path = _write_prearm_manifest(tmp_path / "nxt.json", day, shard, started_ns=started, acks=acks)
+    (finding,) = check_aftermarket_prearm(expected=((shard, path),), date=day, anchors=anchors)
+    assert finding.verdict == "LATE_ACK"
+    assert finding.initial_ack_ns == late
+
+
+def test_prearm_reconnect_reacks_do_not_taint(tmp_path) -> None:
+    import datetime as dt
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import check_aftermarket_prearm
+
+    day = dt.date(2026, 10, 18)
+    anchors = standard_session_anchors(day)
+    shard = _prearm_shard()
+    started = _prearm_ns(day, 15, 39, 2)
+    acks = [(s, t, True, _prearm_ns(day, 15, 39, 6)) for s in shard.symbols for t in shard.streams]
+    acks += [(s, t, True, _prearm_ns(day, 17, 12, 0)) for s in shard.symbols for t in shard.streams]
+    path = _write_prearm_manifest(tmp_path / "nxt.json", day, shard, started_ns=started, acks=acks)
+    (finding,) = check_aftermarket_prearm(expected=((shard, path),), date=day, anchors=anchors)
+    assert finding.verdict == "ARMED"
+    assert finding.initial_ack_ns == _prearm_ns(day, 15, 39, 6)
+
+
+def test_prearm_same_day_restart_judged_by_first_boot(tmp_path) -> None:
+    import datetime as dt
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import check_aftermarket_prearm
+    from src.realtime.manifest import SessionManifest
+
+    day = dt.date(2026, 10, 18)
+    anchors = standard_session_anchors(day)
+    shard = _prearm_shard()
+    started = _prearm_ns(day, 15, 39, 2)
+    acks = [(s, t, True, _prearm_ns(day, 15, 39, 6)) for s in shard.symbols for t in shard.streams]
+    path = _write_prearm_manifest(tmp_path / "nxt.json", day, shard, started_ns=started, acks=acks)
+    manifest = SessionManifest.load(path)
+    manifest.boots.append(
+        {"started_at_ns": _prearm_ns(day, 16, 30, 0), "clock_offset_ns": 0, "clock_status": "measured"}
+    )
+    manifest.save(path)
+    (finding,) = check_aftermarket_prearm(expected=((shard, path),), date=day, anchors=anchors)
+    assert finding.verdict == "ARMED"
+
+
+def test_prearm_shifted_day_uses_vendor_anchors(tmp_path) -> None:
+    import datetime as dt
+    from src.core.session_anchors import AnchorSource, SessionAnchors
+    from src.orchestration.eod import check_aftermarket_prearm
+
+    day = dt.date(2026, 11, 19)
+    anchors = SessionAnchors(
+        date=day,
+        regular_open=dt.time(10, 0),
+        closing_auction_start=dt.time(16, 20),
+        regular_close=dt.time(16, 30),
+        after_market_end=dt.time(20, 0),
+        source=AnchorSource.VENDOR,
+    )
+    shard = _prearm_shard()
+    acks_armed = [(s, t, True, _prearm_ns(day, 16, 39, 0)) for s in shard.symbols for t in shard.streams]
+    ok = _write_prearm_manifest(
+        tmp_path / "ok.json", day, shard, started_ns=_prearm_ns(day, 16, 39, 0), acks=acks_armed
+    )
+    (finding,) = check_aftermarket_prearm(expected=((shard, ok),), date=day, anchors=anchors)
+    assert finding.verdict == "ARMED"
+    late = _write_prearm_manifest(
+        tmp_path / "late.json", day, shard, started_ns=_prearm_ns(day, 16, 40, 30), acks=acks_armed
+    )
+    (late_finding,) = check_aftermarket_prearm(expected=((shard, late),), date=day, anchors=anchors)
+    assert late_finding.verdict == "LATE_START"
+
+
+def test_prearm_missing_or_corrupt_is_unverifiable(tmp_path) -> None:
+    import datetime as dt
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import check_aftermarket_prearm
+
+    day = dt.date(2026, 10, 18)
+    anchors = standard_session_anchors(day)
+    shard = _prearm_shard()
+    bad = tmp_path / "bad.json"
+    bad.write_text("{", encoding="utf-8")
+    findings = check_aftermarket_prearm(
+        expected=((shard, tmp_path / "absent.json"), (shard, bad)), date=day, anchors=anchors
+    )
+    assert [f.verdict for f in findings] == ["UNVERIFIABLE", "UNVERIFIABLE"]
+    assert [f.reason for f in findings] == ["manifest_missing", "manifest_unreadable"]
+
+
+def test_prearm_legacy_acks_without_time_are_unverifiable(tmp_path) -> None:
+    import datetime as dt
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import check_aftermarket_prearm
+    from src.realtime.manifest import SessionManifest
+
+    day = dt.date(2026, 10, 18)
+    anchors = standard_session_anchors(day)
+    shard = _prearm_shard()
+    manifest = SessionManifest(
+        session_date=day,
+        clock_offset_ns=0,
+        started_at_ns=_prearm_ns(day, 15, 39, 0),
+        venue="nxt",
+        session="nxt_after",
+        expected_close_ns=1,
+        writer_closed_at_ns=2,
+        planned_pairs=[{"symbol": s, "tr_id": t} for s in shard.symbols for t in shard.streams],
+        shard_index=0,
+        credential_key_id=shard.credential_key_id,
+    )
+    for s in shard.symbols:
+        for t in shard.streams:
+            manifest.subscription_acks.append(
+                {"vendor": "kis", "tr_id": t, "symbol": s, "rt_cd": "0", "accepted": True}
+            )
+    path = tmp_path / "legacy.json"
+    manifest.save(path)
+    (finding,) = check_aftermarket_prearm(expected=((shard, path),), date=day, anchors=anchors)
+    assert finding.verdict == "UNVERIFIABLE"
+    assert finding.reason == "ack_time_missing"
+
+
+def test_prearm_unacked_planned_pair_is_unverifiable(tmp_path) -> None:
+    import datetime as dt
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import check_aftermarket_prearm
+
+    day = dt.date(2026, 10, 18)
+    anchors = standard_session_anchors(day)
+    shard = _prearm_shard()
+    started = _prearm_ns(day, 15, 39, 0)
+    acks = [(shard.symbols[0], shard.streams[0], True, _prearm_ns(day, 15, 39, 5))]
+    path = _write_prearm_manifest(tmp_path / "nxt.json", day, shard, started_ns=started, acks=acks)
+    (finding,) = check_aftermarket_prearm(expected=((shard, path),), date=day, anchors=anchors)
+    assert finding.verdict == "UNVERIFIABLE"
+    assert finding.reason == "pair_unacked"
+
+
+def test_prearm_date_and_venue_mismatch_are_unverifiable(tmp_path) -> None:
+    import datetime as dt
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import check_aftermarket_prearm
+
+    day = dt.date(2026, 10, 18)
+    anchors = standard_session_anchors(day)
+    shard = _prearm_shard()
+    started = _prearm_ns(day, 15, 39, 0)
+    acks = [(s, t, True, _prearm_ns(day, 15, 39, 5)) for s in shard.symbols for t in shard.streams]
+    wrong_date = _write_prearm_manifest(
+        tmp_path / "date.json", day, shard, started_ns=started, acks=acks, date_override=dt.date(2026, 10, 17)
+    )
+    (date_finding,) = check_aftermarket_prearm(expected=((shard, wrong_date),), date=day, anchors=anchors)
+    assert date_finding.verdict == "UNVERIFIABLE"
+    assert date_finding.reason == "date_mismatch"
+    wrong_venue = _write_prearm_manifest(
+        tmp_path / "venue.json", day, shard, started_ns=started, acks=acks, venue="krx"
+    )
+    (venue_finding,) = check_aftermarket_prearm(expected=((shard, wrong_venue),), date=day, anchors=anchors)
+    assert venue_finding.verdict == "UNVERIFIABLE"
+    assert venue_finding.reason == "venue_mismatch"

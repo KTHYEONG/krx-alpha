@@ -10,12 +10,14 @@ import pathlib
 from collections.abc import Callable
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from src.core.session_anchors import STANDARD_AFTER_MARKET_END
+from src.core.session_anchors import STANDARD_AFTER_MARKET_END, SessionAnchors
 from src.realtime.kis_sharding import AftermarketShard
 from src.realtime.manifest import SessionManifest
+from src.realtime.streamer import aftermarket_open_time
 from src.storage.layout import (
     L0_JOURNAL_GLOB,
     L0_REPO_PREFIX,
@@ -92,7 +94,9 @@ def run_eod_offload(
     if progress is not None and hasattr(arc, "bind_progress"):
         arc.bind_progress(progress)
     l1_stats = arc.sync_l1_tree(archive_root, progress=progress)
-    manifest_path = pathlib.Path(manifest_root) if manifest_root is not None else pathlib.Path(archive_root).parent / "manifest"
+    manifest_path = (
+        pathlib.Path(manifest_root) if manifest_root is not None else pathlib.Path(archive_root).parent / "manifest"
+    )
     archiver = arc
     manifests_stats = archiver.sync_manifest_tree(manifest_path)
     if l1_stats.failed_verification > 0 or manifests_stats.failed_verification > 0:
@@ -110,7 +114,8 @@ def run_eod_offload(
     if journal_root is not None:
         # Keep verified bytes until the second maintenance pass has removed their inputs.
         confirmed = {
-            path for path in confirmed
+            path
+            for path in confirmed
             if (l0_dir := l0_partition_for_l1(path)) is None
             or not (journal_root / l0_dir.removeprefix(L0_REPO_PREFIX)).exists()
         }
@@ -146,7 +151,8 @@ def run_eod_remote_l0_purge(
     if quarantine_root is not None:
         # A quarantined input may contain records absent from the previously verified L1.
         verified_remote_l1 = {
-            path for path in verified_remote_l1
+            path
+            for path in verified_remote_l1
             if (l0_dir := l0_partition_for_l1(path)) is None
             or not (quarantine_root / l0_dir.removeprefix(L0_REPO_PREFIX)).exists()
         }
@@ -233,8 +239,10 @@ def aftermarket_eod_ready(
     after_market_end: dt.time = STANDARD_AFTER_MARKET_END,
 ) -> bool:
     # 그날 애프터마켓 종료(앵커) 전에는 EOD 준비 완료로 보지 않는다.
-    if now.astimezone(_KST).time() < after_market_end: return False  # noqa: E701
-    if not manifests: return False  # noqa: E701 - 대상 manifest 없이 성공 표기 금지
+    if now.astimezone(_KST).time() < after_market_end:
+        return False  # noqa: E701
+    if not manifests:
+        return False  # noqa: E701 - 대상 manifest 없이 성공 표기 금지
     closed: list[bool] = []
     routes: set[tuple[str, str]] = set()
     loaded: dict[tuple[str, int], SessionManifest] = {}
@@ -263,9 +271,152 @@ def aftermarket_eod_ready(
     return len(closed) == 2 and all(closed) and routes == required_routes
 
 
-def check_backup_freshness(
-    *, manifest_dir: pathlib.Path, today: dt.date, archiver: Any = None
-) -> list[str]:
+class PrearmVerdict(StrEnum):
+    ARMED = "ARMED"
+    LATE_START = "LATE_START"
+    LATE_ACK = "LATE_ACK"
+    UNVERIFIABLE = "UNVERIFIABLE"
+
+
+@dataclass(frozen=True)
+class AftermarketPrearmFinding:
+    """Pre-arm verdict of one expected aftermarket shard."""
+
+    venue: str
+    shard_index: int
+    verdict: PrearmVerdict
+    open_at_ns: int
+    started_at_ns: int | None
+    initial_ack_ns: int | None
+    reason: str
+
+
+def check_aftermarket_prearm(
+    *,
+    expected: tuple[tuple[AftermarketShard, pathlib.Path], ...],
+    date: dt.date,
+    anchors: SessionAnchors,
+) -> tuple[AftermarketPrearmFinding, ...]:
+    """Classify each expected shard's manifest against its venue's shifted open; never raises on bad manifests."""
+    findings: list[AftermarketPrearmFinding] = []
+    for shard, path in expected:
+        open_at_ns = int(
+            dt.datetime.combine(date, aftermarket_open_time(shard.venue, anchors), tzinfo=_KST).timestamp()
+            * 1_000_000_000
+        )
+        venue = shard.venue.value
+        try:
+            if not pathlib.Path(path).exists():
+                findings.append(
+                    AftermarketPrearmFinding(
+                        venue, shard.shard_index, PrearmVerdict.UNVERIFIABLE, open_at_ns, None, None, "manifest_missing"
+                    )
+                )
+                continue
+            manifest = SessionManifest.load(pathlib.Path(path))
+        except (ValueError, KeyError, TypeError, OSError, AttributeError, OverflowError):
+            findings.append(
+                AftermarketPrearmFinding(
+                    venue, shard.shard_index, PrearmVerdict.UNVERIFIABLE, open_at_ns, None, None, "manifest_unreadable"
+                )
+            )
+            continue
+        if manifest.session_date != date:
+            findings.append(
+                AftermarketPrearmFinding(
+                    venue,
+                    shard.shard_index,
+                    PrearmVerdict.UNVERIFIABLE,
+                    open_at_ns,
+                    manifest.started_at_ns,
+                    None,
+                    "date_mismatch",
+                )
+            )
+            continue
+        if manifest.venue != venue:
+            findings.append(
+                AftermarketPrearmFinding(
+                    venue,
+                    shard.shard_index,
+                    PrearmVerdict.UNVERIFIABLE,
+                    open_at_ns,
+                    manifest.started_at_ns,
+                    None,
+                    "venue_mismatch",
+                )
+            )
+            continue
+        started_at_ns: int = manifest.started_at_ns
+        if started_at_ns >= open_at_ns:
+            findings.append(
+                AftermarketPrearmFinding(
+                    venue,
+                    shard.shard_index,
+                    PrearmVerdict.LATE_START,
+                    open_at_ns,
+                    started_at_ns,
+                    None,
+                    "started_after_open",
+                )
+            )
+            continue
+        per_pair: list[int] = []
+        unverifiable: str | None = None
+        try:
+            for symbol in shard.symbols:
+                for stream in shard.streams:
+                    times = [
+                        a.get("acked_at_ns")
+                        for a in manifest.subscription_acks
+                        if a.get("accepted") is True and str(a.get("symbol")) == symbol and str(a.get("tr_id")) == stream
+                    ]
+                    if not times:
+                        unverifiable = "pair_unacked"
+                        break
+                    if any(t is None for t in times):
+                        unverifiable = "ack_time_missing"
+                        break
+                    valid_times: list[int] = []
+                    for t in times:
+                        if type(t) is not int:
+                            raise TypeError("ack time must be an integer")
+                        valid_times.append(t)
+                    per_pair.append(min(valid_times))
+                if unverifiable is not None:
+                    break
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            unverifiable = "manifest_unreadable"
+        if unverifiable is not None:
+            findings.append(
+                AftermarketPrearmFinding(
+                    venue, shard.shard_index, PrearmVerdict.UNVERIFIABLE, open_at_ns, started_at_ns, None, unverifiable
+                )
+            )
+            continue
+        initial_ack_ns = max(per_pair) if per_pair else None
+        if initial_ack_ns is not None and initial_ack_ns >= open_at_ns:
+            findings.append(
+                AftermarketPrearmFinding(
+                    venue,
+                    shard.shard_index,
+                    PrearmVerdict.LATE_ACK,
+                    open_at_ns,
+                    started_at_ns,
+                    initial_ack_ns,
+                    "acked_after_open",
+                )
+            )
+        else:
+            findings.append(
+                AftermarketPrearmFinding(
+                    venue, shard.shard_index, PrearmVerdict.ARMED, open_at_ns, started_at_ns, initial_ack_ns, "-"
+                )
+            )
+    return tuple(findings)
+
+
+def check_backup_freshness(*, manifest_dir: pathlib.Path, today: dt.date, archiver: Any = None) -> list[str]:
     arc = archiver if archiver is not None else RcloneArchiver.try_from_env()
     if arc is None:
         return []
@@ -284,9 +435,7 @@ def check_backup_freshness(
     return sorted(n for n in local if n not in remote)
 
 
-def check_host_backup_freshness(
-    *, status_path: pathlib.Path, now: dt.datetime, max_age: dt.timedelta
-) -> str | None:
+def check_host_backup_freshness(*, status_path: pathlib.Path, now: dt.datetime, max_age: dt.timedelta) -> str | None:
     """Return a staleness reason when the host Drive backup has not succeeded recently.
 
     The host backup runs outside the container under a lock shared with other
