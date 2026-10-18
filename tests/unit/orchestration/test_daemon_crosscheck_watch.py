@@ -73,6 +73,7 @@ def _stub_eod(monkeypatch, runner) -> list[tuple[str, str]]:
 
 def test_crosscheck_stale_warns_never_critical(tmp_path, monkeypatch, caplog) -> None:
     runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+
     class _Running:
         def ensure_running(self):
             return "running"
@@ -87,9 +88,7 @@ def test_crosscheck_stale_warns_never_critical(tmp_path, monkeypatch, caplog) ->
     with caplog.at_level(logging.INFO, logger=daemon_mod.logger.name):
         assert runner.step(now) == 10.0
 
-    stale = [
-        r for r in caplog.records if "stage=crosscheck_watchdog status=STALE" in r.getMessage()
-    ]
+    stale = [r for r in caplog.records if "stage=crosscheck_watchdog status=STALE" in r.getMessage()]
     assert len(stale) == 1
     assert stale[0].levelno == logging.WARNING
     assert "child=db_crosscheck vendor=db" in stale[0].getMessage()
@@ -311,6 +310,7 @@ def test_digest_body_unchanged_without_crosscheck(tmp_path, monkeypatch) -> None
         "purged=3",
         "reconciled=True",
         "aftermarket_ready=True",
+        "aftermarket_prearm_late=0",
         "backup_missing=0",
         "host_backup=ok",
         "streamer_restarts=0",

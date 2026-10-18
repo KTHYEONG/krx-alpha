@@ -100,6 +100,7 @@ class SessionFrameSink:
     session: CollectorSession
     checkpoint_interval_s: float = 60.0
     monotonic: Callable[[], float] = time.monotonic
+    wall_clock_ns: Callable[[], int] = time.time_ns
     _last_checkpoint: float | None = field(default=None, init=False)
 
     def record(self, frame: L0Frame) -> None:
@@ -119,7 +120,12 @@ class SessionFrameSink:
 
     def note_ack(self, vendor: str, ack: VendorAck) -> None:
         self.session.note_ack(
-            vendor=vendor, tr_id=ack.stream, symbol=ack.symbol, rt_cd=ack.code, accepted=ack.accepted
+            vendor=vendor,
+            tr_id=ack.stream,
+            symbol=ack.symbol,
+            rt_cd=ack.code,
+            accepted=ack.accepted,
+            acked_at_ns=self.wall_clock_ns(),
         )
 
     def note_gap(self, symbol: str, start_ns: int, end_ns: int, reason: str) -> None:
@@ -376,7 +382,10 @@ class RealtimeStreamer:
             if self._outage is None:
                 # Opening at the last frame's reception time, not the trigger time,
                 # keeps every recorded gap covering the real no-data interval.
-                self._outage = (self._last_frame_wall_ns if self._last_frame_wall_ns is not None else run_start_ns, reason)
+                self._outage = (
+                    self._last_frame_wall_ns if self._last_frame_wall_ns is not None else run_start_ns,
+                    reason,
+                )
             cap = AUTH_BACKOFF_MAX_S if reason == "auth_rejected" else self._backoff_max_s
             delay = min(cap, backoff_s * 2 ** (self._failures - 1)) * (0.5 + self._rng() / 2)
             logger.warning(

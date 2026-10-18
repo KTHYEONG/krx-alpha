@@ -106,7 +106,8 @@ class CollectorSession:
         session: MarketSession | str | None = None,
         exchange_event_time: str = "",
     ) -> None:
-        if not check_disk_watermark(self.manifest_path.parent, min_free_gb=self.min_free_disk_gb): raise StorageExhaustedError('free disk below watermark')  # noqa: E701
+        if not check_disk_watermark(self.manifest_path.parent, min_free_gb=self.min_free_disk_gb):
+            raise StorageExhaustedError("free disk below watermark")  # noqa: E701
         route = getattr(self, "route", None)
         # 라우팅 세션은 (venue, session, stream) 파티션 키로 검증한다.
         # 경로 불일치 프레임은 저널 미스 KeyError 로 쓰기 전에 거부된다 (모호한 파티션 기록 방지).
@@ -130,8 +131,12 @@ class CollectorSession:
     def flush_journals(self) -> int:
         return sum(writer.flush() for writer in self.journals.values())
 
-    def note_ack(self, *, vendor: str, tr_id: str, symbol: str, rt_cd: str, accepted: bool) -> None:
-        self.manifest.record_ack(vendor=vendor, tr_id=tr_id, symbol=symbol, rt_cd=rt_cd, accepted=accepted)
+    def note_ack(
+        self, *, vendor: str, tr_id: str, symbol: str, rt_cd: str, accepted: bool, acked_at_ns: int | None = None
+    ) -> None:
+        self.manifest.record_ack(
+            vendor=vendor, tr_id=tr_id, symbol=symbol, rt_cd=rt_cd, accepted=accepted, acked_at_ns=acked_at_ns
+        )
 
     def note_gap(self, *, symbol: str, gap_start_ns: int, gap_end_ns: int, reason: str) -> None:
         self.manifest.record_gap(symbol=symbol, gap_start_ns=gap_start_ns, gap_end_ns=gap_end_ns, reason=reason)
@@ -143,7 +148,9 @@ class CollectorSession:
         self.manifest.save(self.manifest_path)
 
 
-def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, now_ns: int | None = None) -> CollectorSession:
+def bootstrap_session(
+    cfg: SessionConfig, *, ntp_client: object | None = None, now_ns: int | None = None
+) -> CollectorSession:
     """Start a collection session only after a measured clock passes its offset gate.
 
     Args:
@@ -190,9 +197,7 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
         except (ValueError, KeyError, TypeError, OSError):
             corrupt = cfg.manifest_path.with_name(cfg.manifest_path.name + ".corrupt")
             os.replace(cfg.manifest_path, corrupt)
-            logger.warning(
-                "[DATA] stage=manifest_load status=CORRUPT action=fresh path=%s", str(cfg.manifest_path)
-            )
+            logger.warning("[DATA] stage=manifest_load status=CORRUPT action=fresh path=%s", str(cfg.manifest_path))
             loaded = None
         if loaded is not None and loaded.session_date == cfg.session_date:
             manifest = loaded
@@ -203,9 +208,7 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
         market_session = cfg.route.session.value if cfg.route is not None else MarketSession.REGULAR.value
         expected_close_ns = 0
         if cfg.route is not None:
-            anchors = resolve_session_anchors(
-                DataPaths(cfg.journal_root.parent).session_calendar_dir, cfg.session_date
-            )
+            anchors = resolve_session_anchors(DataPaths(cfg.journal_root.parent).session_calendar_dir, cfg.session_date)
             if cfg.route.session is MarketSession.NXT_PRE:
                 close_at = dt.datetime.combine(
                     cfg.session_date, anchors.shift_pre_open(STANDARD_NXT_PREMARKET_END), tzinfo=_KST
@@ -251,7 +254,10 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
             for stream in cfg.desired_streams
         }
     else:
-        journals = {(cfg.vendor, stream): L0JournalWriter(root=cfg.journal_root, vendor=cfg.vendor, stream=stream) for stream in cfg.desired_streams}
+        journals = {
+            (cfg.vendor, stream): L0JournalWriter(root=cfg.journal_root, vendor=cfg.vendor, stream=stream)
+            for stream in cfg.desired_streams
+        }
     if manifest.boots:
         last_write_ns = last_journal_write_ns(journals, started)
         if last_write_ns is not None and started > last_write_ns:
@@ -260,10 +266,20 @@ def bootstrap_session(cfg: SessionConfig, *, ntp_client: object | None = None, n
                 "[DATA] stage=bootstrap status=RESTART_GAP gap_s=%.1f",
                 (started - last_write_ns) / 1_000_000_000,
             )
-    prune_old_journals(cfg.journal_root, archive_root=cfg.archive_root, retain_days=cfg.journal_retain_days, reference_date=cfg.session_date)
+    prune_old_journals(
+        cfg.journal_root,
+        archive_root=cfg.archive_root,
+        retain_days=cfg.journal_retain_days,
+        reference_date=cfg.session_date,
+    )
     session = CollectorSession(
-        manifest=manifest, registry=registry, journals=journals, manifest_path=cfg.manifest_path, schedule=cfg.schedule,
-        route=cfg.route, min_free_disk_gb=cfg.min_free_disk_gb,
+        manifest=manifest,
+        registry=registry,
+        journals=journals,
+        manifest_path=cfg.manifest_path,
+        schedule=cfg.schedule,
+        route=cfg.route,
+        min_free_disk_gb=cfg.min_free_disk_gb,
     )
     if stored is not None and "rev" in stored:
         manifest.candidates_rev = int(cast(Any, stored["rev"]))

@@ -33,8 +33,20 @@ class SessionManifest:
     shard_index: int | None = None
     credential_key_id: str | None = None
 
-    def record_ack(self, *, vendor: str, tr_id: str, symbol: str, rt_cd: str, accepted: bool) -> None:
-        self.subscription_acks.append({"vendor": vendor, "tr_id": tr_id, "symbol": symbol, "rt_cd": rt_cd, "accepted": accepted})
+    def record_ack(
+        self, *, vendor: str, tr_id: str, symbol: str, rt_cd: str, accepted: bool, acked_at_ns: int | None = None
+    ) -> None:
+        """Append one subscription ack; ``acked_at_ns`` is the wall-clock receipt time in epoch ns."""
+        self.subscription_acks.append(
+            {
+                "vendor": vendor,
+                "tr_id": tr_id,
+                "symbol": symbol,
+                "rt_cd": rt_cd,
+                "accepted": accepted,
+                "acked_at_ns": acked_at_ns,
+            }
+        )
 
     def record_gap(self, *, symbol: str, gap_start_ns: int, gap_end_ns: int, reason: str) -> None:
         self.gaps.append({"symbol": symbol, "gap_start_ns": gap_start_ns, "gap_end_ns": gap_end_ns, "reason": reason})

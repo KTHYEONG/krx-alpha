@@ -9,49 +9,76 @@ def test_session_frame_sink_routes_frame_to_session_journal(tmp_path) -> None:
         def request(self, host, version=3, timeout=5):
             class _S:
                 offset = 0.0
+
             return _S()
 
-    cp = tmp_path / 'c.json'
-    write_candidates(cp, [{'symbol': '005930', 'selection_reasons': ['limit_up']}], rev=1)
-    cfg = SessionConfig(session_date=dt.date(2026, 9, 8), journal_root=tmp_path / 'l0',
-                        manifest_path=tmp_path / 's.json', candidates_path=cp, ntp_host='h',
-                        slot_budget=200, max_clock_offset_ns=2_000_000_000,
-                        desired_streams=('H0STCNT0',), vendor='ls')
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
+    cfg = SessionConfig(
+        session_date=dt.date(2026, 9, 8),
+        journal_root=tmp_path / "l0",
+        manifest_path=tmp_path / "s.json",
+        candidates_path=cp,
+        ntp_host="h",
+        slot_budget=200,
+        max_clock_offset_ns=2_000_000_000,
+        desired_streams=("H0STCNT0",),
+        vendor="ls",
+    )
     session = bootstrap_session(cfg, ntp_client=_FC(), now_ns=1)
     sink = SessionFrameSink(session=session)
 
-    sink.record(L0Frame(vendor='ls', stream='H0STCNT0', symbol='005930', raw='{"x":1}',
-                        recv_mono_ns=10, recv_wall_ns=1_735_954_200_000_000_000, conn_seq=1, conn_id='ls-1'))
+    sink.record(
+        L0Frame(
+            vendor="ls",
+            stream="H0STCNT0",
+            symbol="005930",
+            raw='{"x":1}',
+            recv_mono_ns=10,
+            recv_wall_ns=1_735_954_200_000_000_000,
+            conn_seq=1,
+            conn_id="ls-1",
+        )
+    )
     written = sink.flush()
 
     assert written == 1
-    assert any((tmp_path / 'l0').rglob('*.jsonl.zst'))
+    assert any((tmp_path / "l0").rglob("*.jsonl.zst"))
+
+
 def test_streamer_pump_subscribes_records_frames_and_returns_on_disconnect() -> None:
     import asyncio
     from src.realtime.streamer import RealtimeStreamer
     from src.realtime.contracts import L0Frame, VendorAck, VendorDisconnected
 
-    frames = [L0Frame('ls', 'H0STCNT0', '005930', 'a', 1, 2, 1, 'ls-1'),
-              L0Frame('ls', 'H0STCNT0', '005930', 'b', 3, 4, 2, 'ls-1')]
+    frames = [
+        L0Frame("ls", "H0STCNT0", "005930", "a", 1, 2, 1, "ls-1"),
+        L0Frame("ls", "H0STCNT0", "005930", "b", 3, 4, 2, "ls-1"),
+    ]
 
     class _Adapter:
-        name = 'ls'
+        name = "ls"
         capacity_pairs = 200
+
         def __init__(self):
             self.log: list[str] = []
             self.subscribed = None
             self._q = list(frames)
+
         async def connect(self):
-            self.log.append('connect')
+            self.log.append("connect")
+
         async def subscribe(self, pairs):
             self.subscribed = pairs
-            return [VendorAck(s, t, True, '00000') for s, t in pairs]
+            return [VendorAck(s, t, True, "00000") for s, t in pairs]
+
         async def recv(self):
             if self._q:
                 return self._q.pop(0)
-            raise VendorDisconnected('closed')
+            raise VendorDisconnected("closed")
+
         async def aclose(self):
-            self.log.append('aclose')
+            self.log.append("aclose")
 
     class _Sink:
         def __init__(self):
@@ -59,67 +86,83 @@ def test_streamer_pump_subscribes_records_frames_and_returns_on_disconnect() -> 
             self.acks: list = []
             self.gaps: list = []
             self.flushed = 0
+
         def record(self, f):
             self.records.append(f)
+
         def note_ack(self, v, a):
             self.acks.append((v, a))
+
         def note_gap(self, *a):
             self.gaps.append(a)
+
         def flush(self):
             self.flushed += 1
             return len(self.records)
 
     adapter = _Adapter()
     sink = _Sink()
-    streamer = RealtimeStreamer(adapter=adapter, sink=sink, replay_pairs=[('005930', 'H0STCNT0')], flush_every=1)
+    streamer = RealtimeStreamer(adapter=adapter, sink=sink, replay_pairs=[("005930", "H0STCNT0")], flush_every=1)
 
     reason = asyncio.run(streamer.pump(asyncio.Event()))
 
-    assert reason == 'disconnect'
-    assert adapter.subscribed == [('005930', 'H0STCNT0')]
-    assert [f.raw for f in sink.records] == ['a', 'b']
+    assert reason == "disconnect"
+    assert adapter.subscribed == [("005930", "H0STCNT0")]
+    assert [f.raw for f in sink.records] == ["a", "b"]
     # flush_every=1 -> 프레임당 1회 + 절단 시 1회
-    assert len(sink.acks) == 1 and sink.flushed >= 3 and 'aclose' in adapter.log  # noqa: PT018 - verbatim contract skeleton
+    assert len(sink.acks) == 1 and sink.flushed >= 3 and "aclose" in adapter.log  # noqa: PT018 - verbatim contract skeleton
+
+
 def test_streamer_run_forever_records_gap_between_reconnect_cycles() -> None:
     import asyncio
     from src.realtime.streamer import RealtimeStreamer
     from src.realtime.contracts import VendorAck, VendorDisconnected
 
     class _Adapter:
-        name = 'ls'
+        name = "ls"
         capacity_pairs = 200
+
         async def connect(self):
             self.c = True
+
         async def subscribe(self, pairs):
-            return [VendorAck(s, t, True, '00000') for s, t in pairs]
+            return [VendorAck(s, t, True, "00000") for s, t in pairs]
+
         async def recv(self):
-            raise VendorDisconnected('closed')
+            raise VendorDisconnected("closed")
+
         async def aclose(self):
             self.a = True
 
     class _Sink:
         def __init__(self):
             self.gaps: list = []
+
         def record(self, f):
-            self.gaps.append(('rec', f))
+            self.gaps.append(("rec", f))
+
         def note_ack(self, v, a):
-            self.gaps.append(('ack', v))
+            self.gaps.append(("ack", v))
+
         def note_gap(self, symbol, s, e, reason):
             self.gaps.append((symbol, reason))
+
         def flush(self):
             return 0
 
     sink = _Sink()
-    streamer = RealtimeStreamer(adapter=_Adapter(), sink=sink,
-                               replay_pairs=[('005930', 'H0STCNT0'), ('005930', 'H0STASP0')])
+    streamer = RealtimeStreamer(
+        adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0"), ("005930", "H0STASP0")]
+    )
 
     async def _nosleep(_):
         return await asyncio.sleep(0)
 
     asyncio.run(streamer.run_forever(asyncio.Event(), max_cycles=2, sleep=_nosleep))
 
-    gap_events = [g for g in sink.gaps if g[0] == '005930']
-    assert gap_events == [('005930', 'disconnect')]
+    gap_events = [g for g in sink.gaps if g[0] == "005930"]
+    assert gap_events == [("005930", "disconnect")]
+
 
 def test_streamer_pump_stops_on_event_and_flushes() -> None:
     import asyncio
@@ -129,37 +172,46 @@ def test_streamer_pump_stops_on_event_and_flushes() -> None:
     stop = asyncio.Event()
 
     class _Adapter:
-        name = 'ls'
+        name = "ls"
         capacity_pairs = 200
+
         async def connect(self):
             self.c = True
+
         async def subscribe(self, pairs):
-            return [VendorAck(s, t, True, '00000') for s, t in pairs]
+            return [VendorAck(s, t, True, "00000") for s, t in pairs]
+
         async def recv(self):
             stop.set()
-            return L0Frame('ls', 'H0STCNT0', '005930', 'a', 1, 2, 1, 'ls-1')
+            return L0Frame("ls", "H0STCNT0", "005930", "a", 1, 2, 1, "ls-1")
+
         async def aclose(self):
             self.a = True
 
     class _Sink:
         def __init__(self):
             self.flushed = 0
+
         def record(self, f):
             self.last = f
+
         def note_ack(self, v, a):
             self.ack = (v, a)
+
         def note_gap(self, *a):
             self.gap = a
+
         def flush(self):
             self.flushed += 1
             return 0
 
     sink = _Sink()
-    streamer = RealtimeStreamer(adapter=_Adapter(), sink=sink, replay_pairs=[('005930', 'H0STCNT0')])
+    streamer = RealtimeStreamer(adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0")])
 
     reason = asyncio.run(streamer.pump(stop))
 
-    assert reason == 'stopped' and sink.flushed >= 1  # noqa: PT018 - verbatim contract skeleton
+    assert reason == "stopped" and sink.flushed >= 1  # noqa: PT018 - verbatim contract skeleton
+
 
 def test_streamer_pump_interrupts_blocked_recv_on_stop() -> None:
     import asyncio
@@ -168,27 +220,35 @@ def test_streamer_pump_interrupts_blocked_recv_on_stop() -> None:
     from src.realtime.contracts import VendorAck
 
     class _Adapter:
-        name = 'ls'
+        name = "ls"
         capacity_pairs = 200
+
         async def connect(self):
             self.c = True
+
         async def subscribe(self, pairs):
-            return [VendorAck(s, t, True, '00000') for s, t in pairs]
+            return [VendorAck(s, t, True, "00000") for s, t in pairs]
+
         async def recv(self):
             await asyncio.sleep(999)
-            raise AssertionError('unreachable')
+            raise AssertionError("unreachable")
+
         async def aclose(self):
             self.a = True
 
     class _Sink:
         def __init__(self):
             self.flushed = 0
+
         def record(self, f):
             self.last = f
+
         def note_ack(self, v, a):
             self.ack = (v, a)
+
         def note_gap(self, *a):
             self.gap = a
+
         def flush(self):
             self.flushed += 1
             return 0
@@ -196,7 +256,7 @@ def test_streamer_pump_interrupts_blocked_recv_on_stop() -> None:
     async def _run() -> tuple[str, float, int]:
         stop = asyncio.Event()
         sink = _Sink()
-        streamer = RealtimeStreamer(adapter=_Adapter(), sink=sink, replay_pairs=[('005930', 'H0STCNT0')])
+        streamer = RealtimeStreamer(adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0")])
         task = asyncio.ensure_future(streamer.pump(stop))
         await asyncio.sleep(0.05)
         t0 = time.monotonic()
@@ -206,7 +266,7 @@ def test_streamer_pump_interrupts_blocked_recv_on_stop() -> None:
 
     reason, elapsed, flushed = asyncio.run(_run())
 
-    assert reason == 'stopped'
+    assert reason == "stopped"
     assert elapsed < 0.5
     assert flushed >= 1
 
@@ -230,30 +290,57 @@ def test_session_frame_sink_persists_frame_conn_id(tmp_path) -> None:
 
             return _S()
 
-    cp = tmp_path / 'c.json'
-    write_candidates(cp, [{'symbol': '005930', 'selection_reasons': ['limit_up']}], rev=1)
-    cfg = SessionConfig(session_date=dt.date(2026, 9, 8), journal_root=tmp_path / 'l0',
-                        manifest_path=tmp_path / 's.json', candidates_path=cp, ntp_host='h',
-                        slot_budget=200, max_clock_offset_ns=2_000_000_000,
-                        desired_streams=('H0STCNT0',), vendor='ls')
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
+    cfg = SessionConfig(
+        session_date=dt.date(2026, 9, 8),
+        journal_root=tmp_path / "l0",
+        manifest_path=tmp_path / "s.json",
+        candidates_path=cp,
+        ntp_host="h",
+        slot_budget=200,
+        max_clock_offset_ns=2_000_000_000,
+        desired_streams=("H0STCNT0",),
+        vendor="ls",
+    )
     session = bootstrap_session(cfg, ntp_client=_FC(), now_ns=1)
     sink = SessionFrameSink(session=session)
 
     # When: vendor 는 같지만 conn_id 가 다른 두 프레임을 기록한다
-    sink.record(L0Frame(vendor='ls', stream='H0STCNT0', symbol='005930', raw='{"x":1}',
-                        recv_mono_ns=10, recv_wall_ns=1_735_954_200_000_000_000, conn_seq=1, conn_id='ls-111'))
-    sink.record(L0Frame(vendor='ls', stream='H0STCNT0', symbol='005930', raw='{"x":2}',
-                        recv_mono_ns=20, recv_wall_ns=1_735_954_200_000_000_001, conn_seq=1, conn_id='ls-222'))
+    sink.record(
+        L0Frame(
+            vendor="ls",
+            stream="H0STCNT0",
+            symbol="005930",
+            raw='{"x":1}',
+            recv_mono_ns=10,
+            recv_wall_ns=1_735_954_200_000_000_000,
+            conn_seq=1,
+            conn_id="ls-111",
+        )
+    )
+    sink.record(
+        L0Frame(
+            vendor="ls",
+            stream="H0STCNT0",
+            symbol="005930",
+            raw='{"x":2}',
+            recv_mono_ns=20,
+            recv_wall_ns=1_735_954_200_000_000_001,
+            conn_seq=1,
+            conn_id="ls-222",
+        )
+    )
     written = sink.flush()
 
     # Then: 저널에 vendor 가 아닌 접속 고유 conn_id 가 기록된다
     assert written == 2
-    zst = next((tmp_path / 'l0').rglob('*.jsonl.zst'))
+    zst = next((tmp_path / "l0").rglob("*.jsonl.zst"))
     dctx = zstd.ZstdDecompressor()
-    with open(zst, 'rb') as fh, dctx.stream_reader(fh, read_across_frames=True) as reader:
-        lines = reader.read().decode('utf-8').strip().splitlines()
-    conn_ids = [json.loads(x)['conn_id'] for x in lines]
-    assert conn_ids == ['ls-111', 'ls-222']
+    with open(zst, "rb") as fh, dctx.stream_reader(fh, read_across_frames=True) as reader:
+        lines = reader.read().decode("utf-8").strip().splitlines()
+    conn_ids = [json.loads(x)["conn_id"] for x in lines]
+    assert conn_ids == ["ls-111", "ls-222"]
 
 
 def test_regular_session_silence_limit_only_during_regular_session() -> None:
@@ -272,7 +359,10 @@ def test_regular_session_silence_limit_only_during_regular_session() -> None:
     assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 15, 29, 59, tzinfo=kst), anchors=anchors) == 30.0
     assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 15, 30, 0, tzinfo=kst), anchors=anchors) is None
     assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 1, 0, 0, tzinfo=dt.UTC), anchors=anchors) == 30.0
-    assert regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 0, 0, 0, tzinfo=dt.UTC), anchors=anchors, limit_s=5.0) == 5.0
+    assert (
+        regular_session_silence_limit_s(dt.datetime(2026, 9, 14, 0, 0, 0, tzinfo=dt.UTC), anchors=anchors, limit_s=5.0)
+        == 5.0
+    )
 
 
 def test_streamer_pump_returns_watchdog_when_vendor_goes_silent() -> None:
@@ -319,7 +409,9 @@ def test_streamer_pump_returns_watchdog_when_vendor_goes_silent() -> None:
             return 0
 
     adapter, sink = _Adapter(), _Sink()
-    streamer = RealtimeStreamer(adapter=adapter, sink=sink, replay_pairs=[("005930", "H0STCNT0")], silence_limit=lambda: 0.05)
+    streamer = RealtimeStreamer(
+        adapter=adapter, sink=sink, replay_pairs=[("005930", "H0STCNT0")], silence_limit=lambda: 0.05
+    )
 
     t0 = time.monotonic()
     reason = asyncio.run(streamer.pump(asyncio.Event()))
@@ -367,7 +459,9 @@ def test_streamer_pump_disables_watchdog_when_limit_is_none() -> None:
 
     async def _run() -> str:
         stop = asyncio.Event()
-        streamer = RealtimeStreamer(adapter=_Adapter(), sink=_Sink(), replay_pairs=[("005930", "H0STCNT0")], silence_limit=lambda: None)
+        streamer = RealtimeStreamer(
+            adapter=_Adapter(), sink=_Sink(), replay_pairs=[("005930", "H0STCNT0")], silence_limit=lambda: None
+        )
         task = asyncio.ensure_future(streamer.pump(stop))
         await asyncio.sleep(0.2)
         assert not task.done()
@@ -434,8 +528,11 @@ def test_streamer_records_gap_from_disconnect_until_first_frame_after_reconnect(
 
     sink = _Sink()
     streamer = RealtimeStreamer(
-        adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0"), ("000660", "H0STCNT0")],
-        wall_ns=lambda: 1_000, rng=lambda: 1.0,
+        adapter=_Adapter(),
+        sink=sink,
+        replay_pairs=[("005930", "H0STCNT0"), ("000660", "H0STCNT0")],
+        wall_ns=lambda: 1_000,
+        rng=lambda: 1.0,
     )
 
     with caplog.at_level(logging.WARNING):
@@ -496,8 +593,14 @@ def test_streamer_backoff_is_capped_exponential_and_resets_after_healthy_connect
         async def _sleep(s):
             slept.append(round(s, 3))
 
-        streamer = RealtimeStreamer(adapter=_Adapter(healthy), sink=_Sink(), replay_pairs=[("005930", "H0STCNT0")],
-                                    backoff_max_s=4.0, rng=rng, wall_ns=lambda: 1)
+        streamer = RealtimeStreamer(
+            adapter=_Adapter(healthy),
+            sink=_Sink(),
+            replay_pairs=[("005930", "H0STCNT0")],
+            backoff_max_s=4.0,
+            rng=rng,
+            wall_ns=lambda: 1,
+        )
         asyncio.run(streamer.run_forever(asyncio.Event(), max_cycles=cycles, backoff_s=1.0, sleep=_sleep))
         return slept
 
@@ -620,8 +723,14 @@ def test_streamer_pump_flushes_on_time_interval_between_count_flushes() -> None:
             return 0
 
     sink = _Sink()
-    streamer = RealtimeStreamer(adapter=_Adapter(), sink=sink, replay_pairs=[], flush_every=1000,
-                                flush_interval_s=0.5, monotonic=lambda: clock["t"])
+    streamer = RealtimeStreamer(
+        adapter=_Adapter(),
+        sink=sink,
+        replay_pairs=[],
+        flush_every=1000,
+        flush_interval_s=0.5,
+        monotonic=lambda: clock["t"],
+    )
 
     assert asyncio.run(streamer.pump(stop)) == "stopped"
     assert sink.flush_at == [0.7, 0.7]
@@ -663,7 +772,9 @@ def test_streamer_pump_logs_connect_summary_and_rejected_subscriptions(caplog) -
         def flush(self):
             return 0
 
-    streamer = RealtimeStreamer(adapter=_Adapter(), sink=_Sink(), replay_pairs=[("005930", "H0STCNT0"), ("000660", "H0STCNT0")])
+    streamer = RealtimeStreamer(
+        adapter=_Adapter(), sink=_Sink(), replay_pairs=[("005930", "H0STCNT0"), ("000660", "H0STCNT0")]
+    )
 
     with caplog.at_level(logging.INFO):
         assert asyncio.run(streamer.pump(asyncio.Event())) == "disconnect"
@@ -686,9 +797,17 @@ def test_session_frame_sink_persists_manifest_on_gap_and_throttles_flush_checkpo
 
     cp = tmp_path / "c.json"
     write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
-    cfg = SessionConfig(session_date=dt.date(2026, 9, 14), journal_root=tmp_path / "l0", manifest_path=tmp_path / "s.json",
-                        candidates_path=cp, ntp_host="h", slot_budget=200, max_clock_offset_ns=2_000_000_000,
-                        desired_streams=("H0STCNT0",), vendor="ls")
+    cfg = SessionConfig(
+        session_date=dt.date(2026, 9, 14),
+        journal_root=tmp_path / "l0",
+        manifest_path=tmp_path / "s.json",
+        candidates_path=cp,
+        ntp_host="h",
+        slot_budget=200,
+        max_clock_offset_ns=2_000_000_000,
+        desired_streams=("H0STCNT0",),
+        vendor="ls",
+    )
     session = bootstrap_session(cfg, ntp_client=_FC(), now_ns=1)
     persists: list[int] = []
     real_persist = session.persist
@@ -811,8 +930,14 @@ def test_streamer_escalates_auth_rejection_once_and_caps_backoff_at_auth_limit(c
         clock["ns"] += int(s * 1e9)
 
     sink = _Sink()
-    streamer = RealtimeStreamer(adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0")],
-                                backoff_max_s=60.0, rng=lambda: 1.0, wall_ns=lambda: clock["ns"])
+    streamer = RealtimeStreamer(
+        adapter=_Adapter(),
+        sink=sink,
+        replay_pairs=[("005930", "H0STCNT0")],
+        backoff_max_s=60.0,
+        rng=lambda: 1.0,
+        wall_ns=lambda: clock["ns"],
+    )
 
     with caplog.at_level(logging.WARNING):
         asyncio.run(streamer.run_forever(asyncio.Event(), max_cycles=4, backoff_s=100.0, sleep=_sleep))
@@ -821,9 +946,12 @@ def test_streamer_escalates_auth_rejection_once_and_caps_backoff_at_auth_limit(c
     assert AUTH_BACKOFF_MAX_S == 300.0
     assert slept == [100.0, 200.0, 300.0]
     assert len(criticals) == 1
-    assert criticals[0].startswith("[DATA] stage=stream_outage status=CRITICAL reason=auth_rejected detail=auth_rejected:403:IGW00103")
+    assert criticals[0].startswith(
+        "[DATA] stage=stream_outage status=CRITICAL reason=auth_rejected detail=auth_rejected:403:IGW00103"
+    )
     assert sink.gaps == [("005930", 0, 600_000_000_000, "auth_rejected")]
     assert "stage=stream_outage status=UNRESOLVED reason=auth_rejected outage_s=600" in caplog.text
+
 
 def test_streamer_escalates_regular_session_outage_after_threshold_and_logs_recovery(caplog) -> None:
     import asyncio
@@ -877,8 +1005,15 @@ def test_streamer_escalates_regular_session_outage_after_threshold_and_logs_reco
         clock["ns"] += int(s * 1e9)
 
     sink = _Sink()
-    streamer = RealtimeStreamer(adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0")],
-                                silence_limit=lambda: 30.0, backoff_max_s=120.0, rng=lambda: 1.0, wall_ns=lambda: clock["ns"])
+    streamer = RealtimeStreamer(
+        adapter=_Adapter(),
+        sink=sink,
+        replay_pairs=[("005930", "H0STCNT0")],
+        silence_limit=lambda: 30.0,
+        backoff_max_s=120.0,
+        rng=lambda: 1.0,
+        wall_ns=lambda: clock["ns"],
+    )
 
     with caplog.at_level(logging.WARNING):
         asyncio.run(streamer.run_forever(stop, backoff_s=100.0, sleep=_sleep))
@@ -886,9 +1021,12 @@ def test_streamer_escalates_regular_session_outage_after_threshold_and_logs_reco
     criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
     assert OUTAGE_CRITICAL_S == 300.0
     assert len(criticals) == 1
-    assert criticals[0].startswith("[DATA] stage=stream_outage status=CRITICAL reason=disconnect detail=closed outage_s=340")
+    assert criticals[0].startswith(
+        "[DATA] stage=stream_outage status=CRITICAL reason=disconnect detail=closed outage_s=340"
+    )
     assert sink.gaps == [("005930", 0, 470_000_000_000, "disconnect")]
     assert "stage=stream_outage status=RECOVERED reason=disconnect outage_s=470" in caplog.text
+
 
 def test_streamer_does_not_escalate_transient_outage_outside_regular_session(caplog) -> None:
     import asyncio
@@ -942,8 +1080,15 @@ def test_streamer_does_not_escalate_transient_outage_outside_regular_session(cap
         clock["ns"] += int(s * 1e9)
 
     sink = _Sink()
-    streamer = RealtimeStreamer(adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0")],
-                                silence_limit=lambda: None, backoff_max_s=120.0, rng=lambda: 1.0, wall_ns=lambda: clock["ns"])
+    streamer = RealtimeStreamer(
+        adapter=_Adapter(),
+        sink=sink,
+        replay_pairs=[("005930", "H0STCNT0")],
+        silence_limit=lambda: None,
+        backoff_max_s=120.0,
+        rng=lambda: 1.0,
+        wall_ns=lambda: clock["ns"],
+    )
 
     with caplog.at_level(logging.WARNING):
         asyncio.run(streamer.run_forever(stop, backoff_s=100.0, sleep=_sleep))
@@ -953,7 +1098,6 @@ def test_streamer_does_not_escalate_transient_outage_outside_regular_session(cap
     assert sink.gaps == [("005930", 0, 470_000_000_000, "disconnect")]
 
 
-
 def test_aftermarket_silence_limit_honors_distinct_starts():
     import datetime as dt
     from zoneinfo import ZoneInfo
@@ -961,7 +1105,8 @@ def test_aftermarket_silence_limit_honors_distinct_starts():
     from src.realtime.session import StreamRoute
     from src.core.session_anchors import standard_session_anchors
     from src.realtime.streamer import aftermarket_silence_limit_s
-    kst = ZoneInfo('Asia/Seoul')
+
+    kst = ZoneInfo("Asia/Seoul")
     anchors = standard_session_anchors(dt.date(2026, 9, 15))
     nxt = StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER)
     krx = StreamRoute(MarketVenue.KRX, MarketSession.KRX_AFTER)
@@ -1012,8 +1157,12 @@ def test_aftermarket_silence_limit_follows_shifted_close() -> None:
     )
     nxt = StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER)
 
-    assert aftermarket_silence_limit_s(dt.datetime(2026, 11, 19, 16, 35, tzinfo=kst), route=nxt, anchors=anchors) is None
-    assert aftermarket_silence_limit_s(dt.datetime(2026, 11, 19, 16, 45, tzinfo=kst), route=nxt, anchors=anchors) == 30.0
+    assert (
+        aftermarket_silence_limit_s(dt.datetime(2026, 11, 19, 16, 35, tzinfo=kst), route=nxt, anchors=anchors) is None
+    )
+    assert (
+        aftermarket_silence_limit_s(dt.datetime(2026, 11, 19, 16, 45, tzinfo=kst), route=nxt, anchors=anchors) == 30.0
+    )
 
 
 def test_aftermarket_open_time_standard_day() -> None:
@@ -1072,7 +1221,10 @@ def test_aftermarket_silence_limit_stays_disarmed_before_open() -> None:
     kst = ZoneInfo("Asia/Seoul")
     anchors = standard_session_anchors(dt.date(2026, 9, 15))
     nxt = StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER)
-    assert aftermarket_silence_limit_s(dt.datetime(2026, 9, 15, 15, 39, 30, tzinfo=kst), route=nxt, anchors=anchors) is None
+    assert (
+        aftermarket_silence_limit_s(dt.datetime(2026, 9, 15, 15, 39, 30, tzinfo=kst), route=nxt, anchors=anchors)
+        is None
+    )
     assert (
         aftermarket_silence_limit_s(
             dt.datetime(2026, 9, 15, 15, 40, 0, tzinfo=kst), route=nxt, anchors=anchors, limit_s=10.0
@@ -1143,10 +1295,14 @@ def _silent_after_one_frame(recv_wall_ns: int, stop) -> "object":
                 if self.cycle == 2:
                     stop.set()
                 return L0Frame(
-                    "ls", "H0STCNT0", "005930",
+                    "ls",
+                    "H0STCNT0",
+                    "005930",
                     "a" if self.cycle == 1 else "b",
-                    1, recv_wall_ns if self.cycle == 1 else 50_000,
-                    self.sent, f"ls-{self.cycle}",
+                    1,
+                    recv_wall_ns if self.cycle == 1 else 50_000,
+                    self.sent,
+                    f"ls-{self.cycle}",
                 )
             await asyncio.sleep(999)
 
@@ -1165,8 +1321,12 @@ def test_watchdog_gap_starts_at_last_received_frame_not_trigger_time() -> None:
     stop = asyncio.Event()
     sink = _gap_sink()
     streamer = RealtimeStreamer(
-        adapter=_silent_after_one_frame(1_000, stop), sink=sink, replay_pairs=[("005930", "H0STCNT0")],
-        silence_limit=lambda: 0.05, wall_ns=lambda: 40_000, rng=lambda: 1.0,
+        adapter=_silent_after_one_frame(1_000, stop),
+        sink=sink,
+        replay_pairs=[("005930", "H0STCNT0")],
+        silence_limit=lambda: 0.05,
+        wall_ns=lambda: 40_000,
+        rng=lambda: 1.0,
     )
 
     async def _nosleep(_):
@@ -1187,8 +1347,12 @@ def test_gap_never_inverts_when_clock_steps_backwards() -> None:
     stop = asyncio.Event()
     sink = _gap_sink()
     streamer = RealtimeStreamer(
-        adapter=_silent_after_one_frame(9_000, stop), sink=sink, replay_pairs=[("005930", "H0STCNT0")],
-        silence_limit=lambda: 0.05, wall_ns=lambda: 40_000, rng=lambda: 1.0,
+        adapter=_silent_after_one_frame(9_000, stop),
+        sink=sink,
+        replay_pairs=[("005930", "H0STCNT0")],
+        silence_limit=lambda: 0.05,
+        wall_ns=lambda: 40_000,
+        rng=lambda: 1.0,
     )
 
     async def _nosleep(_):
@@ -1233,8 +1397,11 @@ def test_outage_without_any_frame_starts_at_run_start_wall_time() -> None:
     clock = {"ns": 0}
     sink = _gap_sink()
     streamer = RealtimeStreamer(
-        adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0")],
-        wall_ns=lambda: clock["ns"], rng=lambda: 1.0,
+        adapter=_Adapter(),
+        sink=sink,
+        replay_pairs=[("005930", "H0STCNT0")],
+        wall_ns=lambda: clock["ns"],
+        rng=lambda: 1.0,
     )
 
     async def _sleep(s):
@@ -1276,8 +1443,11 @@ def test_unresolved_outage_starts_at_last_frame_and_closes_at_final_wall_time() 
 
     sink = _gap_sink()
     streamer = RealtimeStreamer(
-        adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0")],
-        wall_ns=lambda: 9_000, rng=lambda: 1.0,
+        adapter=_Adapter(),
+        sink=sink,
+        replay_pairs=[("005930", "H0STCNT0")],
+        wall_ns=lambda: 9_000,
+        rng=lambda: 1.0,
     )
 
     asyncio.run(streamer.run_forever(asyncio.Event(), max_cycles=1))
@@ -1317,8 +1487,11 @@ def test_watchdog_arms_only_after_window_opens_and_fires_limit_after_arming() ->
         return 0.05 if time.monotonic() - opened_at["t"] >= 0.15 else None
 
     streamer = RealtimeStreamer(
-        adapter=_Adapter(), sink=_gap_sink(), replay_pairs=[("005930", "H0STCNT0")],
-        silence_limit=_limit, silence_poll_interval_s=0.02,
+        adapter=_Adapter(),
+        sink=_gap_sink(),
+        replay_pairs=[("005930", "H0STCNT0")],
+        silence_limit=_limit,
+        silence_poll_interval_s=0.02,
     )
 
     t0 = time.monotonic()
@@ -1378,8 +1551,11 @@ def test_in_flight_recv_survives_poll_wakeups() -> None:
     adapter = _Adapter()
     sink = _NotifySink(third_recorded)
     streamer = RealtimeStreamer(
-        adapter=adapter, sink=sink, replay_pairs=[("005930", "H0STCNT0")],
-        silence_limit=lambda: 1.0, silence_poll_interval_s=0.01,
+        adapter=adapter,
+        sink=sink,
+        replay_pairs=[("005930", "H0STCNT0")],
+        silence_limit=lambda: 1.0,
+        silence_poll_interval_s=0.01,
     )
 
     reason = asyncio.run(_run())
@@ -1401,7 +1577,9 @@ def test_poll_interval_must_be_positive() -> None:
 
     with pytest.raises(ValueError, match="silence_poll_interval_s"):
         RealtimeStreamer(
-            adapter=_Adapter(), sink=_gap_sink(), replay_pairs=[],
+            adapter=_Adapter(),
+            sink=_gap_sink(),
+            replay_pairs=[],
             silence_poll_interval_s=0,
         )
 
@@ -1442,18 +1620,18 @@ def test_disconnect_log_carries_frame_and_heartbeat_ages(caplog) -> None:
             return None
 
     streamer = RealtimeStreamer(
-        adapter=_Adapter(), sink=_gap_sink(), replay_pairs=[("005930", "H0STCNT0")],
+        adapter=_Adapter(),
+        sink=_gap_sink(),
+        replay_pairs=[("005930", "H0STCNT0")],
         silence_limit=lambda: 0.05,
-        wall_ns=lambda: pingpong_at + 2_500_000_000, rng=lambda: 1.0,
+        wall_ns=lambda: pingpong_at + 2_500_000_000,
+        rng=lambda: 1.0,
     )
 
     with caplog.at_level(logging.WARNING):
         asyncio.run(streamer.run_forever(stop, max_cycles=1))
 
-    assert (
-        "last_frame_age_s=3.50 last_pingpong_age_s=2.50 pingpongs=3"
-        in caplog.text
-    )
+    assert "last_frame_age_s=3.50 last_pingpong_age_s=2.50 pingpongs=3" in caplog.text
 
 
 def test_disconnect_log_reports_na_without_heartbeat_probe(caplog) -> None:
@@ -1480,8 +1658,11 @@ def test_disconnect_log_reports_na_without_heartbeat_probe(caplog) -> None:
             return None
 
     streamer = RealtimeStreamer(
-        adapter=_Adapter(), sink=_gap_sink(), replay_pairs=[("005930", "H0STCNT0")],
-        wall_ns=lambda: 5_000, rng=lambda: 1.0,
+        adapter=_Adapter(),
+        sink=_gap_sink(),
+        replay_pairs=[("005930", "H0STCNT0")],
+        wall_ns=lambda: 5_000,
+        rng=lambda: 1.0,
     )
 
     with caplog.at_level(logging.WARNING):
@@ -1503,12 +1684,18 @@ def test_aftermarket_silence_limit_honors_configured_limit_s() -> None:
     anchors = standard_session_anchors(dt.date(2026, 9, 15))
     nxt = StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER)
 
-    assert aftermarket_silence_limit_s(
-        dt.datetime(2026, 9, 15, 15, 45, tzinfo=kst), route=nxt, anchors=anchors, limit_s=10.0
-    ) == 10.0
-    assert aftermarket_silence_limit_s(
-        dt.datetime(2026, 9, 15, 15, 0, tzinfo=kst), route=nxt, anchors=anchors, limit_s=10.0
-    ) is None
+    assert (
+        aftermarket_silence_limit_s(
+            dt.datetime(2026, 9, 15, 15, 45, tzinfo=kst), route=nxt, anchors=anchors, limit_s=10.0
+        )
+        == 10.0
+    )
+    assert (
+        aftermarket_silence_limit_s(
+            dt.datetime(2026, 9, 15, 15, 0, tzinfo=kst), route=nxt, anchors=anchors, limit_s=10.0
+        )
+        is None
+    )
 
 
 def test_watchdog_rearms_after_window_closes_and_reopens() -> None:
@@ -1542,8 +1729,11 @@ def test_watchdog_rearms_after_window_closes_and_reopens() -> None:
         return None if 0.10 <= elapsed < 0.40 else 0.30
 
     streamer = RealtimeStreamer(
-        adapter=_Adapter(), sink=_gap_sink(), replay_pairs=[("005930", "H0STCNT0")],
-        silence_limit=_limit, silence_poll_interval_s=0.02,
+        adapter=_Adapter(),
+        sink=_gap_sink(),
+        replay_pairs=[("005930", "H0STCNT0")],
+        silence_limit=_limit,
+        silence_poll_interval_s=0.02,
     )
 
     reason = asyncio.run(streamer.pump(asyncio.Event()))
@@ -1807,8 +1997,10 @@ def _cleanup_streamer(*, close_error=None, flush_error=None):
     from src.realtime.streamer import RealtimeStreamer
 
     adapter = SimpleNamespace(
-        name="ls", capacity_pairs=200,
-        connect=AsyncMock(), subscribe=AsyncMock(return_value=[]),
+        name="ls",
+        capacity_pairs=200,
+        connect=AsyncMock(),
+        subscribe=AsyncMock(return_value=[]),
         recv=AsyncMock(side_effect=VendorDisconnected("closed")),
         aclose=AsyncMock(side_effect=close_error),
     )
@@ -1854,7 +2046,8 @@ def test_cleanup_propagates_domain_errors_and_preserves_primary() -> None:
 
     primary = JournalWriteError("primary")
     streamer, adapter, sink = _cleanup_streamer(
-        close_error=KrxAlphaError("secondary close"), flush_error=JournalWriteError("secondary flush"),
+        close_error=KrxAlphaError("secondary close"),
+        flush_error=JournalWriteError("secondary flush"),
     )
     adapter.connect = AsyncMock(side_effect=primary)
     with pytest.raises(JournalWriteError) as caught:
@@ -1924,7 +2117,8 @@ def test_pump_cancellation_survives_cleanup_domain_errors() -> None:
             await asyncio.Event().wait()
 
         streamer, adapter, _ = _cleanup_streamer(
-            close_error=KrxAlphaError("close"), flush_error=JournalWriteError("flush"),
+            close_error=KrxAlphaError("close"),
+            flush_error=JournalWriteError("flush"),
         )
         adapter.recv = recv
         task = asyncio.create_task(streamer.pump(asyncio.Event()))
@@ -2048,10 +2242,44 @@ def test_outage_gap_ends_when_all_pairs_are_subscribed_not_at_first_frame() -> N
 
     sink = _Sink()
     streamer = RealtimeStreamer(
-        adapter=_Adapter(), sink=sink, replay_pairs=[("005930", "H0STCNT0")],
-        wall_ns=lambda: next(clock, 9_000), rng=lambda: 1.0,
+        adapter=_Adapter(),
+        sink=sink,
+        replay_pairs=[("005930", "H0STCNT0")],
+        wall_ns=lambda: next(clock, 9_000),
+        rng=lambda: 1.0,
     )
     asyncio.run(streamer.run_forever(stop, sleep=_nosleep))
 
     # First frame after reconnect arrived at 5_000 but subscribe completed at 9_000.
     assert sink.gaps == [("005930", 100, 9_000, "disconnect")]
+
+
+def test_sink_stamps_ack_with_injected_wall_clock(tmp_path) -> None:
+    import datetime as dt
+
+    from src.realtime.contracts import VendorAck
+    from src.realtime.session import SessionConfig, bootstrap_session
+    from src.realtime.streamer import SessionFrameSink
+    from src.universe.ipc import write_candidates
+
+    class _FC:
+        def request(self, host, version=3, timeout=5):
+            return type("S", (), {"offset": 0.0})()
+
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
+    cfg = SessionConfig(
+        session_date=dt.date(2026, 10, 18),
+        journal_root=tmp_path / "l0",
+        manifest_path=tmp_path / "s.json",
+        candidates_path=cp,
+        ntp_host="h",
+        slot_budget=200,
+        max_clock_offset_ns=2_000_000_000,
+        desired_streams=("H0NXCNT0",),
+        vendor="kis",
+    )
+    session = bootstrap_session(cfg, ntp_client=_FC(), now_ns=1)
+    sink = SessionFrameSink(session=session, wall_clock_ns=lambda: 777)
+    sink.note_ack("kis", VendorAck("005930", "H0NXCNT0", True, "0"))
+    assert session.manifest.subscription_acks[0]["acked_at_ns"] == 777

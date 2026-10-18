@@ -82,13 +82,30 @@ def test_manifest_roundtrip_preserves_degraded_metadata_and_loads_legacy(tmp_pat
     from src.realtime.manifest import SessionManifest
 
     path = tmp_path / "m.json"
-    SessionManifest(session_date=dt.date(2026, 9, 14), clock_offset_ns=1, started_at_ns=2, candidates_rev=20260911, degraded_reason="orchestration_failed").save(path)
+    SessionManifest(
+        session_date=dt.date(2026, 9, 14),
+        clock_offset_ns=1,
+        started_at_ns=2,
+        candidates_rev=20260911,
+        degraded_reason="orchestration_failed",
+    ).save(path)
     loaded = SessionManifest.load(path)
     assert loaded.candidates_rev == 20260911
     assert loaded.degraded_reason == "orchestration_failed"
 
     legacy = tmp_path / "legacy.json"
-    legacy.write_text(json.dumps({"session_date": "2026-09-11", "clock_offset_ns": 0, "started_at_ns": 0, "subscription_acks": [], "gaps": []}), encoding="utf-8")
+    legacy.write_text(
+        json.dumps(
+            {
+                "session_date": "2026-09-11",
+                "clock_offset_ns": 0,
+                "started_at_ns": 0,
+                "subscription_acks": [],
+                "gaps": [],
+            }
+        ),
+        encoding="utf-8",
+    )
     old = SessionManifest.load(legacy)
     assert old.candidates_rev is None
     assert old.degraded_reason is None
@@ -102,8 +119,13 @@ def test_manifest_roundtrip_preserves_clock_status_and_boots(tmp_path, caplog) -
     from src.realtime.manifest import SessionManifest
 
     path = tmp_path / "m.json"
-    manifest = SessionManifest(session_date=dt.date(2026, 9, 14), clock_offset_ns=0, started_at_ns=1, clock_status="unmeasured",
-                               boots=[{"started_at_ns": 1, "clock_offset_ns": 0, "clock_status": "unmeasured"}])
+    manifest = SessionManifest(
+        session_date=dt.date(2026, 9, 14),
+        clock_offset_ns=0,
+        started_at_ns=1,
+        clock_status="unmeasured",
+        boots=[{"started_at_ns": 1, "clock_offset_ns": 0, "clock_status": "unmeasured"}],
+    )
     with caplog.at_level(logging.INFO):
         manifest.save(path)
     loaded = SessionManifest.load(path)
@@ -112,7 +134,45 @@ def test_manifest_roundtrip_preserves_clock_status_and_boots(tmp_path, caplog) -
     assert loaded.boots == [{"started_at_ns": 1, "clock_offset_ns": 0, "clock_status": "unmeasured"}]
     assert "stage=manifest_save" not in caplog.text
     legacy = tmp_path / "legacy.json"
-    legacy.write_text(json.dumps({"session_date": "2026-09-11", "clock_offset_ns": 0, "started_at_ns": 0}), encoding="utf-8")
+    legacy.write_text(
+        json.dumps({"session_date": "2026-09-11", "clock_offset_ns": 0, "started_at_ns": 0}), encoding="utf-8"
+    )
     old = SessionManifest.load(legacy)
     assert old.clock_status == "measured"
     assert old.boots == []
+
+
+def test_ack_time_round_trips_through_save_and_load(tmp_path) -> None:
+    import datetime as dt
+
+    from src.realtime.manifest import SessionManifest
+
+    m = SessionManifest(session_date=dt.date(2026, 10, 18), clock_offset_ns=0, started_at_ns=1)
+    m.record_ack(vendor="kis", tr_id="H0NXCNT0", symbol="005930", rt_cd="0", accepted=True, acked_at_ns=123)
+    path = tmp_path / "m.json"
+    m.save(path)
+    loaded = SessionManifest.load(path)
+    assert loaded.subscription_acks[0]["acked_at_ns"] == 123
+
+
+def test_legacy_ack_without_time_loads(tmp_path) -> None:
+    import json
+
+    from src.realtime.manifest import SessionManifest
+
+    path = tmp_path / "legacy.json"
+    path.write_text(
+        json.dumps(
+            {
+                "session_date": "2026-10-18",
+                "clock_offset_ns": 0,
+                "started_at_ns": 0,
+                "subscription_acks": [
+                    {"vendor": "kis", "tr_id": "H0NXCNT0", "symbol": "005930", "rt_cd": "0", "accepted": True}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = SessionManifest.load(path)
+    assert loaded.subscription_acks[0].get("acked_at_ns") is None
