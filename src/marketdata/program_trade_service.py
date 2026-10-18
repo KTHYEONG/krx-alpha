@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import pathlib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
@@ -20,10 +20,13 @@ from src.marketdata.toss_calendar import (
     issue_access_token,
 )
 from src.marketdata.toss_program_trades import (
+    ProgramTradeGapReport,
+    ProgramTradeGapStatus,
     TossProgramTradesError,
     _TossProgramTradesAuthRejected,
     append_program_trades,
     backfill_program_trades_history,
+    find_program_trade_gaps,
     program_trade_coverage,
     symbols_needing_backfill,
 )
@@ -130,6 +133,66 @@ class ProgramTradesSyncResult:
     appended_rows: int
     stale_symbols: tuple[str, ...]
     tracked: tuple[str, ...]
+    gap_targets: tuple[str, ...] = ()
+    gap_report: ProgramTradeGapReport | None = None
+
+
+def _pre_sync_gap_floors(
+    store: pathlib.Path,
+    *,
+    bars_daily_dir: pathlib.Path,
+    coverage: Mapping[str, tuple[dt.date, dt.date]],
+    active_symbols: frozenset[str] | None,
+    complete_through: dt.date,
+    window_business_days: int,
+) -> dict[str, dt.date]:
+    """Return the fetch floor each gap-affected active symbol must be re-fetched from."""
+    active_coverage = {
+        symbol: bounds
+        for symbol, bounds in coverage.items()
+        if active_symbols is None or symbol in active_symbols
+    }
+    report = find_program_trade_gaps(
+        store,
+        bars_daily_dir=bars_daily_dir,
+        coverage=active_coverage,
+        complete_through=complete_through,
+        window_business_days=window_business_days,
+    )
+    if report.status is not ProgramTradeGapStatus.GAPS:
+        return {}
+    logger.warning(
+        "[DATA] stage=program_trades_gap phase=pre status=GAPS symbols=%d pairs=%d earliest=%s",
+        len(report.missing),
+        report.missing_pairs,
+        report.earliest_missing,
+    )
+    return {symbol: days[0] for symbol, days in report.missing.items()}
+
+
+def _post_sync_gap_report(
+    store: pathlib.Path,
+    *,
+    bars_daily_dir: pathlib.Path,
+    active_symbols: frozenset[str] | None,
+    complete_through: dt.date,
+    window_business_days: int,
+) -> ProgramTradeGapReport:
+    """Re-derive the gap report from the store after the run's append."""
+    tracked = _tracked_program_trade_symbols(store)
+    coverage = program_trade_coverage(store, tracked) if tracked else {}
+    active_coverage = {
+        symbol: bounds
+        for symbol, bounds in coverage.items()
+        if active_symbols is None or symbol in active_symbols
+    }
+    return find_program_trade_gaps(
+        store,
+        bars_daily_dir=bars_daily_dir,
+        coverage=active_coverage,
+        complete_through=complete_through,
+        window_business_days=window_business_days,
+    )
 
 
 def _tracked_program_trade_symbols(store_path: pathlib.Path) -> tuple[str, ...]:
@@ -160,22 +223,39 @@ def sync_program_trades_forward(
     active_symbols: frozenset[str] | None = None,
     cache_dir: pathlib.Path | None = None,
     max_lead_s: float | None = None,
+    bars_daily_dir: pathlib.Path | None = None,
+    gap_window_business_days: int | None = None,
 ) -> ProgramTradesSyncResult:
     """Forward-sync tracked symbols to ``session_date`` plus candidate history depth.
 
     ``active_symbols`` (currently listed codes) limits forward targets and the
     staleness measure; delisted symbols never gain rows, so counting them would
     push the stale ratio past tolerance within about a year of normal delistings.
-    ``None`` keeps every stored symbol tracked.
+    ``None`` keeps every stored symbol tracked. When ``bars_daily_dir`` and
+    ``gap_window_business_days`` are both set, interior gaps against the daily-bar
+    calendar lower the affected symbols' fetch floor so one run heals them, and a
+    post-sync report re-verifies the store.
 
     Tracked symbols behind ``session_date`` are fetched from ``max_date + 1``;
     candidate symbols lacking history back to ``session_date - lookback_days``
     are fetched from that floor. One shared token and rate limiter cover both
     phases, and all rows land with a single store write.
     """
+    if (bars_daily_dir is None) != (gap_window_business_days is None):
+        raise ValueError("bars_daily_dir and gap_window_business_days must be provided together")
     store = pathlib.Path(store_root)
     tracked = _tracked_program_trade_symbols(store)
     coverage = program_trade_coverage(store, tracked) if tracked else {}
+    gap_floors: dict[str, dt.date] = {}
+    if bars_daily_dir is not None and gap_window_business_days is not None:
+        gap_floors = _pre_sync_gap_floors(
+            store,
+            bars_daily_dir=bars_daily_dir,
+            coverage=coverage,
+            active_symbols=active_symbols,
+            complete_through=complete_through,
+            window_business_days=gap_window_business_days,
+        )
     forward_min: dict[str, dt.date] = {}
     for symbol, (_min_date, max_date) in coverage.items():
         if active_symbols is not None and symbol not in active_symbols:
@@ -183,6 +263,10 @@ def sync_program_trades_forward(
         if max_date < session_date:
             forward_min[symbol] = max_date + dt.timedelta(days=1)
     forward_targets = tuple(sorted(forward_min))
+    gap_targets = tuple(sorted(
+        symbol for symbol, floor in gap_floors.items()
+        if symbol not in forward_min or floor < forward_min[symbol]
+    ))
     candidate_floor = session_date - dt.timedelta(days=lookback_days)
     clean_candidates = tuple(code for code in candidate_symbols if is_krx_short_code(code))
     skipped = set(candidate_symbols) - set(clean_candidates)
@@ -193,13 +277,15 @@ def sync_program_trades_forward(
     candidate_targets = (
         symbols_needing_backfill(store, clean_candidates, candidate_floor) if clean_candidates else ()
     )
-    union = tuple(dict.fromkeys((*forward_targets, *candidate_targets)))
+    union = tuple(dict.fromkeys((*forward_targets, *gap_targets, *candidate_targets)))
     min_date_by_symbol: dict[str, dt.date] = {}
     candidate_set = set(candidate_targets)
     for symbol in union:
         dates = []
         if symbol in forward_min:
             dates.append(forward_min[symbol])
+        if symbol in gap_floors:
+            dates.append(gap_floors[symbol])
         if symbol in candidate_set:
             dates.append(candidate_floor)
         min_date_by_symbol[symbol] = min(dates)
@@ -238,6 +324,15 @@ def sync_program_trades_forward(
             if symbol not in fetched_max or day > fetched_max[symbol]:
                 fetched_max[symbol] = day
     appended_rows = append_program_trades(store, fetched) if fetched else 0
+    gap_report: ProgramTradeGapReport | None = None
+    if bars_daily_dir is not None and gap_window_business_days is not None:
+        gap_report = _post_sync_gap_report(
+            store,
+            bars_daily_dir=bars_daily_dir,
+            active_symbols=active_symbols,
+            complete_through=complete_through,
+            window_business_days=gap_window_business_days,
+        )
     final_max: dict[str, dt.date] = {symbol: max_date for symbol, (_min_date, max_date) in coverage.items()}
     for symbol, day in fetched_max.items():
         if symbol not in final_max or day > final_max[symbol]:
@@ -247,10 +342,11 @@ def sync_program_trades_forward(
     tracked_final = tuple(sorted(final_max))
     stale_symbols = tuple(sorted(symbol for symbol, max_date in final_max.items() if max_date < complete_through))
     logger.info(
-        "[DATA] stage=program_trades_forward status=OK fetched_symbols=%d appended_rows=%d stale=%d",
+        "[DATA] stage=program_trades_forward status=OK fetched_symbols=%d appended_rows=%d stale=%d gap_targets=%d",
         symbols_ok,
         appended_rows,
         len(stale_symbols),
+        len(gap_targets),
     )
     return ProgramTradesSyncResult(
         forward_targets=forward_targets,
@@ -260,6 +356,8 @@ def sync_program_trades_forward(
         appended_rows=appended_rows,
         stale_symbols=stale_symbols,
         tracked=tracked_final,
+        gap_targets=gap_targets,
+        gap_report=gap_report,
     )
 
 

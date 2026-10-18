@@ -569,3 +569,378 @@ def test_fetch_program_trades_page_rejects_non_mapping_body() -> None:
     # When / Then: 봉투 위반으로 표면화된다
     with pytest.raises(TossProgramTradesError, match="envelope invalid"):
         tpt.fetch_program_trades_page("005930", access_token="tok", session=_ListSession())
+
+
+_D1 = dt.date(2026, 9, 1)
+_D2 = dt.date(2026, 9, 2)
+_D3 = dt.date(2026, 9, 3)
+_D4 = dt.date(2026, 9, 4)
+_D5 = dt.date(2026, 9, 7)
+
+
+def _seed_bars(bars_dir, entries: dict[str, list[tuple[dt.date, int]]]) -> None:
+    import polars as pl
+
+    from src.marketdata.partitioned_store import upsert_month_partitions
+
+    rows = [(symbol, day, volume) for symbol, days in entries.items() for day, volume in days]
+    frame = pl.DataFrame(
+        {
+            "date": [row[1] for row in rows],
+            "symbol": [row[0] for row in rows],
+            "close": [1000.0] * len(rows),
+            "volume": [row[2] for row in rows],
+            "trade_value_100m": [100.0] * len(rows),
+            "daily_change_pct": [1.0] * len(rows),
+        },
+        schema={
+            "date": pl.Date,
+            "symbol": pl.String,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+            "trade_value_100m": pl.Float64,
+            "daily_change_pct": pl.Float64,
+        },
+    )
+    upsert_month_partitions(bars_dir, frame, key_columns=("date", "symbol"), sort_columns=("date", "symbol"))
+
+
+def test_find_program_trade_gaps_detects_interior_gap(tmp_path) -> None:
+    # Given: A가 D2에만 프로그램매매 행이 없는 저장/일봉 스토어
+    bars = tmp_path / "bars" / "daily"
+    store = tmp_path / "bars" / "program_trades"
+    _seed_bars(bars, {"A": [(_D1, 1000), (_D2, 1000), (_D3, 1000)]})
+    tpt.append_program_trades(store, [_row("A", _D1), _row("A", _D3)])
+
+    # When
+    report = tpt.find_program_trade_gaps(
+        store, bars_daily_dir=bars, coverage={"A": (_D1, _D3)}, complete_through=_D3, window_business_days=20
+    )
+
+    # Then
+    assert report.status is tpt.ProgramTradeGapStatus.GAPS
+    assert report.window == (_D1, _D2, _D3)
+    assert report.missing == {"A": (_D2,)}
+    assert report.missing_pairs == 1
+    assert report.earliest_missing == _D2
+
+
+def test_find_program_trade_gaps_holiday_is_never_expected(tmp_path) -> None:
+    # Given: 휴장일 D2에는 일봉 자체가 없는 캘린더
+    bars = tmp_path / "bars" / "daily"
+    store = tmp_path / "bars" / "program_trades"
+    _seed_bars(bars, {"A": [(_D1, 1000), (_D3, 1000)]})
+    tpt.append_program_trades(store, [_row("A", _D1), _row("A", _D3)])
+
+    # When
+    report = tpt.find_program_trade_gaps(
+        store, bars_daily_dir=bars, coverage={"A": (_D1, _D3)}, complete_through=_D3, window_business_days=20
+    )
+
+    # Then
+    assert report.status is tpt.ProgramTradeGapStatus.COMPLETE
+    assert report.missing == {}
+    assert report.earliest_missing is None
+
+
+def test_find_program_trade_gaps_halted_day_is_never_expected(tmp_path) -> None:
+    # Given: D2 일봉 거래량이 0인 정지일
+    bars = tmp_path / "bars" / "daily"
+    store = tmp_path / "bars" / "program_trades"
+    _seed_bars(bars, {"A": [(_D1, 1000), (_D2, 0), (_D3, 1000)]})
+    tpt.append_program_trades(store, [_row("A", _D1), _row("A", _D3)])
+
+    # When
+    report = tpt.find_program_trade_gaps(
+        store, bars_daily_dir=bars, coverage={"A": (_D1, _D3)}, complete_through=_D3, window_business_days=20
+    )
+
+    # Then
+    assert report.status is tpt.ProgramTradeGapStatus.COMPLETE
+
+
+def test_find_program_trade_gaps_history_starts_inside_window(tmp_path) -> None:
+    # Given: A의 첫 프로그램매매 행이 D3라 D1/D2는 기대 대상이 아니다
+    bars = tmp_path / "bars" / "daily"
+    store = tmp_path / "bars" / "program_trades"
+    _seed_bars(bars, {"A": [(_D1, 1000), (_D2, 1000), (_D3, 1000)]})
+    tpt.append_program_trades(store, [_row("A", _D3)])
+
+    # When
+    report = tpt.find_program_trade_gaps(
+        store, bars_daily_dir=bars, coverage={"A": (_D3, _D3)}, complete_through=_D3, window_business_days=20
+    )
+
+    # Then
+    assert report.status is tpt.ProgramTradeGapStatus.COMPLETE
+
+
+def test_find_program_trade_gaps_detects_gap_at_window_edge(tmp_path) -> None:
+    # Given: K=3에서 window[0]인 D3가 비어 있는 스토어
+    bars = tmp_path / "bars" / "daily"
+    store = tmp_path / "bars" / "program_trades"
+    _seed_bars(bars, {"A": [(_D1, 1000), (_D2, 1000), (_D3, 1000), (_D4, 1000), (_D5, 1000)]})
+    tpt.append_program_trades(store, [_row("A", _D1), _row("A", _D2), _row("A", _D4), _row("A", _D5)])
+
+    # When
+    report = tpt.find_program_trade_gaps(
+        store, bars_daily_dir=bars, coverage={"A": (_D1, _D5)}, complete_through=_D5, window_business_days=3
+    )
+
+    # Then
+    assert report.window == (_D3, _D4, _D5)
+    assert report.missing == {"A": (_D3,)}
+
+
+def test_find_program_trade_gaps_ignores_gap_outside_window(tmp_path) -> None:
+    # Given: K=3에서 window[0] 바로 이전 영업일 D2가 비어 있는 스토어
+    bars = tmp_path / "bars" / "daily"
+    store = tmp_path / "bars" / "program_trades"
+    _seed_bars(bars, {"A": [(_D1, 1000), (_D2, 1000), (_D3, 1000), (_D4, 1000), (_D5, 1000)]})
+    tpt.append_program_trades(store, [_row("A", _D1), _row("A", _D3), _row("A", _D4), _row("A", _D5)])
+
+    # When
+    report = tpt.find_program_trade_gaps(
+        store, bars_daily_dir=bars, coverage={"A": (_D1, _D5)}, complete_through=_D5, window_business_days=3
+    )
+
+    # Then
+    assert report.status is tpt.ProgramTradeGapStatus.COMPLETE
+
+
+def test_find_program_trade_gaps_short_calendar_uses_available_days(tmp_path) -> None:
+    # Given: 영업일이 5일뿐이고 K=20
+    bars = tmp_path / "bars" / "daily"
+    store = tmp_path / "bars" / "program_trades"
+    _seed_bars(bars, {"A": [(_D1, 1000), (_D2, 1000), (_D3, 1000), (_D4, 1000), (_D5, 1000)]})
+    tpt.append_program_trades(store, [_row("A", _D1), _row("A", _D2), _row("A", _D4), _row("A", _D5)])
+
+    # When
+    report = tpt.find_program_trade_gaps(
+        store, bars_daily_dir=bars, coverage={"A": (_D1, _D5)}, complete_through=_D5, window_business_days=20
+    )
+
+    # Then
+    assert report.window == (_D1, _D2, _D3, _D4, _D5)
+    assert report.missing == {"A": (_D3,)}
+
+
+def test_find_program_trade_gaps_uncertified_without_bars_store(tmp_path) -> None:
+    # Given: 일봉 스토어 자체가 없음
+    store = tmp_path / "bars" / "program_trades"
+    tpt.append_program_trades(store, [_row("A", _D1), _row("A", _D3)])
+
+    # When
+    report = tpt.find_program_trade_gaps(
+        store, bars_daily_dir=tmp_path / "missing", coverage={"A": (_D1, _D3)}, complete_through=_D3, window_business_days=20
+    )
+
+    # Then: 미인증 캘린더는 COMPLETE로 위장하지 않는다
+    assert report.status is tpt.ProgramTradeGapStatus.CALENDAR_UNAVAILABLE
+    assert report.window == ()
+    assert report.missing == {}
+
+
+def test_find_program_trade_gaps_uncertified_when_calendar_lags(tmp_path) -> None:
+    # Given: 일봉 최신일 D3 < complete_through D4
+    bars = tmp_path / "bars" / "daily"
+    store = tmp_path / "bars" / "program_trades"
+    _seed_bars(bars, {"A": [(_D1, 1000), (_D2, 1000), (_D3, 1000)]})
+    tpt.append_program_trades(store, [_row("A", _D1), _row("A", _D3)])
+
+    # When
+    report = tpt.find_program_trade_gaps(
+        store, bars_daily_dir=bars, coverage={"A": (_D1, _D3)}, complete_through=_D4, window_business_days=20
+    )
+
+    # Then
+    assert report.status is tpt.ProgramTradeGapStatus.CALENDAR_UNAVAILABLE
+
+
+def test_find_program_trade_gaps_uncertified_when_no_bar_in_range(tmp_path) -> None:
+    # Given: 일봉이 complete_through 이후 날짜만 존재
+    bars = tmp_path / "bars" / "daily"
+    store = tmp_path / "bars" / "program_trades"
+    _seed_bars(bars, {"A": [(_D4, 1000)]})
+    tpt.append_program_trades(store, [_row("A", _D4)])
+
+    # When
+    report = tpt.find_program_trade_gaps(
+        store, bars_daily_dir=bars, coverage={"A": (_D4, _D4)}, complete_through=_D3, window_business_days=20
+    )
+
+    # Then
+    assert report.status is tpt.ProgramTradeGapStatus.CALENDAR_UNAVAILABLE
+
+
+def test_find_program_trade_gaps_missing_complete_through_is_a_gap(tmp_path) -> None:
+    # Given: A의 마지막 행이 D2인데 complete_through D3는 거래일
+    bars = tmp_path / "bars" / "daily"
+    store = tmp_path / "bars" / "program_trades"
+    _seed_bars(bars, {"A": [(_D1, 1000), (_D2, 1000), (_D3, 1000)]})
+    tpt.append_program_trades(store, [_row("A", _D1), _row("A", _D2)])
+
+    # When
+    report = tpt.find_program_trade_gaps(
+        store, bars_daily_dir=bars, coverage={"A": (_D1, _D2)}, complete_through=_D3, window_business_days=20
+    )
+
+    # Then
+    assert report.missing == {"A": (_D3,)}
+
+
+def test_find_program_trade_gaps_ignores_dates_after_complete_through(tmp_path) -> None:
+    # Given: D4 일봉이 이미 발행됐지만 complete_through는 D3
+    bars = tmp_path / "bars" / "daily"
+    store = tmp_path / "bars" / "program_trades"
+    _seed_bars(bars, {"A": [(_D1, 1000), (_D2, 1000), (_D3, 1000), (_D4, 1000)]})
+    tpt.append_program_trades(store, [_row("A", _D1), _row("A", _D2), _row("A", _D3)])
+
+    # When
+    report = tpt.find_program_trade_gaps(
+        store, bars_daily_dir=bars, coverage={"A": (_D1, _D3)}, complete_through=_D3, window_business_days=20
+    )
+
+    # Then: D4는 기대 대상이 아니다
+    assert report.status is tpt.ProgramTradeGapStatus.COMPLETE
+
+
+def test_find_program_trade_gaps_rejects_non_positive_window(tmp_path) -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="positive"):
+        tpt.find_program_trade_gaps(
+            tmp_path / "store", bars_daily_dir=tmp_path / "bars", coverage={}, complete_through=_D3, window_business_days=0
+        )
+
+
+def test_find_program_trade_gaps_wraps_corrupt_program_store(tmp_path) -> None:
+    # Given: 손상된 프로그램매매 파티션
+    import pytest
+
+    bars = tmp_path / "bars" / "daily"
+    store = tmp_path / "bars" / "program_trades"
+    _seed_bars(bars, {"A": [(_D1, 1000), (_D2, 1000), (_D3, 1000)]})
+    store.mkdir(parents=True)
+    (store / "2026-09.parquet").write_bytes(b"not-a-parquet")
+
+    # When / Then: fail-closed
+    with pytest.raises(TossProgramTradesError, match="unreadable"):
+        tpt.find_program_trade_gaps(
+            store, bars_daily_dir=bars, coverage={"A": (_D1, _D3)}, complete_through=_D3, window_business_days=20
+        )
+
+
+def test_find_program_trade_gaps_rejects_file_path_store(tmp_path) -> None:
+    # Given: 디렉터리가 아닌 레거시 파일 경로
+    import pytest
+
+    bars = tmp_path / "bars" / "daily"
+    store = tmp_path / "program_trades.parquet"
+    _seed_bars(bars, {"A": [(_D1, 1000), (_D2, 1000), (_D3, 1000)]})
+    store.write_bytes(b"legacy bytes")
+
+    # When / Then
+    with pytest.raises(TossProgramTradesError, match="not a directory"):
+        tpt.find_program_trade_gaps(
+            store, bars_daily_dir=bars, coverage={"A": (_D1, _D3)}, complete_through=_D3, window_business_days=20
+        )
+
+
+def test_find_program_trade_gaps_treats_absent_store_as_all_missing(tmp_path) -> None:
+    # Given: 프로그램매매 스토어가 아직 없음
+    bars = tmp_path / "bars" / "daily"
+    _seed_bars(bars, {"A": [(_D1, 1000), (_D2, 1000), (_D3, 1000)]})
+
+    # When
+    report = tpt.find_program_trade_gaps(
+        tmp_path / "bars" / "program_trades",
+        bars_daily_dir=bars,
+        coverage={"A": (_D1, _D3)},
+        complete_through=_D3,
+        window_business_days=20,
+    )
+
+    # Then: 저장분이 없으니 기대 쌍 전부가 누락이다
+    assert report.status is tpt.ProgramTradeGapStatus.GAPS
+    assert report.missing == {"A": (_D1, _D2, _D3)}
+
+
+def test_find_program_trade_gaps_empty_coverage_is_complete(tmp_path) -> None:
+    # Given: 점검 대상 종목이 없지만 캘린더는 인증된다
+    bars = tmp_path / "bars" / "daily"
+    _seed_bars(bars, {"A": [(_D1, 1000), (_D2, 1000), (_D3, 1000)]})
+
+    # When
+    report = tpt.find_program_trade_gaps(
+        tmp_path / "bars" / "program_trades",
+        bars_daily_dir=bars,
+        coverage={},
+        complete_through=_D3,
+        window_business_days=20,
+    )
+
+    # Then
+    assert report.status is tpt.ProgramTradeGapStatus.COMPLETE
+    assert report.window == (_D1, _D2, _D3)
+
+
+@pytest.mark.parametrize("failure", ["missing_volume", "corrupt_volume", "corrupt_parquet"])
+def test_gap_calendar_read_failure_is_unverified(tmp_path, failure) -> None:
+    import polars as pl
+
+    bars = tmp_path / "daily"
+    bars.mkdir()
+    path = bars / "2026-09.parquet"
+    if failure == "corrupt_parquet":
+        path.write_bytes(b"invalid parquet")
+    else:
+        frame = pl.DataFrame({"symbol": ["A"], "date": [_D3]})
+        if failure == "corrupt_volume":
+            frame = frame.with_columns(pl.lit("invalid").alias("volume"))
+        frame.write_parquet(path)
+    report = tpt.find_program_trade_gaps(
+        tmp_path / "program", bars_daily_dir=bars, coverage={"A": (_D1, _D3)},
+        complete_through=_D3, window_business_days=20,
+    )
+    assert report.status is tpt.ProgramTradeGapStatus.CALENDAR_UNAVAILABLE
+    assert report.window == ()
+    assert report.missing == {}
+
+
+def test_gap_check_prunes_future_and_old_partitions(tmp_path) -> None:
+    bars = tmp_path / "daily"
+    store = tmp_path / "program"
+    _seed_bars(bars, {"A": [(_D1, 1), (_D2, 1), (_D3, 1)]})
+    tpt.append_program_trades(store, [_row("A", _D1), _row("A", _D3)])
+    for root in (bars, store):
+        (root / "2026-10.parquet").write_bytes(b"future corruption")
+    (store / "2026-08.parquet").write_bytes(b"old corruption")
+    report = tpt.find_program_trade_gaps(
+        store, bars_daily_dir=bars, coverage={"A": (_D1, _D3)},
+        complete_through=_D3, window_business_days=2,
+    )
+    assert report.window == (_D2, _D3)
+    assert report.missing == {"A": (_D2,)}
+
+
+def test_gap_check_rejects_unreadable_program_directory(tmp_path, monkeypatch) -> None:
+    import pathlib
+
+    bars = tmp_path / "daily"
+    store = tmp_path / "program"
+    _seed_bars(bars, {"A": [(_D3, 1)]})
+    store.mkdir()
+    original = pathlib.Path.iterdir
+
+    def iterdir(path):
+        if path == store:
+            raise PermissionError("denied")
+        return original(path)
+
+    monkeypatch.setattr(pathlib.Path, "iterdir", iterdir)
+    with pytest.raises(TossProgramTradesError, match="unreadable"):
+        tpt.find_program_trade_gaps(
+            store, bars_daily_dir=bars, coverage={"A": (_D1, _D3)},
+            complete_through=_D3, window_business_days=20,
+        )

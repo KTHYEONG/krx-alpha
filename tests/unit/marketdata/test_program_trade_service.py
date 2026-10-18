@@ -657,3 +657,325 @@ def test_backfill_aborts_when_rotation_issuance_fails(tmp_path, monkeypatch) -> 
             rate_per_s=1000.0,
             cache_dir=tmp_path / "cache",
         )
+
+
+_SD1 = dt.date(2026, 9, 1)
+_SD2 = dt.date(2026, 9, 2)
+_SD3 = dt.date(2026, 9, 3)
+_SD4 = dt.date(2026, 9, 4)
+
+
+def _seed_bars(bars_dir, entries: dict[str, list[dt.date]]) -> None:
+    import polars as pl
+
+    from src.marketdata.partitioned_store import upsert_month_partitions
+
+    rows = [(symbol, day) for symbol, days in entries.items() for day in days]
+    frame = pl.DataFrame(
+        {
+            "date": [row[1] for row in rows],
+            "symbol": [row[0] for row in rows],
+            "close": [1000.0] * len(rows),
+            "volume": [1000] * len(rows),
+            "trade_value_100m": [100.0] * len(rows),
+            "daily_change_pct": [1.0] * len(rows),
+        },
+        schema={
+            "date": pl.Date,
+            "symbol": pl.String,
+            "close": pl.Float64,
+            "volume": pl.Int64,
+            "trade_value_100m": pl.Float64,
+            "daily_change_pct": pl.Float64,
+        },
+    )
+    upsert_month_partitions(bars_dir, frame, key_columns=("date", "symbol"), sort_columns=("date", "symbol"))
+
+
+def _forward(service, store, bars, monkeypatch, **overrides):
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: "tok")
+    kwargs = {
+        "store_root": store,
+        "session_date": _SD4,
+        "complete_through": _SD3,
+        "candidate_symbols": (),
+        "lookback_days": 120,
+        "app_key": "k",
+        "app_secret": "s",
+        "rate_per_s": 1000.0,
+        "bars_daily_dir": bars,
+        "gap_window_business_days": 20,
+    }
+    kwargs.update(overrides)
+    return service.sync_program_trades_forward(**kwargs)
+
+
+def test_forward_sync_lowers_floor_for_interior_gap(tmp_path, monkeypatch) -> None:
+    # Given: A가 D1,D3,D4를 가지며 D2 내부 갭이 있고 일봉은 D1..D3
+    from src.marketdata import program_trade_service as service
+    from src.marketdata.toss_program_trades import ProgramTradeGapStatus
+
+    store = tmp_path / "program_trades"
+    bars = tmp_path / "bars" / "daily"
+    _seed(store, {"A": [_SD1, _SD3, _SD4]})
+    _seed_bars(bars, {"A": [_SD1, _SD2, _SD3]})
+    calls: dict[str, dt.date] = {}
+
+    def _fake_history(symbol: str, **kwargs) -> tuple:
+        calls[symbol] = kwargs["min_date"]
+        return (_pt_row(symbol, _SD2),)
+
+    monkeypatch.setattr(service, "backfill_program_trades_history", _fake_history)
+
+    # When
+    result = _forward(service, store, bars, monkeypatch)
+
+    # Then: 내부 갭 날짜로 바닥이 낮아져 한 번에 봉합된다
+    assert calls == {"A": _SD2}
+    assert result.gap_targets == ("A",)
+    assert result.forward_targets == ()
+    assert result.gap_report is not None
+    assert result.gap_report.status is ProgramTradeGapStatus.COMPLETE
+
+
+def test_forward_sync_vendor_hole_persists_as_post_gap(tmp_path, monkeypatch) -> None:
+    # Given: 벤더가 D2를 끝내 주지 않는 상태
+    from src.marketdata import program_trade_service as service
+
+    store = tmp_path / "program_trades"
+    bars = tmp_path / "bars" / "daily"
+    _seed(store, {"A": [_SD1, _SD3, _SD4]})
+    _seed_bars(bars, {"A": [_SD1, _SD2, _SD3]})
+    monkeypatch.setattr(service, "backfill_program_trades_history", lambda symbol, **kwargs: ())
+
+    # When
+    result = _forward(service, store, bars, monkeypatch)
+
+    # Then: 사후 보고서가 잔여 갭을 유지한다
+    assert result.gap_report is not None
+    assert result.gap_report.missing == {"A": (_SD2,)}
+
+
+def test_forward_sync_tail_gap_floor_stays_max_plus_one(tmp_path, monkeypatch) -> None:
+    # Given: 내부 갭 없이 세션일보다 뒤처진 A
+    from src.marketdata import program_trade_service as service
+
+    store = tmp_path / "program_trades"
+    bars = tmp_path / "bars" / "daily"
+    _seed(store, {"A": [_SD1, _SD2, _SD3]})
+    _seed_bars(bars, {"A": [_SD1, _SD2, _SD3]})
+    calls: dict[str, dt.date] = {}
+
+    def _fake_history(symbol: str, **kwargs) -> tuple:
+        calls[symbol] = kwargs["min_date"]
+        return ()
+
+    monkeypatch.setattr(service, "backfill_program_trades_history", _fake_history)
+
+    # When
+    result = _forward(service, store, bars, monkeypatch)
+
+    # Then: 꼬리 갭은 max+1, 갭 대상 아님
+    assert calls == {"A": _SD4}
+    assert result.gap_targets == ()
+
+
+def test_forward_sync_does_not_gap_check_delisted_symbol(tmp_path, monkeypatch) -> None:
+    # Given: 상장폐지 B가 D2 내부 갭을 갖지만 active_symbols에 없음
+    from src.marketdata import program_trade_service as service
+
+    store = tmp_path / "program_trades"
+    bars = tmp_path / "bars" / "daily"
+    _seed(store, {"A": [_SD1, _SD2, _SD3], "B": [_SD1, _SD3]})
+    _seed_bars(bars, {"A": [_SD1, _SD2, _SD3], "B": [_SD1, _SD2, _SD3]})
+    calls: list[str] = []
+
+    def _fake_history(symbol: str, **kwargs) -> tuple:
+        calls.append(symbol)
+        return ()
+
+    monkeypatch.setattr(service, "backfill_program_trades_history", _fake_history)
+
+    # When
+    result = _forward(service, store, bars, monkeypatch, active_symbols=frozenset({"A"}))
+
+    # Then: B는 갭 대상도, 누락 목록도 아니다
+    assert calls == ["A"]
+    assert result.gap_targets == ()
+    assert result.gap_report is not None
+    assert "B" not in result.gap_report.missing
+
+
+def test_forward_sync_keeps_candidate_lookback_floor(tmp_path, monkeypatch) -> None:
+    # Given: 이력이 없는 후보 C
+    from src.marketdata import program_trade_service as service
+
+    store = tmp_path / "program_trades"
+    bars = tmp_path / "bars" / "daily"
+    _seed(store, {"A": [_SD1, _SD2, _SD3]})
+    _seed_bars(bars, {"A": [_SD1, _SD2, _SD3]})
+    calls: dict[str, dt.date] = {}
+
+    def _fake_history(symbol: str, **kwargs) -> tuple:
+        calls[symbol] = kwargs["min_date"]
+        return ()
+
+    monkeypatch.setattr(service, "backfill_program_trades_history", _fake_history)
+
+    # When
+    result = _forward(service, store, bars, monkeypatch, candidate_symbols=("000660",), lookback_days=10)
+
+    # Then: 후보 바닥은 세션일-lookback 그대로다
+    assert result.candidate_targets == ("000660",)
+    assert calls["000660"] == _SD4 - dt.timedelta(days=10)
+
+
+def test_forward_sync_gap_check_is_idempotent_on_complete_store(tmp_path, monkeypatch) -> None:
+    # Given: 갭이 없는 완전한 스토어
+    from src.marketdata import program_trade_service as service
+
+    store = tmp_path / "program_trades"
+    bars = tmp_path / "bars" / "daily"
+    _seed(store, {"A": [_SD1, _SD2, _SD3]})
+    _seed_bars(bars, {"A": [_SD1, _SD2, _SD3]})
+    monkeypatch.setattr(service, "backfill_program_trades_history", lambda symbol, **kwargs: ())
+    from src.marketdata.partitioned_store import scan_month_partitions
+
+    before = scan_month_partitions(store).collect().sort("symbol", "date")
+
+    # When
+    first = _forward(service, store, bars, monkeypatch)
+    second = _forward(service, store, bars, monkeypatch)
+
+    # Then: 재실행은 갭 대상을 만들지 않고 스토어를 바꾸지 않는다
+    assert first.gap_targets == ()
+    assert second.gap_targets == ()
+    assert second.appended_rows == 0
+    assert scan_month_partitions(store).collect().sort("symbol", "date").equals(before)
+
+
+def test_forward_sync_gap_check_disabled_matches_legacy(tmp_path, monkeypatch) -> None:
+    # Given: 새 파라미터를 모두 생략한 레거시 호출
+    from src.marketdata import program_trade_service as service
+
+    store = tmp_path / "program_trades"
+    _seed(store, {"A": [_SD1]})
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: "tok")
+    monkeypatch.setattr(service, "backfill_program_trades_history", lambda symbol, **kwargs: ())
+
+    # When
+    result = service.sync_program_trades_forward(
+        store_root=store,
+        session_date=_SD4,
+        complete_through=_SD3,
+        candidate_symbols=(),
+        lookback_days=120,
+        app_key="k",
+        app_secret="s",
+        rate_per_s=1000.0,
+    )
+
+    # Then: 갭 필드는 기본값 그대로다
+    assert result.gap_targets == ()
+    assert result.gap_report is None
+
+
+def test_forward_sync_rejects_half_configured_gap_check(tmp_path, monkeypatch) -> None:
+    # Given: 두 파라미터 중 하나만 지정
+    import pytest
+
+    from src.marketdata import program_trade_service as service
+
+    store = tmp_path / "program_trades"
+    _seed(store, {"A": [_SD1]})
+    calls: list[str] = []
+    monkeypatch.setattr(service, "issue_access_token", lambda **kwargs: calls.append("token") or "tok")
+    base = {
+        "store_root": store,
+        "session_date": _SD4,
+        "complete_through": _SD3,
+        "candidate_symbols": (),
+        "lookback_days": 120,
+        "app_key": "k",
+        "app_secret": "s",
+        "rate_per_s": 1000.0,
+    }
+
+    # When / Then: 벤더 호출 전에 fail-closed
+    with pytest.raises(ValueError, match="together"):
+        service.sync_program_trades_forward(**base, bars_daily_dir=tmp_path / "bars")
+    with pytest.raises(ValueError, match="together"):
+        service.sync_program_trades_forward(**base, gap_window_business_days=20)
+    assert calls == []
+
+
+def test_forward_sync_unverified_calendar_keeps_max_plus_one_floor(tmp_path, monkeypatch) -> None:
+    # Given: 일봉 스토어가 없어 캘린더를 인증할 수 없음
+    from src.marketdata import program_trade_service as service
+    from src.marketdata.toss_program_trades import ProgramTradeGapStatus
+
+    store = tmp_path / "program_trades"
+    _seed(store, {"A": [_SD1, _SD2, _SD3]})
+    calls: dict[str, dt.date] = {}
+
+    def _fake_history(symbol: str, **kwargs) -> tuple:
+        calls[symbol] = kwargs["min_date"]
+        return ()
+
+    monkeypatch.setattr(service, "backfill_program_trades_history", _fake_history)
+
+    # When
+    result = _forward(service, store, tmp_path / "missing-bars", monkeypatch)
+
+    # Then: 바닥 변경 없이 기존 max+1 로직이 돈다
+    assert calls == {"A": _SD4}
+    assert result.gap_targets == ()
+    assert result.gap_report is not None
+    assert result.gap_report.status is ProgramTradeGapStatus.CALENDAR_UNAVAILABLE
+
+
+def test_tail_missing_day_does_not_count_as_lowered_gap_floor(tmp_path, monkeypatch) -> None:
+    from src.marketdata import program_trade_service as service
+
+    store = tmp_path / "program"
+    bars = tmp_path / "daily"
+    _seed(store, {"A": [_SD1, _SD2]})
+    _seed_bars(bars, {"A": [_SD1, _SD2, _SD3]})
+    calls = {}
+
+    def fetch(symbol, **kwargs):
+        calls[symbol] = kwargs["min_date"]
+        return ()
+
+    monkeypatch.setattr(service, "backfill_program_trades_history", fetch)
+    result = _forward(service, store, bars, monkeypatch)
+    assert calls == {"A": _SD3}
+    assert result.forward_targets == ("A",)
+    assert result.gap_targets == ()
+    assert result.gap_report.missing == {"A": (_SD3,)}
+
+
+def test_healed_store_rerun_does_not_fetch_again(tmp_path, monkeypatch) -> None:
+    from src.marketdata import program_trade_service as service
+    from src.marketdata.partitioned_store import scan_month_partitions
+    from src.marketdata.toss_program_trades import ProgramTradeGapStatus
+
+    store = tmp_path / "program"
+    bars = tmp_path / "daily"
+    _seed(store, {"A": [_SD1, _SD3, _SD4]})
+    _seed_bars(bars, {"A": [_SD1, _SD2, _SD3]})
+    calls = []
+
+    def fetch(symbol, **kwargs):
+        calls.append((symbol, kwargs["min_date"]))
+        return (_pt_row(symbol, _SD2),)
+
+    monkeypatch.setattr(service, "backfill_program_trades_history", fetch)
+    first = _forward(service, store, bars, monkeypatch)
+    before = scan_month_partitions(store).collect().sort("symbol", "date")
+    second = _forward(service, store, bars, monkeypatch)
+    assert calls == [("A", _SD2)]
+    assert first.gap_report.status is ProgramTradeGapStatus.COMPLETE
+    assert second.gap_targets == ()
+    assert second.symbols_ok == 0
+    assert scan_month_partitions(store).collect().sort("symbol", "date").equals(before)

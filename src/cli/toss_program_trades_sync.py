@@ -20,7 +20,7 @@ from src.core.config import (
 from src.core.errors import MissingCredentialsError
 from src.core.observability import configure_logging
 from src.marketdata.program_trade_service import sync_program_trades_forward
-from src.marketdata.toss_program_trades import TossProgramTradesError
+from src.marketdata.toss_program_trades import ProgramTradeGapStatus, TossProgramTradesError
 from src.universe.ipc import CandidateFileError, read_candidates
 
 logger = logging.getLogger(__name__)
@@ -56,8 +56,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             symbol is expected to have rows through this date after the run.
 
     Exit codes:
-        0: sync finished and staleness is within tolerance.
-        2: sync finished but staleness exceeded tolerance (CRITICAL logged).
+        0: sync finished and staleness is within tolerance, with a verified calendar and no residual gaps.
+        2: sync finished but staleness exceeded tolerance, residual interior gaps remain, or the trading calendar is unverified (CRITICAL logged).
         1: fatal error (credentials, token, unreadable store).
     """
     args = build_parser().parse_args(argv)
@@ -83,6 +83,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             active_symbols=_active_symbols(paths.market_map),
             cache_dir=KisTokenSettings().token_cache_dir,
             max_lead_s=settings.rest_max_lead_s,
+            bars_daily_dir=paths.bars_daily_dir,
+            gap_window_business_days=settings.gap_check_business_days,
         )
     except MissingCredentialsError as exc:
         logger.error("[DATA] stage=program_trades_sync status=FAIL reason=missing_credentials:%s", str(exc))
@@ -94,7 +96,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     tracked = len(result.tracked)
     ratio = (stale / tracked) if tracked else 0.0
     sample = ",".join(result.stale_symbols[:10])
-    if ratio > settings.max_stale_ratio:
+    report = result.gap_report
+    stale_exceeded = ratio > settings.max_stale_ratio
+    if stale_exceeded:
         logger.critical(
             "[DATA] stage=program_trades_sync status=STALE stale=%d tracked=%d ratio=%.4f complete_through=%s stale_sample=%s",
             stale,
@@ -103,14 +107,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             complete_through.isoformat(),
             sample,
         )
+    if report is not None and report.status is ProgramTradeGapStatus.GAPS:
+        gap_entries = [f"{symbol}:{day.isoformat()}" for symbol, days in sorted(report.missing.items()) for day in days]
+        logger.critical(
+            "[DATA] stage=program_trades_gap status=GAPS symbols=%d pairs=%d earliest=%s window=%s..%s complete_through=%s sample=%s",
+            len(report.missing),
+            report.missing_pairs,
+            report.earliest_missing,
+            report.window[0].isoformat(),
+            report.window[-1].isoformat(),
+            complete_through.isoformat(),
+            ",".join(gap_entries[:10]),
+        )
+    elif report is not None and report.status is ProgramTradeGapStatus.CALENDAR_UNAVAILABLE:
+        logger.critical(
+            "[DATA] stage=program_trades_gap status=UNVERIFIED reason=calendar_unavailable complete_through=%s",
+            complete_through.isoformat(),
+        )
+    gap_problem = report is not None and report.status is not ProgramTradeGapStatus.COMPLETE
+    if stale_exceeded or gap_problem:
         return 2
     logger.info(
-        "[DATA] stage=program_trades_sync status=OK fetched_symbols=%d appended_rows=%d stale=%d tracked=%d ratio=%.4f stale_sample=%s",
+        "[DATA] stage=program_trades_sync status=OK fetched_symbols=%d appended_rows=%d stale=%d tracked=%d ratio=%.4f gap_targets=%d gap_pairs=0 stale_sample=%s",
         result.symbols_ok,
         result.appended_rows,
         stale,
         tracked,
         ratio,
+        len(result.gap_targets),
         sample,
     )
     return 0

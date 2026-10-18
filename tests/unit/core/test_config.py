@@ -1018,3 +1018,31 @@ def test_non_positive_mock_timeout_is_rejected() -> None:
 
     with pytest.raises(ValidationError):
         ExecutionSettings(mock_request_timeout_s=0)
+
+
+def test_toss_program_trades_gap_check_business_days_defaults(monkeypatch) -> None:
+    # Given: 환경변수 없음
+    import os
+
+    from src.core.config import TossProgramTradesSettings
+
+    for name in [n for n in os.environ if n.startswith("KRX_ALPHA_TOSS_PROGRAM_")]:
+        monkeypatch.delenv(name, raising=False)
+
+    # When
+    settings = TossProgramTradesSettings()
+
+    # Then: 내부 갭 점검 창은 기본 20영업일
+    assert settings.gap_check_business_days == 20
+
+
+def test_toss_program_trades_gap_check_business_days_rejects_zero() -> None:
+    # Given: 0인 갭 점검 창
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import TossProgramTradesSettings
+
+    # When / Then: 생성 시점에 fail-closed
+    with pytest.raises(ValidationError):
+        TossProgramTradesSettings(gap_check_business_days=0)
