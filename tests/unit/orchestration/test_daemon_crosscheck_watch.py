@@ -310,6 +310,7 @@ def test_digest_body_unchanged_without_crosscheck(tmp_path, monkeypatch) -> None
         "purged=3",
         "reconciled=True",
         "aftermarket_ready=True",
+        "aftermarket_zero_frame_symbols=0",
         "aftermarket_prearm_late=0",
         "backup_missing=0",
         "host_backup=ok",

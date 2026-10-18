@@ -969,6 +969,37 @@
         ],
         [
           "INFO",
+          "[DATA] stage=aftermarket_coverage status=UNVERIFIABLE venue=%s shard=%d reason=%s",
+          [
+            "nxt",
+            0,
+            "manifest_missing"
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DATA] stage=aftermarket_coverage status=UNVERIFIABLE venue=%s shard=%d reason=%s",
+          [
+            "krx",
+            0,
+            "manifest_missing"
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DATA] stage=aftermarket_coverage status=%s zero=%d shards=%d date=%s",
+          [
+            "OK",
+            0,
+            2,
+            "2026-09-16"
+          ],
+          false
+        ],
+        [
+          "INFO",
           "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=%s",
           [
             1,
@@ -1720,6 +1751,9 @@
     "[DAEMON] stage=streamer status=STARTED",
     "[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s",
     "[DAEMON] stage=streamer_stop result=%s",
+    "[DATA] stage=aftermarket_coverage status=%s zero=%d shards=%d date=%s",
+    "[DATA] stage=aftermarket_coverage status=UNVERIFIABLE venue=%s shard=%d reason=%s",
+    "[DATA] stage=aftermarket_coverage status=ZERO_FRAMES venue=%s shard=%d accepted=%d zero=%d symbols=%s",
     "[DATA] stage=aftermarket_prearm status=%s armed=%d shards=%d date=%s",
     "[DATA] stage=aftermarket_prearm status=%s venue=%s shard=%d open=%s start_lead_s=%s ack_lead_s=%s reason=%s",
     "[DATA] stage=aftermarket_reselection status=OK venue=%s symbols=%d",

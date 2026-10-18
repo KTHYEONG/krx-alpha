@@ -75,6 +75,7 @@ from src.orchestration.eod import (
     PrearmVerdict,
     aftermarket_eod_ready,
     check_aftermarket_prearm,
+    check_aftermarket_symbol_coverage,
     check_backup_freshness,
     check_host_backup_freshness,
     check_session_reconciliation,
@@ -2197,6 +2198,44 @@ class DaemonRunner:
         )
         return late
 
+    def _log_aftermarket_coverage(self, ref_day: dt.date) -> int:
+        """Log per-shard zero-frame symbols for today's aftermarket plan; return the total zero-frame symbol count."""
+        st = self._state
+        if not self._cfg.after_market_enabled or not st.aftermarket_plan:
+            return 0
+        expected = tuple(
+            (shard, self._paths.aftermarket_manifest_path(ref_day, shard.venue, shard.shard_index))
+            for shard in st.aftermarket_plan
+        )
+        findings = check_aftermarket_symbol_coverage(expected=expected, date=ref_day)
+        zero_total = 0
+        for finding in findings:
+            if finding.zero_frame_symbols is None:
+                logger.info(
+                    "[DATA] stage=aftermarket_coverage status=UNVERIFIABLE venue=%s shard=%d reason=%s",
+                    finding.venue,
+                    finding.shard_index,
+                    finding.reason,
+                )
+            elif finding.zero_frame_symbols:
+                zero_total += len(finding.zero_frame_symbols)
+                logger.warning(
+                    "[DATA] stage=aftermarket_coverage status=ZERO_FRAMES venue=%s shard=%d accepted=%d zero=%d symbols=%s",
+                    finding.venue,
+                    finding.shard_index,
+                    finding.accepted_symbols,
+                    len(finding.zero_frame_symbols),
+                    ",".join(finding.zero_frame_symbols),
+                )
+        logger.info(
+            "[DATA] stage=aftermarket_coverage status=%s zero=%d shards=%d date=%s",
+            "GAPS" if zero_total else "OK",
+            zero_total,
+            len(findings),
+            ref_day.isoformat(),
+        )
+        return zero_total
+
     def _step_post_market_eod(self, now: dt.datetime, day: TradingDayView | None, anchors: SessionAnchors) -> float:
         """Stop session children and run EOD maintenance once per KST date; return 60.0 s.
 
@@ -2254,6 +2293,7 @@ class DaemonRunner:
         paths = self._paths
         aftermarket_blocked = self._aftermarket_eod_blocked(now, ref_day, anchors)
         prearm_late = self._log_aftermarket_prearm(ref_day, anchors)
+        zero_frame_symbols = self._log_aftermarket_coverage(ref_day)
         self._log_premarket_eod(ref_day)
         housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=self._eod_progress)
         reconcile_ok, reconciled = self._reconcile_regular_session(ref_day, day, anchors)
@@ -2293,6 +2333,7 @@ class DaemonRunner:
                 f"purged={housekeeping.purged}",
                 f"reconciled={reconciled}",
                 f"aftermarket_ready={not aftermarket_blocked}",
+                f"aftermarket_zero_frame_symbols={zero_frame_symbols}",
                 f"aftermarket_prearm_late={prearm_late}",
                 f"backup_missing={len(backup_missing)}",
                 f"host_backup={host_backup}",

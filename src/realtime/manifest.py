@@ -32,6 +32,28 @@ class SessionManifest:
     planned_pairs: list[dict[str, str]] = field(default_factory=list)
     shard_index: int | None = None
     credential_key_id: str | None = None
+    frame_counts: dict[str, dict[str, int]] | None = field(default_factory=dict)
+
+    def record_frame_count(self, symbol: str, stream: str) -> None:
+        """Increment the journaled-frame counter of ``(symbol, stream)``; no-op when counting is untracked (None)."""
+        if self.frame_counts is None:
+            return
+        if not symbol:
+            return
+        per_stream = self.frame_counts.get(symbol)
+        if per_stream is None:
+            per_stream = {}
+            self.frame_counts[symbol] = per_stream
+        per_stream[stream] = per_stream.get(stream, 0) + 1
+
+    def symbol_frame_total(self, symbol: str) -> int | None:
+        """Total frames of ``symbol`` across streams, or None when counting is untracked."""
+        if self.frame_counts is None:
+            return None
+        per_stream = self.frame_counts.get(symbol)
+        if not per_stream:
+            return 0
+        return sum(per_stream.values())
 
     def record_ack(
         self, *, vendor: str, tr_id: str, symbol: str, rt_cd: str, accepted: bool, acked_at_ns: int | None = None
@@ -77,6 +99,7 @@ class SessionManifest:
             "planned_pairs": self.planned_pairs,
             "shard_index": self.shard_index,
             "credential_key_id": self.credential_key_id,
+            "frame_counts": self.frame_counts,
         }
         tmp = target.parent / f".{target.name}.{os.getpid()}.tmp"
         if str(target.parent) not in ("", "."):
@@ -89,6 +112,18 @@ class SessionManifest:
     def load(cls, path: pathlib.Path) -> SessionManifest:
         raw = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
         rev_raw = raw.get("candidates_rev")
+        counts_raw = raw.get("frame_counts")
+        frame_counts: dict[str, dict[str, int]] | None = None
+        if counts_raw is not None:
+            if not isinstance(counts_raw, dict):
+                raise ValueError("frame_counts must be an object or null")
+            frame_counts = {}
+            for symbol, per_stream in counts_raw.items():
+                if not isinstance(per_stream, dict):
+                    raise ValueError("frame_counts streams must be an object")
+                if any(type(count) is not int or count < 0 for count in per_stream.values()):
+                    raise ValueError("frame_counts values must be nonnegative integers")
+                frame_counts[symbol] = dict(per_stream)
         return cls(
             session_date=dt.date.fromisoformat(str(raw["session_date"])),
             clock_offset_ns=int(raw["clock_offset_ns"]),
@@ -106,4 +141,5 @@ class SessionManifest:
             planned_pairs=[dict(pair) for pair in raw.get("planned_pairs", [])],
             shard_index=int(raw["shard_index"]) if raw.get("shard_index") is not None else None,
             credential_key_id=str(raw["credential_key_id"]) if raw.get("credential_key_id") is not None else None,
+            frame_counts=frame_counts,
         )

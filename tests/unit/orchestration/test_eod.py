@@ -1657,3 +1657,196 @@ def test_prearm_date_and_venue_mismatch_are_unverifiable(tmp_path) -> None:
     (venue_finding,) = check_aftermarket_prearm(expected=((shard, wrong_venue),), date=day, anchors=anchors)
     assert venue_finding.verdict == "UNVERIFIABLE"
     assert venue_finding.reason == "venue_mismatch"
+
+
+def _coverage_shard(symbols=("A", "B", "C")):
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+
+    return AftermarketShard(MarketVenue.NXT, 0, tuple(symbols), ("H0NXCNT0", "H0NXASP0"), "0", "id0")
+
+
+def _write_coverage_manifest(path, day, shard, *, counts, accepted=None, date_override=None):
+    from src.realtime.manifest import SessionManifest
+    import pathlib
+
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = SessionManifest(
+        session_date=date_override or day,
+        clock_offset_ns=0,
+        started_at_ns=1,
+        venue=shard.venue.value,
+        session="nxt_after",
+        expected_close_ns=1,
+        writer_closed_at_ns=2,
+        planned_pairs=[{"symbol": s, "tr_id": t} for s in shard.symbols for t in shard.streams],
+        shard_index=shard.shard_index,
+        credential_key_id=shard.credential_key_id,
+    )
+    accept = set(accepted) if accepted is not None else set(shard.symbols)
+    for s in shard.symbols:
+        for t in shard.streams:
+            manifest.record_ack(
+                vendor="kis", tr_id=t, symbol=s, rt_cd="0", accepted=s in accept, acked_at_ns=1
+            )
+    for symbol, per_stream in counts.items():
+        for stream, n in per_stream.items():
+            for _ in range(n):
+                manifest.record_frame_count(symbol, stream)
+    manifest.save(path)
+    return path
+
+
+def test_coverage_accepted_silent_symbol_is_reported(tmp_path) -> None:
+    import datetime as dt
+    from src.orchestration.eod import check_aftermarket_symbol_coverage
+
+    day = dt.date(2026, 10, 18)
+    shard = _coverage_shard()
+    path = _write_coverage_manifest(
+        tmp_path / "m.json", day, shard, counts={"A": {"H0NXCNT0": 10}, "C": {"H0NXCNT0": 4}}
+    )
+    (finding,) = check_aftermarket_symbol_coverage(expected=((shard, path),), date=day)
+    assert finding.zero_frame_symbols == ("B",)
+    assert finding.accepted_symbols == 3
+
+
+def test_coverage_quote_only_symbol_is_not_silent(tmp_path) -> None:
+    import datetime as dt
+    from src.orchestration.eod import check_aftermarket_symbol_coverage
+
+    day = dt.date(2026, 10, 18)
+    shard = _coverage_shard(("A", "B"))
+    path = _write_coverage_manifest(
+        tmp_path / "m.json", day, shard, counts={"A": {"H0NXCNT0": 1}, "B": {"H0NXASP0": 2}}
+    )
+    (finding,) = check_aftermarket_symbol_coverage(expected=((shard, path),), date=day)
+    assert finding.zero_frame_symbols == ()
+
+
+def test_coverage_unaccepted_symbol_is_not_reported(tmp_path) -> None:
+    import datetime as dt
+    from src.orchestration.eod import check_aftermarket_symbol_coverage
+
+    day = dt.date(2026, 10, 18)
+    shard = _coverage_shard(("A", "B", "C"))
+    path = _write_coverage_manifest(
+        tmp_path / "m.json",
+        day,
+        shard,
+        counts={"A": {"H0NXCNT0": 1}, "C": {"H0NXCNT0": 1}},
+        accepted={"A", "C"},
+    )
+    (finding,) = check_aftermarket_symbol_coverage(expected=((shard, path),), date=day)
+    assert finding.zero_frame_symbols == ()
+    assert finding.accepted_symbols == 2
+
+
+def test_coverage_rank_order_and_probe_shape(tmp_path) -> None:
+    import datetime as dt
+    from src.orchestration.eod import check_aftermarket_symbol_coverage
+
+    day = dt.date(2026, 10, 18)
+    symbols = tuple(f"S{i:02d}" for i in range(20))
+    shard = _coverage_shard(symbols)
+    silent = set(symbols[1:18:2])
+    counts = {s: {"H0NXCNT0": 1} for s in symbols if s not in silent}
+    expected_zero = tuple(s for s in symbols if s in silent)
+    assert len(expected_zero) == 9
+    path = _write_coverage_manifest(tmp_path / "m.json", day, shard, counts=counts)
+    (finding,) = check_aftermarket_symbol_coverage(expected=((shard, path),), date=day)
+    assert finding.zero_frame_symbols == expected_zero
+
+
+def test_coverage_untracked_missing_unreadable_and_date_mismatch(tmp_path) -> None:
+    import datetime as dt
+    import json
+    from src.orchestration.eod import check_aftermarket_symbol_coverage
+
+    day = dt.date(2026, 10, 18)
+    shard = _coverage_shard(("A",))
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(
+        json.dumps({"session_date": "2026-10-18", "clock_offset_ns": 0, "started_at_ns": 0}),
+        encoding="utf-8",
+    )
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_text("not json", encoding="utf-8")
+    wrong_date = _write_coverage_manifest(
+        tmp_path / "wrong.json", day, shard, counts={}, date_override=dt.date(2026, 10, 17)
+    )
+    missing = tmp_path / "absent.json"
+    findings = check_aftermarket_symbol_coverage(
+        expected=(
+            (shard, legacy),
+            (shard, missing),
+            (shard, corrupt),
+            (shard, wrong_date),
+        ),
+        date=day,
+    )
+    assert [f.zero_frame_symbols for f in findings] == [None, None, None, None]
+    assert [f.reason for f in findings] == ["untracked", "manifest_missing", "manifest_unreadable", "date_mismatch"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"subscription_acks": [None]},
+        {"subscription_acks": ["invalid"]},
+        {"frame_counts": []},
+        {"frame_counts": {"A": []}},
+        {"frame_counts": {"A": {"H0NXCNT0": -1}}},
+        {"frame_counts": {"A": {"H0NXCNT0": True}}},
+        {"frame_counts": {"A": {"H0NXCNT0": 0.5}}},
+        {"frame_counts": {"A": {"H0NXCNT0": "1"}}},
+    ],
+)
+def test_coverage_bad_manifest_is_isolated_read_only(tmp_path, caplog, change) -> None:
+    import datetime as dt
+    import json
+    import logging
+
+    from src.orchestration.eod import check_aftermarket_symbol_coverage
+
+    day = dt.date(2026, 10, 18)
+    shard = _coverage_shard(("A",))
+    bad = _write_coverage_manifest(tmp_path / "bad.json", day, shard, counts={})
+    payload = json.loads(bad.read_text(encoding="utf-8"))
+    payload.update(change)
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+    before = bad.read_bytes()
+    good = _write_coverage_manifest(tmp_path / "good.json", day, shard, counts={})
+    with caplog.at_level(logging.DEBUG):
+        invalid, valid = check_aftermarket_symbol_coverage(expected=((shard, bad), (shard, good)), date=day)
+    assert invalid.zero_frame_symbols is None
+    assert invalid.reason == "manifest_unreadable"
+    assert valid.zero_frame_symbols == ("A",)
+    assert bad.read_bytes() == before
+    assert all(record.levelno <= logging.DEBUG for record in caplog.records)
+
+
+def test_coverage_counts_any_accepted_ack_even_when_untracked(tmp_path) -> None:
+    import datetime as dt
+
+    from src.orchestration.eod import check_aftermarket_symbol_coverage
+    from src.realtime.manifest import SessionManifest
+
+    day = dt.date(2026, 10, 18)
+    shard = _coverage_shard(("B", "A", "C"))
+    path = _write_coverage_manifest(tmp_path / "m.json", day, shard, counts={}, accepted=())
+    manifest = SessionManifest.load(path)
+    manifest.record_ack(vendor="kis", tr_id="H0NXASP0", symbol="B", rt_cd="0", accepted=True)
+    manifest.record_ack(vendor="kis", tr_id="H0NXASP0", symbol="B", rt_cd="9", accepted=False)
+    manifest.record_ack(vendor="kis", tr_id="H0NXASP0", symbol="outside", rt_cd="0", accepted=True)
+    manifest.save(path)
+    (tracked,) = check_aftermarket_symbol_coverage(expected=((shard, path),), date=day)
+    assert tracked.accepted_symbols == 1
+    assert tracked.zero_frame_symbols == ("B",)
+    manifest.frame_counts = None
+    manifest.save(path)
+    (untracked,) = check_aftermarket_symbol_coverage(expected=((shard, path),), date=day)
+    assert untracked.accepted_symbols == 1
+    assert untracked.zero_frame_symbols is None
+    assert untracked.reason == "untracked"
