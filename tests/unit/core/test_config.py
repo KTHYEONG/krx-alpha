@@ -364,6 +364,57 @@ def test_aftermarket_silence_limit_default_env_override_and_bounds(monkeypatch):
         AftermarketSettings()
 
 
+def test_aftermarket_prearm_lead_defaults_to_sixty_seconds(monkeypatch):
+    from src.core.config import AftermarketSettings
+
+    monkeypatch.delenv('KRX_ALPHA_AFTERMARKET_PREARM_LEAD_S', raising=False)
+    assert AftermarketSettings().prearm_lead_s == 60.0
+
+
+def test_aftermarket_prearm_lead_env_override(monkeypatch):
+    from src.core.config import AftermarketSettings
+
+    monkeypatch.setenv('KRX_ALPHA_AFTERMARKET_PREARM_LEAD_S', '90')
+    assert AftermarketSettings().prearm_lead_s == 90.0
+
+
+def test_aftermarket_prearm_lead_rejects_non_positive(monkeypatch):
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import AftermarketSettings
+
+    monkeypatch.delenv('KRX_ALPHA_AFTERMARKET_PREARM_LEAD_S', raising=False)
+    for value in (0, -1.0):
+        with pytest.raises(ValidationError):
+            AftermarketSettings(prearm_lead_s=value)
+
+
+def test_aftermarket_prearm_lead_must_leave_arm_instant_after_selection(monkeypatch):
+    import datetime as dt
+
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import AftermarketSettings
+
+    monkeypatch.delenv('KRX_ALPHA_AFTERMARKET_PREARM_LEAD_S', raising=False)
+    assert AftermarketSettings(selection_time=dt.time(15, 31), prearm_lead_s=539.0).prearm_lead_s == 539.0
+    with pytest.raises(ValidationError):
+        AftermarketSettings(selection_time=dt.time(15, 31), prearm_lead_s=540.0)
+
+
+def test_aftermarket_prearm_lead_rejects_unrepresentable_durations():
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import AftermarketSettings
+
+    for lead in (float("inf"), 1e300):
+        with pytest.raises(ValidationError):
+            AftermarketSettings(prearm_lead_s=lead)
+
+
 def _clear_snapshot_env(monkeypatch) -> None:
     import os
 

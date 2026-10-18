@@ -542,6 +542,16 @@
             0
           ],
           false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=aftermarket_stream status=ARMED key=%s open=%s lead_s=%.1f",
+          [
+            "nxt:0",
+            "15:40:00",
+            -300.0
+          ],
+          false
         ]
       ],
       "calls": [
@@ -679,6 +689,16 @@
             7,
             true,
             0
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=aftermarket_stream status=ARMED key=%s open=%s lead_s=%.1f",
+          [
+            "krx:0",
+            "16:00:00",
+            -300.0
           ],
           false
         ],
@@ -1567,6 +1587,7 @@
     "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=no_bars_store",
     "[DAEMON] stage=aftermarket_plan status=FAIL reason=%s",
     "[DAEMON] stage=aftermarket_reselection status=FAIL reason=%s next_retry=%s",
+    "[DAEMON] stage=aftermarket_stream status=ARMED key=%s open=%s lead_s=%.1f",
     "[DAEMON] stage=aftermarket_stream status=FAIL reason=circuit_open key=%s",
     "[DAEMON] stage=aftermarket_stream status=RESTARTED key=%s exit_code=%s",
     "[DAEMON] stage=child_ownership status=REPLACE_LIVE slot=%s stop_result=%s",

@@ -54,14 +54,20 @@ def regular_session_silence_limit_s(
     return None
 
 
+def aftermarket_open_time(venue: MarketVenue, anchors: SessionAnchors) -> dt.time:
+    """Return ``venue``'s aftermarket open on the anchors' date, shifted by ``close_shift``."""
+    if venue is MarketVenue.NXT:
+        return anchors.shift_post_close(STANDARD_NXT_AFTER_MARKET_OPEN)
+    if venue is MarketVenue.KRX:
+        return anchors.shift_post_close(STANDARD_KRX_AFTER_MARKET_OPEN)
+    raise ValueError(f"no aftermarket open for venue {venue!r}")
+
+
 def aftermarket_silence_limit_s(
     now: dt.datetime, *, route: Any, anchors: SessionAnchors, limit_s: float = SILENCE_LIMIT_S
 ) -> float | None:
     venue = route.venue if hasattr(route, "venue") else route
-    if MarketVenue(venue) == MarketVenue.NXT:
-        open_t = anchors.shift_post_close(STANDARD_NXT_AFTER_MARKET_OPEN)
-    else:
-        open_t = anchors.shift_post_close(STANDARD_KRX_AFTER_MARKET_OPEN)
+    open_t = aftermarket_open_time(MarketVenue(venue), anchors)
     if open_t <= now.astimezone(_KST).time() < anchors.after_market_end:
         return limit_s
     return None

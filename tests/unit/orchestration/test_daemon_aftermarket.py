@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import logging
 
 import pytest
 from tests.unit.orchestration.daemon_fixtures import _business_trading_day, _holiday_trading_day
+
+_ARM_DAY = _dt.date(2026, 9, 16)
 
 
 @pytest.fixture(autouse=True)
@@ -670,3 +673,472 @@ def test_aftermarket_circuit_open_not_realerted_after_breaker_recovers(tmp_path,
         if r.levelno == logging.CRITICAL and "reason=circuit_open" in r.getMessage()
     ]
     assert criticals == ["[DAEMON] stage=aftermarket_stream status=FAIL reason=circuit_open key=krx:2"]
+
+
+def _arm_plan():
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+
+    return (
+        AftermarketShard(MarketVenue.NXT, 0, ("005930",), ("H0NXCNT0", "H0NXASP0"), "0", "id0"),
+        AftermarketShard(MarketVenue.KRX, 0, ("000660",), ("H0STCNT0", "H0STASP0"), "1", "id1"),
+    )
+
+
+def _arm_candidate_snapshot(day=None):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.universe.ipc import CandidateSnapshot
+
+    session_date = day if day is not None else _ARM_DAY
+    stamp = dt.datetime.combine(session_date, dt.time(15, 31), tzinfo=ZoneInfo("Asia/Seoul"))
+    return CandidateSnapshot(
+        schema_version=1,
+        rev=int(session_date.strftime("%Y%m%d")),
+        session_date=session_date,
+        session="aftermarket",
+        generated_at=stamp,
+        source_asof=stamp,
+        effective_from=stamp,
+        policy_version="aftermarket_v1",
+        capacity=40,
+        eligible_count=1,
+        selected_count=1,
+        candidates=(
+            {
+                "symbol": "005930",
+                "rank": 1,
+                "source_ranks": {"trade_amount": 1},
+                "metrics": {"trade_value_krw": 1, "change_pct": 1.0},
+                "selection_reasons": ["trade_amount"],
+            },
+        ),
+    )
+
+
+def _arm_daemon(
+    tmp_path,
+    monkeypatch,
+    *,
+    refresh_day=_ARM_DAY,
+    candidate=True,
+    enabled=True,
+    holiday=False,
+    refresh=None,
+):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings, resolve_collector_runtime
+    from src.orchestration import daemon as daemon_mod
+    from src.universe.ipc import write_candidate_snapshot
+
+    kst = ZoneInfo("Asia/Seoul")
+    commands: list[list[str]] = []
+    ensures: list[str] = []
+
+    def _default_refresh(*, out_path, **_kwargs):
+        snapshot = _arm_candidate_snapshot()
+        write_candidate_snapshot(out_path, snapshot)
+        return snapshot
+
+    monkeypatch.setattr(daemon_mod, "_kis_token_preflight", lambda *a, **k: {})
+    monkeypatch.setattr(daemon_mod, "_build_kis_client", lambda _paths: object())
+    monkeypatch.setattr(daemon_mod, "load_kis_data_credentials", lambda: ())
+    monkeypatch.setattr(daemon_mod, "plan_aftermarket_shards", lambda **_kw: _arm_plan())
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **_kw: True)
+    monkeypatch.setattr(daemon_mod, "refresh_aftermarket_candidates", refresh or _default_refresh)
+    monkeypatch.setattr(
+        daemon_mod,
+        "_resolve_trading_day_with_cache",
+        lambda day, cache, _a: _holiday_trading_day(day) if holiday else _business_trading_day(day),
+    )
+
+    class _Sup:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = list(cmd)
+            commands.append(self.cmd)
+
+        def ensure_running(self):
+            if "collect-aftermarket" in self.cmd:
+                ensures.append(self.cmd[self.cmd.index("--venue") + 1])
+            return "running"
+
+        def stop(self, *, timeout_s=15.0):
+            return "graceful"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _Sup)
+
+    settings = CollectorSettings(
+        data_root=tmp_path,
+        after_market_enabled=enabled,
+        universe_slot_budget=1,
+        ls_capacity_pairs=2,
+    )
+    if candidate:
+        write_candidate_snapshot(settings.paths.aftermarket_candidates(_ARM_DAY), _arm_candidate_snapshot())
+    runtime = resolve_collector_runtime(collector=settings)
+    holder = {"now": dt.datetime(2026, 9, 16, 15, 30, tzinfo=kst)}
+    runner = daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: holder["now"], sleep=lambda _: None)
+    runner.state.aftermarket_refresh_day = refresh_day
+    return runner, commands, ensures
+
+
+def _arm_at(runner, hour, minute, second=0):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    now = dt.datetime(2026, 9, 16, hour, minute, second, tzinfo=ZoneInfo("Asia/Seoul"))
+    runner._now = lambda: now  # type: ignore[method-assign]
+    return runner.step(now)
+
+
+def _installed_venues(commands) -> list[str]:
+    return [cmd[cmd.index("--venue") + 1] for cmd in commands if "collect-aftermarket" in cmd]
+
+
+def test_aftermarket_arm_at_standard_day() -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration import daemon
+    from src.realtime.contracts import MarketVenue
+
+    kst = ZoneInfo("Asia/Seoul")
+    anchors = standard_session_anchors(_ARM_DAY)
+    assert daemon.aftermarket_arm_at(
+        _ARM_DAY, MarketVenue.NXT, anchors=anchors, prearm_lead_s=60.0
+    ) == dt.datetime(2026, 9, 16, 15, 39, 0, tzinfo=kst)
+    assert daemon.aftermarket_arm_at(
+        _ARM_DAY, MarketVenue.KRX, anchors=anchors, prearm_lead_s=60.0
+    ) == dt.datetime(2026, 9, 16, 15, 59, 0, tzinfo=kst)
+
+
+def test_aftermarket_arm_at_shifted_day(tmp_path) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.core.paths import DataPaths
+    from src.core.session_anchors import AnchorSource, SessionAnchors, resolve_session_anchors, save_session_anchors
+    from src.orchestration import daemon
+    from src.realtime.contracts import MarketVenue
+
+    kst = ZoneInfo("Asia/Seoul")
+    day = dt.date(2026, 11, 19)
+    paths = DataPaths(tmp_path)
+    save_session_anchors(
+        paths.session_calendar_dir,
+        SessionAnchors(
+            date=day,
+            regular_open=dt.time(10, 0),
+            closing_auction_start=dt.time(16, 20),
+            regular_close=dt.time(16, 30),
+            after_market_end=dt.time(20, 0),
+            source=AnchorSource.VENDOR,
+        ),
+    )
+    anchors = resolve_session_anchors(paths.session_calendar_dir, day)
+    assert daemon.aftermarket_arm_at(day, MarketVenue.NXT, anchors=anchors, prearm_lead_s=60.0) == dt.datetime(
+        2026, 11, 19, 16, 39, 0, tzinfo=kst
+    )
+    assert daemon.aftermarket_arm_at(day, MarketVenue.KRX, anchors=anchors, prearm_lead_s=60.0) == dt.datetime(
+        2026, 11, 19, 16, 59, 0, tzinfo=kst
+    )
+
+
+def test_aftermarket_arm_at_rejects_non_positive_lead() -> None:
+    import pytest
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration import daemon
+    from src.realtime.contracts import MarketVenue
+
+    anchors = standard_session_anchors(_ARM_DAY)
+    with pytest.raises(ValueError, match="prearm_lead_s must be positive"):
+        daemon.aftermarket_arm_at(_ARM_DAY, MarketVenue.NXT, anchors=anchors, prearm_lead_s=0.0)
+
+
+def test_nxt_shard_launches_inside_full_active_before_open(tmp_path, monkeypatch) -> None:
+    from src.core.calendar import SessionState
+
+    runner, commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=_ARM_DAY)
+
+    _arm_at(runner, 15, 38, 55)
+    assert runner.children.aftermarket == {}
+    assert runner.state.aftermarket_plan_day is None
+
+    _arm_at(runner, 15, 39, 5)
+    assert sorted(runner.children.aftermarket) == ["nxt:0"]
+    assert runner.state.prev_state == SessionState.FULL_ACTIVE
+    assert _installed_venues(commands) == ["nxt"]
+
+
+def test_krx_shard_launches_before_krx_open(tmp_path, monkeypatch) -> None:
+    runner, commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=_ARM_DAY)
+
+    _arm_at(runner, 15, 58, 55)
+    assert sorted(runner.children.aftermarket) == ["nxt:0"]
+
+    _arm_at(runner, 15, 59, 5)
+    assert sorted(runner.children.aftermarket) == ["krx:0", "nxt:0"]
+    assert _installed_venues(commands) == ["nxt", "krx"]
+
+
+def test_shard_start_precedes_open_for_every_venue(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration import daemon
+    from src.realtime.contracts import MarketVenue
+
+    kst = ZoneInfo("Asia/Seoul")
+    runner, _commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=_ARM_DAY)
+    anchors = standard_session_anchors(_ARM_DAY)
+    install_at: dict[str, dt.datetime] = {}
+
+    instant = dt.datetime(2026, 9, 16, 15, 30, 0, tzinfo=kst)
+    end = dt.datetime(2026, 9, 16, 16, 5, 0, tzinfo=kst)
+    while instant <= end:
+        before = set(runner.children.aftermarket)
+        _arm_at(runner, instant.hour, instant.minute, instant.second)
+        for key in set(runner.children.aftermarket) - before:
+            install_at[key] = instant
+        instant += dt.timedelta(seconds=10)
+
+    assert set(install_at) == {"nxt:0", "krx:0"}
+    assert daemon.aftermarket_arm_at(_ARM_DAY, MarketVenue.NXT, anchors=anchors, prearm_lead_s=60.0) <= install_at[
+        "nxt:0"
+    ] < dt.datetime(2026, 9, 16, 15, 40, 0, tzinfo=kst)
+    assert daemon.aftermarket_arm_at(_ARM_DAY, MarketVenue.KRX, anchors=anchors, prearm_lead_s=60.0) <= install_at[
+        "krx:0"
+    ] < dt.datetime(2026, 9, 16, 16, 0, 0, tzinfo=kst)
+
+
+def test_shifted_day_does_not_arm_at_standard_times(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    from src.core.config import CollectorSettings, resolve_collector_runtime
+    from src.core.paths import DataPaths
+    from src.core.session_anchors import AnchorSource, SessionAnchors, save_session_anchors
+    from src.orchestration import daemon as daemon_mod
+    from tests.unit.orchestration.daemon_fixtures import _business_trading_day
+
+    day = dt.date(2026, 11, 19)
+    settings = CollectorSettings(
+        data_root=tmp_path, after_market_enabled=True, universe_slot_budget=1, ls_capacity_pairs=2
+    )
+    save_session_anchors(
+        DataPaths(tmp_path).session_calendar_dir,
+        SessionAnchors(
+            date=day,
+            regular_open=dt.time(10, 0),
+            closing_auction_start=dt.time(16, 20),
+            regular_close=dt.time(16, 30),
+            after_market_end=dt.time(20, 0),
+            source=AnchorSource.VENDOR,
+        ),
+    )
+    commands: list[list[str]] = []
+
+    class _Sup:
+        def __init__(self, *, cmd, breaker=None):
+            commands.append(list(cmd))
+
+        def ensure_running(self):
+            return "running"
+
+        def stop(self, *, timeout_s=15.0):
+            return "graceful"
+
+    monkeypatch.setattr(daemon_mod, "_kis_token_preflight", lambda *a, **k: {})
+    monkeypatch.setattr(daemon_mod, "plan_aftermarket_shards", lambda **_kw: _arm_plan())
+    monkeypatch.setattr(daemon_mod, "load_kis_data_credentials", lambda: ())
+    monkeypatch.setattr(daemon_mod, "run_session_orchestration", lambda **_kw: True)
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(d))
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _Sup)
+    from src.universe.ipc import write_candidate_snapshot
+
+    write_candidate_snapshot(settings.paths.aftermarket_candidates(day), _arm_candidate_snapshot(day))
+    runtime = resolve_collector_runtime(collector=settings)
+    runner = daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda _: None)
+    runner.state.aftermarket_refresh_day = day
+
+    for hour, minute, second in ((15, 39, 5), (15, 59, 5)):
+        now = dt.datetime(2026, 11, 19, hour, minute, second, tzinfo=dt.timezone(dt.timedelta(hours=9)))
+        runner._now = lambda now=now: now  # type: ignore[method-assign]
+        runner.step(now)
+    assert runner.children.aftermarket == {}
+
+    _arm_at_shifted(runner, dt.datetime(2026, 11, 19, 16, 39, 5, tzinfo=dt.timezone(dt.timedelta(hours=9))))
+    assert sorted(runner.children.aftermarket) == ["nxt:0"]
+
+
+def _arm_at_shifted(runner, now) -> None:
+    runner._now = lambda: now  # type: ignore[method-assign]
+    runner.step(now)
+
+
+def test_pending_reselection_defers_plan_without_latching(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+
+    from src.execution.contracts import KisApiError
+    from src.universe.ipc import write_candidate_snapshot
+
+    attempts = []
+
+    def refresh(*, out_path, generated_at, **_kwargs):
+        attempts.append(generated_at)
+        if len(attempts) == 1:
+            raise KisApiError("SCHEMA", "temporary ranking failure")
+        write_candidate_snapshot(out_path, _arm_candidate_snapshot())
+
+    runner, commands, _ = _arm_daemon(
+        tmp_path,
+        monkeypatch,
+        refresh_day=None,
+        candidate=False,
+        refresh=refresh,
+    )
+    _arm_at(runner, 15, 38, 30)
+    assert len(attempts) == 1
+    assert runner.state.next_aftermarket_refresh_at == attempts[0] + dt.timedelta(seconds=60)
+
+    _arm_at(runner, 15, 39, 5)
+    assert runner.state.aftermarket_plan_day is None
+    assert runner.children.aftermarket == {}
+    assert _installed_venues(commands) == []
+    assert len(attempts) == 1
+
+    _arm_at(runner, 15, 39, 35)
+    assert len(attempts) == 2
+    assert runner.state.aftermarket_plan_day == _ARM_DAY
+    assert sorted(runner.children.aftermarket) == ["nxt:0"]
+
+
+def test_reselection_failing_through_open_keeps_existing_fail_path(tmp_path, monkeypatch, caplog) -> None:
+    from src.execution.contracts import KisApiError
+
+    def fail(**_kwargs):
+        raise KisApiError("SCHEMA", "ranking unavailable")
+
+    runner, commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=False, refresh=fail)
+
+    with caplog.at_level(logging.CRITICAL):
+        _arm_at(runner, 15, 38, 30)
+        _arm_at(runner, 15, 39, 35)
+        assert runner.state.aftermarket_plan_day is None
+        _arm_at(runner, 15, 40, 5)
+
+    assert runner.children.aftermarket == {}
+    assert _installed_venues(commands) == []
+    criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert any("stage=aftermarket_plan status=FAIL" in msg for msg in criticals)
+    assert runner.state.aftermarket_plan == ()
+
+
+def test_restart_after_nxt_open_arms_remaining_venue_on_time(tmp_path, monkeypatch, caplog) -> None:
+    runner, _commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None)
+
+    with caplog.at_level(logging.INFO):
+        _arm_at(runner, 15, 50, 0)
+    armed = [r.getMessage() for r in caplog.records if "stage=aftermarket_stream status=ARMED" in r.getMessage()]
+    assert armed == ["[DAEMON] stage=aftermarket_stream status=ARMED key=nxt:0 open=15:40:00 lead_s=-600.0"]
+    assert sorted(runner.children.aftermarket) == ["nxt:0"]
+
+    _arm_at(runner, 15, 59, 5)
+    assert sorted(runner.children.aftermarket) == ["krx:0", "nxt:0"]
+
+
+def test_repeated_cycles_are_idempotent(tmp_path, monkeypatch, caplog) -> None:
+    runner, _commands, ensures = _arm_daemon(tmp_path, monkeypatch, refresh_day=_ARM_DAY)
+
+    with caplog.at_level(logging.INFO):
+        _arm_at(runner, 15, 59, 5)
+        for second in (5, 15, 25, 35, 45):
+            _arm_at(runner, 16, 0, second)
+
+    armed = [r.getMessage() for r in caplog.records if "stage=aftermarket_stream status=ARMED" in r.getMessage()]
+    assert len(armed) == 2
+    assert len(set(armed)) == 2
+    replace_live = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.CRITICAL and "REPLACE_LIVE" in r.getMessage()
+    ]
+    assert replace_live == []
+    assert ensures.count("nxt") == 6
+    assert ensures.count("krx") == 6
+
+
+def test_holiday_never_arms(tmp_path, monkeypatch, caplog) -> None:
+    runner, commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, holiday=True)
+
+    with caplog.at_level(logging.CRITICAL):
+        _arm_at(runner, 15, 39, 5)
+
+    assert runner.children.aftermarket == {}
+    assert _installed_venues(commands) == []
+    assert runner.state.aftermarket_plan_day is None
+    assert not any("stage=aftermarket_plan" in r.getMessage() for r in caplog.records)
+
+
+def test_aftermarket_disabled_never_arms(tmp_path, monkeypatch, caplog) -> None:
+    runner, commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=_ARM_DAY, enabled=False)
+
+    with caplog.at_level(logging.INFO):
+        _arm_at(runner, 15, 39, 5)
+
+    assert runner.children.aftermarket == {}
+    assert _installed_venues(commands) == []
+    assert runner.state.aftermarket_plan_day is None
+    assert not any("stage=aftermarket_stream status=ARMED" in r.getMessage() for r in caplog.records)
+
+
+def test_pending_reselection_never_installs_previous_day_plan(tmp_path, monkeypatch) -> None:
+    from src.execution.contracts import KisApiError
+    from src.universe.ipc import write_candidate_snapshot
+
+    attempts = []
+
+    def refresh(*, out_path, generated_at, **_kwargs):
+        attempts.append(generated_at)
+        if len(attempts) == 1:
+            raise KisApiError("SCHEMA", "temporary ranking failure")
+        write_candidate_snapshot(out_path, _arm_candidate_snapshot())
+
+    runner, commands, _ = _arm_daemon(
+        tmp_path, monkeypatch, refresh_day=None, candidate=False, refresh=refresh
+    )
+    yesterday = _ARM_DAY - _dt.timedelta(days=1)
+    runner.state.aftermarket_plan_day = yesterday
+    runner.state.aftermarket_plan = _arm_plan()
+
+    _arm_at(runner, 15, 38, 30)
+    _arm_at(runner, 15, 39, 5)
+    assert runner.state.aftermarket_plan_day == yesterday
+    assert _installed_venues(commands) == []
+
+    _arm_at(runner, 15, 39, 35)
+    assert runner.state.aftermarket_plan_day == _ARM_DAY
+    assert _installed_venues(commands) == ["nxt"]
+
+
+@pytest.mark.parametrize("minute", [38, 39])
+def test_existing_aftermarket_children_supervised_while_plan_gate_closed(tmp_path, monkeypatch, minute) -> None:
+    from src.core.calendar import SessionState
+    from src.core.session_anchors import standard_session_anchors
+
+    runner, commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=False)
+    runner.children.aftermarket["nxt:0"] = _ScriptedSupervisor(["restarted"])
+    now = _dt.datetime.combine(
+        _ARM_DAY, _dt.time(15, minute, 5), tzinfo=_dt.timezone(_dt.timedelta(hours=9))
+    )
+    runner._supervise_aftermarket(now, SessionState.FULL_ACTIVE, _ARM_DAY, standard_session_anchors(_ARM_DAY))
+
+    assert runner.state.aftermarket_results == {"nxt:0": "restarted"}
+    assert runner.state.aftermarket_restarts == 1
+    assert runner.state.aftermarket_plan_day is None
+    assert _installed_venues(commands) == []
