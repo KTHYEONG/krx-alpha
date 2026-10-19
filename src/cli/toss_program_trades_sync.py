@@ -85,6 +85,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_lead_s=settings.rest_max_lead_s,
             bars_daily_dir=paths.bars_daily_dir,
             gap_window_business_days=settings.gap_check_business_days,
+            gap_vendor_empty_max_day_ratio=settings.gap_vendor_empty_max_day_ratio,
         )
     except MissingCredentialsError as exc:
         logger.error("[DATA] stage=program_trades_sync status=FAIL reason=missing_credentials:%s", str(exc))
@@ -128,13 +129,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if stale_exceeded or gap_problem:
         return 2
     logger.info(
-        "[DATA] stage=program_trades_sync status=OK fetched_symbols=%d appended_rows=%d stale=%d tracked=%d ratio=%.4f gap_targets=%d gap_pairs=0 stale_sample=%s",
+        "[DATA] stage=program_trades_sync status=OK fetched_symbols=%d appended_rows=%d stale=%d tracked=%d ratio=%.4f gap_targets=%d gap_pairs=0 vendor_empty_pairs=%d stale_sample=%s",
         result.symbols_ok,
         result.appended_rows,
         stale,
         tracked,
         ratio,
         len(result.gap_targets),
+        result.vendor_empty_pairs,
         sample,
     )
     return 0

@@ -229,6 +229,8 @@ class TossProgramTradesSettings(BaseSettings):
     max_stale_ratio: float = 0.05
     sync_timeout_s: float = 2400.0
     gap_check_business_days: int = Field(default=20, ge=1)
+    # A refetched symbol-day the vendor still omits is accepted as vendor-empty only while a day's share stays below this.
+    gap_vendor_empty_max_day_ratio: float = Field(default=0.02, gt=0, lt=1)
     # Host-wide Toss pacing reservation lead for program-trades sync/backfill (bulk work).
     rest_max_lead_s: float = Field(default=0.25, gt=0)
 

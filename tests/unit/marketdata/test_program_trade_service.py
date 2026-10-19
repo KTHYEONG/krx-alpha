@@ -979,3 +979,64 @@ def test_healed_store_rerun_does_not_fetch_again(tmp_path, monkeypatch) -> None:
     assert second.gap_targets == ()
     assert second.symbols_ok == 0
     assert scan_month_partitions(store).collect().sort("symbol", "date").equals(before)
+
+
+def _vendor_empty_store(tmp_path, *, holed: int, total: int = 100):
+    store = tmp_path / "program_trades"
+    bars = tmp_path / "bars" / "daily"
+    symbols = [f"S{i:03d}" for i in range(total)]
+    _seed(store, {s: ([_SD1, _SD3, _SD4] if i < holed else [_SD1, _SD2, _SD3, _SD4]) for i, s in enumerate(symbols)})
+    _seed_bars(bars, {s: [_SD1, _SD2, _SD3] for s in symbols})
+    return store, bars
+
+
+def test_forward_sync_accepts_sparse_vendor_empty_pairs(tmp_path, monkeypatch) -> None:
+    # Given: 100종목 중 1종목만 D2를 벤더가 재조회에도 주지 않음 (1% <= 2%)
+    from src.marketdata import program_trade_service as service
+    from src.marketdata.toss_program_trades import ProgramTradeGapStatus
+
+    store, bars = _vendor_empty_store(tmp_path, holed=1)
+    monkeypatch.setattr(service, "backfill_program_trades_history", lambda symbol, **kwargs: ())
+
+    # When
+    result = _forward(service, store, bars, monkeypatch, gap_vendor_empty_max_day_ratio=0.02)
+
+    # Then: 벤더 공백으로 수용되어 COMPLETE, 수용 건수가 보고된다
+    assert result.gap_report is not None
+    assert result.gap_report.status is ProgramTradeGapStatus.COMPLETE
+    assert result.vendor_empty_pairs == 1
+
+
+def test_forward_sync_whole_day_hole_stays_a_gap(tmp_path, monkeypatch) -> None:
+    # Given: 100종목 중 10종목(10% > 2%)이 같은 날 비어 있음
+    from src.marketdata import program_trade_service as service
+    from src.marketdata.toss_program_trades import ProgramTradeGapStatus
+
+    store, bars = _vendor_empty_store(tmp_path, holed=10)
+    monkeypatch.setattr(service, "backfill_program_trades_history", lambda symbol, **kwargs: ())
+
+    # When
+    result = _forward(service, store, bars, monkeypatch, gap_vendor_empty_max_day_ratio=0.02)
+
+    # Then: 하루 단위 공백은 수용하지 않는다
+    assert result.gap_report is not None
+    assert result.gap_report.status is ProgramTradeGapStatus.GAPS
+    assert result.gap_report.missing_pairs == 10
+    assert result.vendor_empty_pairs == 0
+
+
+def test_forward_sync_failed_refetch_is_never_vendor_empty(tmp_path, monkeypatch) -> None:
+    # Given: 재조회가 실패(None)한 종목의 희소 공백
+    from src.marketdata import program_trade_service as service
+    from src.marketdata.toss_program_trades import ProgramTradeGapStatus
+
+    store, bars = _vendor_empty_store(tmp_path, holed=1)
+    monkeypatch.setattr(service, "_fetch_symbol", lambda *args, **kwargs: None)
+
+    # When
+    result = _forward(service, store, bars, monkeypatch, gap_vendor_empty_max_day_ratio=0.02)
+
+    # Then: 조회 실패는 벤더 공백이 아니므로 갭으로 남는다
+    assert result.gap_report is not None
+    assert result.gap_report.status is ProgramTradeGapStatus.GAPS
+    assert result.vendor_empty_pairs == 0
