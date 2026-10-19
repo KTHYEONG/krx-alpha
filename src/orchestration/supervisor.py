@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 PROBE_BASE_INTERVAL_S: float = 60.0
@@ -89,17 +89,48 @@ class ProcessSupervisor:
         cmd: list[str],
         breaker: RestartCircuitBreaker | None = None,
         popen: Any = subprocess.Popen,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._cmd = cmd
         self._breaker = breaker
         self._popen = popen
+        self._wall_clock = wall_clock
         self._proc: Any = None
         self._last_exit_code: int | None = None
         self._open_alerted: bool = False
+        self._started_at_wall: float | None = None
+        self._armed_reason: str | None = None
 
     @property
     def last_exit_code(self) -> int | None:
         return self._last_exit_code
+
+    @property
+    def started_at_wall(self) -> float | None:
+        """Epoch seconds of the latest successful process start, or None before the first start."""
+        return self._started_at_wall
+
+    def arm_restart_reason(self, reason: str) -> None:
+        """Append `--restart-reason <reason>` to the argv of the next restart only."""
+        if not reason or reason.startswith("-"):
+            raise ValueError(f"restart reason must be non-empty and not start with '-': {reason!r}")
+        self._armed_reason = reason
+
+    def stop_for_restart(self, *, reason: str, timeout_s: float = 15.0) -> str:
+        """SIGTERM then SIGKILL after `timeout_s`, arming `reason` for the next restart."""
+        if not reason or reason.startswith("-"):
+            raise ValueError(f"restart reason must be non-empty and not start with '-': {reason!r}")
+        if self._proc is None or self._proc.poll() is not None:
+            return "not_running"
+        result = self.stop(timeout_s=timeout_s)
+        if result != "not_running":
+            self.arm_restart_reason(reason)
+        return result
+
+    def _next_cmd(self) -> list[str]:
+        if self._armed_reason is None:
+            return self._cmd
+        return [*self._cmd, "--restart-reason", self._armed_reason]
 
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -121,17 +152,24 @@ class ProcessSupervisor:
             self._last_exit_code = self._proc.poll()
         if not was_started_before:
             self._proc = self._popen(self._cmd)
+            self._started_at_wall = self._wall_clock()
             return "started"
         if self._breaker is None:
-            self._proc = self._popen(self._cmd)
+            self._proc = self._popen(self._next_cmd())
+            self._armed_reason = None
+            self._started_at_wall = self._wall_clock()
             return "restarted"
         if self._breaker.allow_restart(now=now):
             self._breaker.record_restart(now=now)
-            self._proc = self._popen(self._cmd)
+            self._proc = self._popen(self._next_cmd())
+            self._armed_reason = None
+            self._started_at_wall = self._wall_clock()
             return "restarted"
         if self._breaker.allow_probe(now=now):
             self._breaker.record_restart(now=now)
-            self._proc = self._popen(self._cmd)
+            self._proc = self._popen(self._next_cmd())
+            self._armed_reason = None
+            self._started_at_wall = self._wall_clock()
             return "restarted"
         return "circuit_open"
 

@@ -382,6 +382,7 @@ _STAGE_LABELS: dict[str, str] = {
     "bootstrap": "초기화",
     "unknown_ambiguous": "주문매핑모호",
     "integrity_violation": "체결정합성위반",
+    "shard_watchdog": "샤드감시",
 }
 
 _REASON_LABELS: dict[str, str] = {
@@ -405,6 +406,8 @@ _REASON_LABELS: dict[str, str] = {
     "auth_rejected": "증권사 인증 거부",
     "ntp_unmeasured": "NTP 시간 동기화 측정 실패",
     "quarantine_exists": "격리 대상 중복",
+    "stale_budget_exhausted": "스태일 재시작 예산 소진",
+    "venue_wide_silence": "베뉴 전체 침묵",
 }
 
 

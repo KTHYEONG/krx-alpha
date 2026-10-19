@@ -47,6 +47,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--max-clock-offset-ns", type=int, default=None)
     parser.add_argument("--max-cycles", type=int, default=None)
     parser.add_argument("--degraded-reason", default=None)
+    parser.add_argument("--restart-reason", choices=["stale_child"], default=None)
     parser.set_defaults(handler=lambda args: asyncio.run(_run_stream(args)))
 
 
@@ -102,6 +103,7 @@ async def _run_stream(args: argparse.Namespace) -> int:
         shard=shard,
         min_free_disk_gb=settings.min_free_disk_gb,
         journal_retain_days=settings.journal_retain_days,
+        restart_reason=getattr(args, "restart_reason", None),
     )
     session = bootstrap_session(cfg)
     pairs = session.replay_pairs()
@@ -123,6 +125,7 @@ async def _run_stream(args: argparse.Namespace) -> int:
             allowed_streams=streams,
             capacity_pairs=capacity,
             lease=lease,
+            ack_timeout_s=settings.kis_ack_timeout_s,
         )
 
     await run_streaming_child(

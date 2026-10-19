@@ -60,4 +60,5 @@ LAYER_RANK['src/realtime/adapters/json_ws.py'] = 3
 LAYER_RANK['src/cli/probe_db_stream.py'] = 7
 LAYER_RANK['src/cli/collect_stream_db.py'] = 7
 LAYER_RANK['src/realtime/streaming_child.py'] = 5
+LAYER_RANK['src/orchestration/shard_watchdog.py'] = 5
 LAYER_RANK['src/realtime/adapters/registry.py'] = 4

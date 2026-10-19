@@ -570,3 +570,231 @@ def test_breaker_constructor_validation() -> None:
         RestartCircuitBreaker(probe_max_interval_s=0.0)
     with pytest.raises(ValueError, match="probe_max_interval_s"):
         RestartCircuitBreaker(probe_base_interval_s=300.0, probe_max_interval_s=60.0)
+
+
+def _dying_proc(*, kills: list, waits: int = 1):
+    class _Proc:
+        def __init__(self):
+            self._waits = waits
+            self._killed = False
+
+        def poll(self):
+            if self._killed or self._waits <= 0:
+                return 0
+            return None
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            self._killed = True
+            kills.append(1)
+
+        def wait(self, timeout=None):
+            import subprocess
+
+            if timeout is None:
+                return 0
+            if self._waits > 0:
+                self._waits -= 1
+                raise subprocess.TimeoutExpired("cmd", timeout)
+            return 0
+
+    return _Proc()
+
+
+def test_supervisor_records_start_time() -> None:
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    clock = iter([100.0, 200.0])
+
+    class _Proc:
+        def __init__(self, dead=False):
+            self._dead = dead
+
+        def poll(self):
+            return 1 if self._dead else None
+
+    procs = [_Proc(), _Proc(dead=True), _Proc()]
+    sup = ProcessSupervisor(cmd=["x"], popen=lambda cmd: procs.pop(0), wall_clock=lambda: next(clock))
+    assert sup.started_at_wall is None
+    assert sup.ensure_running() == "started"
+    assert sup.started_at_wall == 100.0
+    sup._proc = procs.pop(0)
+    assert sup.ensure_running() == "restarted"
+    assert sup.started_at_wall == 200.0
+
+
+def test_supervisor_stale_stop_then_standard_restart() -> None:
+    from src.orchestration.supervisor import RestartCircuitBreaker, ProcessSupervisor
+
+    kills: list = []
+    argv: list = []
+    live = _dying_proc(kills=kills, waits=99)
+
+    class _Dead:
+        def poll(self):
+            return 0
+
+    seq = [live, _Dead()]
+
+    def _popen(cmd):
+        argv.append(list(cmd))
+        return seq.pop(0) if seq else _Dead()
+
+    sup = ProcessSupervisor(
+        cmd=["run", "collect-aftermarket"],
+        breaker=RestartCircuitBreaker(max_restarts=5, window_s=1800.0),
+        popen=_popen,
+    )
+    assert sup.ensure_running() == "started"
+    assert sup.stop_for_restart(reason="stale_child", timeout_s=0.01) == "killed"
+    assert kills == [1]
+    assert sup.ensure_running() == "restarted"
+    assert argv[-1] == ["run", "collect-aftermarket", "--restart-reason", "stale_child"]
+    assert sup._armed_reason is None
+    sup._proc = _Dead()
+    assert sup.ensure_running() == "restarted"
+    assert argv[-1] == ["run", "collect-aftermarket"]
+
+
+def test_supervisor_reason_survives_open_circuit() -> None:
+    from src.orchestration.supervisor import RestartCircuitBreaker, ProcessSupervisor
+
+    argv: list = []
+
+    class _Dead:
+        def poll(self):
+            return 1
+
+    class _Live:
+        def poll(self):
+            return None
+
+    live = _Live()
+    started = {"n": 0}
+
+    def _popen(cmd):
+        argv.append(list(cmd))
+        started["n"] += 1
+        return live
+
+    sup = ProcessSupervisor(
+        cmd=["run"], breaker=RestartCircuitBreaker(max_restarts=1, window_s=3600.0), popen=_popen
+    )
+    assert sup.ensure_running() == "started"
+    sup._proc = _Dead()
+    assert sup.ensure_running() == "restarted"
+    assert started["n"] == 2
+    sup._proc = _Dead()
+    assert sup.ensure_running() == "circuit_open"
+    assert sup.stop_for_restart(reason="stale_child", timeout_s=0.01) == "not_running"
+    assert argv == [["run"], ["run"]]
+
+
+def test_supervisor_stop_for_restart_not_running_arms_nothing() -> None:
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    argv: list = []
+    sup = ProcessSupervisor(cmd=["run"], popen=lambda cmd: argv.append(list(cmd)) or _dying_proc(kills=[], waits=0))
+    assert sup.stop_for_restart(reason="stale_child") == "not_running"
+    assert sup.ensure_running() == "started"
+    assert argv == [["run"]]
+
+
+def test_supervisor_argv_safety() -> None:
+    import pytest
+
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    sup = ProcessSupervisor(cmd=["run"], popen=lambda cmd: _dying_proc(kills=[], waits=0))
+    with pytest.raises(ValueError, match="restart reason"):
+        sup.arm_restart_reason("")
+    with pytest.raises(ValueError, match="restart reason"):
+        sup.arm_restart_reason("--evil")
+    with pytest.raises(ValueError, match="restart reason"):
+        sup.stop_for_restart(reason="--evil")
+
+
+def test_supervisor_cmd_never_mutated() -> None:
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    cmd = ["run", "collect-aftermarket"]
+    sup = ProcessSupervisor(cmd=cmd, popen=lambda c: _dying_proc(kills=[], waits=0))
+    assert sup.ensure_running() == "started"
+    sup.arm_restart_reason("stale_child")
+    sup._proc = _dying_proc(kills=[], waits=0)
+    sup._proc.poll = lambda: 1
+    assert sup.ensure_running() == "restarted"
+    assert cmd == ["run", "collect-aftermarket"]
+
+
+def test_supervisor_backward_compatible_popen_shape() -> None:
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    seen: list = []
+
+    def _popen(cmd):
+        seen.append(cmd)
+        return _dying_proc(kills=[], waits=0)
+
+    sup = ProcessSupervisor(cmd=["a", "b"], popen=_popen)
+    assert sup.ensure_running() == "started"
+    assert seen == [["a", "b"]]
+
+
+def test_restart_reason_survives_failed_spawn():
+    from unittest.mock import Mock
+
+    import pytest
+
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    spawn = Mock(side_effect=[_dying_proc(kills=[], waits=0), OSError("spawn failed"),
+                              _dying_proc(kills=[], waits=0), _dying_proc(kills=[], waits=0)])
+    sup = ProcessSupervisor(cmd=["run"], popen=spawn)
+    sup.ensure_running()
+    sup.arm_restart_reason("stale_child")
+    with pytest.raises(OSError, match="spawn failed"):
+        sup.ensure_running()
+    assert sup.ensure_running() == "restarted"
+    assert spawn.call_args.args[0] == ["run", "--restart-reason", "stale_child"]
+    sup.ensure_running()
+    assert spawn.call_args.args[0] == ["run"]
+
+
+def test_stop_race_does_not_arm_restart_reason():
+    from unittest.mock import Mock
+
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    proc = Mock()
+    proc.poll.side_effect = [None, 0]
+    spawn = Mock(side_effect=[proc, _dying_proc(kills=[], waits=0)])
+    sup = ProcessSupervisor(cmd=["run"], popen=spawn)
+    sup.ensure_running()
+    assert sup.stop_for_restart(reason="stale_child") == "not_running"
+    proc.poll.side_effect = None
+    proc.poll.return_value = 0
+    sup.ensure_running()
+    assert spawn.call_args.args[0] == ["run"]
+
+
+def test_stale_reason_survives_circuit_until_probe(monkeypatch):
+    from unittest.mock import Mock
+
+    import src.orchestration.supervisor as module
+
+    clock = {"now": 0.0}
+    monkeypatch.setattr(module.time, "monotonic", lambda: clock["now"])
+    breaker = module.RestartCircuitBreaker(max_restarts=1)
+    spawn = Mock(side_effect=[_dying_proc(kills=[], waits=1), _dying_proc(kills=[], waits=0)])
+    sup = module.ProcessSupervisor(cmd=["run"], popen=spawn, breaker=breaker)
+    sup.ensure_running()
+    breaker.record_restart(now=0.0)
+    assert sup.stop_for_restart(reason="stale_child") == "killed"
+    assert sup.ensure_running() == "circuit_open"
+    assert spawn.call_count == 1
+    clock["now"] = 60.0
+    assert sup.ensure_running() == "restarted"
+    assert spawn.call_args.args[0] == ["run", "--restart-reason", "stale_child"]

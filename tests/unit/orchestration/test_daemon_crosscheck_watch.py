@@ -316,6 +316,7 @@ def test_digest_body_unchanged_without_crosscheck(tmp_path, monkeypatch) -> None
         "host_backup=ok",
         "streamer_restarts=0",
         "aftermarket_restarts=0",
+        "shard_stale_restarts=0",
         "orchestration_attempts=0",
     ]
     assert digests[0][1].splitlines() == expected
