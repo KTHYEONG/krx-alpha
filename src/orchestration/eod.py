@@ -7,17 +7,19 @@ import functools
 import json
 import logging
 import pathlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from src.core.config import AuditMode, AuditSettings
 from src.core.session_anchors import STANDARD_AFTER_MARKET_END, SessionAnchors
 from src.realtime.kis_sharding import AftermarketShard
 from src.realtime.manifest import SessionManifest
 from src.realtime.streamer import aftermarket_open_time
+from src.storage.l0_audit import AuditStatus, LatencyBreach, SessionAudit, StreamLatency, latency_breaches
 from src.storage.layout import (
     L0_JOURNAL_GLOB,
     L0_REPO_PREFIX,
@@ -27,6 +29,7 @@ from src.storage.layout import (
     l0_partition_relpath,
     l1_repo_path,
 )
+from src.storage.market_phase import MarketPhase
 from src.storage.normalize_worker import run_isolated_normalize
 from src.storage.remote import GDriveArchiver, PurgeStats, RcloneArchiver, RemoteArchiveError, SyncStats
 from src.storage.retention import prune_local_l1, prune_old_journals
@@ -159,9 +162,34 @@ def run_eod_remote_l0_purge(
     return arc.purge_superseded_l0(verified_remote_l1, pathlib.Path(journal_root), progress=progress)
 
 
-def _regular_session_gap_s(
-    gaps: list[dict[str, object]], date: dt.date, regular_open: dt.time, regular_close: dt.time
-) -> float:
+class GapBudgetStatus(StrEnum):
+    """Ledger verdict of one regular-session gap budget."""
+
+    PASS = "PASS"  # noqa: S105 - verdict label, not a secret
+    WARN = "WARN"
+    FAIL = "FAIL"
+
+
+@dataclass(frozen=True)
+class GapBudgetVerdict:
+    """Count-based gap budget verdict from manifest spans and the session audit."""
+
+    status: GapBudgetStatus
+    basis: str
+    reasons: tuple[str, ...]
+    confirmed_missing: int
+    trades_observed: int
+    loss_ratio: float
+    loss_span_s: float
+    silent_span_s: float
+    silent_spans: int
+    tail_silence_s: float
+    legacy_gap_s: float
+
+
+def _clip_merge_spans(
+    gaps: Sequence[Mapping[str, object]], date: dt.date, regular_open: dt.time, regular_close: dt.time
+) -> tuple[tuple[tuple[int, int], ...], float]:
     open_ns = int(dt.datetime.combine(date, regular_open, tzinfo=_KST).timestamp()) * 1_000_000_000
     close_ns = int(dt.datetime.combine(date, regular_close, tzinfo=_KST).timestamp()) * 1_000_000_000
     clipped: list[tuple[int, int]] = []
@@ -180,7 +208,207 @@ def _regular_session_gap_s(
         else:
             merged.append([s, e])
     total_ns = sum(e - s for s, e in merged)
-    return total_ns / 1e9
+    return tuple((s, e) for s, e in merged), total_ns / 1e9
+
+
+def _split_silent_loss_spans(
+    merged: tuple[tuple[int, int], ...], audit: SessionAudit
+) -> tuple[float, float, int]:
+    windows: list[tuple[int, int]] = []
+    for symbol in audit.symbols:
+        for interval in symbol.intervals:
+            if interval.phase != MarketPhase.REGULAR.value:
+                continue
+            windows.append((min(interval.recv_prev_ns, interval.recv_next_ns), max(interval.recv_prev_ns, interval.recv_next_ns)))
+    silent_s = 0.0
+    loss_s = 0.0
+    silent_count = 0
+    for s, e in merged:
+        if any(s < hi and lo < e for lo, hi in windows):
+            loss_s += (e - s) / 1e9
+        else:
+            silent_s += (e - s) / 1e9
+            silent_count += 1
+    return silent_s, loss_s, silent_count
+
+
+def evaluate_session_gap_budget(
+    *,
+    gaps: Sequence[Mapping[str, object]],
+    date: dt.date,
+    regular_open: dt.time,
+    regular_close: dt.time,
+    audit: SessionAudit | None,
+    settings: AuditSettings | None,
+    max_gap_s: float = MAX_SESSION_GAP_S,
+) -> GapBudgetVerdict:
+    """Pure verdict from manifest spans and the session audit under `settings.mode`; legacy time budget is the fallback basis."""
+    merged, legacy_gap_s = _clip_merge_spans(gaps, date, regular_open, regular_close)
+    matched = audit is not None and audit.session_date == date and audit.status in (AuditStatus.OK, AuditStatus.PARTIAL)
+    if matched:
+        assert audit is not None
+        confirmed = audit.totals.confirmed_missing
+        trades = audit.totals.trades_observed
+        loss_ratio = (confirmed / trades) if trades else 0.0
+        tail_silence_s = audit.tail_silence_s if audit.tail_silence_s is not None else 0.0
+        silent_span_s, loss_span_s, silent_spans = _split_silent_loss_spans(merged, audit)
+    else:
+        confirmed = 0
+        trades = 0
+        loss_ratio = 0.0
+        tail_silence_s = 0.0
+        silent_span_s = 0.0
+        loss_span_s = legacy_gap_s
+        silent_spans = 0
+    ledger_active = (
+        settings is not None and settings.mode is AuditMode.ENFORCE and matched and trades > 0
+    )
+    if not ledger_active:
+        if legacy_gap_s > max_gap_s:
+            return GapBudgetVerdict(
+                GapBudgetStatus.FAIL, "legacy", (f"gap_exceeded:{int(legacy_gap_s)}s",),
+                confirmed, trades, loss_ratio, loss_span_s, silent_span_s, silent_spans,
+                tail_silence_s, legacy_gap_s,
+            )
+        return GapBudgetVerdict(
+            GapBudgetStatus.PASS, "legacy", (), confirmed, trades, loss_ratio,
+            loss_span_s, silent_span_s, silent_spans, tail_silence_s, legacy_gap_s,
+        )
+    assert audit is not None
+    assert settings is not None
+    reasons: list[str] = []
+    failed = False
+    if loss_ratio > settings.loss_fail_ratio:
+        failed = True
+        reasons.append(f"trade_loss_exceeded:{confirmed}/{trades}")
+    breaching = [
+        symbol for symbol in audit.symbols
+        if symbol.status == "OK"
+        and symbol.trades_observed >= settings.symbol_min_trades
+        and symbol.trades_observed > 0
+        and symbol.confirmed_missing / symbol.trades_observed > settings.symbol_loss_fail_ratio
+    ]
+    if breaching:
+        failed = True
+        ordered = sorted(breaching, key=lambda s: (s.confirmed_missing / s.trades_observed, s.confirmed_missing), reverse=True)
+        worst = ordered[0]
+        extra = f"+{len(ordered) - 1}" if len(ordered) > 1 else ""
+        reasons.append(f"symbol_loss_exceeded:{worst.symbol}:{worst.confirmed_missing}/{worst.trades_observed}{extra}")
+    if tail_silence_s > settings.tail_silence_max_s:
+        failed = True
+        reasons.append(f"tail_silence_exceeded:{int(tail_silence_s)}s")
+    partial = audit.status is AuditStatus.PARTIAL
+    if partial and legacy_gap_s > max_gap_s:
+        failed = True
+        reasons.insert(0, f"gap_exceeded:{int(legacy_gap_s)}s")
+    status = GapBudgetStatus.FAIL if failed else GapBudgetStatus.PASS
+    if not failed and loss_ratio > settings.loss_warn_ratio:
+        status = GapBudgetStatus.WARN
+        reasons.append(f"trade_loss_warn:{confirmed}/{trades}")
+    return GapBudgetVerdict(
+        status, "ledger+legacy" if partial else "ledger", tuple(reasons),
+        confirmed, trades, loss_ratio, loss_span_s, silent_span_s, silent_spans,
+        tail_silence_s, legacy_gap_s,
+    )
+
+
+def _log_stream_latency(entry: StreamLatency, *, threshold_s: float, date: dt.date) -> None:
+    minutes = entry.minutes
+    worst = max(minutes, key=lambda m: (m.max_s, m.minute_kst)) if minutes else None
+    logger.info(
+        "[DATA] stage=ingest_latency status=OK date=%s stream=%s minutes=%d worst_minute=%s max_s=%.1f p50_s=%.1f threshold_s=%.1f",
+        date.isoformat(),
+        entry.stream,
+        len(minutes),
+        worst.minute_kst if worst is not None else "-",
+        worst.max_s if worst is not None else 0.0,
+        worst.p50_s if worst is not None else 0.0,
+        threshold_s,
+    )
+
+
+def log_session_audit(audit: SessionAudit | None, *, settings: AuditSettings, anchors: SessionAnchors, date: dt.date) -> None:
+    """Emit the audit summary and per-stream latency lines; CRITICAL once per stream whose regular-window minutes exceed the latency threshold."""
+    if audit is None or settings.mode is AuditMode.OFF:
+        return
+    try:
+        totals = audit.totals
+        status = audit.status.value
+        reason = audit.reason or "-"
+        tail_silence_s = audit.tail_silence_s if audit.tail_silence_s is not None else 0.0
+        trades = totals.trades_observed
+        confirmed = totals.confirmed_missing
+        count_only = totals.count_only_missing
+        loss_ratio = totals.loss_ratio
+        with_loss = totals.symbols_with_loss
+        no_counter = totals.symbols_without_counter
+    except Exception:  # noqa: BLE001
+        logger.warning("[DATA] stage=session_audit status=UNAVAILABLE reason=summary_error date=%s", date.isoformat())
+        return
+    if status == "OK":
+        logger.info(
+            "[DATA] stage=session_audit status=%s reason=%s date=%s mode=%s trades=%d confirmed_missing=%d count_only_missing=%d loss_ratio=%.6g symbols_with_loss=%d symbols_no_counter=%d tail_silence_s=%.1f",
+            status,
+            reason,
+            date.isoformat(),
+            settings.mode.value,
+            trades,
+            confirmed,
+            count_only,
+            loss_ratio,
+            with_loss,
+            no_counter,
+            tail_silence_s,
+        )
+    else:
+        logger.warning(
+            "[DATA] stage=session_audit status=%s reason=%s date=%s mode=%s trades=%d confirmed_missing=%d count_only_missing=%d loss_ratio=%.6g symbols_with_loss=%d symbols_no_counter=%d tail_silence_s=%.1f",
+            status,
+            reason,
+            date.isoformat(),
+            settings.mode.value,
+            trades,
+            confirmed,
+            count_only,
+            loss_ratio,
+            with_loss,
+            no_counter,
+            tail_silence_s,
+        )
+    for stream in dict.fromkeys(settings.latency_streams):
+        try:
+            entry = next(
+                (item for item in audit.latency if item.stream == stream),
+                StreamLatency(stream, AuditStatus.UNAVAILABLE, "unavailable", 0, 0, ()),
+            )
+            _log_stream_latency(entry, threshold_s=settings.latency_alert_threshold_s, date=date)
+        except Exception:  # noqa: BLE001
+            logger.debug("[DATA] stage=ingest_latency status=SKIP date=%s", date.isoformat())
+            continue
+    try:
+        breaches = latency_breaches(
+            audit,
+            threshold_s=settings.latency_alert_threshold_s,
+            window_start=anchors.regular_open,
+            window_end=anchors.regular_close,
+        )
+    except Exception:  # noqa: BLE001
+        return
+    grouped: dict[str, list[LatencyBreach]] = {}
+    for breach in breaches:
+        grouped.setdefault(breach.stream, []).append(breach)
+    for stream, items in grouped.items():
+        worst = max(items, key=lambda b: (b.max_s, b.minute_kst))
+        logger.critical(
+            "[DATA] stage=ingest_latency status=FAIL reason=latency_exceeded date=%s stream=%s minute=%s max_s=%.1f p50_s=%.1f threshold_s=%.1f breach_minutes=%d",
+            date.isoformat(),
+            stream,
+            worst.minute_kst,
+            worst.max_s,
+            worst.p50_s,
+            settings.latency_alert_threshold_s,
+            len(items),
+        )
 
 
 def classify_remote_failure(message: str) -> str:
@@ -557,6 +785,8 @@ def check_session_reconciliation(
     regular_close: dt.time,
     max_gap_s: float = MAX_SESSION_GAP_S,
     failure_level: int = logging.CRITICAL,
+    audit: SessionAudit | None = None,
+    audit_settings: AuditSettings | None = None,
 ) -> bool:
     """Verify that a business-day regular session left a complete collection trail.
 
@@ -583,6 +813,10 @@ def check_session_reconciliation(
         regular_close: Regular-session close bound for gap clipping (KST).
         max_gap_s: Maximum tolerated regular-session gap in seconds.
         failure_level: Log level for the failure line; WARNING, ERROR or CRITICAL.
+        audit: Session audit for count-based loss accounting; without it the
+            check is purely time-budget based.
+        audit_settings: Rollout mode and loss budget thresholds; without it the
+            check is purely time-budget based.
 
     Returns:
         True when every check holds; otherwise False, after one
@@ -596,27 +830,134 @@ def check_session_reconciliation(
         raise ValueError(f"failure_level must be WARNING, ERROR or CRITICAL: {failure_level}")
     manifest = pathlib.Path(manifest_path)
     root = pathlib.Path(journal_root)
-    issues: list[str] = []
+    structural: list[str] = []
     if not manifest.exists():
-        issues.append("manifest_missing")
+        structural.append("manifest_missing")
     for stream in streams:
         key = l0_partition_key(vendor, venue, session, stream, date)
         if key is None or not list((root / l0_partition_relpath(key)).glob(L0_JOURNAL_GLOB)):
-            issues.append(f"journal_missing:{stream}")
+            structural.append(f"journal_missing:{stream}")
+    gaps: list[dict[str, object]] = []
     if manifest.exists():
         try:
             loaded = SessionManifest.load(manifest)
-            gap_s = _regular_session_gap_s(loaded.gaps, date, regular_open, regular_close)
-            if gap_s > max_gap_s:
-                issues.append(f"gap_exceeded:{int(gap_s)}s")
+            gaps = list(loaded.gaps)
+            for g in gaps:
+                int(g["gap_start_ns"])  # type: ignore[call-overload]
+                int(g["gap_end_ns"])  # type: ignore[call-overload]
         except (ValueError, KeyError, TypeError):
-            issues.append("manifest_unreadable")
-    if issues:
+            gaps = []
+            structural.append("manifest_unreadable")
+        except AttributeError:
+            if audit is None or audit_settings is None or audit_settings.mode is AuditMode.OFF:
+                raise
+            gaps = []
+            structural.append("manifest_unreadable")
+    if audit is None or audit_settings is None or audit_settings.mode is AuditMode.OFF:
+        legacy = evaluate_session_gap_budget(
+            gaps=gaps, date=date, regular_open=regular_open, regular_close=regular_close,
+            audit=None, settings=None, max_gap_s=max_gap_s,
+        )
+        issues = structural + list(legacy.reasons)
+        if issues:
+            logger.log(
+                failure_level,
+                "[DATA] stage=session_reconciliation status=FAIL date=%s reasons=%s",
+                date.isoformat(),
+                ",".join(issues),
+            )
+            return False
+        return True
+    mismatch = audit.session_date != date
+    usable = not mismatch and audit.status in (AuditStatus.OK, AuditStatus.PARTIAL) and audit.totals.trades_observed > 0
+    if not usable:
+        logger.warning(
+            "[DATA] stage=session_audit status=UNAVAILABLE reason=%s basis=legacy date=%s",
+            "date_mismatch" if mismatch else audit.reason,
+            date.isoformat(),
+        )
+        legacy = evaluate_session_gap_budget(
+            gaps=gaps, date=date, regular_open=regular_open, regular_close=regular_close,
+            audit=None, settings=None, max_gap_s=max_gap_s,
+        )
+        issues = structural + list(legacy.reasons)
+        if issues:
+            logger.log(
+                failure_level,
+                "[DATA] stage=session_reconciliation status=FAIL date=%s reasons=%s",
+                date.isoformat(),
+                ",".join(issues),
+            )
+            return False
+        return True
+    if audit_settings.mode is AuditMode.SHADOW:
+        enforce_view = audit_settings.model_copy(update={"mode": AuditMode.ENFORCE})
+        would = evaluate_session_gap_budget(
+            gaps=gaps, date=date, regular_open=regular_open, regular_close=regular_close,
+            audit=audit, settings=enforce_view, max_gap_s=max_gap_s,
+        )
+        legacy = evaluate_session_gap_budget(
+            gaps=gaps, date=date, regular_open=regular_open, regular_close=regular_close,
+            audit=None, settings=None, max_gap_s=max_gap_s,
+        )
+        would_label = would.status.value
+        legacy_label = "FAIL" if legacy.status is GapBudgetStatus.FAIL else "PASS"
+        shadow_reasons = ",".join(would.reasons) if would.reasons else "-"
+        if would.status is GapBudgetStatus.FAIL:
+            logger.warning(
+                "[DATA] stage=session_audit mode=shadow date=%s would=%s legacy=%s reasons=%s",
+                date.isoformat(),
+                would_label,
+                legacy_label,
+                shadow_reasons,
+            )
+        else:
+            logger.info(
+                "[DATA] stage=session_audit mode=shadow date=%s would=%s legacy=%s reasons=%s",
+                date.isoformat(),
+                would_label,
+                legacy_label,
+                shadow_reasons,
+            )
+        issues = structural + list(legacy.reasons)
+        if issues:
+            logger.log(
+                failure_level,
+                "[DATA] stage=session_reconciliation status=FAIL date=%s reasons=%s",
+                date.isoformat(),
+                ",".join(issues),
+            )
+            return False
+        return True
+    verdict = evaluate_session_gap_budget(
+        gaps=gaps, date=date, regular_open=regular_open, regular_close=regular_close,
+        audit=audit, settings=audit_settings, max_gap_s=max_gap_s,
+    )
+    partial = " partial=1" if audit.status is AuditStatus.PARTIAL else ""
+    logger.info(
+        "[DATA] stage=session_audit date=%s silent_span_s=%.1f silent_spans=%d loss_span_s=%.1f legacy_gap_s=%.1f%s",
+        date.isoformat(),
+        verdict.silent_span_s,
+        verdict.silent_spans,
+        verdict.loss_span_s,
+        verdict.legacy_gap_s,
+        partial,
+    )
+    issues = structural + list(verdict.reasons)
+    if structural or verdict.status is GapBudgetStatus.FAIL:
         logger.log(
             failure_level,
-            "[DATA] stage=session_reconciliation status=FAIL date=%s reasons=%s",
+            "[DATA] stage=session_reconciliation status=FAIL date=%s reasons=%s%s",
             date.isoformat(),
             ",".join(issues),
+            partial,
         )
         return False
+    if verdict.status is GapBudgetStatus.WARN:
+        logger.warning(
+            "[DATA] stage=session_reconciliation status=WARN date=%s reasons=%s%s",
+            date.isoformat(),
+            ",".join(verdict.reasons),
+            partial,
+        )
     return True

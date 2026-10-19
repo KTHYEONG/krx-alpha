@@ -505,3 +505,75 @@ def test_shard_budget_daily_cap_respected(caplog) -> None:
             now["t"] = float(i * 2000)
             handler.handle(_shard_budget_record())
     assert len(calls) == 3
+
+
+def _latency_breach_record(stream="H0STCNT0", minute="09:01", max_s=32.0):
+    import logging
+
+    msg = (
+        "[DATA] stage=ingest_latency status=FAIL reason=latency_exceeded "
+        f"date=2026-10-15 stream={stream} minute={minute} max_s={max_s:.1f} p50_s=12.0 threshold_s=10.0 breach_minutes=1"
+    )
+    return logging.LogRecord("x", logging.CRITICAL, __file__, 1, msg, (), None)
+
+
+def test_latency_breach_alert_subject_labeled() -> None:
+    from src.core.alerts import format_alert_subject
+
+    fields = {"stage": "ingest_latency", "reason": "latency_exceeded"}
+    subject = format_alert_subject("daemon", _latency_breach_record().getMessage(), fields)
+    assert "수집지연" in subject
+    assert "전달 지연 임계 초과" in subject
+    assert "ingest_latency" not in subject
+    assert "latency_exceeded" not in subject
+
+
+def test_reconciliation_fail_alert_subject_uses_stage_label() -> None:
+    from src.core.alerts import format_alert_subject
+
+    msg = "[DATA] stage=session_reconciliation status=FAIL date=2026-10-15 reasons=trade_loss_exceeded:10198/1600000"
+    fields = {"stage": "session_reconciliation", "status": "FAIL"}
+    subject = format_alert_subject("daemon", msg, fields)
+    assert "세션정합성" in subject
+    assert "FAIL" in subject
+    assert "session_reconciliation" not in subject
+
+
+def test_latency_dedup_key_by_stream_not_minute_or_value() -> None:
+    from src.core.alerts import alert_dedup_key
+
+    a = alert_dedup_key(_latency_breach_record(stream="H0STCNT0", minute="09:01", max_s=32.0).getMessage())
+    b = alert_dedup_key(_latency_breach_record(stream="H0STCNT0", minute="09:03", max_s=15.0).getMessage())
+    c = alert_dedup_key(_latency_breach_record(stream="H0STASP0", minute="09:01", max_s=32.0).getMessage())
+    assert a == b
+    assert a != c
+
+
+def test_latency_and_gap_alerts_share_daily_budget() -> None:
+    import datetime as dt
+    import logging
+
+    from src.core.alerts import EmailAlertHandler, InMemoryAlertLedger
+
+    calls: list = []
+    now = {"t": 0.0, "day": dt.date(2026, 10, 15)}
+
+    def _rec(subject: str, body: str, **kw: object) -> None:
+        calls.append(subject)
+
+    handler = EmailAlertHandler(
+        component="daemon",
+        run_id="r",
+        sender=_rec,
+        cooldown_s=0,
+        clock=lambda: now["t"],
+        today=lambda: now["day"],
+        sleep=lambda s: None,
+        ledger=InMemoryAlertLedger(),
+    )
+    gap_msg = "[DAEMON] stage=eod_maintenance status=FAIL reason=session_data_gap date=2026-10-15"
+    gap_record = logging.LogRecord("x", logging.CRITICAL, __file__, 1, gap_msg, (), None)
+    handler.handle(_latency_breach_record("H0STCNT0"))
+    handler.handle(_latency_breach_record("H0STASP0"))
+    handler.handle(gap_record)
+    assert len(calls) == 3
