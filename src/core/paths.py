@@ -118,6 +118,12 @@ class DataPaths:
     def manifest_path(self, day: dt.date) -> pathlib.Path:
         return self.manifest_dir / f"{day.isoformat()}.json"
 
+    def session_audit_path(self, day: dt.date, vendor: str) -> pathlib.Path:
+        """Return `manifest/audit/<day>.<vendor>.regular.audit.json`; pure path algebra, no I/O."""
+        if not vendor:
+            raise ValueError(f"vendor must be a non-empty journal vendor id: {vendor!r}")
+        return self.manifest_dir / "audit" / f"{day.isoformat()}.{vendor}.regular.audit.json"
+
     def db_crosscheck_manifest_path(self, day: dt.date) -> pathlib.Path:
         return self.manifest_dir / f"{day.isoformat()}.db.json"
 
