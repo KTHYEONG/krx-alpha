@@ -24,6 +24,8 @@ from src.brokers.kis.data import KisDataClient
 from src.brokers.kis.stack import build_kis_data_slot_stack, build_kis_rest_stack
 from src.core.calendar import SessionState, calc_sleep_seconds, get_target_state, schedule_for
 from src.core.config import (
+    AuditMode,
+    AuditSettings,
     CollectorRuntime,
     CollectorSettings,
     DataPaths,
@@ -81,6 +83,7 @@ from src.orchestration.eod import (
     check_host_backup_freshness,
     check_session_reconciliation,
     classify_remote_failure,
+    log_session_audit,
     run_eod_maintenance,
     run_eod_offload,
     run_eod_remote_l0_purge,
@@ -109,7 +112,9 @@ from src.realtime.kis_sharding import (
     plan_aftermarket_shards,
     plan_premarket_shard,
 )
+from src.realtime.manifest import SessionManifest
 from src.realtime.streamer import aftermarket_open_time
+from src.storage.l0_audit import AuditStatus, SessionAudit, derive_session_audit, write_session_audit
 from src.storage.layout import L0_VENDOR_DB, l0_day_journal_glob
 from src.storage.remote import RemoteArchiveError
 from src.storage.retention import check_disk_watermark
@@ -427,6 +432,18 @@ class _EodHousekeeping:
     purged: int
     maintenance_ok: bool
     offload_ok: bool
+
+
+def _tick_open_max_latency_s(audit: SessionAudit, anchors: SessionAnchors) -> str:
+    peak: float | None = None
+    for entry in audit.latency:
+        if entry.stream != "H0STCNT0":
+            continue
+        for minute in entry.minutes:
+            moment = dt.time(int(minute.minute_kst[0:2]), int(minute.minute_kst[3:5]))
+            if anchors.regular_open <= moment < anchors.regular_close and (peak is None or minute.max_s > peak):
+                peak = minute.max_s
+    return f"{peak:.1f}" if peak is not None else "-"
 
 
 def _run_eod_housekeeping(
@@ -2493,8 +2510,9 @@ class DaemonRunner:
         prearm_late = self._log_aftermarket_prearm(ref_day, anchors)
         zero_frame_symbols = self._log_aftermarket_coverage(ref_day)
         self._log_premarket_eod(ref_day)
+        audit = self._derive_session_audit(ref_day, day, anchors)
         housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=self._eod_progress)
-        reconcile_ok, reconciled = self._reconcile_regular_session(ref_day, day, anchors)
+        reconcile_ok, reconciled = self._reconcile_regular_session(ref_day, day, anchors, audit=audit)
         crosscheck = self._reconcile_crosscheck_sessions(ref_day, day, anchors)
         backup_missing, backup_ok, host_backup = _check_backup(
             cfg.host_backup_status_path,
@@ -2522,6 +2540,20 @@ class DaemonRunner:
             eod_status,
             extra=EVENT,
         )
+        runtime_audit = getattr(self._runtime, "audit", None) or AuditSettings()
+        if audit is None:
+            audit_status = "OFF" if runtime_audit.mode is AuditMode.OFF else "UNAVAILABLE"
+            trade_loss = "-"
+            open_latency = "-"
+        else:
+            audit_status = audit.status.value
+            trade_loss = (
+                f"{audit.totals.confirmed_missing}/{audit.totals.trades_observed}"
+                if audit.status is not AuditStatus.UNAVAILABLE else "-"
+            )
+            open_latency = (
+                _tick_open_max_latency_s(audit, anchors) if audit.status is not AuditStatus.UNAVAILABLE else "-"
+            )
         digest_body = "\n".join(
             [
                 f"run_id={self._run_id}",
@@ -2530,6 +2562,9 @@ class DaemonRunner:
                 f"uploaded={housekeeping.uploaded}",
                 f"purged={housekeeping.purged}",
                 f"reconciled={reconciled}",
+                f"audit_status={audit_status}",
+                f"regular_trade_loss={trade_loss}",
+                f"open_max_latency_s={open_latency}",
                 f"aftermarket_ready={not aftermarket_blocked}",
                 f"aftermarket_zero_frame_symbols={zero_frame_symbols}",
                 f"aftermarket_prearm_late={prearm_late}",
@@ -2580,8 +2615,59 @@ class DaemonRunner:
                     aftermarket_blocked = True
         return aftermarket_blocked
 
+    def _derive_session_audit(self, ref_day: dt.date, day: TradingDayView, anchors: SessionAnchors) -> SessionAudit | None:
+        """Derive, persist and log the regular-session audit before EOD housekeeping; returns None when disabled, not a business day, or on any contained failure (EOD never aborts)."""
+        runtime_audit = getattr(self._runtime, "audit", None) or AuditSettings()
+        if runtime_audit.mode is AuditMode.OFF or day.status is not TradingDayStatus.BUSINESS:
+            return None
+        cfg = self._cfg
+        paths = self._paths
+        try:
+            manifest_frame_counts = SessionManifest.load(paths.manifest_path(ref_day)).frame_counts
+        except FileNotFoundError:
+            manifest_frame_counts = None
+        except (OSError, KrxAlphaError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            manifest_frame_counts = None
+            logger.error(
+                "[DATA] stage=session_audit status=ERROR date=%s error=%s",
+                ref_day.isoformat(),
+                str(exc),
+                exc_info=True,
+            )
+        try:
+            audit = derive_session_audit(
+                paths.journal_root,
+                vendor=cfg.vendor,
+                venue=MarketVenue.KRX.value,
+                session=MarketSession.REGULAR.value,
+                day=ref_day,
+                anchors=anchors,
+                settings=runtime_audit,
+                manifest_frame_counts=manifest_frame_counts,
+                progress=self._eod_progress,
+            )
+        except (OSError, KrxAlphaError, ValueError) as exc:
+            logger.error(
+                "[DATA] stage=session_audit status=ERROR date=%s error=%s",
+                ref_day.isoformat(),
+                str(exc),
+                exc_info=True,
+            )
+            return None
+        try:
+            write_session_audit(audit, paths.session_audit_path(ref_day, cfg.vendor))
+        except (OSError, KrxAlphaError, ValueError) as exc:
+            logger.error(
+                "[DATA] stage=session_audit status=WRITE_FAIL date=%s error=%s",
+                ref_day.isoformat(),
+                str(exc),
+                exc_info=True,
+            )
+        log_session_audit(audit, settings=runtime_audit, anchors=anchors, date=ref_day)
+        return audit
+
     def _reconcile_regular_session(
-        self, ref_day: dt.date, day: TradingDayView, anchors: SessionAnchors
+        self, ref_day: dt.date, day: TradingDayView, anchors: SessionAnchors, *, audit: SessionAudit | None = None
     ) -> tuple[bool, bool]:
         """Return `(reconcile_ok, reconciled)` for the KRX regular session.
 
@@ -2602,6 +2688,8 @@ class DaemonRunner:
                     session=MarketSession.REGULAR.value,
                     regular_open=anchors.regular_open,
                     regular_close=anchors.regular_close,
+                    audit=audit,
+                    audit_settings=getattr(self._runtime, "audit", None) or AuditSettings(),
                 )
                 if not reconciled:
                     logger.critical(

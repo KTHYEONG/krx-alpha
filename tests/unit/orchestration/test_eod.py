@@ -1850,3 +1850,1154 @@ def test_coverage_counts_any_accepted_ack_even_when_untracked(tmp_path) -> None:
     assert untracked.accepted_symbols == 1
     assert untracked.zero_frame_symbols is None
     assert untracked.reason == "untracked"
+
+
+def _ledger_ns(day, hour, minute, second=0):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    return int(
+        dt.datetime(day.year, day.month, day.day, hour, minute, second, tzinfo=ZoneInfo("Asia/Seoul")).timestamp()
+    ) * 1_000_000_000
+
+
+def _ledger_gap(day, hour, minute, duration_s, symbol="005930"):
+    start = _ledger_ns(day, hour, minute)
+    return (symbol, start, start + int(duration_s * 1_000_000_000))
+
+
+def _ledger_session(tmp_path, day, gaps=()):
+    journal_root = tmp_path / "l0"
+    _write_routed_journal(journal_root, stream="H0STCNT0", date=day)
+    _write_routed_journal(journal_root, stream="H0STASP0", date=day)
+    manifest_path = tmp_path / "manifest" / f"{day.isoformat()}.json"
+    _write_session_manifest(manifest_path, day, gaps=gaps)
+    return journal_root, manifest_path
+
+
+def _ledger_symbol(symbol="005930", *, trades=1_600_000, missing=0, count_only=0, status="OK", intervals=()):
+    from src.storage.l0_audit import SymbolLedger
+
+    return SymbolLedger(
+        symbol=symbol,
+        status=status,
+        frames=max(trades, 1),
+        trades_observed=trades,
+        confirmed_missing=missing,
+        count_only_missing=count_only,
+        net_missing=0,
+        volume_deficit=0,
+        duplicates=0,
+        regressions=0,
+        resets=0,
+        decode_fail=0,
+        intervals=tuple(intervals),
+        intervals_truncated=0,
+        manifest_frames=None,
+    )
+
+
+def _ledger_audit(day, *, status="OK", reason="ok", symbols=(), tail_silence_s=0.0, latency=()):
+    from src.storage.l0_audit import AuditStatus, LedgerTotals, SessionAudit
+
+    syms = tuple(symbols)
+    ok = [s for s in syms if s.status == "OK"]
+    trades = sum(s.trades_observed for s in ok)
+    confirmed = sum(s.confirmed_missing for s in ok)
+    totals = LedgerTotals(
+        symbols=len(ok),
+        symbols_with_loss=sum(1 for s in ok if s.confirmed_missing + s.count_only_missing > 0),
+        symbols_without_counter=sum(1 for s in syms if s.status != "OK"),
+        trades_observed=trades,
+        confirmed_missing=confirmed,
+        count_only_missing=sum(s.count_only_missing for s in ok),
+        net_missing_positive=0,
+        volume_deficit=0,
+        loss_ratio=(confirmed / trades) if trades else 0.0,
+    )
+    return SessionAudit(
+        schema_version=1,
+        session_date=day,
+        vendor="ls",
+        venue="krx",
+        session="regular",
+        status=AuditStatus(status),
+        reason=reason,
+        generated_at_ns=1,
+        sources=(),
+        latency=tuple(latency),
+        symbols=syms,
+        totals=totals,
+        tail_silence_s=tail_silence_s,
+        last_regular_tick_recv_ns=1,
+    )
+
+
+def _ledger_latency(stream, peaks):
+    from src.storage.l0_audit import AuditStatus, LatencyMinute, StreamLatency
+
+    return StreamLatency(
+        stream=stream,
+        status=AuditStatus.OK,
+        reason="ok",
+        rows=60 * len(peaks),
+        event_time_missing=0,
+        minutes=tuple(
+            LatencyMinute(minute_kst=m, count=60, p50_s=p, max_s=x, min_s=0.5) for m, x, p in peaks
+        ),
+    )
+
+
+def _ledger_interval(symbol, recv_prev_ns, recv_next_ns, phase="regular"):
+    from src.storage.l0_audit import LossInterval
+
+    return LossInterval(
+        symbol=symbol,
+        phase=phase,
+        kind="confirmed",
+        missing_trades=10,
+        volume_deficit=5,
+        cum_prev=1,
+        cum_next=12,
+        chetime_prev="090100",
+        chetime_next="090101",
+        recv_prev_ns=recv_prev_ns,
+        recv_next_ns=recv_next_ns,
+        conn_changed=False,
+    )
+
+
+def _enforce_settings(**overrides):
+    from src.core.config import AuditMode, AuditSettings
+
+    return AuditSettings(mode=AuditMode.ENFORCE, **overrides)
+
+
+def test_check_session_reconciliation_shadow_keeps_legacy_in_charge(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.core.config import AuditMode, AuditSettings
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: 700초 수신 공백 + 결손 제로 감사, shadow 모드
+    day = dt.date(2026, 10, 15)
+    journal_root, manifest_path = _ledger_session(tmp_path, day, gaps=[_ledger_gap(day, 9, 10, 700)])
+    audit = _ledger_audit(day, symbols=(_ledger_symbol(missing=0),))
+
+    # When
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=AuditSettings(mode=AuditMode.SHADOW),
+        )
+
+    # Then: legacy가 실패를 결정하고 장부 판정은 would로만 기록된다
+    assert ok is False
+    shadow = [r for r in caplog.records if "mode=shadow" in r.getMessage()]
+    assert len(shadow) == 1
+    assert "would=PASS legacy=FAIL" in shadow[0].getMessage()
+    assert shadow[0].levelno == logging.INFO
+    critical = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert len(critical) == 1
+    assert "gap_exceeded:700s" in critical[0].getMessage()
+
+
+def test_check_session_reconciliation_shadow_reports_would_fail(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.core.config import AuditMode, AuditSettings
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: legacy도 장부도 실패하는 shadow 감사
+    day = dt.date(2026, 10, 15)
+    journal_root, manifest_path = _ledger_session(tmp_path, day, gaps=[_ledger_gap(day, 9, 10, 700)])
+    audit = _ledger_audit(day, symbols=(_ledger_symbol(missing=10198),))
+
+    # When
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=AuditSettings(mode=AuditMode.SHADOW),
+        )
+
+    # Then: legacy 실패 + would=FAIL 경고
+    assert ok is False
+    shadow = [r for r in caplog.records if "mode=shadow" in r.getMessage()]
+    assert len(shadow) == 1
+    assert "would=FAIL legacy=FAIL" in shadow[0].getMessage()
+    assert "trade_loss_exceeded:10198/1600000" in shadow[0].getMessage()
+    assert shadow[0].levelno == logging.WARNING
+
+
+def test_check_session_reconciliation_shadow_passes_clean_session(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.core.config import AuditMode, AuditSettings
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: 100초 공백 + 깨끗한 감사, shadow 모드
+    day = dt.date(2026, 10, 15)
+    journal_root, manifest_path = _ledger_session(tmp_path, day, gaps=[_ledger_gap(day, 9, 10, 100)])
+    audit = _ledger_audit(day, symbols=(_ledger_symbol(missing=0),))
+
+    # When
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=AuditSettings(mode=AuditMode.SHADOW),
+        )
+
+    # Then: 통과 + would=PASS legacy=PASS 정보줄
+    assert ok is True
+    assert "mode=shadow date=2026-10-15 would=PASS legacy=PASS reasons=-" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_check_session_reconciliation_cb_halt_costs_nothing(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: 902초 수신 공백 + 결손 제로 OK 감사, enforce 모드
+    day = dt.date(2026, 10, 15)
+    journal_root, manifest_path = _ledger_session(tmp_path, day, gaps=[_ledger_gap(day, 9, 0, 902)])
+    audit = _ledger_audit(day, symbols=(_ledger_symbol(trades=800_000, missing=0),), tail_silence_s=1.2)
+
+    # When
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=_enforce_settings(),
+        )
+
+    # Then: 통과, CRITICAL 없음, 공백은 silent로만 보고된다
+    assert ok is True
+    assert not [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert "silent_span_s=902.0" in caplog.text
+    assert "loss_span_s=0.0" in caplog.text
+
+
+def test_check_session_reconciliation_real_open_loss_fails(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: 09:01 1.4초 공백 + 0.64% 확정 결손, 겹치는 수신 구간 존재
+    day = dt.date(2026, 10, 2)
+    symbol, start, end = _ledger_gap(day, 9, 1, 1.4)
+    journal_root, manifest_path = _ledger_session(tmp_path, day, gaps=[(symbol, start, end)])
+    interval = _ledger_interval(symbol, start, start + 2_000_000_000)
+    audit = _ledger_audit(day, symbols=(_ledger_symbol(missing=10198, intervals=(interval,)),))
+
+    # When
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=_enforce_settings(loss_fail_ratio=5e-3),
+        )
+
+    # Then: CRITICAL 실패 + 결손 구간으로 분류
+    assert ok is False
+    fail = [r for r in caplog.records if "stage=session_reconciliation status=FAIL" in r.getMessage()]
+    assert len(fail) == 1
+    assert fail[0].levelno == logging.CRITICAL
+    assert "trade_loss_exceeded:10198/1600000" in fail[0].getMessage()
+    assert "loss_span_s=1.4" in caplog.text
+
+
+def test_check_session_reconciliation_warn_band_passes_loudly(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: 경고 구간 비율(0.1%)의 결손
+    day = dt.date(2026, 10, 13)
+    journal_root, manifest_path = _ledger_session(tmp_path, day)
+    audit = _ledger_audit(day, symbols=(_ledger_symbol(missing=1600),), tail_silence_s=None)
+
+    # When
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=_enforce_settings(),
+        )
+
+    # Then: 통과 + 정확히 하나의 WARN 줄
+    assert ok is True
+    warns = [r for r in caplog.records if "status=WARN" in r.getMessage()]
+    assert len(warns) == 1
+    assert "trade_loss_warn:1600/1600000" in warns[0].getMessage()
+    assert not [r for r in caplog.records if "status=FAIL" in r.getMessage()]
+
+
+def test_check_session_reconciliation_threshold_equality_passes(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: 실패 임계와 정확히 같은 비율
+    day = dt.date(2026, 10, 13)
+    journal_root, manifest_path = _ledger_session(tmp_path, day)
+    settings = _enforce_settings(loss_fail_ratio=0.005)
+
+    def _check(missing):
+        audit = _ledger_audit(day, symbols=(_ledger_symbol(missing=missing),))
+        return check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=settings,
+        )
+
+    # When/Then: 같은 값은 통과, 한 건 추가는 실패
+    with caplog.at_level(logging.INFO):
+        assert _check(8000) is True
+    with caplog.at_level(logging.INFO):
+        assert _check(8001) is False
+    assert "trade_loss_exceeded:8001/1600000" in caplog.text
+
+
+def test_check_session_reconciliation_symbol_level_breach(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: 전체는 미미하지만 한 종목이 20% 결손
+    day = dt.date(2026, 10, 13)
+    journal_root, manifest_path = _ledger_session(tmp_path, day)
+    big = _ledger_symbol("005930", trades=1_599_000, missing=0)
+    bad = _ledger_symbol("000660", trades=1000, missing=200)
+    audit = _ledger_audit(day, symbols=(big, bad))
+
+    # When
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=_enforce_settings(),
+        )
+
+    # Then: 종목 한도로 실패
+    assert ok is False
+    assert "symbol_loss_exceeded:000660:200/1000" in caplog.text
+    assert "trade_loss_exceeded" not in caplog.text
+
+
+def test_check_session_reconciliation_symbol_below_min_trades_passes(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: 같은 20% 결손이지만 관측 건수가 하한 미만
+    day = dt.date(2026, 10, 13)
+    journal_root, manifest_path = _ledger_session(tmp_path, day)
+    big = _ledger_symbol("005930", trades=1_599_000, missing=0)
+    small = _ledger_symbol("000660", trades=50, missing=10)
+    audit = _ledger_audit(day, symbols=(big, small))
+
+    # When
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=_enforce_settings(),
+        )
+
+    # Then: 종목 한도 미적용으로 통과
+    assert ok is True
+    assert "symbol_loss_exceeded" not in caplog.text
+
+
+def test_check_session_reconciliation_no_counter_symbols_excluded(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: 카운터 없는 종목의 큰 명목 결손 + 깨끗한 관측 종목
+    day = dt.date(2026, 10, 16)
+    journal_root, manifest_path = _ledger_session(tmp_path, day)
+    blind = _ledger_symbol("000660", trades=1_000_000, missing=500_000, status="NO_COUNTER")
+    clean = _ledger_symbol("005930", trades=1000, missing=0)
+    empty = _ledger_symbol("000270", trades=0, missing=0)
+    audit = _ledger_audit(day, symbols=(blind, clean, empty))
+
+    # When
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=_enforce_settings(),
+        )
+
+    # Then: 카운터 없는 종목은 분모·분자에서 제외되어 통과
+    assert ok is True
+    assert audit.totals.trades_observed == 1000
+    assert audit.totals.confirmed_missing == 0
+    assert audit.totals.symbols_without_counter == 1
+
+
+def test_check_session_reconciliation_all_no_counter_falls_back(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: 모든 종목 카운터 없음 + 700초 공백
+    day = dt.date(2026, 10, 15)
+    journal_root, manifest_path = _ledger_session(tmp_path, day, gaps=[_ledger_gap(day, 9, 10, 700)])
+    audit = _ledger_audit(
+        day,
+        symbols=(
+            _ledger_symbol("005930", trades=0, missing=0, status="NO_COUNTER"),
+            _ledger_symbol("000660", trades=0, missing=0, status="NO_COUNTER"),
+        ),
+    )
+
+    # When
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=_enforce_settings(),
+        )
+
+    # Then: 0除 없이 legacy 기준으로 실패
+    assert ok is False
+    assert "gap_exceeded:700s" in caplog.text
+    assert "basis=legacy" in caplog.text
+
+
+def test_check_session_reconciliation_tail_silence_fails_closed(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: 결손 제로 + 3000초 꼬리 침묵
+    day = dt.date(2026, 10, 15)
+    journal_root, manifest_path = _ledger_session(tmp_path, day)
+    settings = _enforce_settings()
+
+    def _check(tail):
+        audit = _ledger_audit(day, symbols=(_ledger_symbol(missing=0),), tail_silence_s=tail)
+        return check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=settings,
+        )
+
+    # When/Then: 초과는 실패, 정확히는 통과
+    with caplog.at_level(logging.INFO):
+        assert _check(3000.0) is False
+    assert "tail_silence_exceeded:3000s" in caplog.text
+    with caplog.at_level(logging.INFO):
+        assert _check(600.0) is True
+
+
+def test_check_session_reconciliation_partial_needs_both_bases(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: PARTIAL 감사 3종 (장부깨끗+legacy초과 / 장부실패+legacy깨끗 / 둘다깨끗)
+    day = dt.date(2026, 10, 15)
+    _, clean_manifest = _ledger_session(tmp_path, day)
+    gapped_root, gapped_manifest = _ledger_session(tmp_path / "gapped", day, gaps=[_ledger_gap(day, 9, 10, 700)])
+    settings = _enforce_settings()
+
+    def _check(manifest_path, journal_root, missing):
+        audit = _ledger_audit(day, status="PARTIAL", reason="truncated", symbols=(_ledger_symbol(missing=missing),))
+        return check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=settings,
+        )
+
+    # When/Then
+    with caplog.at_level(logging.INFO):
+        assert _check(gapped_manifest, gapped_root, 0) is False
+    assert "gap_exceeded:700s" in caplog.text
+    with caplog.at_level(logging.INFO):
+        assert _check(clean_manifest, tmp_path / "l0", 10198) is False
+    assert "trade_loss_exceeded:10198/1600000" in caplog.text
+    with caplog.at_level(logging.INFO):
+        assert _check(clean_manifest, tmp_path / "l0", 0) is True
+    assert "partial=1" in caplog.text
+
+
+def test_check_session_reconciliation_unavailable_falls_back(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: UNAVAILABLE 감사 + 100초 공백
+    day = dt.date(2026, 10, 15)
+    journal_root, manifest_path = _ledger_session(tmp_path, day, gaps=[_ledger_gap(day, 9, 10, 100)])
+    _, wide_manifest = _ledger_session(tmp_path / "wide", day, gaps=[_ledger_gap(day, 9, 10, 700)])
+    audit = _ledger_audit(day, status="UNAVAILABLE", reason="time_budget")
+    settings = _enforce_settings()
+
+    def _check(manifest_path):
+        return check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=settings,
+        )
+
+    # When/Then: 작은 공백은 통과 + 폴백 경고, 큰 공백은 legacy 실패
+    with caplog.at_level(logging.INFO):
+        assert _check(manifest_path) is True
+    assert "status=UNAVAILABLE reason=time_budget basis=legacy" in caplog.text
+    with caplog.at_level(logging.INFO):
+        assert _check(wide_manifest) is False
+    assert "gap_exceeded:700s" in caplog.text
+
+
+def test_check_session_reconciliation_date_mismatch_is_unavailable(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: 다른 날짜의 감사
+    day = dt.date(2026, 10, 15)
+    journal_root, manifest_path = _ledger_session(tmp_path, day, gaps=[_ledger_gap(day, 9, 10, 100)])
+    audit = _ledger_audit(day + dt.timedelta(days=1), symbols=(_ledger_symbol(missing=0),))
+
+    # When
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=_enforce_settings(),
+        )
+
+    # Then: 폴백 경고 후 legacy로 통과
+    assert ok is True
+    assert "status=UNAVAILABLE reason=date_mismatch basis=legacy" in caplog.text
+
+
+def test_check_session_reconciliation_mode_off_is_silent(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.core.config import AuditMode, AuditSettings
+    from src.orchestration.eod import check_session_reconciliation, log_session_audit
+
+    # Given: OFF 모드 + 700초 공백 + 감사
+    day = dt.date(2026, 10, 15)
+    journal_root, manifest_path = _ledger_session(tmp_path, day, gaps=[_ledger_gap(day, 9, 10, 700)])
+    audit = _ledger_audit(day, symbols=(_ledger_symbol(missing=0),))
+    settings = AuditSettings(mode=AuditMode.OFF)
+
+    # When
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=settings,
+        )
+        log_session_audit(audit, settings=settings, anchors=None, date=day)
+        from src.core.session_anchors import standard_session_anchors
+
+        log_session_audit(None, settings=_enforce_settings(), anchors=standard_session_anchors(day), date=day)
+
+    # Then: legacy 동작만, 감사·지연 줄 없음
+    assert ok is False
+    assert "gap_exceeded:700s" in caplog.text
+    assert "session_audit" not in caplog.text
+    assert "ingest_latency" not in caplog.text
+
+
+def test_check_session_reconciliation_never_masks_structural_issues(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: 한 스트림 저널 누락 + 깨끗한 OK 감사
+    day = dt.date(2026, 10, 15)
+    journal_root = tmp_path / "l0"
+    _write_routed_journal(journal_root, stream="H0STCNT0", date=day)
+    manifest_path = tmp_path / "manifest" / f"{day.isoformat()}.json"
+    _write_session_manifest(manifest_path, day)
+    audit = _ledger_audit(day, symbols=(_ledger_symbol(missing=0),))
+
+    # When
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=_enforce_settings(),
+        )
+
+    # Then: 구조적 결함이 그대로 실패를 결정
+    assert ok is False
+    assert "reasons=journal_missing:H0STASP0" in caplog.text
+
+
+def test_check_session_reconciliation_never_masks_unreadable_manifest(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    # Given: 깨진 매니페스트 + 깨끗한 OK 감사
+    day = dt.date(2026, 10, 15)
+    journal_root = tmp_path / "l0"
+    _write_routed_journal(journal_root, stream="H0STCNT0", date=day)
+    _write_routed_journal(journal_root, stream="H0STASP0", date=day)
+    manifest_path = tmp_path / "manifest" / f"{day.isoformat()}.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_bytes(b"{broken")
+    audit = _ledger_audit(day, symbols=(_ledger_symbol(missing=0),))
+
+    # When
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path,
+            date=day,
+            journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"),
+            vendor="ls",
+            venue="krx",
+            session="regular",
+            regular_open=dt.time(9, 0),
+            regular_close=dt.time(15, 30),
+            audit=audit,
+            audit_settings=_enforce_settings(),
+        )
+
+    # Then
+    assert ok is False
+    assert "manifest_unreadable" in caplog.text
+
+
+def test_evaluate_session_gap_budget_classification_is_reporting_only() -> None:
+    import datetime as dt
+
+    from src.orchestration.eod import evaluate_session_gap_budget
+
+    # Given: 겹치는 두 공백(09:10-09:20, 09:15-09:25) + 윈도우 밖 공백
+    day = dt.date(2026, 10, 15)
+    gaps = [
+        {"symbol": "005930", "gap_start_ns": _ledger_ns(day, 9, 10), "gap_end_ns": _ledger_ns(day, 9, 20)},
+        {"symbol": "000660", "gap_start_ns": _ledger_ns(day, 9, 15), "gap_end_ns": _ledger_ns(day, 9, 25)},
+        {"symbol": "005930", "gap_start_ns": _ledger_ns(day, 8, 0), "gap_end_ns": _ledger_ns(day, 8, 10)},
+    ]
+    window = {"regular_open": dt.time(9, 0), "regular_close": dt.time(15, 30)}
+    stored = _ledger_interval("005930", _ledger_ns(day, 9, 12), _ledger_ns(day, 9, 13))
+    off_window = _ledger_interval("005930", _ledger_ns(day, 8, 1), _ledger_ns(day, 8, 2), phase="premarket")
+    loss_audit = _ledger_audit(day, symbols=(_ledger_symbol(trades=100_000, intervals=(stored, off_window)),))
+    clean_audit = _ledger_audit(day, symbols=(_ledger_symbol(trades=100_000),))
+    settings = _enforce_settings()
+
+    # When
+    loss = evaluate_session_gap_budget(gaps=gaps, date=day, audit=loss_audit, settings=settings, **window)
+    clean = evaluate_session_gap_budget(gaps=gaps, date=day, audit=clean_audit, settings=settings, **window)
+
+    # Then: 합집합은 한 번만 계산되고 판정은 동일, 분류만 다르다
+    assert loss.legacy_gap_s == clean.legacy_gap_s == 900.0
+    assert loss.loss_span_s == 900.0
+    assert loss.silent_span_s == 0.0
+    assert clean.silent_span_s == 900.0
+    assert clean.loss_span_s == 0.0
+    assert clean.silent_spans == 1
+    assert loss.status is clean.status
+    assert loss.basis == clean.basis == "ledger"
+
+
+def test_evaluate_session_gap_budget_honors_shifted_window() -> None:
+    import datetime as dt
+
+    from src.orchestration.eod import evaluate_session_gap_budget
+
+    # Given: 시프트된 개장(09:10) 이전의 공백
+    day = dt.date(2026, 10, 15)
+    gaps = [
+        {"symbol": "005930", "gap_start_ns": _ledger_ns(day, 9, 0), "gap_end_ns": _ledger_ns(day, 9, 5)},
+    ]
+    audit = _ledger_audit(day, symbols=(_ledger_symbol(trades=100_000),))
+
+    # When
+    verdict = evaluate_session_gap_budget(
+        gaps=gaps,
+        date=day,
+        regular_open=dt.time(9, 10),
+        regular_close=dt.time(15, 30),
+        audit=audit,
+        settings=_enforce_settings(),
+    )
+
+    # Then: 잘려나가 silent/loss 모두 0
+    assert verdict.legacy_gap_s == 0.0
+    assert verdict.silent_span_s == 0.0
+    assert verdict.loss_span_s == 0.0
+    assert verdict.status.value == "PASS"
+
+
+def test_evaluate_session_gap_budget_is_pure_and_deterministic(caplog) -> None:
+    import datetime as dt
+
+    from src.orchestration.eod import evaluate_session_gap_budget
+
+    # Given: 동일한 입력
+    day = dt.date(2026, 10, 15)
+    gaps = [{"symbol": "005930", "gap_start_ns": _ledger_ns(day, 9, 1), "gap_end_ns": _ledger_ns(day, 9, 1) + 1_400_000_000}]
+    audit = _ledger_audit(day, symbols=(_ledger_symbol(missing=10198),))
+    settings = _enforce_settings()
+
+    # When
+    first = evaluate_session_gap_budget(
+        gaps=gaps, date=day, regular_open=dt.time(9, 0), regular_close=dt.time(15, 30),
+        audit=audit, settings=settings,
+    )
+    second = evaluate_session_gap_budget(
+        gaps=gaps, date=day, regular_open=dt.time(9, 0), regular_close=dt.time(15, 30),
+        audit=audit, settings=settings,
+    )
+
+    # Then: 같은 판정, 로그 없음
+    assert first == second
+    assert caplog.records == []
+
+
+def test_evaluate_session_gap_budget_shadow_and_off_use_legacy() -> None:
+    import datetime as dt
+
+    from src.core.config import AuditMode, AuditSettings
+    from src.orchestration.eod import evaluate_session_gap_budget
+
+    # Given: 700초 공백 + 깨끗한 감사
+    day = dt.date(2026, 10, 15)
+    gaps = [{"symbol": "005930", "gap_start_ns": _ledger_ns(day, 9, 10), "gap_end_ns": _ledger_ns(day, 9, 10) + 700_000_000_000}]
+    audit = _ledger_audit(day, symbols=(_ledger_symbol(missing=0),))
+
+    # When/Then: shadow·off·None 모두 legacy 기준
+    for settings in (AuditSettings(mode=AuditMode.SHADOW), AuditSettings(mode=AuditMode.OFF), None):
+        verdict = evaluate_session_gap_budget(
+            gaps=gaps, date=day, regular_open=dt.time(9, 0), regular_close=dt.time(15, 30),
+            audit=audit, settings=settings,
+        )
+        assert verdict.basis == "legacy"
+        assert verdict.status.value == "FAIL"
+        assert verdict.reasons == ("gap_exceeded:700s",)
+
+
+def test_evaluate_session_gap_budget_reports_worst_symbol_plus_rest() -> None:
+    import datetime as dt
+
+    from src.orchestration.eod import evaluate_session_gap_budget
+
+    # Given: 두 종목이 각각 한도를 초과하고 전체 비율은 미미
+    day = dt.date(2026, 10, 13)
+    audit = _ledger_audit(
+        day,
+        symbols=(
+            _ledger_symbol("000660", trades=1000, missing=200),
+            _ledger_symbol("000270", trades=2000, missing=300),
+            _ledger_symbol("005930", trades=10_000_000, missing=0),
+        ),
+    )
+
+    # When
+    verdict = evaluate_session_gap_budget(
+        gaps=[], date=day, regular_open=dt.time(9, 0), regular_close=dt.time(15, 30),
+        audit=audit, settings=_enforce_settings(),
+    )
+
+    # Then: 최악 종목 + 나머지 수
+    assert verdict.status.value == "FAIL"
+    assert verdict.reasons == ("symbol_loss_exceeded:000660:200/1000+1",)
+
+
+def test_log_session_audit_emits_summary_latency_and_breach(caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import log_session_audit
+
+    # Given: 09:01 32초 지연이 있는 감사
+    day = dt.date(2026, 10, 15)
+    audit = _ledger_audit(
+        day,
+        symbols=(_ledger_symbol(missing=10198),),
+        tail_silence_s=12.5,
+        latency=(
+            _ledger_latency("H0STCNT0", (("09:01", 32.0, 20.0), ("09:02", 5.0, 3.0))),
+            _ledger_latency("H0STASP0", (("09:01", 4.0, 2.0),)),
+        ),
+    )
+
+    # When
+    with caplog.at_level(logging.INFO):
+        log_session_audit(audit, settings=_enforce_settings(), anchors=standard_session_anchors(day), date=day)
+
+    # Then: 요약 1 + 스트림별 INFO 2 + CRITICAL 1(최악 분만)
+    summary = [r for r in caplog.records if "stage=session_audit status=OK" in r.getMessage()]
+    assert len(summary) == 1
+    assert "trades=1600000 confirmed_missing=10198" in summary[0].getMessage()
+    assert "loss_ratio=" in summary[0].getMessage()
+    assert "tail_silence_s=12.5" in summary[0].getMessage()
+    infos = [r for r in caplog.records if "stage=ingest_latency status=OK" in r.getMessage()]
+    assert len(infos) == 2
+    breach = [r for r in caplog.records if "stage=ingest_latency status=FAIL" in r.getMessage()]
+    assert len(breach) == 1
+    assert breach[0].levelno == logging.CRITICAL
+    assert "reason=latency_exceeded" in breach[0].getMessage()
+    assert "stream=H0STCNT0 minute=09:01 max_s=32.0" in breach[0].getMessage()
+
+
+def test_log_session_audit_counts_breach_minutes_once_per_stream(caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import log_session_audit
+
+    # Given: 한 스트림에 초과 분이 둘
+    day = dt.date(2026, 10, 15)
+    audit = _ledger_audit(
+        day,
+        symbols=(_ledger_symbol(missing=0),),
+        latency=(_ledger_latency("H0STCNT0", (("09:01", 32.0, 20.0), ("09:03", 15.0, 9.0))),),
+    )
+
+    # When
+    with caplog.at_level(logging.INFO):
+        log_session_audit(audit, settings=_enforce_settings(), anchors=standard_session_anchors(day), date=day)
+
+    # Then: CRITICAL은 최악 분 하나, breach_minutes=2
+    breach = [r for r in caplog.records if "stage=ingest_latency status=FAIL" in r.getMessage()]
+    assert len(breach) == 1
+    assert "minute=09:01" in breach[0].getMessage()
+    assert "breach_minutes=2" in breach[0].getMessage()
+
+
+def test_log_session_audit_quiet_when_every_minute_within_threshold(caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import log_session_audit
+
+    # Given: 임계 이하 분만 있는 감사
+    day = dt.date(2026, 10, 15)
+    audit = _ledger_audit(
+        day,
+        symbols=(_ledger_symbol(missing=0),),
+        latency=(
+            _ledger_latency("H0STCNT0", (("09:01", 9.0, 4.0),)),
+            _ledger_latency("H0STASP0", (("09:02", 6.0, 3.0),)),
+        ),
+    )
+
+    # When
+    with caplog.at_level(logging.INFO):
+        log_session_audit(audit, settings=_enforce_settings(), anchors=standard_session_anchors(day), date=day)
+
+    # Then: CRITICAL 없음, INFO 줄은 유지
+    assert not [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert len([r for r in caplog.records if "stage=ingest_latency status=OK" in r.getMessage()]) == 2
+
+
+def test_log_session_audit_alert_window_excludes_premarket_minute(caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import log_session_audit
+
+    # Given: 08:55에만 14초 지연
+    day = dt.date(2026, 10, 15)
+    audit = _ledger_audit(day, symbols=(_ledger_symbol(missing=0),), latency=(_ledger_latency("H0STCNT0", (("08:55", 14.0, 8.0),)),))
+
+    # When
+    with caplog.at_level(logging.INFO):
+        log_session_audit(audit, settings=_enforce_settings(), anchors=standard_session_anchors(day), date=day)
+
+    # Then: INFO만, CRITICAL 없음
+    assert not [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    infos = [r for r in caplog.records if "stage=ingest_latency status=OK" in r.getMessage()]
+    assert len(infos) == 2
+    assert "stream=H0STCNT0 minutes=1 worst_minute=08:55 max_s=14.0" in caplog.text
+
+
+def test_log_session_audit_unavailable_summary_without_tail(caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import log_session_audit
+
+    # Given: tail 없는 UNAVAILABLE 감사
+    day = dt.date(2026, 10, 15)
+    audit = _ledger_audit(day, status="UNAVAILABLE", reason="time_budget", tail_silence_s=None)
+
+    # When
+    with caplog.at_level(logging.INFO):
+        log_session_audit(audit, settings=_enforce_settings(), anchors=standard_session_anchors(day), date=day)
+
+    # Then: 요약 WARNING과 요청된 스트림별 빈 INFO가 유지된다
+    summary = [r for r in caplog.records if "stage=session_audit status=UNAVAILABLE" in r.getMessage()]
+    assert len(summary) == 1
+    assert summary[0].levelno == logging.WARNING
+    assert "reason=time_budget" in summary[0].getMessage()
+    assert "tail_silence_s=0.0" in summary[0].getMessage()
+    assert len([r for r in caplog.records if "stage=ingest_latency status=OK" in r.getMessage()]) == 2
+
+
+def test_log_session_audit_reports_empty_minute_streams(caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import log_session_audit
+
+    # Given: 분이 비어 있는 스트림 하나
+    day = dt.date(2026, 10, 15)
+    audit = _ledger_audit(
+        day,
+        symbols=(_ledger_symbol(missing=0),),
+        latency=(
+            _ledger_latency("H0STCNT0", ()),
+            _ledger_latency("H0STASP0", (("09:01", 3.0, 2.0),)),
+        ),
+    )
+
+    # When
+    with caplog.at_level(logging.INFO):
+        log_session_audit(audit, settings=_enforce_settings(), anchors=standard_session_anchors(day), date=day)
+
+    # Then: 요약과 빈 스트림을 포함한 스트림별 INFO가 유지된다
+    assert [r for r in caplog.records if "stage=session_audit status=OK" in r.getMessage()]
+    assert len([r for r in caplog.records if "stage=ingest_latency status=OK" in r.getMessage()]) == 2
+    assert "stream=H0STCNT0 minutes=0 worst_minute=-" in caplog.text
+
+
+def test_log_session_audit_contained_on_malformed_audit(caplog) -> None:
+    import dataclasses
+    import datetime as dt
+    import logging
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import log_session_audit
+
+    # Given: 깨진 감사(스트림 항목 None / totals None)
+    day = dt.date(2026, 10, 15)
+    broken_stream = _ledger_audit(day, symbols=(_ledger_symbol(missing=0),), latency=(None,))
+    broken_totals = dataclasses.replace(_ledger_audit(day, symbols=(_ledger_symbol(missing=0),)), totals=None)
+
+    # When/Then: 예외 없이 요약(또는 폴백) 줄만 남는다
+    with caplog.at_level(logging.DEBUG):
+        log_session_audit(broken_stream, settings=_enforce_settings(), anchors=standard_session_anchors(day), date=day)
+    assert [r for r in caplog.records if "stage=session_audit status=OK" in r.getMessage()]
+    assert not [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        log_session_audit(broken_totals, settings=_enforce_settings(), anchors=standard_session_anchors(day), date=day)
+    assert [r for r in caplog.records if "reason=summary_error" in r.getMessage()]
+
+
+def test_partial_warn_band_still_enforces_legacy_budget(tmp_path, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.orchestration.eod import check_session_reconciliation, evaluate_session_gap_budget
+
+    day = dt.date(2026, 10, 15)
+    audit = _ledger_audit(day, status="PARTIAL", reason="truncated", symbols=(_ledger_symbol(missing=1600),))
+    settings = _enforce_settings()
+    verdict = evaluate_session_gap_budget(
+        gaps=[], date=day, regular_open=dt.time(9), regular_close=dt.time(15, 30),
+        audit=audit, settings=settings,
+    )
+    assert verdict.status.value == "WARN"
+    assert verdict.basis == "ledger+legacy"
+    journal_root, manifest_path = _ledger_session(tmp_path, day, gaps=[_ledger_gap(day, 9, 10, 700)])
+    with caplog.at_level(logging.INFO):
+        ok = check_session_reconciliation(
+            manifest_path=manifest_path, date=day, journal_root=journal_root,
+            streams=("H0STCNT0", "H0STASP0"), vendor="ls", venue="krx", session="regular",
+            regular_open=dt.time(9), regular_close=dt.time(15, 30), audit=audit, audit_settings=settings,
+        )
+    assert ok is False
+    assert "reasons=gap_exceeded:700s partial=1" in caplog.text
+    assert "status=WARN" not in caplog.text
+
+
+def test_nonobject_manifest_is_contained_with_audit_only(tmp_path, caplog) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.orchestration.eod import check_session_reconciliation
+
+    day = dt.date(2026, 10, 15)
+    journal_root, manifest_path = _ledger_session(tmp_path, day)
+    manifest_path.write_text("[]", encoding="utf-8")
+    args = {
+        "manifest_path": manifest_path, "date": day, "journal_root": journal_root,
+        "streams": ("H0STCNT0", "H0STASP0"), "vendor": "ls", "venue": "krx", "session": "regular",
+        "regular_open": dt.time(9), "regular_close": dt.time(15, 30),
+    }
+    with pytest.raises(AttributeError):
+        check_session_reconciliation(**args)
+    assert check_session_reconciliation(
+        **args, audit=_ledger_audit(day, symbols=(_ledger_symbol(),)), audit_settings=_enforce_settings(),
+    ) is False
+    assert "reasons=manifest_unreadable" in caplog.text

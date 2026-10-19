@@ -1637,9 +1637,11 @@ def test_housekeeping_preserves_invalidated_inputs_until_reverified(tmp_path, mo
 def _prearm_daemon_runner(tmp_path, plan, *, enabled=True):
     from types import SimpleNamespace
     import src.orchestration.daemon as daemon_mod
+    from src.core.config import AuditMode, AuditSettings
     from src.core.paths import DataPaths
 
     runner = object.__new__(daemon_mod.DaemonRunner)
+    runner._runtime = SimpleNamespace(audit=AuditSettings(mode=AuditMode.OFF))
     runner._cfg = SimpleNamespace(
         after_market_enabled=enabled, host_backup_status_path=tmp_path / "host.json", host_backup_max_age_h=36
     )
@@ -1734,7 +1736,7 @@ def test_digest_carries_prearm_late_count(tmp_path, monkeypatch) -> None:
         )(),
     )
     monkeypatch.setattr(
-        daemon_mod.DaemonRunner, "_reconcile_regular_session", lambda self, ref_day, day_v, anchors_v: (True, True)
+        daemon_mod.DaemonRunner, "_reconcile_regular_session", lambda self, ref_day, day_v, anchors_v, audit=None: (True, True)
     )
     monkeypatch.setattr(
         daemon_mod.DaemonRunner, "_reconcile_crosscheck_sessions", lambda self, ref_day, day_v, anchors_v: {}
@@ -1774,7 +1776,7 @@ def test_prearm_verdicts_never_change_eod_status(tmp_path, monkeypatch, caplog) 
         )(),
     )
     monkeypatch.setattr(
-        daemon_mod.DaemonRunner, "_reconcile_regular_session", lambda self, ref_day, day_v, anchors_v: (True, True)
+        daemon_mod.DaemonRunner, "_reconcile_regular_session", lambda self, ref_day, day_v, anchors_v, audit=None: (True, True)
     )
     monkeypatch.setattr(
         daemon_mod.DaemonRunner, "_reconcile_crosscheck_sessions", lambda self, ref_day, day_v, anchors_v: {}
@@ -1885,7 +1887,7 @@ def test_eod_digest_carries_zero_frame_count_and_keeps_ok(tmp_path, monkeypatch,
         )(),
     )
     monkeypatch.setattr(
-        daemon_mod.DaemonRunner, "_reconcile_regular_session", lambda self, ref_day, day_v, anchors_v: (True, True)
+        daemon_mod.DaemonRunner, "_reconcile_regular_session", lambda self, ref_day, day_v, anchors_v, audit=None: (True, True)
     )
     monkeypatch.setattr(
         daemon_mod.DaemonRunner, "_reconcile_crosscheck_sessions", lambda self, ref_day, day_v, anchors_v: {}
@@ -1937,3 +1939,516 @@ def test_eod_no_coverage_logs_without_plan(tmp_path, caplog) -> None:
         with caplog.at_level(logging.INFO):
             assert runner._log_aftermarket_coverage(day) == 0
     assert "stage=aftermarket_coverage" not in caplog.text
+
+
+def _stub_session_audit(day, *, status="OK", reason="ok", confirmed=7140, trades=1_000_000, tail=5.0):
+    from src.storage.l0_audit import (
+        AuditStatus,
+        LedgerTotals,
+        LatencyMinute,
+        SessionAudit,
+        StreamLatency,
+        SymbolLedger,
+    )
+
+    latency = (
+        StreamLatency(
+            stream="H0STCNT0",
+            status=AuditStatus.OK,
+            reason="ok",
+            rows=60,
+            event_time_missing=0,
+            minutes=(LatencyMinute(minute_kst="09:01", count=60, p50_s=12.0, max_s=29.0, min_s=1.0),),
+        ),
+        StreamLatency(
+            stream="H0STASP0",
+            status=AuditStatus.OK,
+            reason="ok",
+            rows=60,
+            event_time_missing=0,
+            minutes=(LatencyMinute(minute_kst="09:02", count=60, p50_s=3.0, max_s=6.0, min_s=0.5),),
+        ),
+    )
+    symbols = (
+        SymbolLedger(
+            symbol="005930",
+            status="OK",
+            frames=trades + 1,
+            trades_observed=trades,
+            confirmed_missing=confirmed,
+            count_only_missing=0,
+            net_missing=0,
+            volume_deficit=0,
+            duplicates=0,
+            regressions=0,
+            resets=0,
+            decode_fail=0,
+            intervals=(),
+            intervals_truncated=0,
+            manifest_frames=None,
+        ),
+    )
+    totals = LedgerTotals(
+        symbols=1,
+        symbols_with_loss=1,
+        symbols_without_counter=0,
+        trades_observed=trades,
+        confirmed_missing=confirmed,
+        count_only_missing=0,
+        net_missing_positive=0,
+        volume_deficit=0,
+        loss_ratio=(confirmed / trades) if trades else 0.0,
+    )
+    return SessionAudit(
+        schema_version=1,
+        session_date=day,
+        vendor="ls",
+        venue="krx",
+        session="regular",
+        status=AuditStatus(status),
+        reason=reason,
+        generated_at_ns=1,
+        sources=(),
+        latency=latency,
+        symbols=symbols,
+        totals=totals,
+        tail_silence_s=tail,
+        last_regular_tick_recv_ns=1,
+    )
+
+
+def _stub_full_eod(monkeypatch, tmp_path):
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    import src.orchestration.daemon as daemon_mod
+    from src.core.config import CollectorSettings
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(
+        data_root=pathlib.Path(tmp_path) / "data",
+        host_backup_status_path=_host_status_path(tmp_path),
+    )
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(
+        daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
+    )
+    monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
+    digests: list[tuple[str, str]] = []
+    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    _write_eod_host_status(settings, eod_time, 20)
+    monkeypatch.setattr(
+        daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 14))
+    )
+    return settings, digests, eod_time
+
+
+def test_audit_derivation_precedes_housekeeping(tmp_path, monkeypatch) -> None:
+    # Given: 파생·유지보수 호출을 기록하는 EOD 데몬
+    import src.orchestration.daemon as daemon_mod
+
+    settings, digests, eod_time = _stub_full_eod(monkeypatch, tmp_path)
+    order: list[str] = []
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    monkeypatch.setattr(
+        daemon_mod.DaemonRunner,
+        "_derive_session_audit",
+        lambda self, ref_day, day, anchors: order.append("derive") or None,
+    )
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: order.append("maintenance") or 0)
+
+    # When
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    # Then: 파생이 정확히 한 번, 유지보수보다 먼저 실행된다
+    assert order.count("derive") == 1
+    assert order.index("derive") < order.index("maintenance")
+    assert len(digests) == 1
+
+
+def test_audit_derivation_runs_once_per_date(tmp_path, monkeypatch) -> None:
+    # Given: 같은 날짜에 두 번 도는 EOD
+    import src.orchestration.daemon as daemon_mod
+
+    settings, digests, eod_time = _stub_full_eod(monkeypatch, tmp_path)
+    calls: list = []
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    monkeypatch.setattr(
+        daemon_mod.DaemonRunner,
+        "_derive_session_audit",
+        lambda self, ref_day, day, anchors: calls.append(ref_day) or None,
+    )
+
+    # When
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=2, now_fn=lambda: eod_time)
+
+    # Then: 두 번째 스텝은 eod_attempted_for 게이트로 파생을 건너뛴다
+    assert len(calls) == 1
+    assert len(digests) == 1
+
+
+def test_reconcile_receives_derived_audit(tmp_path, monkeypatch) -> None:
+    # Given: 알려진 감사를 반환하는 파생 스텁
+    import datetime as dt
+
+    import src.orchestration.daemon as daemon_mod
+    from src.core.config import AuditSettings
+
+    settings, digests, eod_time = _stub_full_eod(monkeypatch, tmp_path)
+    stub = _stub_session_audit(dt.date(2026, 9, 14))
+    monkeypatch.setattr(daemon_mod.DaemonRunner, "_derive_session_audit", lambda self, ref_day, day, anchors: stub)
+    seen: dict = {}
+
+    def _reconcile(**kw):
+        seen.update(kw)
+        return True
+
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", _reconcile)
+
+    # When
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    # Then: 기록된 호출에 감사 객체와 런타임 설정이 그대로 전달된다
+    assert seen["audit"] is stub
+    assert isinstance(seen["audit_settings"], AuditSettings)
+
+
+def test_derivation_failure_never_aborts_eod(tmp_path, monkeypatch, caplog) -> None:
+    # Given: 파생이 OSError로 실패하는 EOD
+    import logging
+
+    import src.orchestration.daemon as daemon_mod
+
+    settings, digests, eod_time = _stub_full_eod(monkeypatch, tmp_path)
+
+    def _boom(*a, **kw):
+        raise OSError("journal vanished")
+
+    monkeypatch.setattr(daemon_mod, "derive_session_audit", _boom)
+    seen: dict = {}
+    calls: list[str] = []
+
+    def _reconcile(**kw):
+        seen.update(kw)
+        return True
+
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", _reconcile)
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: calls.append("maintenance") or 0)
+
+    # When
+    with caplog.at_level(logging.ERROR):
+        daemon_mod.run_collector_daemon(
+            settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time
+        )
+
+    # Then: ERROR+traceback 한 줄, 나머지는 전부 실행, 상태는 OK
+    errors = [r for r in caplog.records if "stage=session_audit status=ERROR" in r.getMessage()]
+    assert len(errors) == 1
+    assert errors[0].levelno == logging.ERROR
+    assert errors[0].exc_info is not None
+    assert calls == ["maintenance", "maintenance"]
+    assert seen["audit"] is None
+    assert len(digests) == 1
+    assert digests[0][0].endswith("OK")
+
+
+def test_write_failure_keeps_verdict_for_reconciliation(tmp_path, monkeypatch, caplog) -> None:
+    # Given: 파생은 성공하고 저장이 실패하는 EOD
+    import datetime as dt
+    import logging
+
+    import src.orchestration.daemon as daemon_mod
+
+    settings, digests, eod_time = _stub_full_eod(monkeypatch, tmp_path)
+    stub = _stub_session_audit(dt.date(2026, 9, 14))
+    monkeypatch.setattr(daemon_mod, "derive_session_audit", lambda *a, **kw: stub)
+
+    def _boom(audit, path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(daemon_mod, "write_session_audit", _boom)
+    seen: dict = {}
+
+    def _reconcile(**kw):
+        seen.update(kw)
+        return True
+
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", _reconcile)
+
+    # When
+    with caplog.at_level(logging.ERROR):
+        daemon_mod.run_collector_daemon(
+            settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time
+        )
+
+    # Then: WRITE_FAIL 기록 + 파생 감사가 그대로 정합성 검사로 전달
+    assert [r for r in caplog.records if "stage=session_audit status=WRITE_FAIL" in r.getMessage()]
+    assert seen["audit"] is stub
+    assert len(digests) == 1
+
+
+def test_mode_off_skips_audit_pipeline(tmp_path, monkeypatch) -> None:
+    # Given: 감사가 꺼진 런타임으로 직접 호출하는 EOD
+    import dataclasses
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    import src.orchestration.daemon as daemon_mod
+    from src.core.config import AuditMode, AuditSettings, CollectorSettings, resolve_collector_runtime
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.trading_day_gate import TradingDayStatus, TradingDayView
+
+    from tests.unit.orchestration.daemon_fixtures import _business_trading_day as _biz
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    runtime = dataclasses.replace(
+        resolve_collector_runtime(collector=settings), audit=AuditSettings(mode=AuditMode.OFF)
+    )
+    runner = daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda s: None)
+    day = dt.date(2026, 9, 14)
+    calls: dict[str, int] = {"derive": 0, "write": 0, "log": 0}
+    monkeypatch.setattr(daemon_mod, "derive_session_audit", lambda *a, **kw: calls.__setitem__("derive", 1) or None)
+    monkeypatch.setattr(daemon_mod, "write_session_audit", lambda *a, **kw: calls.__setitem__("write", 1) or None)
+    monkeypatch.setattr(daemon_mod, "log_session_audit", lambda *a, **kw: calls.__setitem__("log", 1) or None)
+    seen: dict = {}
+
+    def _reconcile(**kw):
+        seen.update(kw)
+        return True
+
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", _reconcile)
+    monkeypatch.setattr(
+        daemon_mod,
+        "_run_eod_housekeeping",
+        lambda *a, **k: daemon_mod._EodHousekeeping(
+            deleted=0, uploaded=0, purged=0, maintenance_ok=True, offload_ok=True
+        ),
+    )
+    monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "ok"))
+    digests: list = []
+    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    view = TradingDayView(date=day, status=TradingDayStatus.BUSINESS, trading_day=_biz(day))
+    now = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    # When
+    runner._run_business_eod(now, day, view, standard_session_anchors(day))
+
+    # Then: 파생·저장·로그 미호출, 정합성 검사는 audit=None
+    assert calls == {"derive": 0, "write": 0, "log": 0}
+    assert seen["audit"] is None
+    assert "audit_status=OFF" in digests[0][1].splitlines()
+    assert "regular_trade_loss=-" in digests[0][1].splitlines()
+    assert "open_max_latency_s=-" in digests[0][1].splitlines()
+
+
+def test_holiday_and_unknown_days_skip_derivation(tmp_path, monkeypatch) -> None:
+    # Given: HOLIDAY/UNKNOWN 날짜의 EOD
+    import datetime as dt
+
+    import src.orchestration.daemon as daemon_mod
+
+    from tests.unit.orchestration.daemon_fixtures import _holiday_trading_day
+
+    day = dt.date(2026, 9, 14)
+
+    # When: HOLIDAY
+    settings, digests, eod_time = _stub_full_eod(monkeypatch, tmp_path)
+    calls: list = []
+    monkeypatch.setattr(
+        daemon_mod.DaemonRunner,
+        "_derive_session_audit",
+        lambda self, ref_day, day_v, anchors: calls.append(ref_day) or None,
+    )
+    monkeypatch.setattr(
+        daemon_mod,
+        "_resolve_trading_day_with_cache",
+        lambda d, c, _a: _holiday_trading_day(d),
+    )
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    # Then: 파생 미호출 (휴일 EOD는 다이제스트를 보내지 않는다)
+    assert calls == []
+    assert digests == []
+
+    # When: UNKNOWN (실제 파생 경로, 빈 저널)
+    settings2, digests2, eod_time2 = _stub_full_eod(monkeypatch, tmp_path)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    monkeypatch.setattr(
+        daemon_mod,
+        "_resolve_trading_day_with_cache",
+        lambda d, c, _a: None,
+    )
+    daemon_mod.run_collector_daemon(
+        settings=settings2, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time2
+    )
+
+    # Then: 비즈니스일이 아니라 파생이 조기 종료되어 아티팩트 없음, EOD는 정상 완료
+    assert not list(settings2.paths.manifest_dir.rglob("*.audit.json"))
+    assert len(digests2) == 1
+
+
+def test_digest_carries_audit_lines(tmp_path, monkeypatch) -> None:
+    # Given: 확정 결손 감사를 반환하는 파생 스텁
+    import datetime as dt
+
+    import src.orchestration.daemon as daemon_mod
+
+    settings, digests, eod_time = _stub_full_eod(monkeypatch, tmp_path)
+    day = dt.date(2026, 9, 14)
+    stub = _stub_session_audit(day)
+    monkeypatch.setattr(daemon_mod, "derive_session_audit", lambda *a, **kw: stub)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+
+    # When
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    # Then: reconciled 다음 줄에 감사 3종 세트, 기존 키 순서 유지
+    lines = digests[0][1].splitlines()
+    assert "audit_status=OK" in lines
+    assert "regular_trade_loss=7140/1000000" in lines
+    assert "open_max_latency_s=29.0" in lines
+    assert lines.index("audit_status=OK") == lines.index("reconciled=True") + 1
+    assert "aftermarket_ready=True" in lines
+
+
+def test_digest_without_audit_reports_dashes(tmp_path, monkeypatch) -> None:
+    # Given: 감사가 없는 EOD
+    import src.orchestration.daemon as daemon_mod
+
+    settings, digests, eod_time = _stub_full_eod(monkeypatch, tmp_path)
+    monkeypatch.setattr(daemon_mod.DaemonRunner, "_derive_session_audit", lambda self, ref_day, day_v, anchors: None)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+
+    # When
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    # Then
+    lines = digests[0][1].splitlines()
+    assert "audit_status=UNAVAILABLE" in lines
+    assert "regular_trade_loss=-" in lines
+    assert "open_max_latency_s=-" in lines
+
+
+def test_artifact_lands_in_offloaded_tree(tmp_path, monkeypatch) -> None:
+    # Given: 스텁 감사를 쓰는 실제 저장 경로
+    import datetime as dt
+    import json
+    import pathlib
+
+    import src.orchestration.daemon as daemon_mod
+
+    settings, digests, eod_time = _stub_full_eod(monkeypatch, tmp_path)
+    day = dt.date(2026, 9, 14)
+    stub = _stub_session_audit(day)
+    monkeypatch.setattr(daemon_mod, "derive_session_audit", lambda *a, **kw: stub)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    real_write = daemon_mod.write_session_audit
+    order: list[str] = []
+
+    def _write(audit, path):
+        order.append("write")
+        return real_write(audit, path)
+
+    def _offload(*a, **kw):
+        order.append("offload")
+        return {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
+
+    monkeypatch.setattr(daemon_mod, "write_session_audit", _write)
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", _offload)
+
+    # When
+    daemon_mod.run_collector_daemon(settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time)
+
+    # Then: 오프로드 전에 아티팩트가 날짜 우선 파일명으로 존재
+    artifact = settings.paths.session_audit_path(day, settings.vendor)
+    assert artifact.exists()
+    assert order.index("write") < order.index("offload")
+    assert artifact.name.split(".")[0] == day.isoformat()
+    assert json.loads(pathlib.Path(artifact).read_text(encoding="utf-8"))["status"] == "OK"
+
+
+def test_empty_journals_end_to_end_without_exception(tmp_path, monkeypatch, caplog) -> None:
+    # Given: 빈 저널의 실제 파생 + 실제 정합성 검사
+    import datetime as dt
+    import logging
+
+    import src.orchestration.daemon as daemon_mod
+
+    settings, digests, eod_time = _stub_full_eod(monkeypatch, tmp_path)
+    day = dt.date(2026, 9, 14)
+
+    # When
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(
+            settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time
+        )
+
+    # Then: UNAVAILABLE 감사 + legacy 판정, 예외 없음
+    assert len(digests) == 1
+    lines = digests[0][1].splitlines()
+    assert "audit_status=UNAVAILABLE" in lines
+    assert "reconciled=False" in lines
+    assert "regular_trade_loss=-" in lines
+    assert "open_max_latency_s=-" in lines
+    assert "status=UNAVAILABLE" in caplog.text
+    assert "basis=legacy" in caplog.text
+
+
+@pytest.mark.parametrize("payload", ["{}", "[]", '{"session_date": null}', "{broken"])
+def test_unreadable_audit_manifest_does_not_abort_eod(tmp_path, monkeypatch, caplog, payload) -> None:
+    import datetime as dt
+
+    import src.orchestration.daemon as daemon_mod
+
+    settings, digests, eod_time = _stub_full_eod(monkeypatch, tmp_path)
+    day = dt.date(2026, 9, 14)
+    manifest = settings.paths.manifest_path(day)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(payload, encoding="utf-8")
+    audit = _stub_session_audit(day)
+    derived: dict = {}
+
+    def _derive(*a, **kw):
+        derived.update(kw)
+        return audit
+
+    monkeypatch.setattr(daemon_mod, "derive_session_audit", _derive)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    with caplog.at_level(logging.ERROR):
+        daemon_mod.run_collector_daemon(
+            settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time
+        )
+    assert derived["manifest_frame_counts"] is None
+    assert settings.paths.session_audit_path(day, settings.vendor).exists()
+    assert len(digests) == 1
+    errors = [r for r in caplog.records if "stage=session_audit status=ERROR" in r.getMessage()]
+    assert len(errors) == 1
+    assert errors[0].exc_info is not None
+
+
+@pytest.mark.parametrize("status", ["HOLIDAY", "UNKNOWN"])
+def test_nonbusiness_audit_derivation_skips_all_io(tmp_path, monkeypatch, status) -> None:
+    import datetime as dt
+
+    import src.orchestration.daemon as daemon_mod
+    from src.core.config import CollectorSettings, resolve_collector_runtime
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.trading_day_gate import TradingDayStatus, TradingDayView
+
+    runtime = resolve_collector_runtime(collector=CollectorSettings(data_root=tmp_path))
+    runner = daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda s: None)
+
+    def _unexpected(*a, **kw):
+        pytest.fail("nonbusiness audit must not perform I/O")
+
+    monkeypatch.setattr(daemon_mod.SessionManifest, "load", _unexpected)
+    monkeypatch.setattr(daemon_mod, "derive_session_audit", _unexpected)
+    monkeypatch.setattr(daemon_mod, "write_session_audit", _unexpected)
+    monkeypatch.setattr(daemon_mod, "log_session_audit", _unexpected)
+    day = dt.date(2026, 9, 14)
+    view = TradingDayView(date=day, status=TradingDayStatus[status], trading_day=None)
+    assert runner._derive_session_audit(day, view, standard_session_anchors(day)) is None
