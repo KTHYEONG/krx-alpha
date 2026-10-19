@@ -33,6 +33,7 @@ from src.core.config import (
     KrxCredentials,
     LivenessSettings,
     ObservabilitySettings,
+    ShardWatchdogSettings,
     SnapshotSettings,
     TossCredentials,
     TossProgramTradesSettings,
@@ -90,6 +91,14 @@ from src.orchestration.premarket import (
     premarket_pool_due,
     premarket_stream_cmd,
     premarket_wake_cap_s,
+)
+from src.orchestration.shard_watchdog import (
+    ShardDecision,
+    ShardObservation,
+    ShardVerdict,
+    ShardWatchdog,
+    shard_last_journal_wall,
+    shard_window,
 )
 from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker, stop_supervisors
 from src.orchestration.trading_day_gate import TradingDayGate, TradingDayStatus, TradingDayView
@@ -783,6 +792,9 @@ class DaemonState:
     aftermarket_results: dict[str, str] = field(default_factory=dict)
     aftermarket_circuit_alerted: set[str] = field(default_factory=set)
     aftermarket_restarts: int = 0
+    shard_stale_restarts: int = 0
+    shard_venue_wide_warned: set[tuple[str, dt.date]] = field(default_factory=set)
+    shard_budget_alerted: set[tuple[str, dt.date]] = field(default_factory=set)
     premarket_pool_day: dt.date | None = None
     next_premarket_pool_at: dt.datetime | None = None
     premarket_pool_failed_day: dt.date | None = None
@@ -1102,6 +1114,15 @@ class DaemonRunner:
         self._after_cfg = runtime.aftermarket
         self._snapshot_cfg = runtime.snapshot
         self._premarket_cfg = runtime.premarket
+        _wd = getattr(runtime, "shard_watchdog", None)
+        if _wd is None:
+            _wd = ShardWatchdogSettings()
+        self._aftermarket_watchdog = ShardWatchdog(
+            limit_s=_wd.aftermarket_stale_limit_s, max_restarts_per_day=_wd.max_restarts_per_day
+        )
+        self._premarket_watchdog = ShardWatchdog(
+            limit_s=_wd.premarket_stale_limit_s, max_restarts_per_day=_wd.max_restarts_per_day
+        )
         self._program_sync_cfg = (
             program_sync_settings if program_sync_settings is not None else TossProgramTradesSettings()
         )
@@ -1923,6 +1944,181 @@ class DaemonRunner:
                 st.aftermarket_plan = ()
             st.aftermarket_plan_day = today
 
+    def _watch_aftermarket_shards(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
+        """Judge each running shard's journal freshness inside its window and stop a stale one."""
+        try:
+            self._watch_aftermarket_shards_guarded(now, today, anchors)
+        except (OSError, ValueError) as exc:
+            logger.warning("[DATA] stage=shard_watchdog status=ERROR reason=%s", type(exc).__name__)
+
+    def _watch_aftermarket_shards_guarded(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
+        wd = getattr(self._runtime, "shard_watchdog", None)
+        if wd is None or not wd.enabled:
+            return
+        st = self._state
+        ch = self._children
+        if not ch.aftermarket or st.aftermarket_plan_day != today:
+            return
+        plan = {f"{s.venue.value}:{s.shard_index}": s for s in st.aftermarket_plan}
+        live = {
+            key: sup
+            for key, sup in ch.aftermarket.items()
+            if key in plan and hasattr(sup, "is_running") and hasattr(sup, "stop_for_restart")
+        }
+        if not live:
+            return
+        by_venue: dict[str, list[tuple[str, Any, AftermarketShard]]] = {}
+        for key, sup in live.items():
+            shard = plan[key]
+            by_venue.setdefault(shard.venue.value, []).append((key, sup, shard))
+        for venue, items in by_venue.items():
+            first = items[0][2]
+            session = MarketSession.NXT_AFTER if first.venue is MarketVenue.NXT else MarketSession.KRX_AFTER
+            open_dt, end_dt = shard_window(first.venue, session, day=today, anchors=anchors)
+            if not open_dt <= now < end_dt:
+                continue
+            observations = tuple(
+                ShardObservation(
+                    key=key,
+                    venue=venue,
+                    running=bool(sup.is_running()),
+                    started_at_wall=getattr(sup, "started_at_wall", None),
+                    last_journal_wall=shard_last_journal_wall(
+                        self._paths.journal_root,
+                        vendor="kis",
+                        venue=shard.venue.value,
+                        session=session.value,
+                        streams=shard.streams,
+                        day=today,
+                        shard_index=shard.shard_index,
+                    ),
+                )
+                for key, sup, shard in items
+            )
+            decisions = self._aftermarket_watchdog.evaluate(
+                observations,
+                now_wall=now.timestamp(),
+                window_open_wall=open_dt.timestamp(),
+                in_window=bool(open_dt <= now < end_dt),
+                day=today,
+            )
+            if self._apply_shard_decisions(
+                decisions,
+                watchdog=self._aftermarket_watchdog,
+                venue=venue,
+                today=today,
+                supervisors={key: sup for key, sup, _ in items},
+                max_restarts=wd.max_restarts_per_day,
+            ):
+                return
+
+    def _watch_premarket_shard(
+        self, now: dt.datetime, today: dt.date, anchors: SessionAnchors, shard: AftermarketShard
+    ) -> None:
+        """Judge the running premarket shard's journal freshness inside its window."""
+        try:
+            self._watch_premarket_shard_guarded(now, today, anchors, shard)
+        except (OSError, ValueError) as exc:
+            logger.warning("[DATA] stage=shard_watchdog status=ERROR reason=%s", type(exc).__name__)
+
+    def _watch_premarket_shard_guarded(
+        self, now: dt.datetime, today: dt.date, anchors: SessionAnchors, shard: AftermarketShard
+    ) -> None:
+        wd = getattr(self._runtime, "shard_watchdog", None)
+        if wd is None or not wd.enabled:
+            return
+        sup = self._children.premarket
+        if sup is None or not hasattr(sup, "is_running") or not hasattr(sup, "stop_for_restart"):
+            return
+        open_dt, end_dt = shard_window(MarketVenue.NXT, MarketSession.NXT_PRE, day=today, anchors=anchors)
+        if not open_dt <= now < end_dt:
+            return
+        observations = (
+            ShardObservation(
+                key="premarket",
+                venue="nxt",
+                running=bool(sup.is_running()),
+                started_at_wall=getattr(sup, "started_at_wall", None),
+                last_journal_wall=shard_last_journal_wall(
+                    self._paths.journal_root,
+                    vendor="kis",
+                    venue="nxt",
+                    session=MarketSession.NXT_PRE.value,
+                    streams=shard.streams,
+                    day=today,
+                    shard_index=shard.shard_index,
+                ),
+            ),
+        )
+        decisions = self._premarket_watchdog.evaluate(
+            observations,
+            now_wall=now.timestamp(),
+            window_open_wall=open_dt.timestamp(),
+            in_window=bool(open_dt <= now < end_dt),
+            day=today,
+        )
+        self._apply_shard_decisions(
+            decisions,
+            watchdog=self._premarket_watchdog,
+            venue="nxt",
+            today=today,
+            supervisors={"premarket": sup},
+            max_restarts=wd.max_restarts_per_day,
+        )
+
+    def _apply_shard_decisions(
+        self,
+        decisions: tuple[ShardDecision, ...],
+        *,
+        watchdog: ShardWatchdog,
+        venue: str,
+        today: dt.date,
+        supervisors: Mapping[str, ProcessSupervisor],
+        max_restarts: int,
+    ) -> bool:
+        """Log verdicts and stop at most one stale shard; returns True when stopped."""
+        st = self._state
+        wide = [d for d in decisions if d.verdict is ShardVerdict.VENUE_WIDE_SILENCE]
+        if wide and (venue, today) not in st.shard_venue_wide_warned:
+            st.shard_venue_wide_warned.add((venue, today))
+            peak = max(d.silent_s or 0.0 for d in wide)
+            logger.warning(
+                "[DATA] stage=shard_watchdog status=WARN reason=venue_wide_silence venue=%s shards=%d silent_s=%.0f limit_s=%.0f",
+                venue,
+                len(wide),
+                peak,
+                wide[0].limit_s,
+            )
+        for d in decisions:
+            if d.verdict is ShardVerdict.BUDGET_EXHAUSTED and (d.key, today) not in st.shard_budget_alerted:
+                st.shard_budget_alerted.add((d.key, today))
+                logger.critical(
+                    "[DATA] stage=shard_watchdog status=FAIL reason=stale_budget_exhausted key=%s silent_s=%.0f limit_s=%.0f max_restarts=%d",
+                    d.key,
+                    d.silent_s or 0.0,
+                    d.limit_s,
+                    max_restarts,
+                )
+        for d in decisions:
+            if not d.restart:
+                continue
+            sup = supervisors.get(d.key)
+            if sup is None:
+                continue
+            stop_result = sup.stop_for_restart(reason="stale_child", timeout_s=CHILD_STOP_TIMEOUT_S)
+            restarts_today = watchdog.record_restart(d.key, day=today)
+            st.shard_stale_restarts += 1
+            logger.warning(
+                "[SYS] stage=child_restart status=STALE reason=stale_child key=%s silent_s=%.0f limit_s=%.0f stop_result=%s restarts_today=%d",
+                d.key,
+                d.silent_s or 0.0,
+                d.limit_s,
+                stop_result,
+                restarts_today,
+            )
+            return True
+        return False
+
     def _supervise_aftermarket(
         self, now: dt.datetime, state: SessionState, today: dt.date, anchors: SessionAnchors
     ) -> None:
@@ -1960,6 +2156,7 @@ class DaemonRunner:
                 open_time.isoformat(),
                 (dt.datetime.combine(today, open_time, tzinfo=_KST) - now).total_seconds(),
             )
+        self._watch_aftermarket_shards(now, today, anchors)
         for supervisor_key, sup in ch.aftermarket.items():
             result = sup.ensure_running()
             st.aftermarket_results[supervisor_key] = result
@@ -2118,6 +2315,7 @@ class DaemonRunner:
                     cmd=premarket_stream_cmd(today, paths, shard=shard),
                     breaker=RestartCircuitBreaker(),
                 )
+            self._watch_premarket_shard(now, today, anchors, shard)
             result = ch.premarket.ensure_running()
             if result == "restarted":
                 logger.warning(
@@ -2339,12 +2537,14 @@ class DaemonRunner:
                 f"host_backup={host_backup}",
                 f"streamer_restarts={st.streamer_restarts}",
                 f"aftermarket_restarts={st.aftermarket_restarts}",
+                f"shard_stale_restarts={st.shard_stale_restarts}",
                 f"orchestration_attempts={st.orchestration_attempts}",
                 *[f"crosscheck_{k.value}={v}" for k, v in crosscheck.items()],
             ]
         )
         send_digest(f"[krx-alpha] EOD {ref_day.isoformat()} {eod_status}", digest_body)
         st.aftermarket_restarts = 0
+        st.shard_stale_restarts = 0
 
     def _aftermarket_eod_blocked(self, now: dt.datetime, ref_day: dt.date, anchors: SessionAnchors) -> bool:
         """Return whether missing aftermarket manifests degrade this EOD."""

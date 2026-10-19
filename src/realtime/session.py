@@ -71,6 +71,8 @@ class SessionConfig:
     symbol_limit: int | None = None
     min_free_disk_gb: float = 3.0
     journal_retain_days: int = 3
+    # Reason recorded on the restart gap when this boot follows a previous boot; None means the default `restart`.
+    restart_reason: str | None = None
 
 
 @dataclass
@@ -171,6 +173,8 @@ def bootstrap_session(
         raise ValueError("journal_retain_days must be nonnegative")
     if cfg.symbol_limit is not None and cfg.symbol_limit < 1:
         raise ValueError(f"symbol_limit {cfg.symbol_limit} must be positive")
+    if cfg.restart_reason not in (None, "restart", "stale_child"):
+        raise ValueError(f"restart_reason {cfg.restart_reason!r} must be None, 'restart' or 'stale_child'")
     hosts = (cfg.ntp_host, *cfg.ntp_fallback_hosts)
     offset_ns: int | None = None
     for host in hosts:
@@ -261,10 +265,12 @@ def bootstrap_session(
     if manifest.boots:
         last_write_ns = last_journal_write_ns(journals, started)
         if last_write_ns is not None and started > last_write_ns:
-            manifest.record_gap(symbol="*", gap_start_ns=last_write_ns, gap_end_ns=started, reason="restart")
+            reason = cfg.restart_reason or "restart"
+            manifest.record_gap(symbol="*", gap_start_ns=last_write_ns, gap_end_ns=started, reason=reason)
             logger.warning(
-                "[DATA] stage=bootstrap status=RESTART_GAP gap_s=%.1f",
+                "[DATA] stage=bootstrap status=RESTART_GAP gap_s=%.1f reason=%s",
                 (started - last_write_ns) / 1_000_000_000,
+                reason,
             )
     prune_old_journals(
         cfg.journal_root,

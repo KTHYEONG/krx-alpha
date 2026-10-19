@@ -17,7 +17,7 @@ def test_collect_aftermarket_builds_nxt_kis_route(monkeypatch, tmp_path):
     monkeypatch.setattr(collect_aftermarket, 'RealtimeStreamer', FakeStreamer)
     monkeypatch.setattr(collect_aftermarket, 'load_kis_data_credentials', lambda: (KisDataCredential('1','k','s','h','fp1'),))
     from src.core.config import CollectorRuntime
-    _collector = type('Settings', (), {'after_market_enabled': True, 'subscription_pair_budget': 4, 'ntp_fallback_hosts': (), 'min_free_disk_gb': 3.0, 'journal_retain_days': 3})()
+    _collector = type('Settings', (), {'after_market_enabled': True, 'subscription_pair_budget': 4, 'ntp_fallback_hosts': (), 'min_free_disk_gb': 3.0, 'journal_retain_days': 3, 'kis_ack_timeout_s': 10.0})()
     _after = type('Aftermarket', (), {'nxt_streams': ('H0NXCNT0', 'H0NXASP0'), 'krx_streams': ('H0STCNT0', 'H0STASP0'), 'pair_capacity_per_connection': 4, 'max_symbols': 40, 'enabled': True, 'silence_limit_s': 10.0})()
     _snapshot = type('Snapshot', (), {})()
     _runtime = CollectorRuntime(collector=_collector, aftermarket=_after, snapshot=_snapshot, paths=type('P', (), {})())
@@ -67,7 +67,7 @@ def test_collect_aftermarket_passes_configured_silence_limit_to_window(monkeypat
     )
 
     from src.core.config import CollectorRuntime
-    _collector = type('Settings', (), {'after_market_enabled': True, 'subscription_pair_budget': 4, 'ntp_fallback_hosts': (), 'min_free_disk_gb': 3.0, 'journal_retain_days': 3})()
+    _collector = type('Settings', (), {'after_market_enabled': True, 'subscription_pair_budget': 4, 'ntp_fallback_hosts': (), 'min_free_disk_gb': 3.0, 'journal_retain_days': 3, 'kis_ack_timeout_s': 10.0})()
     _after = type('Aftermarket', (), {'nxt_streams': ('H0NXCNT0', 'H0NXASP0'), 'krx_streams': ('H0STCNT0', 'H0STASP0'), 'pair_capacity_per_connection': 4, 'max_symbols': 40, 'enabled': True, 'silence_limit_s': 7.5})()
     _runtime = CollectorRuntime(collector=_collector, aftermarket=_after, snapshot=type('Snapshot', (), {})(), paths=type('P', (), {})())
     monkeypatch.setattr(collect_aftermarket, 'resolve_collector_runtime', lambda **kw: _runtime)
@@ -99,7 +99,7 @@ def test_collect_aftermarket_rejects_missing_verified_capacity(monkeypatch, tmp_
 
     monkeypatch.setattr(collect_aftermarket, 'load_kis_data_credentials', lambda: (KisDataCredential('1','k','s','h','fp1'),))
     from src.core.config import CollectorRuntime
-    _collector = type('Settings', (), {'after_market_enabled': True, 'subscription_pair_budget': 4, 'ntp_fallback_hosts': (), 'min_free_disk_gb': 3.0, 'journal_retain_days': 3})()
+    _collector = type('Settings', (), {'after_market_enabled': True, 'subscription_pair_budget': 4, 'ntp_fallback_hosts': (), 'min_free_disk_gb': 3.0, 'journal_retain_days': 3, 'kis_ack_timeout_s': 10.0})()
     _after = type('Aftermarket', (), {'nxt_streams': ('H0NXCNT0', 'H0NXASP0'), 'krx_streams': ('H0STCNT0', 'H0STASP0'), 'pair_capacity_per_connection': None, 'max_symbols': 40, 'enabled': True, 'silence_limit_s': 10.0})()
     _snapshot = type('Snapshot', (), {})()
     _runtime = CollectorRuntime(collector=_collector, aftermarket=_after, snapshot=_snapshot, paths=type('P', (), {})())

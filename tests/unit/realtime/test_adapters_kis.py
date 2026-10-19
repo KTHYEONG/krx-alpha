@@ -591,3 +591,522 @@ def test_kis_close_cancellation_still_releases_lease(tmp_path) -> None:
         await follower.release()
 
     asyncio.run(run())
+
+
+def _ack_raw(code="0", msg="OPSP0000"):
+    import json
+    return json.dumps({"header": {"tr_id": "H0NXCNT0"}, "body": {"rt_cd": code, "msg_cd": msg}})
+
+
+def _timeout_adapter(ws, **kwargs):
+    from src.realtime.adapters.kis import KisRealtimeAdapter
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import StreamRoute
+
+    kwargs.setdefault("ack_timeout_s", 10.0)
+    adapter = KisRealtimeAdapter(
+        app_key="k", app_secret="s", http=object(),
+        route=StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER),
+        allowed_streams=("H0NXCNT0", "H0NXASP0"), capacity_pairs=4, **kwargs,
+    )
+    adapter._ws = ws
+    return adapter
+
+
+def test_kis_subscribe_returns_acks_in_send_order():
+    import asyncio
+    import json
+
+    sent = []
+
+    class Ws:
+        def __init__(self):
+            self._replies = iter([_ack_raw(), _ack_raw()])
+
+        async def send_str(self, payload):
+            sent.append(payload)
+
+        async def receive_str(self):
+            return next(self._replies)
+
+    acks = asyncio.run(_timeout_adapter(Ws()).subscribe([("005930", "H0NXCNT0"), ("000660", "H0NXCNT0")]))
+    assert [(a.symbol, a.stream, a.accepted) for a in acks] == [
+        ("005930", "H0NXCNT0", True), ("000660", "H0NXCNT0", True)]
+    bodies = [json.loads(p) for p in sent]
+    assert [b["header"]["tr_type"] for b in bodies] == ["1", "1"]
+    assert [b["body"]["input"]["tr_key"] for b in bodies] == ["005930", "000660"]
+
+
+def test_kis_hung_ack_becomes_plain_disconnect():
+    import asyncio
+    import time
+
+    import pytest
+
+    from src.realtime.contracts import VendorAuthRejected, VendorDisconnected
+
+    class Ws:
+        async def send_str(self, payload):
+            return None
+
+        async def receive_str(self):
+            await asyncio.sleep(10)
+
+    start = time.monotonic()
+    with pytest.raises(VendorDisconnected, match=r"ack_timeout:005930:H0NXCNT0") as excinfo:
+        asyncio.run(_timeout_adapter(Ws(), ack_timeout_s=0.05).subscribe([("005930", "H0NXCNT0")]))
+    elapsed = time.monotonic() - start
+    assert type(excinfo.value) is VendorDisconnected
+    assert not isinstance(excinfo.value, VendorAuthRejected)
+    assert 0.04 <= elapsed < 2.0
+    assert isinstance(excinfo.value.__cause__, TimeoutError)
+
+
+def test_kis_ack_deadline_bounds_blocked_pingpong_echo():
+    import asyncio
+    import json
+    from unittest.mock import AsyncMock
+
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    ping = json.dumps({"header": {"tr_id": "PINGPONG"}})
+
+    class Ws:
+        async def send_str(self, raw):
+            if raw == ping:
+                await asyncio.Event().wait()
+
+        receive_str = AsyncMock(return_value=ping)
+
+    async def run():
+        adapter = _timeout_adapter(Ws(), ack_timeout_s=0.02)
+        with pytest.raises(VendorDisconnected, match="ack_timeout:005930:H0NXCNT0") as exc:
+            await asyncio.wait_for(adapter.subscribe([("005930", "H0NXCNT0")]), timeout=1.0)
+        assert isinstance(exc.value.__cause__, TimeoutError)
+
+    asyncio.run(run())
+
+
+def test_kis_deadline_expired_before_receive_is_chained(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    import pytest
+
+    import src.realtime.adapters.kis as kis
+    from src.realtime.contracts import VendorDisconnected
+
+    adapter = _timeout_adapter(type("Ws", (), {"receive_str": AsyncMock()})())
+    clock = iter([0.0, 11.0])
+    monkeypatch.setattr(kis, "time", type("Clock", (), {"monotonic": lambda: next(clock)}))
+    with pytest.raises(VendorDisconnected, match="ack_timeout") as exc:
+        asyncio.run(adapter._await_subscribe_ack("005930", "H0NXCNT0"))
+    assert isinstance(exc.value.__cause__, TimeoutError)
+    adapter._ws.receive_str.assert_not_called()
+
+
+def test_kis_live_ticks_cannot_starve_deadline():
+    import asyncio
+    import json
+    import time
+
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    pingpong = json.dumps({"header": {"tr_id": "PINGPONG"}})
+
+    class Ws:
+        def __init__(self):
+            self.sent = []
+            self.n = 0
+
+        async def send_str(self, payload):
+            self.sent.append(payload)
+
+        async def receive_str(self):
+            await asyncio.sleep(0.01)
+            self.n += 1
+            if self.n % 3 == 0:
+                return pingpong
+            return "0|H0NXCNT0|001|005930^154001^a^b"
+
+    ws = Ws()
+    adapter = _timeout_adapter(ws, ack_timeout_s=0.1)
+    start = time.monotonic()
+    with pytest.raises(VendorDisconnected, match="ack_timeout"):
+        asyncio.run(adapter.subscribe([("005930", "H0NXCNT0")]))
+    assert time.monotonic() - start < 1.0
+    assert len(adapter._pending) > 0
+    assert all(f.raw == "005930^154001^a^b" for f in adapter._pending)
+    assert pingpong in ws.sent
+
+
+def test_kis_second_pair_hang_names_second_pair():
+    import asyncio
+
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    class Ws:
+        def __init__(self):
+            self.calls = 0
+
+        async def send_str(self, payload):
+            return None
+
+        async def receive_str(self):
+            self.calls += 1
+            if self.calls == 1:
+                return _ack_raw()
+            await asyncio.sleep(10)
+
+    with pytest.raises(VendorDisconnected, match=r"ack_timeout:000660:H0NXCNT0"):
+        asyncio.run(_timeout_adapter(Ws(), ack_timeout_s=0.05).subscribe(
+            [("005930", "H0NXCNT0"), ("000660", "H0NXCNT0")]))
+
+
+def test_kis_rejected_ack_is_not_timeout():
+    import asyncio
+    import json
+
+    import pytest
+
+    from src.realtime.contracts import VendorAuthRejected
+
+    class Ws:
+        def __init__(self, payload):
+            self._payload = payload
+
+        async def send_str(self, payload):
+            return None
+
+        async def receive_str(self):
+            return self._payload
+
+    acks = asyncio.run(_timeout_adapter(Ws(_ack_raw(code="1", msg="OPSP0011"))).subscribe([("005930", "H0NXCNT0")]))
+    assert acks[0].accepted is False
+    assert acks[0].code == "1"
+    with pytest.raises(VendorAuthRejected):
+        asyncio.run(_timeout_adapter(
+            Ws(json.dumps({"header": {}, "body": {"rt_cd": "1", "msg_cd": "IGW00121"}}))
+        ).subscribe([("005930", "H0NXCNT0")]))
+
+
+def test_kis_closed_socket_during_wait():
+    import asyncio
+
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    class Ws:
+        async def send_str(self, payload):
+            return None
+
+        async def receive_str(self):
+            raise TypeError("cannot read")
+
+    with pytest.raises(VendorDisconnected, match="subscribe_non_text"):
+        asyncio.run(_timeout_adapter(Ws()).subscribe([("005930", "H0NXCNT0")]))
+
+
+def test_kis_send_failure_disconnects():
+    import asyncio
+
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    class Ws:
+        async def send_str(self, payload):
+            raise ConnectionResetError("reset")
+
+        async def receive_str(self):
+            raise AssertionError("no wait after send failure")
+
+    with pytest.raises(VendorDisconnected, match="subscribe_failed:ConnectionResetError"):
+        asyncio.run(_timeout_adapter(Ws()).subscribe([("005930", "H0NXCNT0")]))
+
+
+def test_kis_pingpong_echo_failure_mid_wait():
+    import asyncio
+    import json
+
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    pingpong = json.dumps({"header": {"tr_id": "PINGPONG"}})
+
+    class Ws:
+        async def send_str(self, payload):
+            if payload == pingpong:
+                raise ConnectionResetError("reset")
+
+        async def receive_str(self):
+            return pingpong
+
+    with pytest.raises(VendorDisconnected, match="pingpong_echo_failed:ConnectionResetError"):
+        asyncio.run(_timeout_adapter(Ws()).subscribe([("005930", "H0NXCNT0")]))
+
+
+def test_kis_subscribe_cancellation_propagates():
+    import asyncio
+
+    import pytest
+
+    class Ws:
+        async def send_str(self, payload):
+            return None
+
+        async def receive_str(self):
+            await asyncio.sleep(10)
+
+    async def run():
+        adapter = _timeout_adapter(Ws(), ack_timeout_s=10.0)
+        task = asyncio.ensure_future(adapter.subscribe([("005930", "H0NXCNT0")]))
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+
+
+def test_kis_ack_timeout_constructor_validation():
+    import pytest
+
+    from src.realtime.adapters.kis import KIS_ACK_TIMEOUT_S
+    from src.core.config import CollectorSettings
+
+    with pytest.raises(ValueError, match="ack_timeout_s"):
+        _timeout_adapter(object(), ack_timeout_s=0)
+    with pytest.raises(ValueError, match="ack_timeout_s"):
+        _timeout_adapter(object(), ack_timeout_s=-1.0)
+    assert CollectorSettings().kis_ack_timeout_s == KIS_ACK_TIMEOUT_S
+
+
+def test_kis_ack_timeout_hides_secrets(caplog):
+    import asyncio
+    import logging
+
+    import pytest
+
+    from src.realtime.adapters.kis import KisRealtimeAdapter
+    from src.realtime.contracts import MarketSession, MarketVenue, VendorDisconnected
+    from src.realtime.session import StreamRoute
+
+    class Ws:
+        async def send_str(self, payload):
+            return None
+
+        async def receive_str(self):
+            await asyncio.sleep(10)
+
+    adapter = KisRealtimeAdapter(
+        app_key="LIVEKEY-9f8e7d", app_secret="LIVESECRET-1234", http=object(),
+        route=StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER),
+        allowed_streams=("H0NXCNT0", "H0NXASP0"), capacity_pairs=4, ack_timeout_s=0.02,
+    )
+    adapter._ws = Ws()
+    adapter._approval_key = "APPROVAL-abcdef"
+    with caplog.at_level(logging.DEBUG), pytest.raises(VendorDisconnected) as excinfo:
+        asyncio.run(adapter.subscribe([("005930", "H0NXCNT0")]))
+    assert "LIVEKEY-9f8e7d" not in str(excinfo.value)
+    assert "LIVESECRET-1234" not in str(excinfo.value)
+    assert "APPROVAL-abcdef" not in str(excinfo.value)
+    assert "LIVEKEY-9f8e7d" not in caplog.text
+
+
+def _hanging_kis_http(*, ack_timeout_s=0.05, scripts=None, closed=None, lease=None):
+    import asyncio
+    class _Response:
+        status = 200
+
+        async def json(self):
+            return {"approval_key": "approved"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    state = {"conns": 0}
+
+    class _Ws:
+        def __init__(self, script):
+            self._script = list(script)
+            self.close_calls = 0
+
+        async def send_str(self, payload):
+            return None
+
+        async def receive_str(self):
+            if not self._script:
+                await asyncio.sleep(10)
+            item = self._script.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+
+        async def close(self):
+            self.close_calls += 1
+            if closed is not None:
+                closed.append(1)
+
+    class _Http:
+        def post(self, *a, **k):
+            return _Response()
+
+        async def ws_connect(self, *a, **k):
+            state["conns"] += 1
+            script = scripts[state["conns"] - 1] if scripts and state["conns"] - 1 < len(scripts) else []
+            ws = _Ws(script)
+            if closed is not None:
+                orig = ws.close
+
+                async def _close():
+                    await orig()
+
+                ws.close = _close
+            return ws
+
+    return _Http(), state
+
+
+def _kis_streamer(http, *, ack_timeout_s=0.05, **streamer_kwargs):
+    from src.realtime.adapters.kis import KisRealtimeAdapter
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import StreamRoute
+    from src.realtime.streamer import RealtimeStreamer
+
+    adapter = KisRealtimeAdapter(
+        app_key="k", app_secret="s", http=http,
+        route=StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER),
+        allowed_streams=("H0NXCNT0", "H0NXASP0"), capacity_pairs=4,
+        ack_timeout_s=ack_timeout_s,
+    )
+    frames: list = []
+    gaps: list = []
+
+    class _Sink:
+        def record(self, frame):
+            frames.append(frame)
+
+        def note_ack(self, vendor, ack):
+            return None
+
+        def note_gap(self, symbol, start_ns, end_ns, reason):
+            gaps.append((symbol, start_ns, end_ns, reason))
+
+        def flush(self):
+            return len(frames)
+
+    sink = _Sink()
+    streamer = RealtimeStreamer(
+        adapter=adapter, sink=sink, replay_pairs=[("005930", "H0NXCNT0")], **streamer_kwargs
+    )
+    return streamer, adapter, sink, frames, gaps
+
+
+def test_kis_pump_hung_ack_uses_reconnect_path():
+    import asyncio
+
+    closed: list = []
+    http, state = _hanging_kis_http(closed=closed)
+    streamer, adapter, sink, frames, gaps = _kis_streamer(http)
+    stop = asyncio.Event()
+
+    async def _sleep(delay):
+        return None
+
+    asyncio.run(streamer.run_forever(stop, max_cycles=3, sleep=_sleep))
+    assert state["conns"] == 3
+    assert streamer._last_disconnect_detail.startswith("ack_timeout:")
+    assert frames == []
+    assert len(closed) == 3
+
+
+def test_kis_ack_timeout_backoff_bounds_reconnects():
+    import asyncio
+
+    http, state = _hanging_kis_http()
+    delays: list = []
+    wall = {"ns": 1_000_000_000_000_000_000}
+
+    async def _sleep(delay):
+        delays.append(delay)
+
+    streamer, *_ = _kis_streamer(
+        http, rng=lambda: 1.0, wall_ns=lambda: wall["ns"], monotonic=lambda: wall["ns"] / 1e9,
+    )
+    stop = asyncio.Event()
+    asyncio.run(streamer.run_forever(stop, max_cycles=5, sleep=_sleep))
+    assert state["conns"] == 5
+    assert len(delays) == 4
+    assert delays == sorted(delays)
+    assert delays[0] >= 0.5
+    for delay, n in zip(delays, range(1, 5), strict=True):
+        assert abs(delay - min(60.0, 1.0 * 2 ** (n - 1))) < 1e-9
+
+
+def test_kis_ack_timeout_outage_escalation_carries_detail(caplog):
+    import asyncio
+    import logging
+
+    http, _ = _hanging_kis_http()
+    wall = {"ns": 1_000_000_000_000_000_000}
+
+    streamer, *_ = _kis_streamer(
+        http, wall_ns=lambda: wall["ns"], silence_limit=lambda: 30.0,
+    )
+    stop = asyncio.Event()
+
+    async def _sleep(delay):
+        wall["ns"] += 200_000_000_000
+
+    with caplog.at_level(logging.CRITICAL):
+        asyncio.run(streamer.run_forever(stop, max_cycles=3, sleep=_sleep))
+    outages = [r for r in caplog.records if "stage=stream_outage" in r.getMessage()]
+    assert len(outages) == 1
+    assert "detail=ack_timeout:" in outages[0].getMessage()
+
+
+def test_kis_gap_recorded_on_recovery_after_timeouts():
+    import asyncio
+
+    frame_ns = 2_000_000_000_000_000_000
+    ack = _ack_raw()
+    http, _ = _hanging_kis_http(scripts=[[], [], [ack]])
+    streamer, adapter, sink, frames, gaps = _kis_streamer(http)
+
+    seen = {"n": 0}
+
+    async def _recv():
+        seen["n"] += 1
+        if seen["n"] == 1:
+            from src.realtime.contracts import L0Frame, MarketSession, MarketVenue
+
+            stop.set()
+            return L0Frame(
+                vendor="kis", stream="H0NXCNT0", symbol="005930", raw="005930^154001",
+                recv_mono_ns=1, recv_wall_ns=frame_ns, conn_id="c", conn_seq=1,
+                venue=MarketVenue.NXT, session=MarketSession.NXT_AFTER, exchange_event_time="154001",
+            )
+        await asyncio.sleep(10)
+
+    adapter.recv = _recv  # type: ignore[method-assign]
+    stop = asyncio.Event()
+
+    async def _sleep(delay):
+        return None
+
+    asyncio.run(streamer.run_forever(stop, max_cycles=5, sleep=_sleep))
+    assert gaps
+    assert all(g[3] == "disconnect" for g in gaps)
+    assert {g[0] for g in gaps} == {"005930"}

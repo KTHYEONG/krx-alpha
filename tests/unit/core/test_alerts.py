@@ -447,3 +447,61 @@ def test_invalid_limits_fail_fast() -> None:
         EmailAlertHandler(component="d", run_id="r", sender=_rec, first_occurrence_reserve=-1)
     with pytest.raises(ValueError, match="first_occurrence_reserve"):
         EmailAlertHandler(component="d", run_id="r", sender=_rec, daily_cap=20, first_occurrence_reserve=20)
+
+
+def _shard_budget_record(key="nxt:1", silent=240):
+    import logging
+
+    msg = (
+        "[DATA] stage=shard_watchdog status=FAIL reason=stale_budget_exhausted "
+        f"key={key} silent_s={silent} limit_s=120 max_restarts=3"
+    )
+    return logging.LogRecord("x", logging.CRITICAL, __file__, 1, msg, (), None)
+
+
+def test_shard_budget_alert_subject_labeled() -> None:
+    from src.core.alerts import format_alert_subject
+
+    fields = {"stage": "shard_watchdog", "reason": "stale_budget_exhausted"}
+    subject = format_alert_subject("daemon", _shard_budget_record().getMessage(), fields)
+    assert "샤드감시" in subject
+    assert "stale_budget_exhausted" not in subject
+
+
+def test_shard_dedup_key_by_venue_not_index_or_timing() -> None:
+    from src.core.alerts import alert_dedup_key
+
+    a = alert_dedup_key(_shard_budget_record(key="nxt:0", silent=240).getMessage())
+    b = alert_dedup_key(_shard_budget_record(key="nxt:1", silent=980).getMessage())
+    c = alert_dedup_key(_shard_budget_record(key="krx:0", silent=240).getMessage())
+    assert a == b
+    assert a != c
+
+
+def test_shard_budget_daily_cap_respected(caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.core.alerts import EmailAlertHandler, InMemoryAlertLedger
+
+    calls: list = []
+    now = {"t": 0.0, "day": dt.date(2026, 9, 25)}
+
+    def _rec(subject: str, body: str, **kw: object) -> None:
+        calls.append(subject)
+
+    handler = EmailAlertHandler(
+        component="daemon",
+        run_id="r",
+        sender=_rec,
+        cooldown_s=0,
+        clock=lambda: now["t"],
+        today=lambda: now["day"],
+        sleep=lambda s: None,
+        ledger=InMemoryAlertLedger(),
+    )
+    with caplog.at_level(logging.WARNING):
+        for i in range(4):
+            now["t"] = float(i * 2000)
+            handler.handle(_shard_budget_record())
+    assert len(calls) == 3

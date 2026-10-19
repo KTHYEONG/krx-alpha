@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 KIS_WS_URL = "ws://ops.koreainvestment.com:21000"
 KIS_APPROVAL_URL = "https://openapi.koreainvestment.com:9443/oauth2/Approval"
+KIS_ACK_TIMEOUT_S: float = 10.0
 
 KRX_STREAMS: tuple[str, str] = ("H0STCNT0", "H0STASP0")
 NXT_STREAMS: tuple[str, str] = ("H0NXCNT0", "H0NXASP0")
@@ -67,11 +69,14 @@ class KisRealtimeAdapter:
         allowed_streams: tuple[str, str],
         capacity_pairs: int,
         lease: KisWebSocketLease | None = None,
+        ack_timeout_s: float = KIS_ACK_TIMEOUT_S,
     ) -> None:
         expected = _expected_streams(route)
         if tuple(allowed_streams) != expected:
             raise VendorDisconnected(f"route_mismatch:{route.venue.value}:{','.join(allowed_streams)}")
         if not app_key or not app_secret: raise VendorAuthRejected("auth_rejected:missing_credentials")  # noqa: E701
+        if ack_timeout_s <= 0:
+            raise ValueError(f"ack_timeout_s must be positive, got {ack_timeout_s}")
         self.name = "kis"
         self.capacity_pairs = capacity_pairs
         self._app_key = app_key
@@ -80,6 +85,7 @@ class KisRealtimeAdapter:
         self._route = route
         self._allowed = tuple(allowed_streams)
         self._lease = lease
+        self._ack_timeout_s = ack_timeout_s
         self._ws: Any = None
         self._approval_key: str | None = None
         self._seq = 0
@@ -115,35 +121,48 @@ class KisRealtimeAdapter:
         self.pingpong_count = 0
         self.last_pingpong_wall_ns = None
 
-    async def subscribe(self, pairs: list[tuple[str, str]]) -> list[VendorAck]:  # pragma: no cover - live KIS subscribe/ACK boundary (G0-gated)
+    async def subscribe(self, pairs: list[tuple[str, str]]) -> list[VendorAck]:
+        """Subscribe pairs sequentially; returns acks in send order."""
         if len(pairs) > self.capacity_pairs:
             raise VendorDisconnected(f"capacity_exceeded:{len(pairs)}>{self.capacity_pairs}")
         acks: list[VendorAck] = []
         for symbol, stream in pairs:
             if stream not in self._allowed:
                 raise VendorDisconnected(f"route_mismatch:{stream}")
-            await self._ws.send_str(
-                json.dumps({
-                    "header": {"approval_key": self._approval_key, "custtype": "P", "tr_type": "1", "content-type": "utf-8"},
-                    "body": {"input": {"tr_id": stream, "tr_key": symbol}},
-                })
-            )
+            try:
+                await self._ws.send_str(
+                    json.dumps({
+                        "header": {"approval_key": self._approval_key, "custtype": "P", "tr_type": "1", "content-type": "utf-8"},
+                        "body": {"input": {"tr_id": stream, "tr_key": symbol}},
+                    })
+                )
+            except (aiohttp.ClientError, OSError) as exc:
+                raise VendorDisconnected(f"subscribe_failed:{type(exc).__name__}") from exc
             ack = await self._await_subscribe_ack(symbol, stream)
             acks.append(ack)
         return acks
 
-    async def _await_subscribe_ack(self, symbol: str, stream: str) -> VendorAck:  # pragma: no cover - exercised only via live subscribe path
-        # 40개 심볼을 순차 구독하는 동안 이미 등록된 심볼의 실시간 틱("0|"/"1|" 접두)이나
-        # PINGPONG 하트비트가 다음 ACK보다 먼저 도착할 수 있다(실측 확인). 이를 이번 요청의
-        # ACK으로 오인해 json.loads 에 실패시키지 않도록, ACK이 아닌 프레임은 건너뛰며
-        # 실시간 틱은 recv() 가 나중에 소비하도록 큐에 적재한다.
+    async def _await_subscribe_ack(self, symbol: str, stream: str) -> VendorAck:
+        """Wait for the ack of one request within `ack_timeout_s` total."""
+        deadline = time.monotonic() + self._ack_timeout_s
         while True:
-            raw = await self._ws.receive_str()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise VendorDisconnected(f"ack_timeout:{symbol}:{stream}") from TimeoutError()
+            try:
+                raw = await asyncio.wait_for(self._ws.receive_str(), timeout=remaining)
+            except TimeoutError as exc:
+                raise VendorDisconnected(f"ack_timeout:{symbol}:{stream}") from exc
+            except TypeError as exc:
+                raise VendorDisconnected("subscribe_non_text") from exc
             if raw[:1] in ("0", "1") and "|" in raw:
                 self._pending.extend(self._parse_envelope(raw))
                 continue
             if _is_pingpong(raw):
-                await self._echo_pingpong(raw)
+                try:
+                    await asyncio.wait_for(self._echo_pingpong(raw), timeout=max(0.0, deadline - time.monotonic()))
+                except TimeoutError as exc:
+                    raise VendorDisconnected(f"ack_timeout:{symbol}:{stream}") from exc
                 continue
             return self._parse_ack(raw, symbol, stream)
 
@@ -170,7 +189,7 @@ class KisRealtimeAdapter:
         except OSError as exc:
             raise VendorDisconnected(f"pingpong_echo_failed:{type(exc).__name__}") from exc
 
-    def _parse_ack(self, raw: str, symbol: str, stream: str) -> VendorAck:  # pragma: no cover - exercised only via live subscribe path
+    def _parse_ack(self, raw: str, symbol: str, stream: str) -> VendorAck:
         try:
             o = json.loads(raw)
         except ValueError as exc:

@@ -64,6 +64,7 @@ def _runtime(*, enabled=True, capacity=41, max_symbols=20, extra_disk=2.0, silen
         ntp_fallback_hosts=(),
         min_free_disk_gb=3.0,
         journal_retain_days=3,
+        kis_ack_timeout_s=10.0,
     )
     premarket = SimpleNamespace(
         enabled=enabled,

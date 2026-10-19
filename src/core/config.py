@@ -68,6 +68,8 @@ class CollectorSettings(BaseSettings):
     db_token_rotation_cooldown_s: float = Field(default=300.0, ge=0)
     db_subscribe_spacing_s: float = Field(default=0.12, ge=0.1)
     db_ack_timeout_s: float = Field(default=10.0, gt=0)
+    # Per-subscribe-ack deadline (seconds) of the KIS adapter; mirrors `db_ack_timeout_s`.
+    kis_ack_timeout_s: float = Field(default=10.0, gt=0)
     db_crosscheck_enabled: bool = False
     # Symbols per session universe. Unset derives ``ls_capacity_pairs // len(streams)`` so the cap cannot drift from vendor capacity (a literal caused the 2026-09-10 and 2026-10-02 incidents). An explicit value (env ``KRX_ALPHA_UNIVERSE_SLOT_BUDGET`` or kwarg) may only tighten it.
     universe_slot_budget: int = Field(default=0, ge=0)
@@ -569,6 +571,17 @@ class LivenessSettings(BaseSettings):
         return self
 
 
+class ShardWatchdogSettings(BaseSettings):
+    """Daemon-side stale detection for aftermarket/premarket shards."""
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_SHARD_WATCHDOG_", extra="ignore")
+
+    enabled: bool = True
+    aftermarket_stale_limit_s: float = Field(default=120.0, gt=0)
+    premarket_stale_limit_s: float = Field(default=120.0, gt=0)
+    max_restarts_per_day: int = Field(default=3, ge=0)
+
+
 @dataclass(frozen=True)
 class CollectorRuntime:
     collector: CollectorSettings
@@ -576,6 +589,7 @@ class CollectorRuntime:
     snapshot: SnapshotSettings
     paths: DataPaths
     premarket: PremarketSettings = field(default_factory=lambda: PremarketSettings())
+    shard_watchdog: ShardWatchdogSettings = field(default_factory=lambda: ShardWatchdogSettings())
 
 
 def resolve_collector_runtime(
@@ -584,6 +598,7 @@ def resolve_collector_runtime(
     aftermarket: AftermarketSettings | None = None,
     snapshot: SnapshotSettings | None = None,
     premarket: PremarketSettings | None = None,
+    shard_watchdog: ShardWatchdogSettings | None = None,
 ) -> CollectorRuntime:
     """Resolve one coherent collector configuration before child processes start.
 
@@ -592,6 +607,7 @@ def resolve_collector_runtime(
         aftermarket: Optional prevalidated aftermarket settings.
         snapshot: Optional prevalidated snapshot settings.
         premarket: Optional prevalidated premarket settings.
+        shard_watchdog: Optional prevalidated shard watchdog settings.
 
     Returns:
         Settings and data paths from one resolved process configuration.
@@ -599,10 +615,12 @@ def resolve_collector_runtime(
     Raises:
         ValueError: Explicit aftermarket enablement conflicts with collector enablement.
         ValueError: Enabled premarket shares the snapshot REST data slot.
+        ValueError: Enabled watchdog stale limit does not exceed the in-process silence limit.
     """
     resolved_collector = collector if collector is not None else CollectorSettings()
     resolved_snapshot = snapshot if snapshot is not None else SnapshotSettings()
     resolved_premarket = premarket if premarket is not None else PremarketSettings()
+    resolved_watchdog = shard_watchdog if shard_watchdog is not None else ShardWatchdogSettings()
     if aftermarket is None:
         resolved_aftermarket = AftermarketSettings(enabled=resolved_collector.after_market_enabled)
     else:
@@ -611,12 +629,22 @@ def resolve_collector_runtime(
         resolved_aftermarket = aftermarket
     if resolved_premarket.enabled and resolved_premarket.credential_slot == resolved_snapshot.kis_data_slot:
         raise ValueError("premarket credential_slot must not equal snapshot kis_data_slot")
+    if resolved_watchdog.enabled:
+        if resolved_watchdog.aftermarket_stale_limit_s <= resolved_aftermarket.silence_limit_s:
+            raise ValueError(
+                "aftermarket_stale_limit_s must exceed aftermarket silence_limit_s"
+            )
+        if resolved_watchdog.premarket_stale_limit_s <= resolved_premarket.silence_limit_s:
+            raise ValueError(
+                "premarket_stale_limit_s must exceed premarket silence_limit_s"
+            )
     return CollectorRuntime(
         collector=resolved_collector,
         aftermarket=resolved_aftermarket,
         snapshot=resolved_snapshot,
         paths=DataPaths(resolved_collector.data_root),
         premarket=resolved_premarket,
+        shard_watchdog=resolved_watchdog,
     )
 
 
