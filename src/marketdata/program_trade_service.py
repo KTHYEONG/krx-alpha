@@ -26,6 +26,7 @@ from src.marketdata.toss_program_trades import (
     _TossProgramTradesAuthRejected,
     append_program_trades,
     backfill_program_trades_history,
+    exclude_vendor_empty_pairs,
     find_program_trade_gaps,
     program_trade_coverage,
     symbols_needing_backfill,
@@ -135,6 +136,7 @@ class ProgramTradesSyncResult:
     tracked: tuple[str, ...]
     gap_targets: tuple[str, ...] = ()
     gap_report: ProgramTradeGapReport | None = None
+    vendor_empty_pairs: int = 0
 
 
 def _pre_sync_gap_floors(
@@ -225,6 +227,7 @@ def sync_program_trades_forward(
     max_lead_s: float | None = None,
     bars_daily_dir: pathlib.Path | None = None,
     gap_window_business_days: int | None = None,
+    gap_vendor_empty_max_day_ratio: float | None = None,
 ) -> ProgramTradesSyncResult:
     """Forward-sync tracked symbols to ``session_date`` plus candidate history depth.
 
@@ -234,7 +237,9 @@ def sync_program_trades_forward(
     ``None`` keeps every stored symbol tracked. When ``bars_daily_dir`` and
     ``gap_window_business_days`` are both set, interior gaps against the daily-bar
     calendar lower the affected symbols' fetch floor so one run heals them, and a
-    post-sync report re-verifies the store.
+    post-sync report re-verifies the store. With ``gap_vendor_empty_max_day_ratio`` set, pairs a
+    successful refetch still left empty are accepted as vendor-empty unless one day's share of
+    tracked symbols exceeds the ratio (a whole-day hole stays a gap).
 
     Tracked symbols behind ``session_date`` are fetched from ``max_date + 1``;
     candidate symbols lacking history back to ``session_date - lookback_days``
@@ -299,6 +304,7 @@ def sync_program_trades_forward(
     )
     symbols_ok = 0
     symbols_failed = 0
+    refetched_floors: dict[str, dt.date] = {}
     fetched: list[dict[str, object]] = []
     fetched_max: dict[str, dt.date] = {}
     for symbol in union:
@@ -317,6 +323,7 @@ def sync_program_trades_forward(
             symbols_failed += 1
             continue
         symbols_ok += 1
+        refetched_floors[symbol] = min_date_by_symbol[symbol]
         for row in rows:
             fetched.append(row)
             day = row["date"]
@@ -340,13 +347,22 @@ def sync_program_trades_forward(
     if active_symbols is not None:
         final_max = {symbol: day for symbol, day in final_max.items() if symbol in active_symbols}
     tracked_final = tuple(sorted(final_max))
+    vendor_empty_pairs = 0
+    if gap_report is not None and gap_vendor_empty_max_day_ratio is not None:
+        gap_report, vendor_empty_pairs = exclude_vendor_empty_pairs(
+            gap_report,
+            refetched_floors=refetched_floors,
+            tracked_symbols=len(tracked_final),
+            max_day_ratio=gap_vendor_empty_max_day_ratio,
+        )
     stale_symbols = tuple(sorted(symbol for symbol, max_date in final_max.items() if max_date < complete_through))
     logger.info(
-        "[DATA] stage=program_trades_forward status=OK fetched_symbols=%d appended_rows=%d stale=%d gap_targets=%d",
+        "[DATA] stage=program_trades_forward status=OK fetched_symbols=%d appended_rows=%d stale=%d gap_targets=%d vendor_empty_pairs=%d",
         symbols_ok,
         appended_rows,
         len(stale_symbols),
         len(gap_targets),
+        vendor_empty_pairs,
     )
     return ProgramTradesSyncResult(
         forward_targets=forward_targets,
@@ -358,6 +374,7 @@ def sync_program_trades_forward(
         tracked=tracked_final,
         gap_targets=gap_targets,
         gap_report=gap_report,
+        vendor_empty_pairs=vendor_empty_pairs,
     )
 
 

@@ -336,6 +336,41 @@ class ProgramTradeGapReport:
         return min(day for days in self.missing.values() for day in days)
 
 
+def exclude_vendor_empty_pairs(
+    report: ProgramTradeGapReport,
+    *,
+    refetched_floors: Mapping[str, dt.date],
+    tracked_symbols: int,
+    max_day_ratio: float,
+) -> tuple[ProgramTradeGapReport, int]:
+    """Accept pairs a successful refetch left empty, unless one day's empty share exceeds ``max_day_ratio``.
+
+    Returns the residual report and the accepted pair count. Only GAPS reports are altered.
+    """
+    if report.status is not ProgramTradeGapStatus.GAPS or tracked_symbols < 1:
+        return report, 0
+    candidates = {
+        (symbol, day)
+        for symbol, days in report.missing.items()
+        if symbol in refetched_floors
+        for day in days
+        if day >= refetched_floors[symbol]
+    }
+    per_day: dict[dt.date, int] = {}
+    for _symbol, day in candidates:
+        per_day[day] = per_day.get(day, 0) + 1
+    accepted = {
+        pair for pair in candidates if per_day[pair[1]] / tracked_symbols <= max_day_ratio
+    }
+    if not accepted:
+        return report, 0
+    residual = _group_missing_days(
+        {(symbol, day) for symbol, days in report.missing.items() for day in days} - accepted
+    )
+    status = ProgramTradeGapStatus.GAPS if residual else ProgramTradeGapStatus.COMPLETE
+    return ProgramTradeGapReport(status, report.window, residual), len(accepted)
+
+
 def _certified_gap_window(
     bars_daily_dir: pathlib.Path, complete_through: dt.date, window_business_days: int
 ) -> tuple[dt.date, ...] | None:

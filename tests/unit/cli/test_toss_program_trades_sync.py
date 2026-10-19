@@ -323,6 +323,7 @@ def test_cli_passes_configured_gap_window(tmp_path, monkeypatch) -> None:
     # Then: 설정값과 일봉 경로가 서비스로 전달된다
     assert rc == 0
     assert captured["gap_window_business_days"] == 7
+    assert captured["gap_vendor_empty_max_day_ratio"] == 0.02
     assert captured["bars_daily_dir"] == paths.bars_daily_dir
 
 
