@@ -51,3 +51,44 @@ def test_aftermarket_candidates_rejects_unknown_venue(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="unknown aftermarket venue"):
         paths.aftermarket_candidates(dt.date(2026, 10, 19), "xyz")
+
+
+def test_session_audit_path_layout_creates_nothing(tmp_path) -> None:
+    import datetime as dt
+    import pathlib
+
+    from src.core.paths import DataPaths
+
+    paths = DataPaths(pathlib.Path(tmp_path) / "data")
+
+    audit = paths.session_audit_path(dt.date(2026, 10, 15), "ls")
+
+    assert audit == pathlib.Path(tmp_path) / "data" / "manifest" / "audit" / "2026-10-15.ls.regular.audit.json"
+    assert not audit.exists()
+    assert not audit.parent.exists()
+
+
+def test_session_audit_path_name_is_date_first(tmp_path) -> None:
+    import datetime as dt
+    import pathlib
+
+    from src.core.paths import DataPaths
+
+    paths = DataPaths(pathlib.Path(tmp_path) / "data")
+    day = dt.date(2026, 10, 15)
+
+    assert dt.date.fromisoformat(paths.session_audit_path(day, "ls").name.split(".")[0]) == day
+
+
+def test_session_audit_path_rejects_empty_vendor(tmp_path) -> None:
+    import datetime as dt
+    import pathlib
+
+    import pytest
+
+    from src.core.paths import DataPaths
+
+    paths = DataPaths(pathlib.Path(tmp_path) / "data")
+
+    with pytest.raises(ValueError, match="vendor"):
+        paths.session_audit_path(dt.date(2026, 10, 15), "")

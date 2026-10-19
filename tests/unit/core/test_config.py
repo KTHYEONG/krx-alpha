@@ -1046,3 +1046,93 @@ def test_toss_program_trades_gap_check_business_days_rejects_zero() -> None:
     # When / Then: 생성 시점에 fail-closed
     with pytest.raises(ValidationError):
         TossProgramTradesSettings(gap_check_business_days=0)
+
+
+def _clear_audit_env(monkeypatch) -> None:
+    import os
+
+    for name in [n for n in os.environ if n.startswith("KRX_ALPHA_AUDIT_")]:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_audit_settings_default_shadow_and_budgets(monkeypatch) -> None:
+    from src.core.config import AuditMode, AuditSettings
+
+    _clear_audit_env(monkeypatch)
+    settings = AuditSettings()
+
+    assert settings.mode is AuditMode.SHADOW
+    assert settings.latency_alert_threshold_s == 10.0
+    assert settings.latency_streams == ("H0STCNT0", "H0STASP0")
+    assert settings.loss_warn_ratio < settings.loss_fail_ratio
+    assert settings.tail_silence_max_s == 600.0
+    assert settings.counter_reset_confirm_frames == 3
+    assert settings.max_intervals_per_symbol == 20
+
+
+def test_audit_settings_env_override(monkeypatch) -> None:
+    from src.core.config import AuditMode, AuditSettings
+
+    _clear_audit_env(monkeypatch)
+    monkeypatch.setenv("KRX_ALPHA_AUDIT_LATENCY_ALERT_THRESHOLD_S", "5")
+    monkeypatch.setenv("KRX_ALPHA_AUDIT_MODE", "enforce")
+
+    settings = AuditSettings()
+
+    assert settings.latency_alert_threshold_s == 5.0
+    assert settings.mode is AuditMode.ENFORCE
+    assert settings.loss_fail_ratio == 5e-3
+
+
+def test_audit_settings_ratio_ordering_fails_at_construction(monkeypatch) -> None:
+    from src.core.config import AuditSettings
+
+    _clear_audit_env(monkeypatch)
+
+    with pytest.raises(ValueError, match=r"loss_warn_ratio.*loss_fail_ratio"):
+        AuditSettings(loss_warn_ratio=0.01, loss_fail_ratio=0.01)
+    with pytest.raises(ValueError, match=r"loss_warn_ratio.*loss_fail_ratio"):
+        AuditSettings(loss_warn_ratio=0.02, loss_fail_ratio=0.01)
+
+
+def test_audit_settings_unknown_or_empty_stream_rejected(monkeypatch) -> None:
+    from src.core.config import AuditSettings
+
+    _clear_audit_env(monkeypatch)
+
+    with pytest.raises(ValueError, match="latency_streams"):
+        AuditSettings(latency_streams=("H0STXXX",))
+    with pytest.raises(ValueError, match="latency_streams"):
+        AuditSettings(latency_streams=())
+
+
+def test_audit_settings_non_positive_bounds_rejected(monkeypatch) -> None:
+    from pydantic import ValidationError
+
+    from src.core.config import AuditSettings
+
+    _clear_audit_env(monkeypatch)
+
+    with pytest.raises(ValidationError):
+        AuditSettings(time_budget_s=0)
+    with pytest.raises(ValidationError):
+        AuditSettings(counter_reset_confirm_frames=1)
+
+
+def test_runtime_carries_audit_without_changing_existing_fields(monkeypatch, tmp_path) -> None:
+    import pathlib
+
+    from src.core.config import AuditMode, AuditSettings, CollectorSettings, resolve_collector_runtime
+
+    _clear_audit_env(monkeypatch)
+    collector = CollectorSettings(data_root=pathlib.Path(tmp_path))
+
+    shadow = resolve_collector_runtime(collector=collector)
+
+    assert shadow.audit.mode is AuditMode.SHADOW
+    assert shadow.paths.root == pathlib.Path(tmp_path)
+
+    off = resolve_collector_runtime(collector=collector, audit=AuditSettings(mode="off"))
+
+    assert off.audit.mode is AuditMode.OFF
+    assert off.collector.data_root == pathlib.Path(tmp_path)

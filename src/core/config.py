@@ -582,6 +582,43 @@ class ShardWatchdogSettings(BaseSettings):
     max_restarts_per_day: int = Field(default=3, ge=0)
 
 
+class AuditMode(StrEnum):
+    """EOD session-audit rollout mode."""
+
+    OFF = "off"
+    SHADOW = "shadow"
+    ENFORCE = "enforce"
+
+
+class AuditSettings(BaseSettings):
+    """Open-latency alert threshold, trade-loss budget and derivation bounds for the EOD session audit; every threshold is configuration, never a literal in business logic."""
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_AUDIT_", extra="ignore")
+
+    mode: AuditMode = AuditMode.SHADOW
+    latency_alert_threshold_s: float = Field(default=10.0, gt=0)
+    latency_streams: tuple[str, ...] = ("H0STCNT0", "H0STASP0")
+    loss_warn_ratio: float = Field(default=1e-4, gt=0, lt=1)
+    loss_fail_ratio: float = Field(default=5e-3, gt=0, lt=1)
+    symbol_loss_fail_ratio: float = Field(default=5e-2, gt=0, lt=1)
+    symbol_min_trades: int = Field(default=100, ge=1)
+    tail_silence_max_s: float = Field(default=600.0, gt=0)
+    time_budget_s: float = Field(default=300.0, gt=0)
+    counter_reset_confirm_frames: int = Field(default=3, ge=2)
+    max_intervals_per_symbol: int = Field(default=20, ge=1)
+
+    @model_validator(mode="after")
+    def check_audit_budget_order(self) -> AuditSettings:
+        if not self.loss_warn_ratio < self.loss_fail_ratio:
+            raise ValueError(
+                f"loss_warn_ratio {self.loss_warn_ratio} must be < loss_fail_ratio {self.loss_fail_ratio}"
+            )
+        allowed = ("H0STCNT0", "H0STASP0")
+        if not self.latency_streams or any(stream not in allowed for stream in self.latency_streams):
+            raise ValueError(f"latency_streams {self.latency_streams!r} must be a non-empty subset of {allowed!r}")
+        return self
+
+
 @dataclass(frozen=True)
 class CollectorRuntime:
     collector: CollectorSettings
@@ -590,6 +627,7 @@ class CollectorRuntime:
     paths: DataPaths
     premarket: PremarketSettings = field(default_factory=lambda: PremarketSettings())
     shard_watchdog: ShardWatchdogSettings = field(default_factory=lambda: ShardWatchdogSettings())
+    audit: AuditSettings = field(default_factory=lambda: AuditSettings())
 
 
 def resolve_collector_runtime(
@@ -599,6 +637,7 @@ def resolve_collector_runtime(
     snapshot: SnapshotSettings | None = None,
     premarket: PremarketSettings | None = None,
     shard_watchdog: ShardWatchdogSettings | None = None,
+    audit: AuditSettings | None = None,
 ) -> CollectorRuntime:
     """Resolve one coherent collector configuration before child processes start.
 
@@ -608,6 +647,7 @@ def resolve_collector_runtime(
         snapshot: Optional prevalidated snapshot settings.
         premarket: Optional prevalidated premarket settings.
         shard_watchdog: Optional prevalidated shard watchdog settings.
+        audit: Optional prevalidated session-audit settings.
 
     Returns:
         Settings and data paths from one resolved process configuration.
@@ -621,6 +661,7 @@ def resolve_collector_runtime(
     resolved_snapshot = snapshot if snapshot is not None else SnapshotSettings()
     resolved_premarket = premarket if premarket is not None else PremarketSettings()
     resolved_watchdog = shard_watchdog if shard_watchdog is not None else ShardWatchdogSettings()
+    resolved_audit = audit if audit is not None else AuditSettings()
     if aftermarket is None:
         resolved_aftermarket = AftermarketSettings(enabled=resolved_collector.after_market_enabled)
     else:
@@ -645,6 +686,7 @@ def resolve_collector_runtime(
         paths=DataPaths(resolved_collector.data_root),
         premarket=resolved_premarket,
         shard_watchdog=resolved_watchdog,
+        audit=resolved_audit,
     )
 
 
