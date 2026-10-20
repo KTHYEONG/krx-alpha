@@ -391,12 +391,13 @@ class RealtimeStreamer:
             delay = min(cap, backoff_s * 2 ** (self._failures - 1)) * (0.5 + self._rng() / 2)
             logger.warning(
                 "[DATA] stage=stream_disconnect reason=%s frames=%d consecutive_failures=%d backoff_s=%.2f "
-                "last_frame_age_s=%s last_pingpong_age_s=%s pingpongs=%s",
+                "last_frame_age_s=%s last_pingpong_age_s=%s pingpongs=%s detail=%s",
                 reason,
                 self._last_pump_frames,
                 self._failures,
                 delay,
                 *self._disconnect_log_fields(),
+                self._last_disconnect_detail or "na",
             )
             if not self._outage_alerted:
                 outage_s = (self._wall_ns() - self._outage[0]) / 1e9
