@@ -2365,3 +2365,65 @@ def test_get_daily_orders_normalizes_zero_filled_parent_number(tmp_path) -> None
 
     # Then: treated as a parent row so UNKNOWN adoption can match it
     assert parsed.original_order_no == ""
+
+
+def _tick_row(hour: str, acml: int, price: str = '1000', qty: str = '1') -> dict[str, str]:
+    return {'stck_cntg_hour': hour, 'stck_prpr': price, 'cnqn': qty, 'acml_vol': str(acml)}
+
+
+def test_get_time_conclusions_walks_pages_and_dedupes_boundary_second(tmp_path) -> None:
+    import datetime as dt
+
+    from tests.unit.execution.fakes import make_client
+
+    page1 = [_tick_row('090151', 100 - i) for i in range(10)] + [_tick_row('090150', 90 - i) for i in range(20)]
+    page2 = page1[-5:] + [_tick_row('090150', 70 - i) for i in range(15)] + [_tick_row('090149', 50 - i) for i in range(10)]
+    client, session, _ = make_client(tmp_path, [_ok({'output2': page1}), _ok({'output2': page2})])
+
+    trades, stalled = client.get_time_conclusions('005160', start=dt.time(9, 1, 49), end=dt.time(9, 1, 51))
+
+    assert stalled == ()
+    assert [call['params']['FID_INPUT_HOUR_1'] for call in session.calls] == ['090151', '090150']
+    assert len(trades) == 55
+    assert [t['hour'] for t in trades] == sorted(t['hour'] for t in trades)
+    assert len({t['acml_volume'] for t in trades}) == 55
+    assert trades[0]['price'] == 1000
+    assert trades[0]['volume'] == 1
+
+
+def test_get_time_conclusions_marks_saturated_second_and_steps_past_it(tmp_path) -> None:
+    import datetime as dt
+
+    from tests.unit.execution.fakes import make_client
+
+    saturated = [_tick_row('090150', 100 - i) for i in range(30)]
+    older = [_tick_row('090149', 40 - i) for i in range(5)]
+    client, session, _ = make_client(
+        tmp_path, [_ok({'output2': saturated}), _ok({'output2': saturated}), _ok({'output2': older})]
+    )
+
+    trades, stalled = client.get_time_conclusions('005160', start=dt.time(9, 1, 49), end=dt.time(9, 1, 50))
+
+    assert stalled == ('090150',)
+    assert [call['params']['FID_INPUT_HOUR_1'] for call in session.calls] == ['090150', '090150', '090149']
+    assert len(trades) == 35
+
+
+def test_get_time_conclusions_filters_outside_window_and_rejects_malformed_time(tmp_path) -> None:
+    import datetime as dt
+
+    import pytest
+
+    from src.execution.contracts import KisApiError
+    from tests.unit.execution.fakes import make_client
+
+    page = [_tick_row('090152', 9), _tick_row('090150', 8), _tick_row('090100', 7)]
+    client, _, _ = make_client(tmp_path, [_ok({'output2': page})])
+    trades, stalled = client.get_time_conclusions('005160', start=dt.time(9, 1, 30), end=dt.time(9, 1, 50))
+    assert [t['hour'] for t in trades] == ['090150']
+    assert stalled == ()
+
+    client, _, _ = make_client(tmp_path / 'bad', [_ok({'output2': [_tick_row('25AB00', 1)]})])
+    with pytest.raises(KisApiError) as excinfo:
+        client.get_time_conclusions('005160', start=dt.time(9, 0), end=dt.time(9, 1))
+    assert excinfo.value.msg_cd == 'SCHEMA'

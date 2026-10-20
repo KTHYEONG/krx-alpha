@@ -124,6 +124,13 @@ class DataPaths:
             raise ValueError(f"vendor must be a non-empty journal vendor id: {vendor!r}")
         return self.manifest_dir / "audit" / f"{day.isoformat()}.{vendor}.regular.audit.json"
 
+    def gapfill_paths(self, day: dt.date, vendor: str) -> tuple[pathlib.Path, pathlib.Path]:
+        """Return `gapfill/<vendor>/regular/<day>.parquet` and its `.report.json`; pure path algebra, no I/O."""
+        if not vendor:
+            raise ValueError(f"vendor must be a non-empty journal vendor id: {vendor!r}")
+        base = self.root / "gapfill" / vendor / "regular"
+        return base / f"{day.isoformat()}.parquet", base / f"{day.isoformat()}.report.json"
+
     def db_crosscheck_manifest_path(self, day: dt.date) -> pathlib.Path:
         return self.manifest_dir / f"{day.isoformat()}.db.json"
 

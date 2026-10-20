@@ -222,5 +222,10 @@ class KisRestClient:
             symbol, session_date=session_date, session_open=session_open, session_close=session_close
         )
 
+    def get_time_conclusions(
+        self, symbol: str, *, start: dt.time, end: dt.time
+    ) -> tuple[tuple[dict[str, object], ...], tuple[str, ...]]:
+        return self._data.get_time_conclusions(symbol, start=start, end=end)
+
     def get_news_titles(self, *, before: tuple[str, str] | None = None) -> tuple[dict[str, object], ...]:
         return self._data.get_news_titles(before=before)

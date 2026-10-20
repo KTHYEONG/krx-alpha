@@ -32,6 +32,7 @@ TR_INDEX_PRICE: str = "FHPUP02100000"
 TR_INDEX_MINUTE_CHART: str = "FHKUP03500200"
 TR_MINUTE_CHART: str = "FHKST03010200"
 TR_NEWS_TITLE: str = "FHKST01011800"
+TR_TIME_CONCLUSION: str = "FHPST01060000"
 
 _PATH_PRICE = "/uapi/domestic-stock/v1/quotations/inquire-price"
 _PATH_ASKING = "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
@@ -44,6 +45,7 @@ _PATH_INDEX_PRICE = "/uapi/domestic-stock/v1/quotations/inquire-index-price"
 _PATH_INDEX_MINUTE_CHART = "/uapi/domestic-stock/v1/quotations/inquire-time-indexchartprice"
 _PATH_MINUTE_CHART = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
 _PATH_NEWS_TITLE = "/uapi/domestic-stock/v1/quotations/news-title"
+_PATH_TIME_CONCLUSION = "/uapi/domestic-stock/v1/quotations/inquire-time-itemconclusion"
 
 _KST: dt.tzinfo = ZoneInfo("Asia/Seoul")
 
@@ -624,6 +626,70 @@ class KisDataClient:
             "[DATA] stage=kis_snapshot tr=%s symbol=%s rows=%d", TR_MINUTE_CHART, symbol, len(ordered)
         )
         return ordered
+
+    def get_time_conclusions(
+        self, symbol: str, *, start: dt.time, end: dt.time
+    ) -> tuple[tuple[dict[str, object], ...], tuple[str, ...]]:
+        """Fetch same-day KRX trades with `start <= time <= end` (second resolution), newest-first pages of 30.
+
+        The endpoint exposes no sub-second cursor, so a second holding more than 30 trades yields only its newest 30;
+        such seconds are returned as `stalled` so callers can treat the result as a lower bound.
+
+        Returns:
+            (trades sorted by `hour` ascending, unique per `acml_volume`; stalled `HHMMSS` seconds).
+
+        Raises:
+            KisApiError: On transport/API failure, schema violation, or when the page cap is exceeded.
+        """
+        start_s = start.strftime("%H%M%S")
+        end_s = end.strftime("%H%M%S")
+        trades: dict[tuple[str, int], dict[str, object]] = {}
+        stalled: list[str] = []
+        cursor = end.strftime("%H%M%S")
+        for _ in range(_MAX_PAGES):
+            params = {
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": symbol,
+                "FID_INPUT_HOUR_1": cursor,
+                "FID_PW_DATA_INCU_YN": "Y",
+            }
+            body, _ = self._transport.get(_PATH_TIME_CONCLUSION, TR_TIME_CONCLUSION, params)
+            rows = body.get("output2") or []
+            if not rows:
+                break
+            fresh = 0
+            min_hour = cursor
+            for raw in rows:
+                hour = _snapshot_code(raw, "stck_cntg_hour")
+                if len(hour) != 6 or not hour.isdigit():
+                    raise KisApiError("SCHEMA", f"malformed trade time: {hour}")
+                min_hour = min(min_hour, hour)
+                key = (hour, _snapshot_int(raw, "acml_vol"))
+                if hour < start_s or hour > end_s or key in trades:
+                    continue
+                trades[key] = {
+                    "source_tr": TR_TIME_CONCLUSION,
+                    "symbol": symbol,
+                    "hour": hour,
+                    "price": _snapshot_int(raw, "stck_prpr"),
+                    "volume": _snapshot_int(raw, "cnqn"),
+                    "acml_volume": key[1],
+                }
+                fresh += 1
+            if min_hour <= start_s:
+                break
+            if fresh == 0:
+                stalled.append(min_hour)
+                cursor = (dt.datetime.strptime(min_hour, "%H%M%S") - dt.timedelta(seconds=1)).strftime("%H%M%S")
+            else:
+                cursor = min_hour
+        else:
+            raise KisApiError("PAGINATION", f"exceeded {_MAX_PAGES} pages")
+        ordered = tuple(trades[key] for key in sorted(trades))
+        logger.debug(
+            "[DATA] stage=kis_snapshot tr=%s symbol=%s rows=%d stalled=%d", TR_TIME_CONCLUSION, symbol, len(ordered), len(stalled)
+        )
+        return ordered, tuple(stalled)
 
     def get_news_titles(
         self, *, before: tuple[str, str] | None = None
