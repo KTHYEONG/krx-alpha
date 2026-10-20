@@ -268,7 +268,7 @@ def test_eod_crosscheck_gap_keeps_status_ok(tmp_path, monkeypatch, caplog) -> No
 
     subject, body = digests[0]
     assert subject == "[krx-alpha] EOD 2026-09-14 OK"
-    assert body.splitlines()[-1] == "crosscheck_db_crosscheck=gap"
+    assert "crosscheck_db_crosscheck=gap" in body.splitlines()
     failure = [r for r in caplog.records if "stage=session_reconciliation status=FAIL" in r.getMessage()]
     assert len(failure) == 1
     assert failure[0].levelno == logging.WARNING
@@ -289,7 +289,7 @@ def test_eod_crosscheck_skipped_when_not_orchestrated(tmp_path, monkeypatch) -> 
     runner._run_business_eod(now, DAY, view, anchors)
 
     assert len(calls) == 1
-    assert digests[0][1].splitlines()[-1] == "crosscheck_db_crosscheck=skipped"
+    assert "crosscheck_db_crosscheck=skipped" in digests[0][1].splitlines()
 
 
 def test_digest_body_unchanged_without_crosscheck(tmp_path, monkeypatch) -> None:
@@ -321,8 +321,12 @@ def test_digest_body_unchanged_without_crosscheck(tmp_path, monkeypatch) -> None
         "aftermarket_restarts=0",
         "shard_stale_restarts=0",
         "orchestration_attempts=0",
+        "degraded_reasons=none",
+        f"digest_path={tmp_path / 'data' / 'logs' / 'eod_digests' / '2026-09-14.txt'}",
     ]
     assert digests[0][1].splitlines() == expected
+    archived = (tmp_path / "data" / "logs" / "eod_digests" / "2026-09-14.txt").read_text(encoding="utf-8")
+    assert archived == "[krx-alpha] EOD 2026-09-14 OK\n\n" + "\n".join(expected[:-1]) + "\n"
 
 
 def test_reconciliation_failure_level_validated(tmp_path, monkeypatch) -> None:
@@ -409,3 +413,19 @@ def test_golden_unchanged() -> None:
     golden = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
     assert sorted(golden["log_stage_multiset"]) == _stage_multiset()
     assert golden["steps"]
+
+
+def test_eod_digest_archive_failure_is_logged_and_skips_path(tmp_path, caplog) -> None:
+    import logging
+
+    from src.core.paths import DataPaths
+    from src.orchestration import daemon as daemon_mod
+
+    root = tmp_path / "data"
+    root.mkdir()
+    (root / "logs").write_text("not a dir", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        result = daemon_mod._archive_eod_digest(DataPaths(root), DAY, "s", "status=OK")
+
+    assert result is None
+    assert "stage=eod_digest_archive status=FAIL" in caplog.text

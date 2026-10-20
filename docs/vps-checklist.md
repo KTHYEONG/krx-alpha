@@ -171,8 +171,8 @@ Commands run on the host after `cd ~/krx-alpha/data` unless the probe says conta
 | ID | Modes | Check | How | PASS | WARN / FAIL |
 |---|---|---|---|---|---|
 | A1 | M0 M3 | Alert path armed | `docker logs krx-collector 2>&1 \| grep -E 'stage=alert\|stage=healthcheck' \| tail -3` | `stage=alert status=ENABLED` after last start; no `healthcheck status=DISABLED` | alert `DISABLED` = SEV1; `FAIL` = SEV2 |
-| A2 | M3 | CRITICAL vs mail | P-EVENTS CRITICAL keys for D vs `docker exec krx-collector cat /app/data/work/alert_ledger.json` (`sent_today`, per-key `count`) and `stage=alert status=SUPPRESSED` | each CRITICAL key mailed or suppressed; `sent_today` <20; no key at cap 3 unexplained | unaccounted CRITICAL = SEV2 |
-| A3 | M3 | Digest | `docker logs --since 14h krx-collector 2>&1 \| grep stage=digest` | `status=SENT` after EOD | FAIL/missing = SEV3 |
+| A2 | M3 | CRITICAL vs mail | P-EVENTS CRITICAL keys for D vs `docker exec krx-collector cat /app/data/work/alert_ledger.json` (`sent_today`, per-key `count`) and `stage=alert status=SUPPRESSED` | each CRITICAL key mailed or suppressed; `sent_today` <20; each key mailed at most once per KST day (`per_key_cap`, repeats suppressed by design) | unaccounted CRITICAL = SEV2 |
+| A3 | M3 | Digest | `docker logs --since 14h krx-collector 2>&1 \| grep stage=digest`; `ls ~/krx-alpha/data/logs/eod_digests/` | EOD OK: `status=SKIPPED reason=status_ok` (no mail by design); DEGRADED: `status=SENT`; `<D>.txt` archived either way | DEGRADED without `SENT`, `FAIL`, missing log line or missing `<D>.txt` = SEV3 |
 | A4 | M0 M3 | External liveness | `docker logs --since 24h krx-collector 2>&1 \| grep stage=healthcheck` | none or `RECOVERED` | `FAIL` = SEV2 |
 | A5 | M3 | Dashboard truth | P-DASH vs this run | 6 `krx.*` checks (`container`, `daemon_heartbeat`, `data_quality`, `host_backup`, `unit.krx-deferred-recreate`, `unit.krx-host-backup`) agree with evidence; `generated` <3 min; HTTP 200 | dashboard OK while SEV1/SEV2 open = SEV2 (name the uncovered check: it has no snapshot, offload, universe, content or image-gc check); dashboard FAIL with healthy evidence = SEV3 |
 

@@ -3,8 +3,6 @@
 import contextlib
 import datetime as dt
 import fcntl
-import html
-import inspect
 import json
 import logging
 import math
@@ -29,10 +27,15 @@ from src.core.log_format import format_record_timestamp
 
 ALERT_COOLDOWN_S: float = 1800.0
 ALERT_DAILY_CAP: int = 20
-ALERT_PER_KEY_DAILY_CAP: int = 3
+# One mail per failure kind per KST day: repeats add no signal (they stay in events jsonl and the dashboard).
+ALERT_PER_KEY_DAILY_CAP: int = 1
 ALERT_FIRST_OCCURRENCE_RESERVE: int = 5
 ALERT_SEND_ATTEMPTS: int = 3
 ALERT_RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 8.0)
+ALERT_LINE_MAX_CHARS: int = 300
+# Host-relative (~/krx-alpha) path of the persistent events log the card points the reader to.
+ALERT_EVENTS_LOG_TEMPLATE: str = "data/logs/events-{component}.jsonl"
+DIGEST_STATUS_OK: str = "OK"
 
 _KST = ZoneInfo("Asia/Seoul")
 _KV_RE = re.compile(r"(\w+)=(\S+)")
@@ -418,40 +421,6 @@ _REASON_LABELS: dict[str, str] = {
 }
 
 
-def _accepts_html_body(sender: Callable[..., None]) -> bool:
-    """Whether ``sender`` can bind ``(subject, body, html_body=...)``.
-
-    Decided by ``inspect.Signature.bind`` on placeholder arguments, not by a trial call: a trial call
-    that catches ``TypeError`` cannot tell a binding mismatch from a ``TypeError`` raised inside a
-    sender that already transmitted. A positional-only ``html_body`` cannot bind by keyword, so such a
-    sender receives plain text instead of failing the alert. Unintrospectable callables are treated as
-    plain-text senders because ``(subject, body)`` is the minimal sender contract.
-    """
-    try:
-        sig = inspect.signature(sender)
-    except (ValueError, TypeError):
-        return False
-    try:
-        sig.bind("subject", "body", html_body=None)
-    except TypeError:
-        return False
-    return True
-
-
-def _call_sender(
-    sender: Callable[..., None],
-    subject: str,
-    body: str,
-    *,
-    html_body: str | None = None,
-) -> None:
-    """Invoke ``sender`` exactly once, with ``html_body`` only when it can bind it."""
-    if html_body and _accepts_html_body(sender):
-        sender(subject, body, html_body=html_body)
-        return
-    sender(subject, body)
-
-
 def format_alert_subject(
     component: str,
     msg: str,
@@ -476,7 +445,12 @@ def format_alert_subject(
         clean = re.sub(r"\[\w+\]\s*", "", msg).strip()
         core = f"[{component}] {clean[:40]}"
 
-    return f"[{bot_name}] 🚨 {core}"
+    return f"[{bot_name}][실패] {core}"
+
+
+def _one_line(text: str) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= ALERT_LINE_MAX_CHARS else flat[: ALERT_LINE_MAX_CHARS - 1] + "…"
 
 
 def format_alert_text(
@@ -487,221 +461,45 @@ def format_alert_text(
     *,
     bot_name: str = "krx-alpha",
 ) -> str:
-    """Render the plain-text body for a CRITICAL alert."""
-    ts = format_record_timestamp(record)
+    """Render the short CRITICAL alert card; the full record stays in the component's events jsonl."""
     stage = fields.get("stage", "")
-    stage_label = _STAGE_LABELS.get(stage, stage)
+    stage_label = _STAGE_LABELS.get(stage, stage) or "일반"
+    status = fields.get("status", "FAIL")
     reason = fields.get("reason", "")
     reason_label = _REASON_LABELS.get(reason, reason)
-
-    msg = record.getMessage()
-    clean_msg = re.sub(r"\[\w+\]\s*", "", msg).strip()
-
-    lines = [
-        f"🚨 [{bot_name}] 장애 발생 알림",
-        "=" * 50,
-        f"• 발생일시: {ts} (KST)",
-        f"• 문제위치: {component} > {stage_label or stage or '일반'}",
-        f"• 장애원인: {reason_label or reason or '알 수 없음'}",
-        f"• 상세내용: {clean_msg}",
-        f"• Run ID:   {run_id}",
-    ]
-
-    if fields:
-        lines.append("")
-        lines.append("▼ 주요 컨텍스트 (Fields):")
-        for k, v in fields.items():
-            lines.append(f"  • {k}: {v}")
-
-    lines.append("=" * 50)
-    return "\n".join(lines)
+    clean_msg = re.sub(r"\[\w+\]\s*", "", record.getMessage()).strip()
+    cause = f"{reason_label}: {clean_msg}" if reason_label else clean_msg
+    return "\n".join(
+        [
+            f"• 무엇: {component} > {stage_label} {status}",
+            f"• 언제: {format_record_timestamp(record)} (KST)",
+            f"• 원인: {_one_line(cause) or '알 수 없음'}",
+            f"• 증거: {ALERT_EVENTS_LOG_TEMPLATE.format(component=component)} (run_id={run_id})",
+        ]
+    )
 
 
-def format_alert_html(
-    record: logging.LogRecord,
-    component: str,
-    run_id: str,
-    fields: dict[str, str],
-    *,
-    bot_name: str = "krx-alpha",
-) -> str:
-    """Render the HTML body for a CRITICAL alert."""
-    ts = html.escape(format_record_timestamp(record))
-    stage = fields.get("stage", "")
-    stage_label = html.escape(_STAGE_LABELS.get(stage, stage))
-    reason = fields.get("reason", "")
-    reason_label = html.escape(_REASON_LABELS.get(reason, reason))
-
-    msg = record.getMessage()
-    clean_msg = html.escape(re.sub(r"\[\w+\]\s*", "", msg).strip())
-
-    context_html = ""
-    if fields:
-        kv_rows = "".join(
-            f"<tr><td style='padding:3px 6px; color:#64748b; font-family:monospace; width:90px;'>{html.escape(k)}</td>"
-            f"<td style='padding:3px 6px; font-family:monospace; color:#0f172a;'>{html.escape(v)}</td></tr>"
-            for k, v in fields.items()
-        )
-        context_html = (
-            f"<details style='margin-top:12px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:8px 12px;'>"
-            f"<summary style='font-size:12px; color:#475569; cursor:pointer; font-weight:600;'>▼ 상세 파라미터 (Fields)</summary>"
-            f"<table style='width:100%; border-collapse:collapse; font-size:11px; margin-top:6px;'>{kv_rows}</table>"
-            f"</details>"
-        )
-
-    return f"""<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; margin:0; padding:16px; background-color:#f1f5f9; color:#1e293b;">
-<div style="max-width:540px; margin:0 auto; background:#ffffff; border-radius:12px; border:1px solid #e2e8f0; overflow:hidden; box-shadow:0 4px 6px -1px rgba(0,0,0,0.05);">
-  <div style="background:#dc2626; color:#ffffff; padding:14px 20px; font-size:16px; font-weight:700; display:flex; justify-content:space-between; align-items:center;">
-    <span>🚨 [{html.escape(bot_name)}] 장애 알림</span>
-    <span style="font-size:11px; background:rgba(255,255,255,0.25); padding:2px 8px; border-radius:12px; letter-spacing:0.5px;">CRITICAL</span>
-  </div>
-  <div style="padding:20px;">
-    <table style="width:100%; font-size:13px; margin-bottom:14px; border-collapse:collapse;">
-      <tr>
-        <td style="color:#64748b; width:75px; padding:3px 0;">발생일시</td>
-        <td style="font-weight:600; color:#1e293b; padding:3px 0;">{ts} (KST)</td>
-      </tr>
-      <tr>
-        <td style="color:#64748b; padding:3px 0;">문제위치</td>
-        <td style="color:#1e293b; padding:3px 0;"><code style="background:#f1f5f9; padding:2px 6px; border-radius:4px; font-size:12px;">{html.escape(component)}</code> &gt; <strong style="color:#0f172a;">{stage_label or stage or "일반"}</strong></td>
-      </tr>
-    </table>
-
-    <div style="background:#fef2f2; border-left:4px solid #ef4444; padding:14px 16px; border-radius:6px; margin-bottom:14px;">
-      <div style="color:#991b1b; font-weight:700; font-size:15px; margin-bottom:6px;">⚠️ {reason_label or reason or "장애 발생"}</div>
-      <div style="color:#475569; font-size:13px; line-height:1.5; word-break:break-all;">{clean_msg}</div>
-    </div>
-
-    {context_html}
-  </div>
-  <div style="border-top:1px solid #f1f5f9; padding:10px 20px; font-size:11px; color:#94a3b8; text-align:right; background:#f8fafc;">
-    Run ID: {html.escape(run_id)}
-  </div>
-</div>
-</body>
-</html>"""
+def _digest_fields(body: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in body.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            fields[k.strip()] = v.strip()
+    return fields
 
 
 def format_digest_text(subject: str, body: str, *, bot_name: str = "krx-alpha") -> str:
-    """Render the plain-text body for the daily digest email."""
-    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
-    fields: dict[str, str] = {}
-    for line in lines:
-        if "=" in line:
-            k, v = line.split("=", 1)
-            fields[k.strip()] = v.strip()
-
-    if not fields:
-        return body
-
-    status = fields.get("status", "UNKNOWN")
-    is_ok = status == "OK"
-    run_id = fields.get("run_id", "")
-    uploaded = fields.get("uploaded", "-")
-    deleted = fields.get("deleted_partitions", "-")
-    purged = fields.get("purged", "-")
-    reconciled = fields.get("reconciled", "-")
-    backup_missing = fields.get("backup_missing", "0")
-    streamer_restarts = fields.get("streamer_restarts", "0")
-    attempts = fields.get("orchestration_attempts", "1")
-
-    status_icon = "✅ OK (정상 완료)" if is_ok else f"⚠️ {status} (확인 필요)"
-    reconciled_text = "정상 (True)" if reconciled in ("True", "true", "OK") else f"불일치 ({reconciled})"
-    backup_text = "0건 (정상)" if backup_missing == "0" else f"{backup_missing}건 (누락)"
-
-    out = [
-        f"📊 [{bot_name}] 일일 마감 리포트",
-        "=" * 50,
-        f"• 마감상태: {status_icon}",
-        f"• L1 업로드: {uploaded}건 | 파티션 정리: {deleted}개 ({purged}건 삭제)",
-        f"• 정합성 검증: {reconciled_text} | 원격 백업 누락: {backup_text}",
-        f"• 스트리머 재시작: {streamer_restarts}회 | 오케스트레이션 시도: {attempts}회",
+    """Render the short EOD warning card from the key=value digest; the full digest is archived on disk."""
+    fields = _digest_fields(body)
+    what = subject.removeprefix(f"[{bot_name}] ").strip() or "EOD"
+    lines = [
+        f"• 무엇: {what}",
+        f"• 언제: {dt.datetime.now(_KST).strftime('%Y-%m-%d %H:%M')} (KST)",
+        f"• 원인: {_one_line(fields.get('degraded_reasons', '')) or '알 수 없음'}",
     ]
-    if run_id:
-        out.append(f"• Run ID: {run_id}")
-
-    out.append("=" * 50)
-    return "\n".join(out)
-
-
-def format_digest_html(subject: str, body: str, *, bot_name: str = "krx-alpha") -> str:
-    """Render the HTML body for the daily digest email."""
-    lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
-    fields: dict[str, str] = {}
-    for line in lines:
-        if "=" in line:
-            k, v = line.split("=", 1)
-            fields[k.strip()] = v.strip()
-
-    status = fields.get("status", "UNKNOWN")
-    is_ok = status == "OK"
-    status_bg = "#16a34a" if is_ok else "#dc2626"
-    status_badge = "OK" if is_ok else "DEGRADED"
-
-    uploaded = fields.get("uploaded", "-")
-    deleted = fields.get("deleted_partitions", "-")
-    purged = fields.get("purged", "-")
-    reconciled = fields.get("reconciled", "-")
-    backup_missing = fields.get("backup_missing", "0")
-    streamer_restarts = fields.get("streamer_restarts", "0")
-    run_id = fields.get("run_id", "")
-
-    reconciled_ok = reconciled in ("True", "true", "OK")
-    reconciled_color = "#16a34a" if reconciled_ok else "#dc2626"
-    reconciled_text = "정상 (True)" if reconciled_ok else f"불일치 ({reconciled})"
-
-    backup_ok = backup_missing == "0"
-    backup_color = "#16a34a" if backup_ok else "#dc2626"
-    backup_text = "0건 (정상)" if backup_ok else f"{backup_missing}건 (누락)"
-
-    kpi_cards = f"""
-    <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:14px;">
-      <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:10px 12px;">
-        <div style="font-size:11px; color:#64748b; margin-bottom:4px;">📦 L1 원격 업로드</div>
-        <div style="font-size:16px; font-weight:700; color:#0f172a; font-family:ui-monospace,Menlo,monospace;">{html.escape(uploaded)}<span style="font-size:12px; font-weight:normal; color:#64748b;"> 건</span></div>
-      </div>
-      <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:10px 12px;">
-        <div style="font-size:11px; color:#64748b; margin-bottom:4px;">🧹 파티션 정리 (영구삭제)</div>
-        <div style="font-size:16px; font-weight:700; color:#0f172a; font-family:ui-monospace,Menlo,monospace;">{html.escape(deleted)}<span style="font-size:12px; font-weight:normal; color:#64748b;"> 개 ({html.escape(purged)}건)</span></div>
-      </div>
-      <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:10px 12px;">
-        <div style="font-size:11px; color:#64748b; margin-bottom:4px;">🔍 데이터 정합성</div>
-        <div style="font-size:14px; font-weight:700; color:{reconciled_color};">{html.escape(reconciled_text)}</div>
-      </div>
-      <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:10px 12px;">
-        <div style="font-size:11px; color:#64748b; margin-bottom:4px;">☁️ 원격 백업 누락</div>
-        <div style="font-size:14px; font-weight:700; color:{backup_color};">{html.escape(backup_text)}</div>
-      </div>
-    </div>
-    """
-
-    return f"""<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; margin:0; padding:16px; background-color:#f1f5f9; color:#1e293b;">
-<div style="max-width:540px; margin:0 auto; background:#ffffff; border-radius:12px; border:1px solid #e2e8f0; overflow:hidden; box-shadow:0 4px 6px -1px rgba(0,0,0,0.05);">
-  <div style="background:{status_bg}; color:#ffffff; padding:14px 20px; font-size:16px; font-weight:700; display:flex; justify-content:space-between; align-items:center;">
-    <span>📊 [{html.escape(bot_name)}] 일일 마감 리포트</span>
-    <span style="font-size:11px; background:rgba(255,255,255,0.25); padding:2px 8px; border-radius:12px; letter-spacing:0.5px;">{html.escape(status_badge)}</span>
-  </div>
-  <div style="padding:20px;">
-    <div style="margin-bottom:14px; font-size:14px; font-weight:600; color:{"#16a34a" if is_ok else "#dc2626"};">
-      {"✅ 모든 EOD 마감 작업이 정상 완료되었습니다." if is_ok else "⚠️ 정합성 또는 백업 항목에서 이상이 감지되었습니다."}
-    </div>
-    {kpi_cards}
-    <div style="font-size:12px; color:#64748b; background:#f8fafc; padding:8px 12px; border-radius:6px; border:1px solid #e2e8f0;">
-      • 스트리머 재시작: <strong style="color:#0f172a;">{html.escape(streamer_restarts)}회</strong> &nbsp;|&nbsp; 오케스트레이션 시도: <strong style="color:#0f172a;">{html.escape(fields.get("orchestration_attempts", "1"))}회</strong>
-    </div>
-  </div>
-  <div style="border-top:1px solid #f1f5f9; padding:10px 20px; font-size:11px; color:#94a3b8; text-align:right; background:#f8fafc;">
-    {html.escape(subject)} {f"| Run ID: {html.escape(run_id)}" if run_id else ""}
-  </div>
-</div>
-</body>
-</html>"""
+    if fields.get("digest_path"):
+        lines.append(f"• 증거: {fields['digest_path']} (run_id={fields.get('run_id', '-')})")
+    return "\n".join(lines)
 
 
 class EmailAlertHandler(logging.Handler):
@@ -799,11 +597,10 @@ class EmailAlertHandler(logging.Handler):
             fields = dict(_KV_RE.findall(msg))
             subject = format_alert_subject(self._component, msg, fields)
             text_body = format_alert_text(record, self._component, self._run_id, fields)
-            html_body = format_alert_html(record, self._component, self._run_id, fields)
             attempts = max(1, self._send_attempts)
             for attempt in range(attempts):
                 try:
-                    _call_sender(self._sender, subject, text_body, html_body=html_body)
+                    self._sender(subject, text_body)
                     break
                 except (smtplib.SMTPException, OSError):
                     if attempt + 1 >= attempts:
@@ -830,14 +627,12 @@ class EmailAlertHandler(logging.Handler):
 def gmail_sender(settings: AlertSettings) -> Callable[..., None]:
     """Build a Gmail SMTP sender bound to the given alert settings."""
 
-    def send(subject: str, body: str, *, html_body: str | None = None) -> None:
+    def send(subject: str, body: str) -> None:
         msg = EmailMessage()
         msg["Subject"] = subject
         msg["From"] = settings.alert_gmail_user
         msg["To"] = settings.alert_gmail_to
         msg.set_content(body)
-        if html_body:
-            msg.add_alternative(html_body, subtype="html")
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as smtp:
             smtp.login(settings.alert_gmail_user, settings.alert_gmail_app_password)
             smtp.send_message(msg)
@@ -852,20 +647,27 @@ def send_digest(
     settings: AlertSettings | None = None,
     sender: Callable[..., None] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    bot_name: str = "krx-alpha",
 ) -> bool:
-    """Send the daily digest email, or skip when alerts are disabled."""
+    """Mail the EOD digest only when its ``status`` is not OK; returns whether a mail was sent.
+
+    A healthy EOD is visible on the dashboard and in the archived digest, so it never mails.
+    """
     s = settings if settings is not None else AlertSettings()
     sys_logger = logging.getLogger(__name__)
+    if _digest_fields(body).get("status") == DIGEST_STATUS_OK:
+        sys_logger.info("[SYS] stage=digest status=SKIPPED reason=status_ok")
+        return False
     if not s.enabled:
         sys_logger.info("[SYS] stage=digest status=DISABLED")
         return False
-    html_body = format_digest_html(subject, body)
-    text_body = format_digest_text(subject, body)
+    mail_subject = f"[{bot_name}][경고] {subject.removeprefix(f'[{bot_name}] ')}"
+    text_body = format_digest_text(subject, body, bot_name=bot_name)
     actual_sender = sender or gmail_sender(s)
     attempts = ALERT_SEND_ATTEMPTS
     for attempt in range(attempts):
         try:
-            _call_sender(actual_sender, subject, text_body, html_body=html_body)
+            actual_sender(mail_subject, text_body)
             sys_logger.info("[SYS] stage=digest status=SENT")
             return True
         except (smtplib.SMTPException, OSError) as exc:
@@ -890,10 +692,8 @@ __all__ = [
     "FileAlertLedger",
     "InMemoryAlertLedger",
     "alert_dedup_key",
-    "format_alert_html",
     "format_alert_subject",
     "format_alert_text",
-    "format_digest_html",
     "format_digest_text",
     "gmail_sender",
     "send_digest",
