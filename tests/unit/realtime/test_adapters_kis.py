@@ -286,6 +286,37 @@ def test_recv_still_fails_closed_on_unknown_json() -> None:
         asyncio.run(adapter.recv())
 
 
+def test_recv_maps_server_close_to_vendor_disconnected() -> None:
+    import asyncio
+
+    import aiohttp
+    import pytest
+
+    from src.realtime.contracts import VendorDisconnected
+
+    class Ws:
+        async def receive_str(self):
+            raise aiohttp.WSMessageTypeError("received message of type WSMsgType.CLOSE")
+
+    adapter = _nxt_adapter(Ws())
+    with pytest.raises(VendorDisconnected, match="ws_non_text_frame"):
+        asyncio.run(adapter.recv())
+
+
+def test_recv_does_not_mask_unrelated_type_errors() -> None:
+    import asyncio
+
+    import pytest
+
+    class Ws:
+        async def receive_str(self):
+            raise TypeError("programming error")
+
+    adapter = _nxt_adapter(Ws())
+    with pytest.raises(TypeError, match="programming error"):
+        asyncio.run(adapter.recv())
+
+
 def test_recv_fails_closed_on_non_json_and_non_object() -> None:
     import asyncio
 

@@ -258,7 +258,10 @@ class KisRealtimeAdapter:
         if self._conn_id == "":
             self._conn_id = f"kis-{time.time_ns()}"
         while True:
-            raw = await self._ws.receive_str()
+            try:
+                raw = await self._ws.receive_str()
+            except aiohttp.WSMessageTypeError as exc:
+                raise VendorDisconnected("ws_non_text_frame") from exc
             if "|" not in raw:
                 if _is_pingpong(raw):
                     await self._echo_pingpong(raw)
