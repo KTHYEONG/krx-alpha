@@ -11,11 +11,12 @@ import pathlib
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from src.core.config import CollectorSettings, KisTokenSettings
+from src.core.config import AuditSettings, CollectorSettings, KisTokenSettings
 from src.core.errors import KrxAlphaError
 from src.core.observability import EVENT
 from src.core.session_anchors import resolve_session_anchors
 from src.realtime.adapters.registry import RegularAdapterContext, regular_vendor
+from src.realtime.lag_monitor import LagMonitor
 from src.realtime.session import CollectorSession, SessionConfig, StreamRoute, bootstrap_session
 from src.realtime.streamer import RealtimeStreamer, regular_session_silence_limit_s
 from src.realtime.streaming_child import resolve_clock_overrides, run_streaming_child
@@ -116,6 +117,7 @@ async def run_regular_stream(
         silence_limit=lambda: regular_session_silence_limit_s(dt.datetime.now(dt.UTC), anchors=anchors),
         max_cycles=getattr(args, "max_cycles", None),
         streamer_factory=streamer_factory,
+        lag_monitor=LagMonitor(threshold_s=AuditSettings().latency_alert_threshold_s),
     )
     logger.info(
         profile.shutdown_log,

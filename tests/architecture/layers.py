@@ -65,3 +65,4 @@ LAYER_RANK['src/storage/l0_audit.py'] = 2
 LAYER_RANK['src/realtime/adapters/registry.py'] = 4
 LAYER_RANK['src/storage/l0_gapfill.py'] = 2
 LAYER_RANK['src/cli/gapfill_ticks.py'] = 7
+LAYER_RANK['src/realtime/lag_monitor.py'] = 1
