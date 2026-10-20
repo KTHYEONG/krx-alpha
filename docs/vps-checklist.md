@@ -85,7 +85,7 @@ Standard anchors; shift per C0. "By" = latest acceptable time.
 | by 15:31 | `universe/aftermarket/D.json` (KRX, J screens) and `D.nxt.json` (NXT, NX screens) | C7 | SEV1 for aftermarket |
 | 15:40 | `AFTER_MARKET_ACTIVE`; NXT aftermarket 15:40–20:00, KRX aftermarket 16:00–20:00 (KIS shards); LS regular stream keeps carrying KRX aftermarket prints until 20:00 | H11, C2 | SEV2 |
 | 20:00 | `POST_MARKET_EOD`: writers close within ~2 s, EOD normalize → offload → verified L0 delete → remote L0 purge → reconcile → backup freshness → digest | C2, S5 | SEV2 |
-| by 20:45 | `eod_maintenance status=OK` (2026-10-12..16: 20:27–20:51); then `program_trades_sync STARTED` (timeout 2400 s from launch); `premarket_pool status=OK target=N`; `NIGHT_SLEEP` | S5, C5, C7 | WARN 20:45, **SEV1 21:00**; sync FAIL = SEV2 |
+| by 20:45 (Monday and post-holiday batch with `deleted_partitions` ≥200: by 21:00, 2026-10-12 20:51, 10-19 20:58 — tracked slowdown, see S5) | `eod_maintenance status=OK` (2026-10-12..16: 20:27–20:51); then `program_trades_sync STARTED` (timeout 2400 s from launch); `premarket_pool status=OK target=N`; `NIGHT_SLEEP` | S5, C5, C7 | WARN 20:45, **SEV1 21:00**; sync FAIL = SEV2 |
 | 22:00 Mon–Fri | `krx-deferred-recreate` (recreates only if a pulled image is pending) + `deferred_verify` | H14 | SEV2 |
 | 23:30 daily | `krx-host-backup` to Drive (shared lock) | H7 | SEV2 if `last_ok_at` >26 h |
 
@@ -133,7 +133,7 @@ Commands run on the host after `cd ~/krx-alpha/data` unless the probe says conta
 | S2 | M1 M2 M3 | State timeline | P-EVENTS `states` for D | `PRE_MARKET_SLEEP 00:00 → STREAMER_ACTIVE 08:20 → FULL_ACTIVE 08:50 → AFTER_MARKET_ACTIVE 15:40 → POST_MARKET_EOD 20:00 → NIGHT_SLEEP` (~20:30–20:52, after EOD) each ±90 s; extra `NIGHT_SLEEP` entries after 22:00 = restarts (S4). No `streamer RESTARTED`/`circuit_open`: manifest gaps do not record time the streamer was down | late/missing transition = SEV2; skipped state = SEV1; `circuit_open` = SEV1 |
 | S3 | M1 M2 | Heartbeat | `docker logs --since 30m krx-collector 2>&1 \| grep stage=heartbeat \| tail -3` | every ~10 min; `streamer_alive=True` in `FULL_ACTIVE`/`AFTER_MARKET_ACTIVE` | stale >15 min or `alive=False` in session = SEV1; `streamer_restarts>0` = SEV2 |
 | S4 | M0 M3 | Starts | events `stage=start status=ONLINE` for D; `work/daemon_lifecycle.json` | starts only after 22:00 or on closed days | business-day start 08:10–22:00 = SEV2 (read `shutdown` `signal`/`graceful`); `daemon_restart status=UNCLEAN` = SEV2 |
-| S5 | M3 | Event audit | P-EVENTS for D; `docker logs --since 14h krx-collector 2>&1 \| grep -E 'stage=eod_\|stage=session_reconciliation\|stage=backup_freshness\|stage=host_backup_freshness'` | `eod_maintenance ... status=OK` by 20:45; every non-INFO event explained by section 9 benign list or an open item | unexplained ERROR/CRITICAL = SEV2; `eod_maintenance DEGRADED`/`FAIL`, `session_reconciliation FAIL`, `backup_freshness STALE` = SEV1 |
+| S5 | M3 | Event audit | P-EVENTS for D; `docker logs --since 14h krx-collector 2>&1 \| grep -E 'stage=eod_\|stage=session_reconciliation\|stage=backup_freshness\|stage=host_backup_freshness'` | `eod_maintenance ... status=OK` by 20:45 (Monday/post-holiday batch: by 21:00; record `deleted_partitions`/`purged` and the finish time each Monday — 10-12 20:51, 10-19 20:58 and rising); every non-INFO event explained by section 9 benign list or an open item | unexplained ERROR/CRITICAL = SEV2; `eod_maintenance DEGRADED`/`FAIL`, `session_reconciliation FAIL`, `backup_freshness STALE` = SEV1 |
 | S6 | M1 | Candidates armed | P-UNIV `candidates` line (after 08:20) | `rev` = P (YYYYMMDD); n ≤ `universe_slot_budget` 100 (= LS 200 pairs / 2 streams); unique; no `candidates_not_ready`/`orchestration_error` since 08:20; `market_map.json` mtime today ~08:20 with ~2760 entries | stale rev/errors after 08:50 = SEV1; n=0 = SEV1 |
 | S7 | M0 M1 M3 | Bars refresh | P-BARS `latest_date` | M0: business day before P; from 08:50: = P | older than P after 08:50 = SEV3 (KRX timeout WARN retried every 5 min) |
 | S8 | M1 | First frame | events `stage=ingest_watchdog status=NO_FIRST_FRAME` for D (08:36–09:05) | absent | present = SEV1 |
@@ -145,7 +145,7 @@ Commands run on the host after `cd ~/krx-alpha/data` unless the probe says conta
 | C1 | M1 M3 | L0 inventory | P-L0 with D | 8 streams (section 9) with hour coverage: ls regular 08–20, krx_after 16–20, nxt_after 15–20, nxt_pre 08; `zero_size=0`; per-symbol MB within 0.5–2x section 9 band | missing stream/hour = SEV1 in session, SEV2 after; zero-size = SEV1 |
 | C2 | M2 M3 | Manifests | P-MANIFEST with D | regular: `unacked=0`, `boots=1`, `max` gap ≤30 s, `clock measured` \|offset\| <5 ms, `cand_rev` = P; aftermarket 4 shards and premarket 1: `closed` within 2 s of session end, `acked_pairs == planned == 40`, `unacked=0`, `degraded None`. `ack_rows` > `acked_pairs` = resubscribe after a watchdog reconnect (benign if a matching gap span exists) | unacked/degraded = SEV2; `boots>1` or `restart` gap = SEV2; gap >30 s = SEV3 (SEV2 inside 15:20–15:30) |
 | C4 | M2 M3 | Snapshots (9 kinds) | P-SNAP; `docker logs --since 14h krx-collector 2>&1 \| grep -E 'snapshot_summary\|snapshot_dq\|NO_SUCCESS\|STORE_FAIL'` | every kind present for D, `bad_date=0`, `nulls=0`; candidate-scaled kinds `symdiff=0` and rows/expected: `security_status`, `auction_book` = 1.000, `program_trade` ≥0.99, `investor_estimate` ≥0.95; fixed kinds: `stock_minute_bar` 23460 and `index_minute_bar` 1173 exact, `index_snapshot` ≥0.99 of 234, `ranking` ≥0.96 of 23400, `news_title` 0.90–1.10 of median; `snapshot_summary failed_jobs=0 expired=0`; no `snapshot_dq status=FAIL` | missing kind/0 rows = SEV2; below threshold or `symdiff>0` = SEV2; `snapshot_dq WARN` = SEV3 |
-| C5 | M0 M4 | Program trades (`bars/program_trades/YYYY-MM.parquet`) | P-BARS `program_trades` lines; M3/M4: `docker logs --since 14h krx-collector 2>&1 \| grep program_trades_sync` | sync covers the session just closed: after `status=OK` latest date = D, else ≥ P; rows/date within ±2% of median (2449–2458); `program_trades_business_days_missing` empty except D before its sync logs OK (2026-10-18: `['2026-10-16']` = OI-1) | `STARTED` absent by 21:00 = SEV2; `FAIL`/`STALE` = SEV2; missing business day at next M0 = SEV2 (backfill lookback 120 d heals it on the next OK run; confirm) |
+| C5 | M0 M4 | Program trades (`bars/program_trades/YYYY-MM.parquet`) | P-BARS `program_trades` lines; M3/M4: `docker logs --since 14h krx-collector 2>&1 \| grep program_trades_sync` | sync covers the session just closed: after `status=OK` latest date = D, else ≥ P; rows/date within ±2% of median (2449–2458); `program_trades_business_days_missing` empty except D before its sync logs OK | `STARTED` absent by 21:00 = SEV2; `FAIL`/`STALE` = SEV2; missing business day at next M0 = SEV2 (backfill lookback 120 d heals it on the next OK run; confirm) |
 | C6 | M0 M3 | Daily bars (`bars/daily/YYYY-MM.parquet`) | P-BARS | latest = P after 08:20 refresh; n within ±0.5% of median (2761–2766) and ≈ `market_map.json` entries; `bars_business_days_missing` ⊆ {D, P before 08:20} (weekend: last business day, normal) | missing older day = SEV2; see Q5 |
 | C7 | M0 M2 M3 M4 | Universe + plan consistency | P-UNIV with D (and N) | aftermarket D (by 15:31) and premarket D/N exist; per venue file (`D.json` KRX J screens, `D.nxt.json` NXT NX screens) `selected == n == unique == min(capacity, eligible)` (after 40, pre 20); `bad_sym=0`; per-venue shard `planned==universe True` (NXT shards checked against `D.nxt.json`), `acked==planned True`; premarket N `generated` ≤ 20:52 of the previous business day, `effective_from` 07:58; regular `same_set True` | missing = SEV1 for that session (premarket SEV3); inconsistency = SEV2 |
 | C8 | M3 | Symbol coverage on L0 | P-L0C with D | ls regular `no_data=0`, `unplanned=0`; krx_after `no_data` ≤2, `thin_lt100` ≤10 of 40; nxt_pre `no_data=0`; nxt_after `no_data` ≤ open item OI-2 baseline (17–18 of 40) | worse than band = SEV3 (selection, change after freeze); regular `no_data>0` = SEV2 |
@@ -383,8 +383,9 @@ print("duplicate_date_symbol", b.group_by(["date", "symbol"]).len().filter(pl.co
 p = pl.scan_parquet("/app/data/bars/program_trades/*.parquet").group_by("date").len().sort("date").tail(10).collect()
 print("program_trades", p.rows())
 cal = sorted(f[-15:-5] for f in glob.glob("/app/data/calendar/dt=*.json"))
-today = dt.date.today().isoformat(); lo = str(g["date"][0])
+today = dt.date.today().isoformat()
 for name, have in (("bars", g["date"]), ("program_trades", p["date"])):
+    lo = str(have[0])
     print(f"{name}_business_days_missing", sorted(set(d for d in cal if lo <= d < today) - {str(x) for x in have.to_list()}))
 ```
 
@@ -556,7 +557,6 @@ print(j.filter(pl.col("ratio") != 1.0).sort("ratio").head(10))
 
 | ID | Since | Condition | Expected resolution / check |
 |---|---|---|---|
-| OI-1 | 2026-10-16 | `program_trades_sync status=FAIL reason=timeout` at 20:40:14 (pre-`c8288e7` image); `bars/program_trades` lacks 2026-10-16 (latest 2026-10-15) | first post-fix sync 2026-10-19 ~20:40 must log `status=OK` and fill 10-16 and 10-19 (C5 at 10-20 M0) |
 | OI-2 | ≥2026-10-13 | NXT aftermarket shards subscribe the KRX-ranked aftermarket universe without an NXT-listing filter: 17–18 of 40 NXT symbols produce no frame at all (10-16: shard-00 5, shard-01 12, incl. `900270`, `900300`). Premarket uses NX-only rankings and has 20/20 | code defect (selection policy `src/universe/aftermarket.py`); track C8 `no_data` until fixed |
 | OI-3 | ≥2026-10-14 | KIS `krx_after` max cumulative tick volume < daily bar volume for many symbols (10-14: exact 26/40, min 0.914 `005930`; 10-15: 29/39, min 0.961), last tick 19:59:59; LS regular mostly exact | closed as a definition difference: bars include off-book volume while tick cumulative does not (no tick loss); verify with the X1 KIS continuity variant |
 
@@ -572,7 +572,7 @@ CHANGED since <prev run>: <new / resolved / worsened>
 CHECKED: H n/n · S n/n · C n/n · Q n/n · X n/n · A n/n   (PASS / WARN / FAIL / UNKNOWN)
 UNKNOWN: <ID> <사유> (what resolves it)
 DATA CONTENT: <key numbers, e.g. L0 dup_seq=0 crossed=0; snapshots 9/9 exact; bars 2762 ratio 1.00; ticks==bars 21/21>
-NEXT: <next mode/time; pending events, e.g. 22:00 recreate, OI-1 first post-fix sync>
+NEXT: <next mode/time; pending events, e.g. 22:00 recreate>
 ```
 
 Every ID of the run's modes needs a status; list skipped IDs with the reason.
