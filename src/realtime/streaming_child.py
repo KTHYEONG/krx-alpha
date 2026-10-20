@@ -14,8 +14,9 @@ import aiohttp
 
 from src.core.config import CollectorSettings
 from src.core.errors import SlotBudgetExceededError
-from src.realtime.contracts import VendorAdapter
-from src.realtime.streamer import RealtimeStreamer, SessionFrameSink
+from src.realtime.contracts import L0Frame, VendorAck, VendorAdapter
+from src.realtime.lag_monitor import LagMonitor
+from src.realtime.streamer import FrameSink, RealtimeStreamer, SessionFrameSink
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,27 @@ def resolve_clock_overrides(
     )
 
 
+class LagMonitoringSink:
+    """FrameSink decorator feeding every recorded frame to a `LagMonitor`."""
+
+    def __init__(self, inner: FrameSink, monitor: LagMonitor) -> None:
+        self._inner = inner
+        self._monitor = monitor
+
+    def record(self, frame: L0Frame) -> None:
+        self._inner.record(frame)
+        self._monitor.observe(frame)
+
+    def note_ack(self, vendor: str, ack: VendorAck) -> None:
+        self._inner.note_ack(vendor, ack)
+
+    def note_gap(self, symbol: str, start_ns: int, end_ns: int, reason: str) -> None:
+        self._inner.note_gap(symbol, start_ns, end_ns, reason)
+
+    def flush(self) -> int:
+        return self._inner.flush()
+
+
 async def run_streaming_child(
     *,
     session: Any,
@@ -46,6 +68,7 @@ async def run_streaming_child(
     streamer_factory: Callable[..., RealtimeStreamer],
     stop_deadline_ns: int | None = None,
     close_writer: bool = False,
+    lag_monitor: LagMonitor | None = None,
 ) -> None:
     """Drive one bootstrapped session until SIGTERM/deadline/max_cycles, then persist."""
     stop = asyncio.Event()
@@ -67,9 +90,12 @@ async def run_streaming_child(
         capacity = getattr(adapter, "capacity_pairs", None)
         if capacity is not None and len(replay_pairs) > capacity:
             raise SlotBudgetExceededError(f"planned pairs {len(replay_pairs)} exceed capacity {capacity}")
+        sink: FrameSink = SessionFrameSink(session=session)
+        if lag_monitor is not None:
+            sink = LagMonitoringSink(sink, lag_monitor)
         streamer = streamer_factory(
             adapter=adapter,
-            sink=SessionFrameSink(session=session),
+            sink=sink,
             replay_pairs=replay_pairs,
             silence_limit=silence_limit,
         )
