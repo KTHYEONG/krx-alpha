@@ -118,10 +118,12 @@ def test_two_handlers_share_one_budget(tmp_path: pathlib.Path) -> None:
     h1 = EmailAlertHandler(
         component="d", run_id="r", sender=lambda s, b, **kw: c1.append(s),
         cooldown_s=0, clock=lambda: 1000.0, today=lambda: day, sleep=lambda s: None, ledger=ledger,
+        per_key_daily_cap=3,
     )
     h2 = EmailAlertHandler(
         component="d", run_id="r", sender=lambda s, b, **kw: c2.append(s),
         cooldown_s=0, clock=lambda: 1000.0, today=lambda: day, sleep=lambda s: None, ledger=ledger,
+        per_key_daily_cap=3,
     )
     for _ in range(5):
         h1.handle(_rec("[DATA] stage=quality tr_id=H0STCNT0 vendor=kis rows=1"))
@@ -396,7 +398,7 @@ def test_handler_dedups_numeric_repeats() -> None:
     day = dt.date(2026, 10, 5)
     h = EmailAlertHandler(
         component="d", run_id="r", sender=lambda s, b, **kw: calls.append(s),
-        cooldown_s=0, clock=lambda: 900.0, today=lambda: day, sleep=lambda s: None,
+        cooldown_s=0, clock=lambda: 900.0, today=lambda: day, sleep=lambda s: None, per_key_daily_cap=3,
     )
     for rows in (1, 22, 333, 4444, 55555):
         h.handle(_rec(f"[DATA] stage=quality tr_id=H0STCNT0 vendor=kis rows={rows}"))
@@ -528,7 +530,7 @@ def test_unrecorded_failed_send_never_refunds_existing_success(tmp_path, monkeyp
 
     handler = EmailAlertHandler(
         component="daemon", run_id="r", sender=sender, ledger=shared,
-        cooldown_s=0, clock=lambda: 100.0, today=lambda: DAY, sleep=lambda _: None,
+        cooldown_s=0, clock=lambda: 100.0, today=lambda: DAY, sleep=lambda _: None, per_key_daily_cap=3,
     )
     handler.handle(_rec("stage=quality rows=1"))
     before = _state(path)

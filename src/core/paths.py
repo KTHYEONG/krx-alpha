@@ -94,6 +94,9 @@ class DataPaths:
     def alert_ledger_file(self) -> pathlib.Path:
         return self.work_root / "alert_ledger.json"
 
+    def eod_digest_path(self, day: dt.date) -> pathlib.Path:
+        return self.logs_dir / "eod_digests" / f"{day.isoformat()}.txt"
+
     def universe_out(self, day: dt.date) -> pathlib.Path:
         return self.universe_dir / f"{day.isoformat()}.parquet"
 

@@ -544,6 +544,20 @@ def _run_eod_housekeeping(
     )
 
 
+def _archive_eod_digest(paths: DataPaths, ref_day: dt.date, subject: str, body: str) -> pathlib.Path | None:
+    """Persist the full EOD digest (mail only carries warnings); returns None when the write fails."""
+    target = paths.eod_digest_path(ref_day)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(f"{subject}\n\n{body}\n", encoding="utf-8")
+        tmp.replace(target)
+    except OSError as exc:
+        logger.warning("[DAEMON] stage=eod_digest_archive status=FAIL reason=%s", type(exc).__name__)
+        return None
+    return target
+
+
 def _check_backup(
     status_path: pathlib.Path,
     paths: DataPaths,
@@ -2521,17 +2535,18 @@ class DaemonRunner:
             now=now,
             max_age=dt.timedelta(hours=cfg.host_backup_max_age_h),
         )
-        eod_status = (
-            "OK"
-            if (
-                housekeeping.maintenance_ok
-                and housekeeping.offload_ok
-                and reconcile_ok
-                and backup_ok
-                and not aftermarket_blocked
+        degraded_reasons = [
+            name
+            for name, failed in (
+                ("maintenance", not housekeeping.maintenance_ok),
+                ("offload", not housekeeping.offload_ok),
+                ("reconcile", not reconcile_ok),
+                ("backup", not backup_ok),
+                ("aftermarket_not_ready", aftermarket_blocked),
             )
-            else "DEGRADED"
-        )
+            if failed
+        ]
+        eod_status = "DEGRADED" if degraded_reasons else "OK"
         logger.info(
             "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=%s",
             housekeeping.deleted,
@@ -2575,9 +2590,14 @@ class DaemonRunner:
                 f"shard_stale_restarts={st.shard_stale_restarts}",
                 f"orchestration_attempts={st.orchestration_attempts}",
                 *[f"crosscheck_{k.value}={v}" for k, v in crosscheck.items()],
+                f"degraded_reasons={','.join(degraded_reasons) or 'none'}",
             ]
         )
-        send_digest(f"[krx-alpha] EOD {ref_day.isoformat()} {eod_status}", digest_body)
+        subject = f"[krx-alpha] EOD {ref_day.isoformat()} {eod_status}"
+        digest_path = _archive_eod_digest(paths, ref_day, subject, digest_body)
+        if digest_path is not None:
+            digest_body = f"{digest_body}\ndigest_path={digest_path}"
+        send_digest(subject, digest_body)
         st.aftermarket_restarts = 0
         st.shard_stale_restarts = 0
 

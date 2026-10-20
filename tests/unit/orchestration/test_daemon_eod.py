@@ -521,6 +521,13 @@ def test_run_collector_daemon_eod_offload_remote_auth_failure_is_critical(tmp_pa
         for m in criticals
     )
     assert "deleted_partitions=0 uploaded=0 purged=0 status=DEGRADED" in caplog.text
+    assert len(digests) == 1
+    body_lines = digests[0][1].splitlines()
+    reasons = next(line for line in body_lines if line.startswith("degraded_reasons="))
+    assert "offload" in reasons.removeprefix("degraded_reasons=").split(",")
+    archived = pathlib.Path(tmp_path) / "data" / "logs" / "eod_digests" / "2026-09-14.txt"
+    assert f"digest_path={archived}" in body_lines
+    assert archived.read_text(encoding="utf-8").startswith("[krx-alpha] EOD 2026-09-14 DEGRADED\n\n")
 
 
 def test_run_collector_daemon_eod_backup_freshness_stale_is_critical(tmp_path, monkeypatch, caplog) -> None:

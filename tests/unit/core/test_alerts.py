@@ -118,74 +118,6 @@ def test_html_sender_internal_type_error_not_resent(caplog) -> None:
     assert any("stage=alert status=FAIL" in r.getMessage() for r in caplog.records)
 
 
-def test_plain_sender_receives_plain_once() -> None:
-    from src.core.alerts import _call_sender
-
-    calls: list[tuple] = []
-
-    def _plain(subject, body):
-        calls.append((subject, body))
-
-    _call_sender(_plain, "s", "b", html_body="<p>")
-
-    assert calls == [("s", "b")]
-
-
-def test_kwargs_sender_receives_html() -> None:
-    from src.core.alerts import _call_sender
-
-    calls: list[tuple] = []
-
-    def _kwargs(subject, body, **kw):
-        calls.append((subject, body, kw))
-
-    _call_sender(_kwargs, "s", "b", html_body="<p>")
-
-    assert calls == [("s", "b", {"html_body": "<p>"})]
-
-
-def test_unintrospectable_sender_falls_back_plain(monkeypatch) -> None:
-    import inspect
-
-    from src.core.alerts import _call_sender
-
-    calls: list[tuple] = []
-
-    def _plain(subject, body):
-        calls.append((subject, body))
-
-    monkeypatch.setattr(inspect, "signature", lambda fn: (_ for _ in ()).throw(ValueError("no signature")))
-    _call_sender(_plain, "s", "b", html_body="<p>")
-
-    assert calls == [("s", "b")]
-
-
-def test_positional_only_html_sender_gets_plain() -> None:
-    from src.core.alerts import _call_sender
-
-    calls: list[tuple] = []
-
-    def _sender(subject, body, html_body=None, /):
-        calls.append((subject, body, html_body))
-
-    _call_sender(_sender, "s", "b", html_body="<p>")
-
-    assert calls == [("s", "b", None)]
-
-
-def test_keyword_only_html_sender_gets_html() -> None:
-    from src.core.alerts import _call_sender
-
-    calls: list[tuple] = []
-
-    def _sender(subject, body, *, html_body=None):
-        calls.append((subject, body, html_body))
-
-    _call_sender(_sender, "s", "b", html_body="<p>")
-
-    assert calls == [("s", "b", "<p>")]
-
-
 def test_per_key_cap_limits_repeating_key(caplog) -> None:
     import datetime as dt
     import logging
@@ -206,6 +138,7 @@ def test_per_key_cap_limits_repeating_key(caplog) -> None:
         clock=lambda: now["t"],
         today=lambda: now["day"],
         sleep=lambda s: None,
+        per_key_daily_cap=3,
     )
     with caplog.at_level(logging.WARNING):
         for _ in range(5):
@@ -353,6 +286,7 @@ def test_day_rollover_resets_per_key_state(caplog) -> None:
         clock=lambda: now["t"],
         today=lambda: now["day"],
         sleep=lambda s: None,
+        per_key_daily_cap=3,
     )
     with caplog.at_level(logging.WARNING):
         for _ in range(4):
@@ -423,6 +357,7 @@ def test_cooldown_still_applies_under_caps(caplog) -> None:
         clock=lambda: now["t"],
         today=lambda: now["day"],
         sleep=lambda s: None,
+        per_key_daily_cap=3,
     )
     with caplog.at_level(logging.WARNING):
         handler.handle(_record("cool-key"))
@@ -498,6 +433,7 @@ def test_shard_budget_daily_cap_respected(caplog) -> None:
         clock=lambda: now["t"],
         today=lambda: now["day"],
         sleep=lambda s: None,
+        per_key_daily_cap=3,
         ledger=InMemoryAlertLedger(),
     )
     with caplog.at_level(logging.WARNING):
@@ -576,4 +512,30 @@ def test_latency_and_gap_alerts_share_daily_budget() -> None:
     handler.handle(_latency_breach_record("H0STCNT0"))
     handler.handle(_latency_breach_record("H0STASP0"))
     handler.handle(gap_record)
+    assert len(calls) == 3
+
+
+def test_default_policy_mails_each_failure_kind_once_per_day() -> None:
+    import datetime as dt
+
+    from src.core.alerts import ALERT_PER_KEY_DAILY_CAP, EmailAlertHandler
+
+    calls: list[str] = []
+    now = {"t": 0.0, "day": dt.date(2026, 9, 25)}
+    handler = EmailAlertHandler(
+        component="daemon",
+        run_id="r",
+        sender=lambda subject, body: calls.append(subject),
+        clock=lambda: now["t"],
+        today=lambda: now["day"],
+        sleep=lambda s: None,
+    )
+    for i in range(4):
+        now["t"] = float(i * 4000)
+        handler.handle(_record("repeat-key"))
+    handler.handle(_record("other-key"))
+    assert ALERT_PER_KEY_DAILY_CAP == 1
+    assert len(calls) == 2
+    now["day"] = dt.date(2026, 9, 26)
+    handler.handle(_record("repeat-key"))
     assert len(calls) == 3
