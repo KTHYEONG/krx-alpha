@@ -266,7 +266,10 @@ class JsonWsOAuthAdapter(ABC):
                 if self._counts_as_unparsable(header):
                     self._note_unparsable(len(data) if isinstance(data, str) else 0)
                 continue
-            raise VendorDisconnected(str(msg.type))
+            detail = str(msg.type)
+            if msg.type == aiohttp.WSMsgType.CLOSE:
+                detail = f"{detail}:code={msg.data}:reason={getattr(msg, 'extra', '') or ''}"
+            raise VendorDisconnected(detail)
 
     async def aclose(self) -> None:
         """Close the socket idempotently, suppressing transport errors."""

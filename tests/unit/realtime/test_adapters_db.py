@@ -474,6 +474,15 @@ def test_db_recv_close_types_disconnect(tmp_path, mtype) -> None:
         asyncio.run(adapter.recv())
 
 
+def test_db_recv_close_frame_reports_code_and_reason(tmp_path) -> None:
+    closing = _M(aiohttp.WSMsgType.CLOSE)
+    closing.data = 1008
+    closing.extra = "policy violation"
+    adapter = _adapter(tmp_path, _QueueWS([closing]))
+    with pytest.raises(VendorDisconnected, match=r"code=1008:reason=policy violation"):
+        asyncio.run(adapter.recv())
+
+
 def test_db_recv_pong_failure_disconnects(tmp_path) -> None:
     adapter = _adapter(tmp_path, _QueueWS([_M(aiohttp.WSMsgType.PING)], pong_exc=OSError("x")))
     with pytest.raises(VendorDisconnected, match="pingpong_echo_failed:OSError"):

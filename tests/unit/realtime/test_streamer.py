@@ -541,6 +541,7 @@ def test_streamer_records_gap_from_disconnect_until_first_frame_after_reconnect(
     assert sink.gaps == [("000660", 100, 5_000, "disconnect"), ("005930", 100, 5_000, "disconnect")]
     assert "stage=stream_gap reason=disconnect gap_ms=0 symbols=2" in caplog.text
     assert "stage=stream_disconnect reason=disconnect frames=1 consecutive_failures=1 backoff_s=1.00" in caplog.text
+    assert "detail=closed" in caplog.text
 
 
 def test_streamer_backoff_is_capped_exponential_and_resets_after_healthy_connection() -> None:
