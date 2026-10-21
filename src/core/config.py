@@ -607,7 +607,9 @@ class AuditSettings(BaseSettings):
     tail_silence_max_s: float = Field(default=600.0, gt=0)
     time_budget_s: float = Field(default=300.0, gt=0)
     counter_reset_confirm_frames: int = Field(default=3, ge=2)
-    max_intervals_per_symbol: int = Field(default=20, ge=1)
+    max_intervals_per_symbol: int = Field(default=500, ge=1)
+    event_hole_min_s: int = Field(default=10, ge=1)
+    max_event_holes: int = Field(default=20, ge=1)
 
     @model_validator(mode="after")
     def check_audit_budget_order(self) -> AuditSettings:

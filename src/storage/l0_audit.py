@@ -67,8 +67,17 @@ class LatencyMinute:
 
 
 @dataclass(frozen=True)
+class EventHole:
+    """Run of exchange-event seconds with no frame from any symbol, inside the regular window."""
+
+    start: str
+    end: str
+    seconds: int
+
+
+@dataclass(frozen=True)
 class StreamLatency:
-    """Per-minute latency of one requested stream."""
+    """Per-minute latency of one requested stream plus its event-time holes (longest first, capped)."""
 
     stream: str
     status: AuditStatus
@@ -76,6 +85,8 @@ class StreamLatency:
     rows: int
     event_time_missing: int
     minutes: tuple[LatencyMinute, ...]
+    event_holes: tuple[EventHole, ...] = ()
+    event_hole_seconds: int = 0
 
 
 @dataclass(frozen=True)
@@ -227,6 +238,7 @@ class _StreamAccumulator:
     finished: list[LatencyMinute] = field(default_factory=list)
     dirty_minutes: set[str] = field(default_factory=set)
     seen_minutes: set[str] = field(default_factory=set)
+    event_seconds: set[int] = field(default_factory=set)
 
 
 class _BudgetExceededError(Exception):
@@ -260,6 +272,26 @@ def _parse_int(value: object) -> int | None:
         except ValueError:
             return None
     return None
+
+
+def _hhmmss(second_of_day: int) -> str:
+    return f"{second_of_day // 3600:02d}{second_of_day % 3600 // 60:02d}{second_of_day % 60:02d}"
+
+
+def _event_holes(seconds: set[int], *, start_s: int, end_s: int, min_hole_s: int, cap: int) -> tuple[tuple[EventHole, ...], int]:
+    """Return the `cap` longest runs of at least `min_hole_s` empty event seconds in `[start_s, end_s)` and their total seconds.
+
+    A window with no event at all yields no holes: that is a missing stream, reported by status instead.
+    """
+    inside = sorted(x for x in seconds if start_s <= x < end_s)
+    if not inside:
+        return (), 0
+    edges = [start_s - 1, *inside, end_s]
+    runs = [(a + 1, b - 1) for a, b in itertools.pairwise(edges) if b - a - 1 >= min_hole_s]
+    total = sum(last - first + 1 for first, last in runs)
+    longest = sorted(runs, key=lambda run: (run[0] - run[1], run[0]))[:cap]
+    holes = tuple(EventHole(_hhmmss(first), _hhmmss(last), last - first + 1) for first, last in sorted(longest))
+    return holes, total
 
 
 def _iter_line_batches(path: pathlib.Path, batch_bytes: int, truncated: list[bool]) -> Iterator[bytes]:
@@ -537,6 +569,7 @@ class _Derivation:
             event_epoch = dt.datetime(
                 self._day.year, self._day.month, self._day.day, moment.hour, moment.minute, moment.second, tzinfo=_KST
             ).timestamp()
+            acc.event_seconds.add(moment.hour * 3600 + moment.minute * 60 + moment.second)
             minute = dt.datetime.fromtimestamp(record.recv_ns // 1_000_000_000, tz=_KST).strftime("%H:%M")
             self.add_sample(acc, minute, (record.recv_ns - int(event_epoch) * 1_000_000_000) / 1_000_000_000)
         if stream == _TICK_STREAM and self._vendor == _LEDGER_VENDOR:
@@ -727,6 +760,14 @@ class _Derivation:
     def _finish_stream(self, acc: _StreamAccumulator, status: AuditStatus, reason: str) -> StreamLatency:
         self.flush_minute(acc)
         acc.finished.sort(key=lambda entry: entry.minute_kst)
+        open_t, auction_t = self._anchors.regular_open, self._anchors.closing_auction_start
+        holes, hole_seconds = _event_holes(
+            acc.event_seconds,
+            start_s=open_t.hour * 3600 + open_t.minute * 60 + open_t.second,
+            end_s=auction_t.hour * 3600 + auction_t.minute * 60 + auction_t.second,
+            min_hole_s=self._settings.event_hole_min_s,
+            cap=self._settings.max_event_holes,
+        )
         return StreamLatency(
             stream=acc.stream,
             status=status,
@@ -734,6 +775,8 @@ class _Derivation:
             rows=acc.rows,
             event_time_missing=acc.missing,
             minutes=tuple(acc.finished),
+            event_holes=holes,
+            event_hole_seconds=hole_seconds,
         )
 
     def finalize_ledger(self) -> tuple[tuple[SymbolLedger, ...], LedgerTotals]:
@@ -1000,6 +1043,10 @@ def _audit_to_jsonable(audit: SessionAudit) -> dict[str, object]:
                 "reason": entry.reason,
                 "rows": entry.rows,
                 "event_time_missing": entry.event_time_missing,
+                "event_hole_seconds": entry.event_hole_seconds,
+                "event_holes": [
+                    {"start": hole.start, "end": hole.end, "seconds": hole.seconds} for hole in entry.event_holes
+                ],
                 "minutes": [
                     {
                         "minute_kst": minute.minute_kst,
