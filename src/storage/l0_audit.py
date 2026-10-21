@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import datetime as dt
 import itertools
 import json
@@ -212,6 +213,7 @@ class _Segment:
     count_only: int = 0
     deficit: int = 0
     interval_count: int = 0
+    seen_conns: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -691,6 +693,10 @@ class _Derivation:
         ):
             state.duplicates += 1
             return
+        if self.is_overlap(segment, frame):
+            self.absorb_overlap(state, segment, frame)
+            return
+        segment.seen_conns.add(frame.conn_id)
         state.accepted_total += 1
         state.frames += 1
         if segment.first_cum is None:
@@ -722,6 +728,41 @@ class _Derivation:
         segment.run.clear()
         self.record_advance(symbol, segment, frame)
         segment.last = frame
+
+    @staticmethod
+    def is_overlap(segment: _Segment, frame: _TickFrame) -> bool:
+        """A frame from an earlier connection delivered after another connection advanced the counter (proactive handover)."""
+        prev = segment.max_frame
+        return (
+            prev is not None
+            and frame.cum <= segment.max_cum
+            and frame.conn_id != prev.conn_id
+            and frame.conn_id in segment.seen_conns
+        )
+
+    @staticmethod
+    def absorb_overlap(state: _SymbolState, segment: _Segment, frame: _TickFrame) -> None:
+        """Shrink the loss interval containing a late frame's counter; counters outside any interval are plain duplicates."""
+        for idx, interval in enumerate(segment.intervals):
+            if not interval.cum_prev < frame.cum < interval.cum_next:
+                continue
+            remaining = interval.missing_trades - 1
+            deficit_left = max(0, interval.volume_deficit - frame.cvolume)
+            segment.deficit -= interval.volume_deficit - deficit_left
+            if interval.kind == "confirmed":
+                segment.confirmed -= 1
+            else:
+                segment.count_only -= 1
+            if remaining == 0:
+                del segment.intervals[idx]
+                segment.interval_count -= 1
+            else:
+                segment.intervals[idx] = dataclasses.replace(interval, missing_trades=remaining, volume_deficit=deficit_left)
+            segment.accepted += 1
+            state.accepted_total += 1
+            state.frames += 1
+            return
+        state.duplicates += 1
 
     def record_advance(self, symbol: str, segment: _Segment, frame: _TickFrame) -> None:
         prev = segment.max_frame
