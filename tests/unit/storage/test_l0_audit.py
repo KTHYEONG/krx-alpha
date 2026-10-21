@@ -1341,3 +1341,64 @@ def test_audit_json_carries_event_holes_and_default_cap_keeps_all_intervals(tmp_
     tick_entry = next(item for item in payload["latency"] if item["stream"] == TICK)
     assert tick_entry["event_holes"]
     assert tick_entry["event_hole_seconds"] > 0
+
+
+def test_late_frames_from_a_handed_over_connection_shrink_the_loss_interval(tmp_path) -> None:
+    records = [
+        _tick("005930", 0, 1, 10, 10, "090000", _ns(9, 0, 1), conn="A"),
+        _tick("005930", 0, 2, 20, 10, "090001", _ns(9, 0, 2), conn="A"),
+        _tick("005930", 0, 6, 60, 10, "090005", _ns(9, 0, 5), conn="B"),
+        _tick("005930", 0, 3, 30, 10, "090002", _ns(9, 0, 6), conn="A"),
+        _tick("005930", 0, 4, 40, 10, "090003", _ns(9, 0, 7), conn="A"),
+        _tick("005930", 0, 2, 20, 10, "090001", _ns(9, 0, 8), conn="A"),
+        _tick("005930", 0, 7, 70, 10, "090006", _ns(9, 0, 9), conn="B"),
+    ]
+    _write(tmp_path / "l0", TICK, records)
+    _write(tmp_path / "l0", QUOTE, [_ok_quote()], name="09.jsonl.zst")
+
+    audit = _derive(tmp_path / "l0")
+
+    (ledger,) = audit.symbols
+    assert ledger.trades_observed == 7
+    assert ledger.confirmed_missing == 1
+    assert ledger.volume_deficit == 10
+    assert ledger.regressions == 0
+    assert ledger.resets == 0
+    assert ledger.duplicates >= 1
+    assert [(iv.cum_prev, iv.cum_next, iv.missing_trades) for iv in ledger.intervals] == [(2, 6, 1)]
+
+
+def test_overlap_fill_removes_an_interval_completely(tmp_path) -> None:
+    records = [
+        _tick("005930", 0, 1, 10, 10, "090000", _ns(9, 0, 1), conn="A"),
+        _tick("005930", 0, 3, 30, 10, "090002", _ns(9, 0, 2), conn="B"),
+        _tick("005930", 0, 2, 20, 20, "090001", _ns(9, 0, 3), conn="A"),
+    ]
+    _write(tmp_path / "l0", TICK, records)
+    _write(tmp_path / "l0", QUOTE, [_ok_quote()], name="09.jsonl.zst")
+
+    audit = _derive(tmp_path / "l0")
+
+    (ledger,) = audit.symbols
+    assert ledger.intervals == ()
+    assert ledger.confirmed_missing == 0
+    assert ledger.count_only_missing == 0
+    assert ledger.volume_deficit == 0
+    assert ledger.net_missing == 0
+
+
+def test_overlap_fill_of_a_count_only_interval(tmp_path) -> None:
+    records = [
+        _tick("005930", 0, 1, 10, 10, "090000", _ns(9, 0, 1), conn="A"),
+        _tick("005930", 0, 4, 40, 30, "090003", _ns(9, 0, 2), conn="B"),
+        _tick("005930", 0, 2, 20, 10, "090001", _ns(9, 0, 3), conn="A"),
+    ]
+    _write(tmp_path / "l0", TICK, records)
+    _write(tmp_path / "l0", QUOTE, [_ok_quote()], name="09.jsonl.zst")
+
+    audit = _derive(tmp_path / "l0")
+
+    (ledger,) = audit.symbols
+    assert ledger.count_only_missing == 1
+    assert ledger.confirmed_missing == 0
+    assert [(iv.kind, iv.missing_trades) for iv in ledger.intervals] == [("count_only", 1)]
