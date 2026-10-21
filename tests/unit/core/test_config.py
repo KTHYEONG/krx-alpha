@@ -777,7 +777,7 @@ def test_dq_price_band_defaults_match_legacy_behaviour(monkeypatch) -> None:
     settings = DataQualitySettings()
 
     assert settings.price_band_ratio == 0.30
-    assert settings.listing_day_lower_ratio == 0.90
+    assert settings.listing_day_lower_ratio == 0.60
     assert settings.listing_day_upper_ratio == 4.00
 
 

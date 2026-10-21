@@ -1252,7 +1252,7 @@ def test_listing_band_still_catches_extremes() -> None:
 
     from src.storage.quality import decode_and_flag_ticks
 
-    df = pl.DataFrame([_listing_tick('NEW', 45000, wall=1), _listing_tick('NEW', 8500, wall=2)])
+    df = pl.DataFrame([_listing_tick('NEW', 45000, wall=1), _listing_tick('NEW', 5500, wall=2)])
 
     summary = decode_and_flag_ticks(df, listing_symbols=frozenset({'NEW'}))
 
@@ -1266,11 +1266,24 @@ def test_listing_and_standard_boundary_values_pass() -> None:
     from src.storage.quality import decode_and_flag_ticks
 
     df = pl.DataFrame([
-        _listing_tick('NEW', 9000, wall=1),
+        _listing_tick('NEW', 6000, wall=1),
         _listing_tick('NEW', 40000, wall=2),
         _listing_tick('OLD', 13000, wall=3),
         _listing_tick('OLD', 7000, wall=4),
     ])
+
+    summary = decode_and_flag_ticks(df, listing_symbols=frozenset({'NEW'}))
+
+    assert summary is not None
+    assert summary.price_band_violation == 0
+
+
+def test_listing_day_floor_at_sixty_percent_of_offering_price_passes() -> None:
+    import polars as pl
+
+    from src.storage.quality import decode_and_flag_ticks
+
+    df = pl.DataFrame([_listing_tick('NEW', 6000, wall=1), _listing_tick('NEW', 6001, wall=2)])
 
     summary = decode_and_flag_ticks(df, listing_symbols=frozenset({'NEW'}))
 
