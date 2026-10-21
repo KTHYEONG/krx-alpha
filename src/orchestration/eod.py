@@ -327,6 +327,21 @@ def _log_stream_latency(entry: StreamLatency, *, threshold_s: float, date: dt.da
     )
 
 
+def _log_event_holes(entry: StreamLatency, *, date: dt.date) -> None:
+    if not entry.event_holes:
+        return
+    longest = max(entry.event_holes, key=lambda hole: (hole.seconds, hole.start))
+    logger.warning(
+        "[DATA] stage=event_holes date=%s stream=%s holes=%d hole_seconds=%d longest_s=%d longest_from=%s",
+        date.isoformat(),
+        entry.stream,
+        len(entry.event_holes),
+        entry.event_hole_seconds,
+        longest.seconds,
+        longest.start,
+    )
+
+
 def log_session_audit(audit: SessionAudit | None, *, settings: AuditSettings, anchors: SessionAnchors, date: dt.date) -> None:
     """Emit the audit summary and per-stream latency lines; CRITICAL once per stream whose regular-window minutes exceed the latency threshold."""
     if audit is None or settings.mode is AuditMode.OFF:
@@ -375,6 +390,14 @@ def log_session_audit(audit: SessionAudit | None, *, settings: AuditSettings, an
             no_counter,
             tail_silence_s,
         )
+    truncated = sum(entry.intervals_truncated for entry in audit.symbols)
+    if truncated:
+        logger.warning(
+            "[DATA] stage=session_audit_intervals status=TRUNCATED date=%s truncated=%d cap=%d",
+            date.isoformat(),
+            truncated,
+            settings.max_intervals_per_symbol,
+        )
     for stream in dict.fromkeys(settings.latency_streams):
         try:
             entry = next(
@@ -382,6 +405,7 @@ def log_session_audit(audit: SessionAudit | None, *, settings: AuditSettings, an
                 StreamLatency(stream, AuditStatus.UNAVAILABLE, "unavailable", 0, 0, ()),
             )
             _log_stream_latency(entry, threshold_s=settings.latency_alert_threshold_s, date=date)
+            _log_event_holes(entry, date=date)
         except Exception:  # noqa: BLE001
             logger.debug("[DATA] stage=ingest_latency status=SKIP date=%s", date.isoformat())
             continue

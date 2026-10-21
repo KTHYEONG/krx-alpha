@@ -1274,3 +1274,70 @@ def test_sequence_replay_cannot_ignore_disappearing_input(tmp_path) -> None:
     audit = _derive(tmp_path, progress=disappear)
     assert audit.status.value == "UNAVAILABLE"
     assert audit.reason == "io_error"
+
+
+def test_event_holes_helper_boundaries() -> None:
+    from src.storage.l0_audit import EventHole, _event_holes
+
+    start, end = 9 * 3600, 9 * 3600 + 60
+    seconds = {start, start + 1, start + 20, start + 21, end - 1}
+    holes, total = _event_holes(seconds, start_s=start, end_s=end, min_hole_s=10, cap=20)
+    assert holes == (EventHole("090002", "090019", 18), EventHole("090022", "090058", 37))
+    assert total == 55
+    assert _event_holes(seconds, start_s=start, end_s=end, min_hole_s=10, cap=1)[0] == (EventHole("090022", "090058", 37),)
+    assert _event_holes({start + 5}, start_s=start, end_s=end, min_hole_s=60, cap=5) == ((), 0)
+    assert _event_holes({start - 100}, start_s=start, end_s=end, min_hole_s=1, cap=5) == ((), 0)
+    assert _event_holes(set(range(start, end)), start_s=start, end_s=end, min_hole_s=1, cap=5) == ((), 0)
+
+
+def test_leading_hole_marks_a_late_first_event() -> None:
+    from src.storage.l0_audit import EventHole, _event_holes
+
+    start, end = 9 * 3600, 9 * 3600 + 30
+    holes, total = _event_holes({start + 12}, start_s=start, end_s=end, min_hole_s=10, cap=5)
+    assert holes == (EventHole("090000", "090011", 12), EventHole("090013", "090029", 17))
+    assert total == 29
+
+
+def test_derivation_reports_event_time_hole_across_symbols(tmp_path) -> None:
+    records = [
+        _tick(symbol, second, 0, 100 + second, 1, f"0900{second:02d}", _ns(9, 0, second))
+        for second in (0, 1, 2, 3, 20, 21)
+        for symbol in ("005930", "000660")
+    ]
+    _write(tmp_path / "l0", TICK, records)
+    _write(tmp_path / "l0", QUOTE, [_quote("005930", "090005", _ns(9, 0, 5))])
+
+    audit = _derive(tmp_path / "l0")
+
+    (entry,) = [item for item in audit.latency if item.stream == TICK]
+    assert (entry.event_holes[0].start, entry.event_holes[0].end, entry.event_holes[0].seconds) == ("090004", "090019", 16)
+    assert entry.event_hole_seconds >= 16
+
+
+def test_audit_json_carries_event_holes_and_default_cap_keeps_all_intervals(tmp_path) -> None:
+    import json as _json
+
+    from src.core.config import AuditSettings
+    from src.storage.l0_audit import write_session_audit
+
+    records = []
+    cum = volume = 0
+    for idx in range(52):
+        records.append(_tick("005930", cum, 0, volume, 1, f"09{idx:02d}00", _ns(9, idx, 0)))
+        cum += 2
+        volume += 2
+    _write(tmp_path / "l0", TICK, records)
+    _write(tmp_path / "l0", QUOTE, [_ok_quote()], name="09.jsonl.zst")
+
+    audit = _derive(tmp_path / "l0")
+
+    assert AuditSettings().max_intervals_per_symbol >= 500
+    (ledger,) = audit.symbols
+    assert ledger.intervals_truncated == 0
+    out = tmp_path / "audit.json"
+    write_session_audit(audit, out)
+    payload = _json.loads(out.read_text(encoding="utf-8"))
+    tick_entry = next(item for item in payload["latency"] if item["stream"] == TICK)
+    assert tick_entry["event_holes"]
+    assert tick_entry["event_hole_seconds"] > 0

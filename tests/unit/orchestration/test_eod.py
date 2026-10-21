@@ -3001,3 +3001,28 @@ def test_nonobject_manifest_is_contained_with_audit_only(tmp_path, caplog) -> No
         **args, audit=_ledger_audit(day, symbols=(_ledger_symbol(),)), audit_settings=_enforce_settings(),
     ) is False
     assert "reasons=manifest_unreadable" in caplog.text
+
+
+def test_log_session_audit_reports_event_holes_and_truncated_intervals(caplog) -> None:
+    import dataclasses
+    import datetime as dt
+    import logging
+
+    from src.core.config import AuditSettings
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.eod import log_session_audit
+    from src.storage.l0_audit import EventHole
+
+    day = dt.date(2026, 10, 15)
+    latency = dataclasses.replace(
+        _ledger_latency("H0STCNT0", [("09:01", 3.0, 1.0)]),
+        event_holes=(EventHole("090126", "090139", 14), EventHole("101000", "101010", 11)),
+        event_hole_seconds=25,
+    )
+    symbol = dataclasses.replace(_ledger_symbol(), intervals_truncated=7)
+    audit = _ledger_audit(day, symbols=(symbol,), latency=(latency,))
+    with caplog.at_level(logging.WARNING):
+        log_session_audit(audit, settings=AuditSettings(), anchors=standard_session_anchors(day), date=day)
+    assert "stage=event_holes" in caplog.text
+    assert "holes=2 hole_seconds=25 longest_s=14 longest_from=090126" in caplog.text
+    assert "stage=session_audit_intervals status=TRUNCATED date=2026-10-15 truncated=7 cap=500" in caplog.text

@@ -1067,7 +1067,9 @@ def test_audit_settings_default_shadow_and_budgets(monkeypatch) -> None:
     assert settings.loss_warn_ratio < settings.loss_fail_ratio
     assert settings.tail_silence_max_s == 600.0
     assert settings.counter_reset_confirm_frames == 3
-    assert settings.max_intervals_per_symbol == 20
+    assert settings.max_intervals_per_symbol == 500
+    assert settings.event_hole_min_s == 10
+    assert settings.max_event_holes == 20
 
 
 def test_audit_settings_env_override(monkeypatch) -> None:
