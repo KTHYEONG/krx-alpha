@@ -513,7 +513,7 @@ class DataQualitySettings(BaseSettings):
     Ratios are violating rows divided by decoded stream rows of one L1 partition.
     Defaults sit well above the measured daily vendor noise floor so that FAIL
     means a structural feed defect, not routine vendor jitter.
-    ``price_band_ratio`` is the symmetric daily price limit around the reference price. On a symbol's listing day the reference price is the offering price and the allowed range is ``[listing_day_lower_ratio, listing_day_upper_ratio] x reference`` (KRX new-listing rule: 90%~400% of the offering price).
+    ``price_band_ratio`` is the symmetric daily price limit around the reference price. On a symbol's listing day the reference price is the offering price and the allowed range is ``[listing_day_lower_ratio, listing_day_upper_ratio] x reference`` (KRX new-listing rule since June 2023: 60%~400% of the offering price).
     """
 
     model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_DQ_", extra="ignore")
@@ -522,7 +522,7 @@ class DataQualitySettings(BaseSettings):
     max_invariant_violation_ratio: float = Field(default=0.001, ge=0.0, le=1.0)
     max_total_remain_short_ratio: float = Field(default=0.05, ge=0.0, le=1.0)
     price_band_ratio: float = Field(default=0.30, gt=0.0, lt=1.0)
-    listing_day_lower_ratio: float = Field(default=0.90, gt=0.0, lt=1.0)
+    listing_day_lower_ratio: float = Field(default=0.60, gt=0.0, lt=1.0)
     listing_day_upper_ratio: float = Field(default=4.00, gt=1.0, allow_inf_nan=False)
 
 
