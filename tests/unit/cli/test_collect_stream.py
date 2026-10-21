@@ -213,7 +213,8 @@ def test_collect_stream_wires_watchdog_ntp_fallback_and_shutdown_event(tmp_path,
     assert captured["cfg"].ntp_fallback_hosts == ("time.google.com", "time.cloudflare.com")
     silence_limit = captured["streamer_kwargs"]["silence_limit"]
     assert callable(silence_limit)
-    assert silence_limit() in (None, 30.0)
+    limit = silence_limit()
+    assert limit is None or limit >= 30.0
     assert captured["max_cycles"] == 1
     assert "[DATA] stage=stream_shutdown" in caplog.text
     assert (tmp_path / "s.json").exists()

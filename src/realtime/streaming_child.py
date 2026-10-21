@@ -8,7 +8,7 @@ import signal
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import aiohttp
 
@@ -37,10 +37,14 @@ def resolve_clock_overrides(
     )
 
 
-class LagMonitoringSink:
-    """FrameSink decorator feeding every recorded frame to a `LagMonitor`."""
+class FrameObserver(Protocol):
+    def observe(self, frame: L0Frame) -> None: ...
 
-    def __init__(self, inner: FrameSink, monitor: LagMonitor) -> None:
+
+class LagMonitoringSink:
+    """FrameSink decorator feeding every recorded frame to a `FrameObserver` (e.g. `LagMonitor`)."""
+
+    def __init__(self, inner: FrameSink, monitor: FrameObserver) -> None:
         self._inner = inner
         self._monitor = monitor
 
@@ -69,6 +73,7 @@ async def run_streaming_child(
     stop_deadline_ns: int | None = None,
     close_writer: bool = False,
     lag_monitor: LagMonitor | None = None,
+    frame_observers: tuple[FrameObserver, ...] = (),
 ) -> None:
     """Drive one bootstrapped session until SIGTERM/deadline/max_cycles, then persist."""
     stop = asyncio.Event()
@@ -93,6 +98,8 @@ async def run_streaming_child(
         sink: FrameSink = SessionFrameSink(session=session)
         if lag_monitor is not None:
             sink = LagMonitoringSink(sink, lag_monitor)
+        for observer in frame_observers:
+            sink = LagMonitoringSink(sink, observer)
         streamer = streamer_factory(
             adapter=adapter,
             sink=sink,

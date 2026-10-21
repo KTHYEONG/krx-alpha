@@ -17,8 +17,9 @@ from src.core.observability import EVENT
 from src.core.session_anchors import resolve_session_anchors
 from src.realtime.adapters.registry import RegularAdapterContext, regular_vendor
 from src.realtime.lag_monitor import LagMonitor
+from src.realtime.regular_open_watch import RegularOpenWatch
 from src.realtime.session import CollectorSession, SessionConfig, StreamRoute, bootstrap_session
-from src.realtime.streamer import RealtimeStreamer, regular_session_silence_limit_s
+from src.realtime.streamer import SILENCE_LIMIT_S, RealtimeStreamer
 from src.realtime.streaming_child import resolve_clock_overrides, run_streaming_child
 
 logger = logging.getLogger(__name__)
@@ -108,16 +109,23 @@ async def run_regular_stream(
             raise KrxAlphaError(f"market-map is required for vendor {profile.vendor}")
         market_of = json.loads(pathlib.Path(str(raw_map)).read_text(encoding="utf-8"))  # noqa: ASYNC240 - one-shot startup read
     token_cache_dir = KisTokenSettings().token_cache_dir
+    open_watch = RegularOpenWatch(
+        anchors=anchors,
+        silence_limit_s=SILENCE_LIMIT_S,
+        open_grace_s=settings.regular_open_grace_s,
+        alert_after_s=settings.regular_open_alert_after_s,
+    )
     await run_streaming_child(
         session=session,
         adapter_factory=lambda http: entry.build(
             creds, RegularAdapterContext(http, settings, token_cache_dir, market_of)
         ),
         replay_pairs=session.replay_pairs(),
-        silence_limit=lambda: regular_session_silence_limit_s(dt.datetime.now(dt.UTC), anchors=anchors),
+        silence_limit=open_watch.silence_limit,
         max_cycles=getattr(args, "max_cycles", None),
         streamer_factory=streamer_factory,
         lag_monitor=LagMonitor(threshold_s=AuditSettings().latency_alert_threshold_s),
+        frame_observers=(open_watch,),
     )
     logger.info(
         profile.shutdown_log,

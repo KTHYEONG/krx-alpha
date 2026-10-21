@@ -64,6 +64,8 @@ class CollectorSettings(BaseSettings):
     ls_capacity_pairs: int = 200
     # Rotation of a fresh token is a transport problem, not expiry.
     ls_token_rotation_cooldown_s: float = Field(default=300.0, ge=0)
+    regular_open_grace_s: float = Field(default=600.0, gt=0)
+    regular_open_alert_after_s: float = Field(default=30.0, gt=0)
     db_capacity_pairs: int = Field(default=50, ge=1)
     db_token_rotation_cooldown_s: float = Field(default=300.0, ge=0)
     db_subscribe_spacing_s: float = Field(default=0.12, ge=0.1)
