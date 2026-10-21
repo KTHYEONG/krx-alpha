@@ -19,6 +19,7 @@ Agent-executable. Verify that every automated routine ran **and that what it wro
 8. **Evidence expires** (section 5). Run M3 before 22:00.
 9. **Load discipline.** Content probes on business days only at/after 20:35 KST (or on closed days), wrapped in `nice -n 19`, parquet reads column-pruned. Never inside 08:10–20:30 on a business day.
 10. **Freeze.** Never recommend or perform a deploy/restart on a business day 08:10–22:00 KST except to stop an active data-loss incident (say so explicitly).
+11. **No ad-hoc work inside `krx-collector`.** The production container has a 1 GiB cgroup (daemon + EOD child already use most of it); loading tapes/parquet or running probes there caused `OOMKilled=true` on 2026-10-20, which then failed `deferred_verify reason=unstable`. Run ad-hoc work on the operator PC, or in a throwaway container `docker run --rm -m 384m --memory-swap 384m` with the same image, `--env-file`s and only the mounts it needs (secrets are never printed). Check `OOMKilled`/`oom_kill` in H-checks before blaming the pipeline.
 
 ## 2. Severity
 
