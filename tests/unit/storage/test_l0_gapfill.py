@@ -278,3 +278,15 @@ def test_short_pool_leaves_later_touching_gaps_without_rows() -> None:
     rows, outcomes = derive_gapfill(_audit(_interval(3, "090059", "090100"), _interval(2, "090100", "090102")), _src(tape), {})
     assert [(o.recovered, o.status) for o in outcomes] == [(1, GapfillStatus.PARTIAL), (0, GapfillStatus.NONE)]
     assert rows["interval_id"].to_list() == [0]
+
+
+def test_single_surplus_row_is_the_one_that_explains_the_excess_volume() -> None:
+    tape = _tape(("000001", 90100, 1, 5), ("000001", 90100, 2, 7), ("000001", 90100, 3, 5))
+    interval = {**_interval(2, "090059", "090101"), "volume_deficit": 10}
+    rows, (outcome,) = derive_gapfill(_audit(interval), _src(tape), {})
+    assert rows["volume"].sum() == 10
+    assert (outcome.status, outcome.surplus) == (GapfillStatus.OVER, 1)
+    no_match = {**_interval(2, "090059", "090101"), "volume_deficit": 999}
+    rows, _ = derive_gapfill(_audit(no_match), _src(tape), {})
+    assert rows["price"].to_list() == [1, 2]
+    assert rows["volume"].to_list() == [5, 7]
