@@ -49,6 +49,7 @@ class GapfillInterval:
     recovered: int
     residual: int
     status: GapfillStatus
+    surplus: int = 0
 
 
 def _audit_intervals(audit: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
@@ -142,8 +143,9 @@ def derive_gapfill(
     source with any pooled trade supplies them, and the pool is handed to the cluster's intervals in time order
     (exact in total, best effort between intervals sharing a second). `received` maps (symbol, chetime) to the
     live frames' (cum, price, volume) and lets the boundary seconds be reconciled (see `_pooled_rows`); the
-    gaps' second ranges must be covered by it. A pool larger than the cluster's missing count is kept and reported as
-    `over` on the cluster's last interval. Raises `ValueError` when a tape lacks `symbol`, `ts_hms`, `price` or `volume`.
+    gaps' second ranges must be covered by it. A pool larger than the cluster's missing count means the tape holds
+    trades the venue never counted (duplicates): only the earliest `missing` rows are kept and the excess is reported
+    as `surplus` with status `over` on the cluster's last interval. Raises `ValueError` when a tape lacks `symbol`, `ts_hms`, `price` or `volume`.
     """
     indexed_sources: list[tuple[GapfillSource, dict[str, dict[int, list[_TapeRow]]]]] = []
     for source in sources:
@@ -166,20 +168,23 @@ def derive_gapfill(
             if pool:
                 chosen = candidate
                 break
+        cluster_missing = sum(int(interval["missing_trades"]) for interval in members)
+        surplus = max(0, len(pool) - cluster_missing)
+        pool = pool[:cluster_missing]
         remaining = len(pool)
         for position, (interval_id, interval) in enumerate(zip(cluster.members, members, strict=True)):
             missing = int(interval["missing_trades"])
             last = position == len(members) - 1
-            recovered = remaining if last else min(missing, remaining)
+            recovered = min(missing, remaining)
             remaining -= recovered
-            if recovered == 0:
+            if last and surplus:
+                status = GapfillStatus.OVER
+            elif recovered == 0:
                 status = GapfillStatus.NONE
             elif recovered < missing:
                 status = GapfillStatus.PARTIAL
-            elif recovered == missing:
-                status = GapfillStatus.FULL
             else:
-                status = GapfillStatus.OVER
+                status = GapfillStatus.FULL
             outcomes[interval_id] = GapfillInterval(
                 interval_id=interval_id,
                 symbol=cluster.symbol,
@@ -191,6 +196,7 @@ def derive_gapfill(
                 recovered=recovered,
                 residual=max(0, missing - recovered),
                 status=status,
+                surplus=surplus if last else 0,
             )
         if pool and chosen is not None:
             cursor = 0
