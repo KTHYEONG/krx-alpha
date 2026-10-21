@@ -58,8 +58,8 @@ def test_full_none_and_over_statuses_and_symbol_isolation() -> None:
     assert rows["symbol"].unique().to_list() == ["000001"]
     over_rows, over = derive_gapfill(_audit(_interval(1)), _src(tape))
     assert over[0].status is GapfillStatus.OVER
-    assert over[0].residual == 0
-    assert over_rows.height == 2
+    assert (over[0].residual, over[0].surplus) == (0, 1)
+    assert over_rows.height == 1
 
 
 def test_tape_order_within_a_second_is_preserved_and_totals_add_up() -> None:
@@ -205,10 +205,11 @@ def test_touching_gaps_share_one_pool_in_time_order() -> None:
     tape = _tape(("000001", 90100, 1, 1), ("000001", 90100, 2, 1), ("000001", 90101, 3, 1), ("000001", 90101, 4, 1))
     first, second = _interval(1, "090059", "090100"), _interval(2, "090100", "090102")
     rows, outcomes = derive_gapfill(_audit(first, second), _src(tape), {})
-    assert [o.recovered for o in outcomes] == [1, 3]
+    assert [o.recovered for o in outcomes] == [1, 2]
     assert [o.status for o in outcomes] == [GapfillStatus.FULL, GapfillStatus.OVER]
-    assert rows["interval_id"].to_list() == [0, 1, 1, 1]
-    assert rows.height == 4
+    assert [o.surplus for o in outcomes] == [0, 1]
+    assert rows["interval_id"].to_list() == [0, 1, 1]
+    assert rows["price"].to_list() == [1, 2, 3]
 
 
 def test_gaps_of_different_symbols_or_apart_do_not_share_a_pool() -> None:
