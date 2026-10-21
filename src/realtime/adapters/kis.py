@@ -261,7 +261,7 @@ class KisRealtimeAdapter:
             try:
                 raw = await self._ws.receive_str()
             except aiohttp.WSMessageTypeError as exc:
-                raise VendorDisconnected("ws_non_text_frame") from exc
+                raise VendorDisconnected(f"ws_non_text_frame:{str(exc)[:80]}") from exc
             if "|" not in raw:
                 if _is_pingpong(raw):
                     await self._echo_pingpong(raw)

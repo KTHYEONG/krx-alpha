@@ -299,7 +299,7 @@ def test_recv_maps_server_close_to_vendor_disconnected() -> None:
             raise aiohttp.WSMessageTypeError("received message of type WSMsgType.CLOSE")
 
     adapter = _nxt_adapter(Ws())
-    with pytest.raises(VendorDisconnected, match="ws_non_text_frame"):
+    with pytest.raises(VendorDisconnected, match=r"ws_non_text_frame:received message of type WSMsgType\.CLOSE"):
         asyncio.run(adapter.recv())
 
 
