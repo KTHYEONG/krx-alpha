@@ -14,9 +14,17 @@ import aiohttp
 
 from src.core.config import CollectorSettings
 from src.core.errors import SlotBudgetExceededError
+from src.realtime.connection_handover import Handover, SwapRequest
 from src.realtime.contracts import L0Frame, VendorAck, VendorAdapter
 from src.realtime.lag_monitor import LagMonitor
 from src.realtime.streamer import FrameSink, RealtimeStreamer, SessionFrameSink
+
+
+@dataclass(frozen=True)
+class HandoverSettings:
+    request: SwapRequest
+    max_s: float
+    cooldown_s: float
 
 
 @dataclass(frozen=True)
@@ -74,6 +82,7 @@ async def run_streaming_child(
     close_writer: bool = False,
     lag_monitor: LagMonitor | None = None,
     frame_observers: tuple[FrameObserver, ...] = (),
+    handover: HandoverSettings | None = None,
 ) -> None:
     """Drive one bootstrapped session until SIGTERM/deadline/max_cycles, then persist."""
     stop = asyncio.Event()
@@ -100,11 +109,21 @@ async def run_streaming_child(
             sink = LagMonitoringSink(sink, lag_monitor)
         for observer in frame_observers:
             sink = LagMonitoringSink(sink, observer)
+        extra: dict[str, Any] = {}
+        if handover is not None:
+            extra["handover"] = Handover(
+                adapter_factory=lambda: adapter_factory(http),
+                pairs=replay_pairs,
+                request=handover.request,
+                max_s=handover.max_s,
+                cooldown_s=handover.cooldown_s,
+            )
         streamer = streamer_factory(
             adapter=adapter,
             sink=sink,
             replay_pairs=replay_pairs,
             silence_limit=silence_limit,
+            **extra,
         )
         await streamer.run_forever(stop, max_cycles=max_cycles)
     finally:

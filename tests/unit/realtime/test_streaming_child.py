@@ -288,3 +288,41 @@ def test_runner_cleans_deadline_before_returning(monkeypatch, failure_stage) -> 
     asyncio.run(_run())
     assert closed == ([] if failure_stage == "http" else [True])
     assert persisted == ([True] if failure_stage in (None, "persist") else [])
+
+
+def test_runner_builds_a_handover_whose_standby_comes_from_the_adapter_factory(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from src.realtime.connection_handover import Handover, SwapRequest
+    from src.realtime.streaming_child import HandoverSettings
+
+    _make_http(monkeypatch)
+    built: list[object] = []
+    captured: dict[str, object] = {}
+
+    def _factory(http):
+        adapter = SimpleNamespace(capacity_pairs=10)
+        built.append(adapter)
+        return adapter
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        async def run_forever(self, stop, *, max_cycles=None) -> None:
+            return None
+
+    asyncio.run(run_streaming_child(
+        session=SimpleNamespace(),
+        adapter_factory=_factory,
+        replay_pairs=[("005930", "trade")],
+        silence_limit=lambda: None,
+        max_cycles=1,
+        streamer_factory=_FakeStreamer,
+        handover=HandoverSettings(SwapRequest(), 120.0, 300.0),
+    ))
+
+    handover = captured["handover"]
+    assert isinstance(handover, Handover)
+    assert len(built) == 1
+    assert handover._factory() is built[1]  # noqa: SLF001 - the standby adapter must come from the same factory

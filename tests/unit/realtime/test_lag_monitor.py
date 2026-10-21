@@ -117,3 +117,12 @@ def test_observe_swallows_unexpected_errors() -> None:
     bad = L0Frame("ls", "H0STCNT0", "005930", '{"chetime":"999999"}', 1, _ns(32400.5), 1, "c")
     monitor.observe(bad)
     assert monitor._lags == []
+
+
+def test_on_exceeded_fires_once_per_episode() -> None:
+    calls: list[int] = []
+    monitor = LagMonitor(threshold_s=10.0, sample_every=1, on_exceeded=lambda: calls.append(1))
+    _feed(monitor, 32400, 20, lag_s=1)
+    _feed(monitor, 32420, 20, lag_s=30)
+    _feed(monitor, 32440, 20, lag_s=40)
+    assert calls == [1]
