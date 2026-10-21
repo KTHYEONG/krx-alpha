@@ -547,7 +547,7 @@ print(j.filter(pl.col("ratio") != 1.0).sort("ratio").head(10))
 | Daily bars | 2761–2766 rows/date; `market_map.json` 2762 entries |
 | Program trades | 2449–2458 rows/date |
 | Benign DQ WARN | ls regular ASP: `decode_fail` ≤0.01% (empty `hotime`), `total_remain_short` ≤2.5%; ls regular CNT: `cum_volume_regression` ≤5, `tick_loss` ≤2; krx_after CNT `cum_volume_regression` ≤1; nxt_after CNT `tick_loss` ≤0.02% of rows, `lost_volume` ≤200. FAIL is never benign. Ignore the old FAIL footers `kis/krx/krx_after/H0STCNT0` `dt=2026-09-29`, `dt=2026-10-01` (old ±30% band, data intact) |
-| Benign events | `stream_disconnect`/`stream_gap reason=disconnect` (LS, ≤30 s) and `reason=watchdog` (KIS NXT) WARNINGs; `quality status=WARN` from the normalize worker with benign counters |
+| Benign events | `stream_disconnect`/`stream_gap reason=disconnect` (LS, ≤30 s) and `reason=watchdog` (KIS NXT) WARNINGs; `stream_handover` STARTED→CUT_OVER (proactive LS reconnect after `ingest_lag`, `dropped_duplicates` = payloads already recorded from the other connection; OPEN_FAILED/STANDBY_LOST leave the live connection untouched); `open_delay` CRITICAL only until the first trade frame (then RESOLVED); EOD `event_holes` lists event-second runs with no frame from any symbol (compare with `stream_gap` gap_ms); `quality status=WARN` from the normalize worker with benign counters |
 | EOD | `eod_maintenance status=OK` 20:21–20:51; `deleted_partitions` 0 on most days, ~70–210 when a 3-day-old batch ages out; `uploaded` 9 per normalized day |
 | Host backup | lock_wait 0 on quiet nights, up to 6174 s when another project holds the Drive lock; run 20 s–2 min after the lock; P-STORE backup 400 `=` (10-18) |
 | Clock | chrony offset <1 ms; manifest offsets ≤0.6 ms |
