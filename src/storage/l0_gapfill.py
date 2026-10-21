@@ -134,6 +134,22 @@ def _pooled_rows(
     return rows
 
 
+def _trim_surplus(pool: list[tuple[int, _TapeRow]], keep: int, deficit: int) -> list[tuple[int, _TapeRow]]:
+    """Keep `keep` pooled rows in tape order.
+
+    A single excess row is the one whose volume equals the pool's volume beyond `deficit`; otherwise the
+    smallest-volume rows (latest first on ties) are dropped, which bounds the volume distortion.
+    """
+    drop = len(pool) - keep
+    if drop == 1 and deficit > 0:
+        excess = sum(row[2] for _, row in pool) - deficit
+        for index in range(len(pool) - 1, -1, -1):
+            if pool[index][1][2] == excess:
+                return pool[:index] + pool[index + 1 :]
+    smallest = sorted(range(len(pool)), key=lambda index: (pool[index][1][2], -index))[:drop]
+    return [item for index, item in enumerate(pool) if index not in set(smallest)]
+
+
 def derive_gapfill(
     audit: Mapping[str, Any], sources: Sequence[GapfillSource], received: _Received | None = None
 ) -> tuple[pl.DataFrame, tuple[GapfillInterval, ...]]:
@@ -144,7 +160,7 @@ def derive_gapfill(
     (exact in total, best effort between intervals sharing a second). `received` maps (symbol, chetime) to the
     live frames' (cum, price, volume) and lets the boundary seconds be reconciled (see `_pooled_rows`); the
     gaps' second ranges must be covered by it. A pool larger than the cluster's missing count means the tape holds
-    trades the venue never counted (duplicates): only the earliest `missing` rows are kept and the excess is reported
+    trades the venue never counted (duplicates): `missing` rows are kept (the row whose volume explains the excess is dropped, else the smallest-volume ones) and the excess is reported
     as `surplus` with status `over` on the cluster's last interval. Raises `ValueError` when a tape lacks `symbol`, `ts_hms`, `price` or `volume`.
     """
     indexed_sources: list[tuple[GapfillSource, dict[str, dict[int, list[_TapeRow]]]]] = []
@@ -170,7 +186,8 @@ def derive_gapfill(
                 break
         cluster_missing = sum(int(interval["missing_trades"]) for interval in members)
         surplus = max(0, len(pool) - cluster_missing)
-        pool = pool[:cluster_missing]
+        if surplus:
+            pool = _trim_surplus(pool, cluster_missing, sum(int(interval.get("volume_deficit", 0)) for interval in members))
         remaining = len(pool)
         for position, (interval_id, interval) in enumerate(zip(cluster.members, members, strict=True)):
             missing = int(interval["missing_trades"])
