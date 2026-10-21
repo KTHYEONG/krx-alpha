@@ -16,11 +16,12 @@ from src.core.errors import KrxAlphaError
 from src.core.observability import EVENT
 from src.core.session_anchors import resolve_session_anchors
 from src.realtime.adapters.registry import RegularAdapterContext, regular_vendor
+from src.realtime.connection_handover import SwapRequest
 from src.realtime.lag_monitor import LagMonitor
 from src.realtime.regular_open_watch import RegularOpenWatch
 from src.realtime.session import CollectorSession, SessionConfig, StreamRoute, bootstrap_session
 from src.realtime.streamer import SILENCE_LIMIT_S, RealtimeStreamer
-from src.realtime.streaming_child import resolve_clock_overrides, run_streaming_child
+from src.realtime.streaming_child import HandoverSettings, resolve_clock_overrides, run_streaming_child
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class RegularStreamProfile:
     symbol_limit: int | None
     route: StreamRoute | None
     shutdown_log: str
+    proactive_handover: bool = False
 
 
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -115,6 +117,7 @@ async def run_regular_stream(
         open_grace_s=settings.regular_open_grace_s,
         alert_after_s=settings.regular_open_alert_after_s,
     )
+    swap_request = SwapRequest()
     await run_streaming_child(
         session=session,
         adapter_factory=lambda http: entry.build(
@@ -124,8 +127,16 @@ async def run_regular_stream(
         silence_limit=open_watch.silence_limit,
         max_cycles=getattr(args, "max_cycles", None),
         streamer_factory=streamer_factory,
-        lag_monitor=LagMonitor(threshold_s=AuditSettings().latency_alert_threshold_s),
+        lag_monitor=LagMonitor(
+            threshold_s=AuditSettings().latency_alert_threshold_s,
+            on_exceeded=swap_request.request if profile.proactive_handover else None,
+        ),
         frame_observers=(open_watch,),
+        handover=(
+            HandoverSettings(swap_request, settings.lag_handover_max_s, settings.lag_handover_cooldown_s)
+            if profile.proactive_handover
+            else None
+        ),
     )
     logger.info(
         profile.shutdown_log,
@@ -146,6 +157,7 @@ async def _run_stream(args: argparse.Namespace) -> int:
         symbol_limit=None,
         route=None,
         shutdown_log="[DATA] stage=stream_shutdown manifest=%s acks=%d gaps=%d boots=%d",
+        proactive_handover=settings.lag_handover_enabled and settings.vendor == "ls",
     )
     return await run_regular_stream(
         args, settings, profile, bootstrap=bootstrap_session, streamer_factory=RealtimeStreamer

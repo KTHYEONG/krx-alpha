@@ -22,6 +22,7 @@ from src.core.session_anchors import (
     STANDARD_NXT_PREMARKET_OPEN,
     SessionAnchors,
 )
+from src.realtime.connection_handover import Handover
 from src.realtime.contracts import (
     HeartbeatProbe,
     L0Frame,
@@ -162,6 +163,7 @@ class RealtimeStreamer:
         flush_every: int = 200,
         flush_interval_s: float = 1.0,
         silence_limit: Callable[[], float | None] | None = None,
+        handover: Handover | None = None,
         silence_poll_interval_s: float = SILENCE_POLL_INTERVAL_S,
         backoff_max_s: float = 60.0,
         rng: Callable[[], float] = random.random,
@@ -176,6 +178,7 @@ class RealtimeStreamer:
         self._flush_every = flush_every
         self._flush_interval_s = flush_interval_s
         self._silence_limit = silence_limit
+        self._handover = handover
         self._silence_poll_interval_s = silence_poll_interval_s
         self._backoff_max_s = backoff_max_s
         self._rng = rng
@@ -229,6 +232,12 @@ class RealtimeStreamer:
             )
             self._outage_alerted = False
         self._outage = None
+
+    async def _retire_adapter(self) -> None:
+        try:
+            await self._adapter.aclose()
+        except Exception:  # noqa: BLE001 - the retired connection is already replaced
+            logger.debug("[DATA] stage=stream_close status=SUPPRESSED reason=retired")
 
     async def pump(self, stop: asyncio.Event) -> str:
         """Run one connection until stop, vendor failure, or silence watchdog.
@@ -296,17 +305,42 @@ class RealtimeStreamer:
                         if remaining <= 0:
                             return "watchdog"
                         timeout = min(timeout, remaining)
-                    done, _ = await asyncio.wait(
-                        {recv_task, stop_task}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
-                    )
+                    handover = self._handover
+                    if handover is not None:
+                        handover.maybe_start(eligible=limit is not None and frames > 0)
+                    waiting = {recv_task, stop_task} | (handover.tasks() if handover is not None else set())
+                    done, _ = await asyncio.wait(waiting, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+                    if handover is not None:
+                        standby_frame = handover.standby_frame(done)
+                        if standby_frame is not None:
+                            handover.restart_standby_recv()
+                            if handover.admit(standby_frame, from_standby=True):
+                                self._sink.record(standby_frame)
+                                self._last_frame_wall_ns = standby_frame.recv_wall_ns
+                                frames += 1
+                                silent_since = self._monotonic()
+                        cut = await handover.step(done, recv_task)
+                        if cut is not None:
+                            await self._retire_adapter()
+                            self._adapter, recv_task = cut.adapter, cut.recv_task
+                            continue
                     if recv_task in done:
-                        frame = recv_task.result()
+                        try:
+                            frame = recv_task.result()
+                        except Exception:
+                            cut = await handover.on_primary_failure() if handover is not None else None
+                            if cut is None:
+                                raise
+                            await self._retire_adapter()
+                            self._adapter, recv_task = cut.adapter, cut.recv_task
+                            continue
                         recv_task = asyncio.ensure_future(self._adapter.recv())
                         if frames == 0:
                             # Pairs are subscribed one by one; a frame read mid-subscribe proves only
                             # that some pair is live, so the gap ends once every pair is subscribed.
                             self._close_outage(max(frame.recv_wall_ns, subscribed_ns), recovered=True)
-                        self._sink.record(frame)
+                        if handover is None or handover.admit(frame, from_standby=False):
+                            self._sink.record(frame)
                         self._last_frame_wall_ns = frame.recv_wall_ns
                         frames += 1
                         silent_since = self._monotonic()
@@ -314,6 +348,8 @@ class RealtimeStreamer:
                             self._sink.flush()
                             last_flush = self._monotonic()
             finally:
+                if self._handover is not None:
+                    await self._handover.aclose()
                 # Cancelling a pending recv may discard a frame already read from the
                 # socket, so it happens only once pump is returning for good.
                 for pending in (recv_task, stop_task):

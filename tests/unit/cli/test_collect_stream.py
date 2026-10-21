@@ -325,3 +325,56 @@ def test_collect_stream_missing_market_map_fails_closed(tmp_path, monkeypatch) -
                               ntp_host="h", max_clock_offset_ns=2_000_000_000, max_cycles=1)
     with pytest.raises(KrxAlphaError, match="market-map"):
         collect_stream.run(args)
+
+
+def _run_with_captured_streamer(tmp_path, monkeypatch, env: dict[str, str]):
+    import argparse
+    import json
+
+    from src.cli import collect_stream
+    from src.realtime.adapters import registry
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setenv("LS_APP_KEY", "k")
+    monkeypatch.setenv("LS_APP_SECRET", "s")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr("src.realtime.session.measure_ntp_offset_ns", lambda *a, **k: 0)
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
+    mm = tmp_path / "m.json"
+    mm.write_text(json.dumps({"005930": "KOSPI"}), encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    class _FakeStreamer:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        async def run_forever(self, stop, *, max_cycles=None):
+            return None
+
+    class _FakeHttp:
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(collect_stream, "RealtimeStreamer", _FakeStreamer)
+    monkeypatch.setattr(registry, "LsRealtimeAdapter", lambda **kw: object())
+    monkeypatch.setattr("aiohttp.ClientSession", lambda *a, **k: _FakeHttp())
+    args = argparse.Namespace(session_date="2026-09-14", journal_root=str(tmp_path / "l0"), manifest_path=str(tmp_path / "s.json"),
+                              candidates_path=str(cp), market_map=str(mm), ntp_host="h", max_clock_offset_ns=2_000_000_000, max_cycles=1)
+    assert collect_stream.run(args) == 0
+    return captured
+
+
+def test_collect_stream_enables_proactive_handover_for_ls_by_default(tmp_path, monkeypatch) -> None:
+    from src.realtime.connection_handover import Handover
+
+    captured = _run_with_captured_streamer(tmp_path, monkeypatch, {})
+
+    assert isinstance(captured["handover"], Handover)
+
+
+def test_collect_stream_handover_can_be_disabled(tmp_path, monkeypatch) -> None:
+    captured = _run_with_captured_streamer(tmp_path, monkeypatch, {"KRX_ALPHA_LAG_HANDOVER_ENABLED": "false"})
+
+    assert "handover" not in captured
