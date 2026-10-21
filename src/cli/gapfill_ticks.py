@@ -15,6 +15,7 @@ from src.brokers.kis.stack import build_kis_data_slot_stack
 from src.core.config import KisTokenSettings, SnapshotSettings
 from src.core.paths import DEFAULT_DATA_ROOT, DataPaths
 from src.realtime.kis_sharding import load_kis_data_credentials
+from src.storage.l0_audit import iter_received_ticks
 from src.storage.l0_gapfill import (
     GapfillInterval,
     GapfillSource,
@@ -37,6 +38,12 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--tape-vendor", default="kiwoom")
     parser.add_argument("--kis-min-missing", type=int, default=0, help="also query KIS REST for tape-less intervals with at least this many missing trades (0 disables)")
     parser.add_argument("--data-root", type=pathlib.Path, default=DEFAULT_DATA_ROOT)
+    parser.add_argument(
+        "--journal-root",
+        type=pathlib.Path,
+        default=None,
+        help="L0 journal root to anchor the tape order and recover the boundary seconds of each gap (read-only)",
+    )
     parser.set_defaults(handler=run)
 
 
@@ -73,6 +80,24 @@ def _kis_fetcher() -> TradeFetcher:
     return lambda symbol, start, end: stack.data.get_time_conclusions(symbol, start=start, end=end)
 
 
+def _received_trades(
+    audit: dict[str, object], journal_root: pathlib.Path, *, vendor: str, day: dt.date
+) -> dict[tuple[str, int], list[tuple[int, int, int]]]:
+    wanted: set[tuple[str, int]] = set()
+    for ledger in audit.get("symbols", ()):  # type: ignore[attr-defined]
+        for interval in ledger.get("intervals", ()):
+            if interval.get("chetime_prev") and interval.get("chetime_next"):
+                wanted.update(
+                    (str(ledger["symbol"]), second)
+                    for second in range(int(interval["chetime_prev"]), int(interval["chetime_next"]) + 1)
+                )
+    found: dict[tuple[str, int], list[tuple[int, int, int]]] = {}
+    for tick in iter_received_ticks(journal_root, vendor=vendor, venue="krx", session="regular", day=day):
+        if (tick.symbol, tick.chetime) in wanted:
+            found.setdefault((tick.symbol, tick.chetime), []).append((tick.cum, tick.price, tick.volume))
+    return found
+
+
 def run(args: argparse.Namespace, *, kis_fetcher: TradeFetcher | None = None) -> int:
     """Write gap-fill rows and report for ``--day`` and print the totals; returns 0 on success, 2 when the audit file is absent."""
     paths = DataPaths(args.data_root)
@@ -84,8 +109,12 @@ def run(args: argparse.Namespace, *, kis_fetcher: TradeFetcher | None = None) ->
     sources = [
         GapfillSource(args.tape_vendor, f"gapfill:{args.tape_vendor}_tape", pl.read_parquet(args.tape)),
     ]
-    rows, outcomes = derive_gapfill(audit, sources)
-    notes: dict[str, object] = {}
+    journal_root = getattr(args, "journal_root", None)
+    received = (
+        _received_trades(audit, journal_root, vendor=args.vendor, day=args.day) if journal_root is not None else None
+    )
+    rows, outcomes = derive_gapfill(audit, sources, received)
+    notes: dict[str, object] = {"anchored_on_journal": received is not None}
     if args.kis_min_missing > 0:
         targets = [
             item
@@ -95,7 +124,7 @@ def run(args: argparse.Namespace, *, kis_fetcher: TradeFetcher | None = None) ->
         if targets:
             kis_tape, stalled = fetch_kis_tape(kis_fetcher or _kis_fetcher(), targets)
             sources.append(GapfillSource("kis_rest", "gapfill:kis_rest_time_conclusion", kis_tape))
-            rows, outcomes = derive_gapfill(audit, sources)
+            rows, outcomes = derive_gapfill(audit, sources, received)
             notes["kis_saturated_seconds"] = stalled
     rows_path, report_path = paths.gapfill_paths(args.day, args.vendor)
     write_gapfill(rows, outcomes, rows_path=rows_path, report_path=report_path, notes=notes)
