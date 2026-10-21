@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import BinaryIO, Final
+from typing import BinaryIO, Final, NamedTuple
 from zoneinfo import ZoneInfo
 
 import zstandard as zstd
@@ -891,6 +891,37 @@ class _Derivation:
         )
         close_ns = int(closing.timestamp() * 1_000_000_000)
         return max(0, close_ns - self._last_regular_tick_ns) / 1_000_000_000, self._last_regular_tick_ns
+
+
+class ReceivedTick(NamedTuple):
+    symbol: str
+    chetime: int
+    cum: int
+    price: int
+    volume: int
+
+
+def iter_received_ticks(
+    journal_root: pathlib.Path, *, vendor: str, venue: str, session: str, day: dt.date
+) -> Iterator[ReceivedTick]:
+    """Yield every decodable trade of the routed tick partition in journal order; nothing is written."""
+    key = l0_partition_key(vendor, venue, session, _TICK_STREAM, day)
+    if key is None:
+        return
+    files = sorted((journal_root / l0_partition_relpath(key)).glob(L0_JOURNAL_GLOB), key=lambda p: p.name)
+    for path in files:
+        for blob in _iter_line_batches(path, _BATCH_BYTES, [False]):
+            for line in blob.splitlines():
+                record = _decode_envelope(line)
+                if record is None:
+                    continue
+                body = _parse_body(record.raw)
+                symbol = body.get("shcode")
+                moment = _valid_hhmmss(body.get("chetime"))
+                cum, price, volume = _tick_cum(body), _parse_int(body.get("price")), _parse_int(body.get("cvolume"))
+                if not isinstance(symbol, str) or moment is None or cum is None or price is None or volume is None:
+                    continue
+                yield ReceivedTick(symbol, moment.hour * 10000 + moment.minute * 100 + moment.second, cum, price, volume)
 
 
 def _tick_cum(body: dict[str, object]) -> int | None:

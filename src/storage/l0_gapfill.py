@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from enum import StrEnum
@@ -68,78 +69,120 @@ class GapfillSource:
     tape: pl.DataFrame
 
 
-def derive_gapfill(
-    audit: Mapping[str, Any], sources: Sequence[GapfillSource]
-) -> tuple[pl.DataFrame, tuple[GapfillInterval, ...]]:
-    """Return tape trades strictly between the two audited frames of every positive-missing interval, plus per-interval outcomes.
+_PICKED_SCHEMA: dict[str, Any] = {
+    "symbol": pl.String,
+    "ts_hms": pl.Int64,
+    "price": pl.Int64,
+    "volume": pl.Int64,
+    "tape_seq": pl.Int64,
+}
+_TapeRow = tuple[int, int, int]
+_Received = Mapping[tuple[str, int], Sequence[tuple[int, int, int]]]
 
-    Each interval takes the trades of the first source that has any inside it. Raises `ValueError` when a tape lacks
-    `symbol`, `ts_hms`, `price` or `volume`. Boundary-second trades are excluded because the live frames may already
-    hold part of them, so `residual` is a lower bound of the still-missing trades.
+
+@dataclass
+class _Cluster:
+    """Audited gaps of one symbol whose second ranges touch; their pooled trades cannot be told apart."""
+
+    members: list[int]
+    symbol: str
+    lo: int
+    hi: int
+
+
+def _clusters(items: Sequence[tuple[int, str, Mapping[str, Any]]]) -> list[_Cluster]:
+    clusters: list[_Cluster] = []
+    open_by_symbol: dict[str, _Cluster] = {}
+    for interval_id, symbol, interval in sorted(items, key=lambda it: (it[1], int(it[2]["chetime_prev"]))):
+        lo, hi = int(interval["chetime_prev"]), int(interval["chetime_next"])
+        current = open_by_symbol.get(symbol)
+        if current is not None and lo <= current.hi:
+            current.hi = max(current.hi, hi)
+            current.members.append(interval_id)
+            continue
+        current = _Cluster([interval_id], symbol, lo, hi)
+        open_by_symbol[symbol] = current
+        clusters.append(current)
+    return clusters
+
+
+def _pooled_rows(
+    by_ts: Mapping[int, Sequence[_TapeRow]], lo: int, hi: int, received: _Received | None, symbol: str
+) -> list[tuple[int, _TapeRow]]:
+    """Tape trades of `symbol` in seconds `[lo, hi]` that the live frames did not receive, in tape order.
+
+    With `received` every second is reconciled as a (price, volume) multiset difference, so partly received
+    boundary seconds contribute only their missing trades. Without it only seconds strictly inside the gap are
+    taken: the boundary seconds may already be held by the live frames, which makes `residual` a lower bound.
     """
-    indexed_sources: list[tuple[GapfillSource, dict[str, pl.DataFrame]]] = []
+    rows: list[tuple[int, _TapeRow]] = []
+    for ts in sorted(by_ts):
+        if not lo <= ts <= hi:
+            continue
+        if received is None:
+            if lo < ts < hi:
+                rows.extend((ts, row) for row in by_ts[ts])
+            continue
+        have = Counter((price, volume) for _, price, volume in received.get((symbol, ts), ()))
+        for row in by_ts[ts]:
+            key = (row[1], row[2])
+            if have[key] > 0:
+                have[key] -= 1
+            else:
+                rows.append((ts, row))
+    return rows
+
+
+def derive_gapfill(
+    audit: Mapping[str, Any], sources: Sequence[GapfillSource], received: _Received | None = None
+) -> tuple[pl.DataFrame, tuple[GapfillInterval, ...]]:
+    """Return tape trades that fill every positive-missing interval of the audit, plus per-interval outcomes.
+
+    Gaps of one symbol whose second ranges touch form a cluster: their missing trades are pooled, the first
+    source with any pooled trade supplies them, and the pool is handed to the cluster's intervals in time order
+    (exact in total, best effort between intervals sharing a second). `received` maps (symbol, chetime) to the
+    live frames' (cum, price, volume) and lets the boundary seconds be reconciled (see `_pooled_rows`); the
+    gaps' second ranges must be covered by it. A pool larger than the cluster's missing count is kept and reported as
+    `over` on the cluster's last interval. Raises `ValueError` when a tape lacks `symbol`, `ts_hms`, `price` or `volume`.
+    """
+    indexed_sources: list[tuple[GapfillSource, dict[str, dict[int, list[_TapeRow]]]]] = []
     for source in sources:
         missing_columns = [name for name in _TAPE_COLUMNS if name not in source.tape.columns]
         if missing_columns:
             raise ValueError(f"tape lacks columns {missing_columns}")
-        indexed = (
-            source.tape.select(_TAPE_COLUMNS).with_row_index("tape_seq").with_columns(pl.col("tape_seq").cast(pl.Int64))
-        )
-        indexed_sources.append(
-            (source, {key[0]: frame for key, frame in indexed.group_by("symbol", maintain_order=True)})
-        )
+        by_symbol: dict[str, dict[int, list[_TapeRow]]] = {}
+        for seq, symbol, ts, price, volume in source.tape.select(_TAPE_COLUMNS).with_row_index("tape_seq").iter_rows():
+            by_symbol.setdefault(symbol, {}).setdefault(int(ts), []).append((int(seq), int(price), int(volume)))
+        indexed_sources.append((source, by_symbol))
+    items = [(interval_id, symbol, interval) for interval_id, (symbol, interval) in enumerate(_audit_intervals(audit))]
     parts: list[pl.DataFrame] = []
-    outcomes: list[GapfillInterval] = []
-    for interval_id, (symbol, interval) in enumerate(_audit_intervals(audit)):
-        lo = int(interval["chetime_prev"])
-        hi = int(interval["chetime_next"])
-        missing = int(interval["missing_trades"])
+    outcomes: dict[int, GapfillInterval] = {}
+    for cluster in _clusters(items):
+        members = [items[interval_id][2] for interval_id in cluster.members]
         chosen: GapfillSource | None = None
-        picked = pl.DataFrame(
-            schema={
-                "symbol": pl.String,
-                "ts_hms": pl.Int64,
-                "price": pl.Int64,
-                "volume": pl.Int64,
-                "tape_seq": pl.Int64,
-            }
-        )
+        pool: list[tuple[int, _TapeRow]] = []
         for candidate, by_symbol in indexed_sources:
-            frame = by_symbol.get(symbol)
-            if frame is None:
-                continue
-            hits = frame.filter((pl.col("ts_hms") > lo) & (pl.col("ts_hms") < hi))
-            if hits.height > 0:
-                picked, chosen = hits, candidate
+            pool = _pooled_rows(by_symbol.get(cluster.symbol, {}), cluster.lo, cluster.hi, received, cluster.symbol)
+            if pool:
+                chosen = candidate
                 break
-        recovered = picked.height
-        if recovered > 0 and chosen is not None:
-            parts.append(
-                picked.select(
-                    pl.col("symbol"),
-                    pl.col("ts_hms").cast(pl.String).str.zfill(6).alias("chetime"),
-                    pl.col("price").cast(pl.Int64),
-                    pl.col("volume").cast(pl.Int64),
-                    pl.col("tape_seq"),
-                    pl.lit(interval_id, dtype=pl.Int64).alias("interval_id"),
-                    pl.lit(int(interval["cum_prev"]), dtype=pl.Int64).alias("cum_prev"),
-                    pl.lit(int(interval["cum_next"]), dtype=pl.Int64).alias("cum_next"),
-                    pl.lit(chosen.vendor).alias("vendor"),
-                    pl.lit(chosen.provenance).alias("provenance"),
-                )
-            )
-        if recovered == 0:
-            status = GapfillStatus.NONE
-        elif recovered < missing:
-            status = GapfillStatus.PARTIAL
-        elif recovered == missing:
-            status = GapfillStatus.FULL
-        else:
-            status = GapfillStatus.OVER
-        outcomes.append(
-            GapfillInterval(
+        remaining = len(pool)
+        for position, (interval_id, interval) in enumerate(zip(cluster.members, members, strict=True)):
+            missing = int(interval["missing_trades"])
+            last = position == len(members) - 1
+            recovered = remaining if last else min(missing, remaining)
+            remaining -= recovered
+            if recovered == 0:
+                status = GapfillStatus.NONE
+            elif recovered < missing:
+                status = GapfillStatus.PARTIAL
+            elif recovered == missing:
+                status = GapfillStatus.FULL
+            else:
+                status = GapfillStatus.OVER
+            outcomes[interval_id] = GapfillInterval(
                 interval_id=interval_id,
-                symbol=symbol,
+                symbol=cluster.symbol,
                 chetime_prev=str(interval["chetime_prev"]),
                 chetime_next=str(interval["chetime_next"]),
                 cum_prev=int(interval["cum_prev"]),
@@ -149,9 +192,36 @@ def derive_gapfill(
                 residual=max(0, missing - recovered),
                 status=status,
             )
-        )
+        if pool and chosen is not None:
+            cursor = 0
+            for interval_id in cluster.members:
+                take = outcomes[interval_id].recovered
+                frame = pl.DataFrame(
+                    [
+                        {"symbol": cluster.symbol, "ts_hms": ts, "price": price, "volume": volume, "tape_seq": seq}
+                        for ts, (seq, price, volume) in pool[cursor : cursor + take]
+                    ],
+                    schema=_PICKED_SCHEMA,
+                )
+                cursor += take
+                if frame.height == 0:
+                    continue
+                parts.append(
+                    frame.select(
+                        pl.col("symbol"),
+                        pl.col("ts_hms").cast(pl.String).str.zfill(6).alias("chetime"),
+                        pl.col("price"),
+                        pl.col("volume"),
+                        pl.col("tape_seq"),
+                        pl.lit(interval_id, dtype=pl.Int64).alias("interval_id"),
+                        pl.lit(outcomes[interval_id].cum_prev, dtype=pl.Int64).alias("cum_prev"),
+                        pl.lit(outcomes[interval_id].cum_next, dtype=pl.Int64).alias("cum_next"),
+                        pl.lit(chosen.vendor).alias("vendor"),
+                        pl.lit(chosen.provenance).alias("provenance"),
+                    )
+                )
     rows = pl.concat(parts) if parts else pl.DataFrame(schema=_ROW_SCHEMA)
-    return rows.sort(["symbol", "chetime", "tape_seq"]), tuple(outcomes)
+    return rows.sort(["symbol", "chetime", "tape_seq"]), tuple(outcomes[i] for i in sorted(outcomes))
 
 
 def summarize_gapfill(outcomes: Sequence[GapfillInterval]) -> dict[str, int]:

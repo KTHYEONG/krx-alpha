@@ -168,7 +168,7 @@ def test_cli_queries_kis_only_for_tape_less_intervals_and_records_saturation(tmp
     rows = pl.read_parquet(rows_path)
     assert rows.group_by("vendor").len().sort("vendor").rows() == [("kis_rest", 2), ("kiwoom", 1)]
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert report["notes"] == {"kis_saturated_seconds": {"000009": ["090101"]}}
+    assert report["notes"] == {"anchored_on_journal": False, "kis_saturated_seconds": {"000009": ["090101"]}}
 
 
 def test_write_gapfill_cleans_temp_file_and_reraises_on_replace_failure(
@@ -185,3 +185,95 @@ def test_write_gapfill_cleans_temp_file_and_reraises_on_replace_failure(
     with pytest.raises(OSError, match="disk full"):
         write_gapfill(rows, outcomes, rows_path=tmp_path / "d.parquet", report_path=tmp_path / "d.report.json")
     assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_received_frames_reconcile_the_boundary_seconds() -> None:
+    tape = _tape(
+        ("000001", 90056, 100, 1),
+        ("000001", 90056, 100, 1),
+        ("000001", 90057, 101, 2),
+        ("000001", 90151, 103, 4),
+        ("000001", 90151, 104, 5),
+    )
+    received = {("000001", 90056): [(10, 100, 1)], ("000001", 90151): [(14, 103, 4)]}
+    rows, outcomes = derive_gapfill(_audit(_interval(3)), _src(tape), received)
+    assert rows.select("chetime", "price", "volume").rows() == [("090056", 100, 1), ("090057", 101, 2), ("090151", 104, 5)]
+    assert (outcomes[0].recovered, outcomes[0].status) == (3, GapfillStatus.FULL)
+
+
+def test_touching_gaps_share_one_pool_in_time_order() -> None:
+    tape = _tape(("000001", 90100, 1, 1), ("000001", 90100, 2, 1), ("000001", 90101, 3, 1), ("000001", 90101, 4, 1))
+    first, second = _interval(1, "090059", "090100"), _interval(2, "090100", "090102")
+    rows, outcomes = derive_gapfill(_audit(first, second), _src(tape), {})
+    assert [o.recovered for o in outcomes] == [1, 3]
+    assert [o.status for o in outcomes] == [GapfillStatus.FULL, GapfillStatus.OVER]
+    assert rows["interval_id"].to_list() == [0, 1, 1, 1]
+    assert rows.height == 4
+
+
+def test_gaps_of_different_symbols_or_apart_do_not_share_a_pool() -> None:
+    tape = _tape(("000001", 90100, 1, 1), ("000002", 90100, 2, 1), ("000001", 91000, 3, 1))
+    audit = {
+        "symbols": [
+            {"symbol": "000001", "intervals": [_interval(1, "090059", "090101"), _interval(1, "090959", "091001")]},
+            {"symbol": "000002", "intervals": [_interval(1, "090059", "090101")]},
+        ]
+    }
+    rows, outcomes = derive_gapfill(audit, _src(tape), {})
+    assert [o.status for o in outcomes] == [GapfillStatus.FULL] * 3
+    assert rows.height == 3
+
+
+def test_journal_root_anchors_the_cli_on_received_frames(tmp_path: Path) -> None:
+    import argparse
+    import datetime as dt
+
+    import zstandard as zstd
+
+    from src.cli.gapfill_ticks import run
+    from src.core.paths import DataPaths
+
+    day = dt.date(2026, 10, 20)
+    paths = DataPaths(tmp_path)
+    audit_path = paths.session_audit_path(day, "ls")
+    audit_path.parent.mkdir(parents=True)
+    audit_path.write_text(json.dumps(_audit(_interval(1, "090056", "090058"))), encoding="utf-8")
+    part = tmp_path / "l0" / "ls" / "krx" / "regular" / "H0STCNT0" / f"dt={day.isoformat()}"
+    part.mkdir(parents=True)
+
+    def _record(chetime: str, cum: int, price: int, volume: int) -> dict[str, object]:
+        body = {"shcode": "000001", "chetime": chetime, "mdchecnt": "0", "mschecnt": str(cum), "price": str(price), "cvolume": str(volume)}
+        return {"raw": json.dumps({"header": {}, "body": body}), "recv_wall_ns": 1, "conn_id": "c", "conn_seq": cum, "symbol": "000001"}
+
+    junk = {"raw": "{}", "recv_wall_ns": 1, "conn_id": "c", "conn_seq": 99, "symbol": "000001"}
+    lines = [_record("090056", 10, 100, 1), _record("090058", 12, 103, 4), _record("090057", 9, 0, 0), junk]
+    lines[2]["raw"] = json.dumps({"header": {}, "body": {"shcode": "000001", "chetime": "09:57"}})
+    payload = ("".join(json.dumps(item) + "\n" for item in lines) + "not json\n").encode()
+    (part / "09.jsonl.zst").write_bytes(zstd.ZstdCompressor().compress(payload))
+    tape_path = tmp_path / "tape.parquet"
+    _tape(("000001", 90056, 100, 1), ("000001", 90057, 101, 2), ("000001", 90058, 103, 4)).write_parquet(tape_path)
+    args = argparse.Namespace(
+        day=day, vendor="ls", tape=tape_path, tape_vendor="kiwoom", kis_min_missing=0, data_root=tmp_path,
+        journal_root=tmp_path / "l0",
+    )
+
+    assert run(args) == 0
+
+    rows_path, report_path = paths.gapfill_paths(day, "ls")
+    assert pl.read_parquet(rows_path).select("chetime", "price").rows() == [("090057", 101)]
+    assert json.loads(report_path.read_text(encoding="utf-8"))["notes"] == {"anchored_on_journal": True}
+
+
+def test_iter_received_ticks_without_a_routable_partition_yields_nothing(tmp_path: Path) -> None:
+    import datetime as dt
+
+    from src.storage.l0_audit import iter_received_ticks
+
+    assert list(iter_received_ticks(tmp_path, vendor="ls", venue="nowhere", session="regular", day=dt.date(2026, 10, 20))) == []
+
+
+def test_short_pool_leaves_later_touching_gaps_without_rows() -> None:
+    tape = _tape(("000001", 90100, 1, 1))
+    rows, outcomes = derive_gapfill(_audit(_interval(3, "090059", "090100"), _interval(2, "090100", "090102")), _src(tape), {})
+    assert [(o.recovered, o.status) for o in outcomes] == [(1, GapfillStatus.PARTIAL), (0, GapfillStatus.NONE)]
+    assert rows["interval_id"].to_list() == [0]
