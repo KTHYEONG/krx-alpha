@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import importlib
 import logging
 import pathlib
 import signal
@@ -38,6 +39,7 @@ from src.core.config import (
     RegularKisSettings,
     ShardWatchdogSettings,
     SnapshotSettings,
+    TickTapeBackfillSettings,
     TossCredentials,
     TossProgramTradesSettings,
     UniverseTierSettings,
@@ -148,6 +150,7 @@ FIRST_FRAME_GRACE: dt.timedelta = dt.timedelta(minutes=5)
 SHUTDOWN_CHILD_DEADLINE_S: float = 20.0
 HOLIDAY_SLEEP_CAP_S: float = 3600.0
 PROGRAM_SYNC_POLL_S: float = 60.0
+NIGHTLY_OVERRUN_GRACE_S: float = 120.0
 CHILD_STOP_TIMEOUT_S: float = 15.0
 
 
@@ -811,6 +814,7 @@ class DaemonState:
     possible_holiday_warned_for: dt.date | None = None
     eod_attempted_for: dt.date | None = None
     program_sync_day: dt.date | None = None
+    nightly_done: dict[NightlyJob, dt.date] = field(default_factory=dict)
     orchestration_day: dt.date | None = None
     next_orchestration_at: dt.datetime | None = None
     orchestration_attempts: int = 0
@@ -869,6 +873,9 @@ class DaemonChildren:
     regular_kis: dict[str, ProcessSupervisor] = field(default_factory=dict)
     program_sync: Any | None = None
     program_sync_started_at: dt.datetime | None = None
+    nightly: subprocess.Popen[bytes] | None = None
+    nightly_job: NightlyJob | None = None
+    nightly_started_at: dt.datetime | None = None
     degraded_regular: ProcessSupervisor | None = None
 
     def get(self, key: StreamChildKey) -> ProcessSupervisor | None:
@@ -940,19 +947,87 @@ def _program_sync_cmd(session_date: dt.date, complete_through: dt.date) -> list[
     ]
 
 
-def _stop_sync_child(proc: Any, *, grace_s: float, already_signalled: bool = False) -> None:
+def _stop_sync_child(proc: Any, *, grace_s: float, already_signalled: bool = False, stage: str = "program_trades_sync") -> None:
     """Terminate a nightly sync child and SIGKILL it when the grace window expires."""
     if not already_signalled:
         proc.terminate()
     try:
         proc.wait(timeout=grace_s)
     except Exception as exc:  # noqa: BLE001 - SIGKILL fallback stays inside the deadline
-        logger.warning("[DAEMON] stage=program_trades_sync status=WAIT_TIMEOUT reason=%s", str(exc))
+        logger.warning("[DAEMON] stage=%s status=WAIT_TIMEOUT reason=%s", stage, str(exc))
         try:
             proc.kill()
             proc.wait()
         except Exception as kill_exc:  # noqa: BLE001 - shutdown proceeds regardless
-            logger.warning("[DAEMON] stage=program_trades_sync status=KILL_FAIL reason=%s", str(kill_exc))
+            logger.warning("[DAEMON] stage=%s status=KILL_FAIL reason=%s", stage, str(kill_exc))
+
+
+class NightlyJob(StrEnum):
+    TICK_TAPE = "tick_tape"
+    MINUTE_BARS = "minute_bars"
+
+
+_NIGHTLY_JOB_ORDER: tuple[NightlyJob, ...] = (NightlyJob.TICK_TAPE, NightlyJob.MINUTE_BARS)
+_NIGHTLY_BLOCKED_STATES: tuple[SessionState, ...] = (
+    SessionState.STREAMER_ACTIVE,
+    SessionState.FULL_ACTIVE,
+    SessionState.AFTER_MARKET_ACTIVE,
+)
+
+
+def nightly_window_open(now: dt.datetime, *, start: dt.time, end: dt.time) -> bool:
+    """True iff now (KST) is inside [start, end), where the window may cross midnight."""
+    wall = now.astimezone(_KST).time()
+    if start <= end:
+        return start <= wall < end
+    return wall >= start or wall < end
+
+
+def _nightly_window_identity(now: dt.datetime, *, start: dt.time, end: dt.time) -> dt.date:
+    """KST date of the window start containing now; a 23:30-05:30 window belongs to the 23:30 date."""
+    today = now.astimezone(_KST).date()
+    if start <= end:
+        return today
+    return today if now.astimezone(_KST).time() >= start else today - dt.timedelta(days=1)
+
+
+def _nightly_window_end(identity: dt.date, *, start: dt.time, end: dt.time) -> dt.datetime:
+    """KST instant the window starting on identity ends."""
+    if start <= end:
+        return dt.datetime.combine(identity, end, tzinfo=_KST)
+    return dt.datetime.combine(identity + dt.timedelta(days=1), end, tzinfo=_KST)
+
+
+def _nightly_job_cmd(job: NightlyJob, *, deadline: dt.datetime) -> list[str]:
+    """Argv for the one-shot backfill child (backfill-tick-tape / backfill-minute-bars) with --deadline."""
+    module = "backfill-tick-tape" if job is NightlyJob.TICK_TAPE else "backfill-minute-bars"
+    return [
+        sys.executable,
+        "-m",
+        "src.cli.main",
+        module,
+        "--deadline",
+        deadline.isoformat(),
+    ]
+
+
+def _minute_backfill_settings(explicit: Any | None) -> Any | None:
+    """Minute-bars settings override, else the Part 4 class when it exists (None until then)."""
+    if explicit is not None:
+        return explicit
+    cls = getattr(importlib.import_module("src.core.config"), "MinuteBackfillSettings", None)
+    return cls() if cls is not None else None
+
+
+def _child_alive(proc: Any) -> bool:
+    """True while a raw Popen or a ProcessSupervisor child is still running."""
+    poll = getattr(proc, "poll", None)
+    if callable(poll):
+        return proc.poll() is None
+    running = getattr(proc, "is_running", None)
+    if callable(running):
+        return bool(proc.is_running())
+    return proc is not None
 
 
 @dataclass
@@ -1155,6 +1230,8 @@ class DaemonRunner:
         now: Callable[[], dt.datetime],
         sleep: Callable[[float], None],
         program_sync_settings: TossProgramTradesSettings | None = None,
+        tick_tape_settings: TickTapeBackfillSettings | None = None,
+        minute_backfill_settings: Any | None = None,
     ) -> None:
         self._runtime = runtime
         self._shutdown = shutdown
@@ -1184,6 +1261,10 @@ class DaemonRunner:
         self._program_sync_cfg = (
             program_sync_settings if program_sync_settings is not None else TossProgramTradesSettings()
         )
+        self._tick_tape_cfg = (
+            tick_tape_settings if tick_tape_settings is not None else TickTapeBackfillSettings()
+        )
+        self._minute_cfg = _minute_backfill_settings(minute_backfill_settings)
         self._sched = replace(
             runtime.collector.schedule,
             after_market_enabled=runtime.collector.after_market_enabled,
@@ -1245,11 +1326,21 @@ class DaemonRunner:
                 targets.append(supervisor)
         sync = self._children.program_sync
         sync_running = sync is not None and sync.poll() is None
+        nightly = self._children.nightly
+        nightly_running = nightly is not None and _child_alive(nightly)
+        nightly_stage = (
+            f"nightly_{self._children.nightly_job.value}"
+            if self._children.nightly_job is not None
+            else "nightly_unknown"
+        )
         # 모든 자식에 먼저 SIGTERM 을 보내 대기를 겹쳐야 compose 30s 유예 안에 끝난다 (순차 대기 시 최대 40s).
         started = time.monotonic()
         if sync_running:
             assert sync is not None
             sync.terminate()
+        if nightly_running:
+            assert nightly is not None
+            nightly.terminate()
         counts = stop_supervisors(targets, deadline_s=SHUTDOWN_CHILD_DEADLINE_S)
         if sync_running:
             assert sync is not None
@@ -1257,6 +1348,13 @@ class DaemonRunner:
             _stop_sync_child(sync, grace_s=remaining, already_signalled=True)
             self._children.program_sync = None
             self._children.program_sync_started_at = None
+        if nightly_running:
+            assert nightly is not None
+            remaining = max(1.0, SHUTDOWN_CHILD_DEADLINE_S - (time.monotonic() - started))
+            _stop_sync_child(nightly, grace_s=remaining, already_signalled=True, stage=nightly_stage)
+        self._children.nightly = None
+        self._children.nightly_job = None
+        self._children.nightly_started_at = None
         raw = getattr(self._shutdown, "signal_name", "UNKNOWN") if self._shutdown is not None else "UNKNOWN"
         sig = str(raw) if raw else "UNKNOWN"
         logger.info(
@@ -1297,6 +1395,8 @@ class DaemonRunner:
         """Launch the nightly sync once per business day after EOD completes."""
         st = self._state
         ch = self._children
+        if ch.nightly is not None and ch.nightly.poll() is None:
+            return
         if ch.program_sync is not None and ch.program_sync.poll() is None:
             return
         if st.eod_attempted_for is None or st.program_sync_day == st.eod_attempted_for:
@@ -1320,6 +1420,118 @@ class DaemonRunner:
         st.program_sync_day = today
         logger.info("[DAEMON] stage=program_trades_sync status=STARTED date=%s", today.isoformat())
 
+    def _nightly_job_enabled(self, job: NightlyJob) -> bool:
+        """Per-job enable gate; minute bars stay inert until the Part 4 settings land."""
+        if job is NightlyJob.TICK_TAPE:
+            return bool(self._tick_tape_cfg.enabled)
+        return self._minute_cfg is not None and bool(self._minute_cfg.enabled)
+
+    def _nightly_session_live(self) -> bool:
+        """True while any session state or supervised session child is active."""
+        if self._state.prev_state in _NIGHTLY_BLOCKED_STATES:
+            return True
+        ch = self._children
+        singles: list[Any | None] = [ch.regular, ch.snapshot, ch.db_crosscheck, ch.premarket]
+        if any(sup is not None and _child_alive(sup) for sup in singles):
+            return True
+        return any(any(_child_alive(sup) for sup in mapping.values()) for mapping in (ch.aftermarket, ch.regular_kis))
+
+    def _stop_nightly_child(self, *, reason: str) -> None:
+        """Terminate the nightly backfill child when present and drop its handle."""
+        ch = self._children
+        proc = ch.nightly
+        if proc is None:
+            return
+        job = ch.nightly_job
+        stage = f"nightly_{job.value}" if job is not None else "nightly_unknown"
+        if proc.poll() is None:
+            _stop_sync_child(proc, grace_s=CHILD_STOP_TIMEOUT_S, stage=stage)
+        ch.nightly = None
+        ch.nightly_job = None
+        ch.nightly_started_at = None
+        logger.info("[DAEMON] stage=%s status=STOPPED reason=%s", stage, reason)
+
+    def _poll_nightly(self, now: dt.datetime) -> None:
+        """Reap the nightly backfill child without blocking; enforce window end + 120 s grace."""
+        ch = self._children
+        proc = ch.nightly
+        if proc is None:
+            return
+        job = ch.nightly_job
+        stage = f"nightly_{job.value}" if job is not None else "nightly_unknown"
+        code = proc.poll()
+        if code is None:
+            started = ch.nightly_started_at
+            anchor = started if started is not None else now
+            window = (self._tick_tape_cfg.window_start_kst, self._tick_tape_cfg.window_end_kst)
+            identity = _nightly_window_identity(anchor, start=window[0], end=window[1])
+            window_end = _nightly_window_end(identity, start=window[0], end=window[1])
+            if (now - window_end).total_seconds() > NIGHTLY_OVERRUN_GRACE_S:
+                _stop_sync_child(proc, grace_s=CHILD_STOP_TIMEOUT_S, stage=stage)
+                ch.nightly = None
+                ch.nightly_job = None
+                ch.nightly_started_at = None
+                logger.warning("[DAEMON] stage=%s status=FAIL reason=deadline", stage)
+            return
+        ch.nightly = None
+        ch.nightly_job = None
+        ch.nightly_started_at = None
+        if code == 0:
+            logger.info("[DAEMON] stage=%s status=OK", stage)
+        elif code == 2:
+            logger.info("[DAEMON] stage=%s status=NOOP", stage)
+        else:
+            logger.warning("[DAEMON] stage=%s status=FAIL exit_code=%s", stage, code)
+
+    def _maybe_launch_nightly(self, now: dt.datetime) -> None:
+        """Launch at most one backfill child at a time, each job at most once per window."""
+        st = self._state
+        ch = self._children
+        if not any(self._nightly_job_enabled(job) for job in _NIGHTLY_JOB_ORDER):
+            return
+        now = max(now, self._now())
+        if ch.nightly is not None:
+            return
+        sync = ch.program_sync
+        if sync is not None and _child_alive(sync):
+            return
+        if self._nightly_session_live():
+            return
+        window = (self._tick_tape_cfg.window_start_kst, self._tick_tape_cfg.window_end_kst)
+        if not nightly_window_open(now, start=window[0], end=window[1]):
+            return
+        identity = _nightly_window_identity(now, start=window[0], end=window[1])
+        view = self._gate.view(identity, now)
+        if view.status is TradingDayStatus.UNKNOWN:
+            return
+        if view.status is TradingDayStatus.BUSINESS and st.eod_attempted_for != identity:
+            return
+        for job in _NIGHTLY_JOB_ORDER:
+            if st.nightly_done.get(job) == identity:
+                continue
+            if not self._nightly_job_enabled(job):
+                continue
+            deadline = _nightly_window_end(identity, start=window[0], end=window[1])
+            try:
+                ch.nightly = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                    _nightly_job_cmd(job, deadline=deadline), env=child_process_env({})
+                )
+            except OSError as exc:
+                logger.critical(
+                    "[DAEMON] stage=nightly_%s status=FAIL exit_code=launch reason=%s",
+                    job.value,
+                    str(exc),
+                )
+                st.nightly_done[job] = identity
+                return
+            ch.nightly_job = job
+            ch.nightly_started_at = self._now()
+            st.nightly_done[job] = identity
+            logger.info(
+                "[DAEMON] stage=nightly_%s status=STARTED deadline=%s", job.value, deadline.isoformat()
+            )
+            return
+
     def step(self, now: dt.datetime) -> float:
         """Advance one scheduled daemon cycle and return the next delay.
 
@@ -1338,6 +1550,8 @@ class DaemonRunner:
         state = get_target_state(now, schedule_for(anchors, self._sched))
         day, anchors = self._resolve_active_day(now, state, anchors)
         self._log_cycle(now, state)
+        if state in _NIGHTLY_BLOCKED_STATES:
+            self._stop_nightly_child(reason="session")
         if state == SessionState.WEEKEND_SLEEP:
             sleep_sec = 3600.0  # 주말엔 1시간씩 대기
         elif state == SessionState.PRE_MARKET_SLEEP:
@@ -1357,8 +1571,12 @@ class DaemonRunner:
                 sleep_sec = min(sleep_sec, cap)
         self._poll_program_sync(now)
         self._maybe_launch_program_sync(now)
-        if self._children.program_sync is not None:
-            # A running sync child must not wait out a long night sleep before its timeout is checked.
+        self._poll_nightly(now)
+        self._maybe_launch_nightly(now)
+        if self._children.program_sync is not None or self._children.nightly is not None:
+            # A running nightly child must not wait out a long night sleep before its deadline is checked.
+            sleep_sec = min(sleep_sec, PROGRAM_SYNC_POLL_S)
+        if any(self._nightly_job_enabled(job) for job in _NIGHTLY_JOB_ORDER):
             sleep_sec = min(sleep_sec, PROGRAM_SYNC_POLL_S)
         return sleep_sec
 
@@ -1487,6 +1705,7 @@ class DaemonRunner:
         self._stop_session_children()
         self._stop_aftermarket_children(clear_circuit_alerts=False)
         self._stop_regular_kis_children(clear_circuit_alerts=False)
+        self._stop_nightly_child(reason="holiday")
 
     def _holiday_sleep_s(self, now: dt.datetime, state: SessionState) -> float:
         if state is SessionState.STREAMER_ACTIVE:
@@ -1510,6 +1729,7 @@ class DaemonRunner:
             logger.warning("[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s", stale_stop)
         self._stop_session_children()
         self._stop_regular_kis_children(clear_circuit_alerts=True)
+        self._stop_nightly_child(reason="new_session_day")
         st.orchestration_day = today
         st.next_orchestration_at = None
         st.orchestration_attempts = 0
@@ -2397,6 +2617,7 @@ class DaemonRunner:
             if shard is None:
                 return
             if ch.premarket is None:
+                self._stop_nightly_child(reason="premarket")
                 ch.premarket = ProcessSupervisor(
                     cmd=premarket_stream_cmd(today, paths, shard=shard),
                     breaker=RestartCircuitBreaker(),

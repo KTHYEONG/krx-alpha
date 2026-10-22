@@ -149,7 +149,8 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "nightly_done": {}
       },
       "instant": "2026-09-16T08:25:00+09:00"
     },
@@ -222,7 +223,8 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "nightly_done": {}
       },
       "instant": "2026-09-16T08:26:00+09:00"
     },
@@ -352,7 +354,8 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "nightly_done": {}
       },
       "instant": "2026-09-16T08:31:00+09:00"
     },
@@ -455,7 +458,8 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "nightly_done": {}
       },
       "instant": "2026-09-16T09:10:00+09:00"
     },
@@ -575,7 +579,8 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "nightly_done": {}
       },
       "instant": "2026-09-16T15:32:00+09:00"
     },
@@ -747,7 +752,8 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "nightly_done": {}
       },
       "instant": "2026-09-16T15:45:00+09:00"
     },
@@ -923,7 +929,8 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "nightly_done": {}
       },
       "instant": "2026-09-16T16:05:00+09:00"
     },
@@ -1159,7 +1166,8 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "nightly_done": {}
       },
       "instant": "2026-09-16T20:05:00+09:00"
     },
@@ -1248,7 +1256,8 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "nightly_done": {}
       },
       "instant": "2026-09-16T20:06:00+09:00"
     },
@@ -1358,7 +1367,8 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "nightly_done": {}
       },
       "instant": "2026-09-16T22:00:00+09:00"
     },
@@ -1494,7 +1504,8 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "nightly_done": {}
       },
       "instant": "2026-09-17T09:00:00+09:00"
     },
@@ -1620,7 +1631,8 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "nightly_done": {}
       },
       "instant": "2026-09-17T20:05:00+09:00"
     },
@@ -1793,7 +1805,8 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0
+        "streamer_restarts": 0,
+        "nightly_done": {}
       },
       "instant": "2026-09-18T08:25:00+09:00"
     }
@@ -1801,6 +1814,11 @@
   "log_stage_multiset": [
     "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=bars_unreadable",
     "[ALGO] stage=aftermarket_eligibility status=DEGRADED reason=no_bars_store",
+    "[DAEMON] stage=%s status=FAIL exit_code=%s",
+    "[DAEMON] stage=%s status=FAIL reason=deadline",
+    "[DAEMON] stage=%s status=NOOP",
+    "[DAEMON] stage=%s status=OK",
+    "[DAEMON] stage=%s status=STOPPED reason=%s",
     "[DAEMON] stage=aftermarket_plan status=EMPTY venue=%s reason=%s",
     "[DAEMON] stage=aftermarket_plan status=FAIL reason=%s",
     "[DAEMON] stage=aftermarket_reselection status=FAIL venue=%s reason=%s next_retry=%s",
@@ -1823,6 +1841,8 @@
     "[DAEMON] stage=ingest_watchdog status=POSSIBLE_HOLIDAY date=%s",
     "[DAEMON] stage=ingest_watchdog status=RECOVERED date=%s age_s=%d",
     "[DAEMON] stage=ingest_watchdog status=STALE date=%s age_s=%s",
+    "[DAEMON] stage=nightly_%s status=FAIL exit_code=launch reason=%s",
+    "[DAEMON] stage=nightly_%s status=STARTED deadline=%s",
     "[DAEMON] stage=program_trades_sync status=FAIL exit_code=%s",
     "[DAEMON] stage=program_trades_sync status=FAIL exit_code=launch reason=%s",
     "[DAEMON] stage=program_trades_sync status=FAIL reason=timeout",
