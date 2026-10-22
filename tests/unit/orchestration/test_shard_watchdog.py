@@ -267,8 +267,14 @@ def test_window_unsupported_pair() -> None:
     anchors = standard_session_anchors(DAY)
     with pytest.raises(ValueError, match="premarket window"):
         shard_window(MarketVenue.KRX, MarketSession.NXT_PRE, day=DAY, anchors=anchors)
-    with pytest.raises(ValueError, match="shard window"):
+    with pytest.raises(ValueError, match="regular window"):
         shard_window(MarketVenue.NXT, MarketSession.REGULAR, day=DAY, anchors=anchors)
+
+
+def test_regular_window_is_open_to_closing_auction() -> None:
+    anchors = standard_session_anchors(DAY)
+    open_dt, end_dt = shard_window(MarketVenue.KRX, MarketSession.REGULAR, day=DAY, anchors=anchors)
+    assert (open_dt.time(), end_dt.time()) == (dt.time(9, 0), dt.time(15, 20))
 
 
 def _journal_path(root, *, stream, day, hour, tag):

@@ -62,6 +62,7 @@ def test_spec_table_order_and_roles() -> None:
         daemon_mod.StreamChildKey.DB_CROSSCHECK,
         daemon_mod.StreamChildKey.AFTERMARKET,
         daemon_mod.StreamChildKey.PREMARKET,
+        daemon_mod.StreamChildKey.REGULAR_KIS,
     ]
     primaries = [s for s in daemon_mod.DaemonRunner._STREAM_SPECS if s.role is daemon_mod.StreamRole.PRIMARY]
     assert len(primaries) == 1

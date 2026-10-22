@@ -35,6 +35,7 @@ from src.core.config import (
     KrxCredentials,
     LivenessSettings,
     ObservabilitySettings,
+    RegularKisSettings,
     ShardWatchdogSettings,
     SnapshotSettings,
     TossCredentials,
@@ -95,6 +96,7 @@ from src.orchestration.premarket import (
     premarket_stream_cmd,
     premarket_wake_cap_s,
 )
+from src.orchestration.regular_kis import regular_kis_collection_due, regular_kis_stream_cmd
 from src.orchestration.shard_watchdog import (
     ShardDecision,
     ShardObservation,
@@ -111,6 +113,7 @@ from src.realtime.kis_sharding import (
     load_kis_data_credentials,
     plan_aftermarket_shards,
     plan_premarket_shard,
+    plan_regular_kis_shards,
 )
 from src.realtime.manifest import SessionManifest
 from src.realtime.streamer import aftermarket_open_time
@@ -436,12 +439,13 @@ class _EodHousekeeping:
 
 def _tick_open_max_latency_s(audit: SessionAudit, anchors: SessionAnchors) -> str:
     peak: float | None = None
+    open_end = _shifted_time(anchors.regular_open, dt.timedelta(minutes=5))
     for entry in audit.latency:
         if entry.stream != "H0STCNT0":
             continue
         for minute in entry.minutes:
             moment = dt.time(int(minute.minute_kst[0:2]), int(minute.minute_kst[3:5]))
-            if anchors.regular_open <= moment < anchors.regular_close and (peak is None or minute.max_s > peak):
+            if anchors.regular_open <= moment < open_end and (peak is None or minute.max_s > peak):
                 peak = minute.max_s
     return f"{peak:.1f}" if peak is not None else "-"
 
@@ -720,6 +724,7 @@ class StreamRole(StrEnum):
     SNAPSHOT = "snapshot"
     AFTERMARKET = "aftermarket"
     PREMARKET = "premarket"
+    REGULAR_KIS = "regular_kis"
 
 
 class StreamChildKey(StrEnum):
@@ -728,6 +733,7 @@ class StreamChildKey(StrEnum):
     DB_CROSSCHECK = "db_crosscheck"
     AFTERMARKET = "aftermarket"
     PREMARKET = "premarket"
+    REGULAR_KIS = "regular_kis"
 
 
 class ChildLifecycle(StrEnum):
@@ -832,6 +838,10 @@ class DaemonState:
     premarket_plan_day: dt.date | None = None
     premarket_shard: AftermarketShard | None = None
     premarket_circuit_alerted_day: dt.date | None = None
+    regular_kis_plan: tuple[AftermarketShard, ...] = ()
+    regular_kis_plan_day: dt.date | None = None
+    regular_kis_circuit_alerted: set[str] = field(default_factory=set)
+    aftermarket_deferred_slots: set[str] = field(default_factory=set)
 
     _CHILD_RESULT_FIELDS: ClassVar[Mapping[StreamChildKey, str]] = {
         StreamChildKey.REGULAR: "last_supervisor_result",
@@ -853,6 +863,7 @@ class DaemonState:
 class DaemonChildren:
     streams: dict[StreamChildKey, ProcessSupervisor] = field(default_factory=dict)
     aftermarket: dict[str, ProcessSupervisor] = field(default_factory=dict)
+    regular_kis: dict[str, ProcessSupervisor] = field(default_factory=dict)
     program_sync: Any | None = None
     program_sync_started_at: dt.datetime | None = None
     degraded_regular: ProcessSupervisor | None = None
@@ -865,6 +876,8 @@ class DaemonChildren:
         """Install (or with None remove) a single-instance child."""
         if key is StreamChildKey.AFTERMARKET:
             raise ValueError("aftermarket shards live in the aftermarket mapping")
+        if key is StreamChildKey.REGULAR_KIS:
+            raise ValueError("regular_kis shards live in the regular_kis mapping")
         if supervisor is None:
             self.streams.pop(key, None)
         else:
@@ -1107,6 +1120,12 @@ class DaemonRunner:
             lifecycle=ChildLifecycle.WINDOWED,
             enabled=lambda runtime: runtime.premarket.enabled,
         ),
+        StreamChildSpec(
+            key=StreamChildKey.REGULAR_KIS,
+            role=StreamRole.REGULAR_KIS,
+            lifecycle=ChildLifecycle.SHARDED,
+            enabled=lambda runtime: bool(getattr(getattr(runtime, "regular_kis", None), "enabled", False)),
+        ),
     )
 
     @classmethod
@@ -1153,6 +1172,9 @@ class DaemonRunner:
         )
         self._premarket_watchdog = ShardWatchdog(
             limit_s=_wd.premarket_stale_limit_s, max_restarts_per_day=_wd.max_restarts_per_day
+        )
+        self._regular_kis_watchdog = ShardWatchdog(
+            limit_s=_wd.aftermarket_stale_limit_s, max_restarts_per_day=_wd.max_restarts_per_day
         )
         self._program_sync_cfg = (
             program_sync_settings if program_sync_settings is not None else TossProgramTradesSettings()
@@ -1209,6 +1231,7 @@ class DaemonRunner:
         if regular is not None:
             targets.append(regular)
         targets.extend(ch.aftermarket.values())
+        targets.extend(ch.regular_kis.values())
         for spec in self._STREAM_SPECS:
             if spec.role is StreamRole.PRIMARY or spec.lifecycle is ChildLifecycle.SHARDED:
                 continue
@@ -1446,6 +1469,7 @@ class DaemonRunner:
             self._reset_for_new_session_day(today)
         self._maybe_orchestrate(now, state, day)
         self._supervise_session_children(now, anchors)
+        self._supervise_regular_kis(now, anchors)
         self._run_ingest_watchdog(now, state, day, anchors)
         self._run_first_frame_watchdog(now, state, day, anchors)
         self._run_crosscheck_watchdogs(now, state, day, anchors)
@@ -1457,6 +1481,7 @@ class DaemonRunner:
     def _stop_holiday_children(self) -> None:
         self._stop_session_children()
         self._stop_aftermarket_children(clear_circuit_alerts=False)
+        self._stop_regular_kis_children(clear_circuit_alerts=False)
 
     def _holiday_sleep_s(self, now: dt.datetime, state: SessionState) -> float:
         if state is SessionState.STREAMER_ACTIVE:
@@ -1479,6 +1504,7 @@ class DaemonRunner:
             stale_stop = self._stop_stream_child(StreamChildKey.REGULAR)
             logger.warning("[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s", stale_stop)
         self._stop_session_children()
+        self._stop_regular_kis_children(clear_circuit_alerts=True)
         st.orchestration_day = today
         st.next_orchestration_at = None
         st.orchestration_attempts = 0
@@ -1487,6 +1513,10 @@ class DaemonRunner:
         st.ingest_stale = False
         st.next_aftermarket_refresh_at = None
         st.next_aftermarket_nxt_refresh_at = None
+        st.regular_kis_plan = ()
+        st.regular_kis_plan_day = None
+        st.regular_kis_circuit_alerted.clear()
+        st.aftermarket_deferred_slots.clear()
 
     def _maybe_orchestrate(self, now: dt.datetime, state: SessionState, day: TradingDayView) -> None:
         """Run session orchestration at most once per day, retrying on backoff and falling back to a degraded streamer.
@@ -1593,6 +1623,8 @@ class DaemonRunner:
         st.orchestrated_for = today
         st.next_orchestration_at = None
         replacing_degraded = self._children.regular_is_degraded
+        if replacing_degraded:
+            st.regular_kis_plan_day = None
         for spec in self._session_specs():
             assert spec.cmd is not None
             self._install_stream_child(
@@ -1675,6 +1707,8 @@ class DaemonRunner:
         """Stop and drop a single-instance child; returns the stop result or None when absent."""
         if key is StreamChildKey.AFTERMARKET:
             raise ValueError("aftermarket shards are stopped via _stop_aftermarket_children")
+        if key is StreamChildKey.REGULAR_KIS:
+            raise ValueError("regular_kis shards are stopped via _stop_regular_kis_children")
         ch = self._children
         sup = ch.get(key)
         if sup is None:
@@ -2173,11 +2207,26 @@ class DaemonRunner:
         ):
             # A pending reselection in FULL_ACTIVE must not latch an empty plan for the day.
             self._ensure_aftermarket_plan(today)
+        plan_slots = {f"krx-{s.shard_index:02d}": s.credential_slot for s in st.regular_kis_plan}
+        live_regular_slots = {
+            plan_slots[key]
+            for key, sup in ch.regular_kis.items()
+            if key in plan_slots and hasattr(sup, "is_running") and bool(sup.is_running())
+        }
         for shard in st.aftermarket_plan:
             if st.aftermarket_plan_day != today or shard.venue not in due:
                 continue
             supervisor_key = f"{shard.venue.value}:{shard.shard_index}"
             if supervisor_key in ch.aftermarket:
+                continue
+            slot = getattr(shard, "credential_slot", None)
+            if slot is not None and slot in live_regular_slots:
+                if slot not in st.aftermarket_deferred_slots:
+                    st.aftermarket_deferred_slots.add(slot)
+                    logger.warning(
+                        "[DATA] stage=aftermarket_stream status=DEFERRED reason=slot_busy_regular_kis slot=%s",
+                        slot,
+                    )
                 continue
             self._install_aftermarket(supervisor_key, _aftermarket_stream_cmd(today, paths, shard=shard))
             open_time = aftermarket_open_time(shard.venue, anchors)
@@ -2362,6 +2411,164 @@ class DaemonRunner:
         except (KrxAlphaError, KisApiError, OSError, ValueError) as exc:
             logger.warning("[DATA] stage=premarket_supervise status=FAIL reason=%s", str(exc))
 
+    def _ensure_regular_kis_plan(self, today: dt.date) -> None:
+        """Plan today's ready candidate prefix once, containing file and credential failures."""
+        st = self._state
+        if st.regular_kis_plan_day == today:
+            return
+        if st.degraded_active:
+            st.regular_kis_plan_day = today
+            st.regular_kis_plan = ()
+            logger.error(
+                "[DATA] stage=regular_kis_plan status=SKIP reason=degraded_candidates date=%s",
+                today.isoformat(),
+            )
+            return
+        if st.orchestrated_for != today:
+            return
+        st.regular_kis_plan_day = today
+        try:
+            data = read_candidates(self._paths.candidates)
+            if data is None or (isinstance(data, dict) and not data.get("candidates")):
+                st.regular_kis_plan_day = None
+                return
+            rows = data.get("candidates") if isinstance(data, dict) else None
+            if (
+                not isinstance(rows, list)
+                or not rows
+                or not all(isinstance(row, dict) and isinstance(row.get("symbol"), str) and row["symbol"] for row in rows)
+            ):
+                raise KrxAlphaError(f"invalid candidates file: {self._paths.candidates}")
+            symbols = tuple(str(row["symbol"]) for row in rows if isinstance(row, dict))
+            cfg = getattr(self._runtime, "regular_kis", None) or RegularKisSettings()
+            st.regular_kis_plan = plan_regular_kis_shards(
+                symbols=symbols,
+                credentials=load_kis_data_credentials(),
+                credential_slots=tuple(cfg.credential_slots),
+                pair_capacity_per_connection=int(cfg.pair_capacity_per_connection or 0),
+                streams=cfg.streams,
+            )
+        except (KrxAlphaError, OSError, ValueError) as exc:
+            st.regular_kis_plan = ()
+            logger.error(
+                "[DATA] stage=regular_kis_plan status=SKIP reason=%s date=%s",
+                str(exc),
+                today.isoformat(),
+            )
+
+    def _supervise_regular_kis(self, now: dt.datetime, anchors: SessionAnchors) -> None:
+        """Start, supervise, watchdog and stop KIS regular shards; never raises and never touches any other child."""
+        try:
+            cfg = getattr(self._runtime, "regular_kis", None) or RegularKisSettings()
+            st = self._state
+            ch = self._children
+            paths = self._paths
+            today = now.astimezone(_KST).date()
+            due = bool(cfg.enabled)
+            if due:
+                view = self._gate.view(today, now)
+                if view.status is TradingDayStatus.HOLIDAY or not regular_kis_collection_due(
+                    now,
+                    anchors=anchors,
+                    start_lead_s=cfg.start_lead_s,
+                    close_grace_s=cfg.close_grace_s,
+                ):
+                    due = False
+            if not due:
+                for live in ch.regular_kis.values():
+                    live.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
+                ch.regular_kis.clear()
+                return
+            self._ensure_regular_kis_plan(today)
+            for shard in st.regular_kis_plan:
+                key = f"krx-{shard.shard_index:02d}"
+                sup = ch.regular_kis.get(key)
+                if sup is None:
+                    sup = ProcessSupervisor(
+                        cmd=regular_kis_stream_cmd(today, paths, shard=shard),
+                        breaker=RestartCircuitBreaker(),
+                    )
+                    ch.regular_kis[key] = sup
+                result = sup.ensure_running()
+                if result == "restarted":
+                    logger.warning(
+                        "[DATA] stage=regular_kis_stream status=RESTARTED shard=%s exit_code=%s",
+                        key,
+                        sup.last_exit_code,
+                    )
+                elif result == "circuit_open" and key not in st.regular_kis_circuit_alerted:
+                    st.regular_kis_circuit_alerted.add(key)
+                    logger.critical(
+                        "[DATA] stage=regular_kis_stream status=FAIL reason=circuit_open shard=%s date=%s",
+                        key,
+                        today.isoformat(),
+                    )
+            self._watch_regular_kis_shards(now, today, anchors)
+        except (KrxAlphaError, KisApiError, OSError, ValueError) as exc:
+            logger.warning("[DATA] stage=regular_kis_supervise status=FAIL reason=%s", str(exc))
+
+    def _watch_regular_kis_shards(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
+        """Judge each running regular shard's journal freshness inside its window and stop a stale one."""
+        try:
+            self._watch_regular_kis_shards_guarded(now, today, anchors)
+        except (OSError, ValueError) as exc:
+            logger.warning("[DATA] stage=shard_watchdog status=ERROR reason=%s", type(exc).__name__)
+
+    def _watch_regular_kis_shards_guarded(
+        self, now: dt.datetime, today: dt.date, anchors: SessionAnchors
+    ) -> None:
+        wd = getattr(self._runtime, "shard_watchdog", None)
+        if wd is None or not wd.enabled:
+            return
+        st = self._state
+        ch = self._children
+        if not ch.regular_kis or st.regular_kis_plan_day != today:
+            return
+        plan = {f"krx-{s.shard_index:02d}": s for s in st.regular_kis_plan}
+        live = {
+            key: sup
+            for key, sup in ch.regular_kis.items()
+            if key in plan and hasattr(sup, "is_running") and hasattr(sup, "stop_for_restart")
+        }
+        if not live:
+            return
+        open_dt, end_dt = shard_window(MarketVenue.KRX, MarketSession.REGULAR, day=today, anchors=anchors)
+        if not open_dt <= now < end_dt:
+            return
+        observations = tuple(
+            ShardObservation(
+                key=key,
+                venue="krx",
+                running=bool(sup.is_running()),
+                started_at_wall=getattr(sup, "started_at_wall", None),
+                last_journal_wall=shard_last_journal_wall(
+                    self._paths.journal_root,
+                    vendor="kis",
+                    venue="krx",
+                    session=MarketSession.REGULAR.value,
+                    streams=plan[key].streams,
+                    day=today,
+                    shard_index=plan[key].shard_index,
+                ),
+            )
+            for key, sup in live.items()
+        )
+        decisions = self._regular_kis_watchdog.evaluate(
+            observations,
+            now_wall=now.timestamp(),
+            window_open_wall=open_dt.timestamp(),
+            in_window=True,
+            day=today,
+        )
+        self._apply_shard_decisions(
+            decisions,
+            watchdog=self._regular_kis_watchdog,
+            venue="krx",
+            today=today,
+            supervisors=live,
+            max_restarts=wd.max_restarts_per_day,
+        )
+
     def _log_premarket_eod(self, ref_day: dt.date) -> None:
         cfg = self._premarket_cfg
         if not cfg.enabled:
@@ -2477,6 +2684,7 @@ class DaemonRunner:
             result = self._stop_stream_child(StreamChildKey.REGULAR)
             logger.info("[DAEMON] stage=streamer_stop result=%s", result, extra=EVENT)
         self._stop_session_children()
+        self._stop_regular_kis_children(clear_circuit_alerts=False)
         ref_day = now.astimezone(_KST).date()
         if st.eod_attempted_for != ref_day:
             st.eod_attempted_for = ref_day
@@ -2525,6 +2733,7 @@ class DaemonRunner:
         zero_frame_symbols = self._log_aftermarket_coverage(ref_day)
         self._log_premarket_eod(ref_day)
         audit = self._derive_session_audit(ref_day, day, anchors)
+        self._derive_kis_regular_audit(ref_day, day, anchors, ls_audit=audit)
         housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=self._eod_progress)
         reconcile_ok, reconciled = self._reconcile_regular_session(ref_day, day, anchors, audit=audit)
         crosscheck = self._reconcile_crosscheck_sessions(ref_day, day, anchors)
@@ -2686,6 +2895,64 @@ class DaemonRunner:
         log_session_audit(audit, settings=runtime_audit, anchors=anchors, date=ref_day)
         return audit
 
+    def _derive_kis_regular_audit(
+        self,
+        ref_day: dt.date,
+        day: TradingDayView,
+        anchors: SessionAnchors,
+        *,
+        ls_audit: SessionAudit | None = None,
+    ) -> SessionAudit | None:
+        """Derive and persist the KIS regular audit when the feature is enabled; returns None on disabled or contained failure; never alters EOD status."""
+        cfg = getattr(self._runtime, "regular_kis", None) or RegularKisSettings()
+        if not cfg.enabled:
+            return None
+        runtime_audit = getattr(self._runtime, "audit", None) or AuditSettings()
+        if runtime_audit.mode is AuditMode.OFF or day.status is not TradingDayStatus.BUSINESS:
+            return None
+        try:
+            kis_audit = derive_session_audit(
+                self._paths.journal_root,
+                vendor="kis",
+                venue=MarketVenue.KRX.value,
+                session=MarketSession.REGULAR.value,
+                day=ref_day,
+                anchors=anchors,
+                settings=runtime_audit,
+                manifest_frame_counts=None,
+                progress=self._eod_progress,
+            )
+        except (OSError, KrxAlphaError, ValueError) as exc:
+            logger.error(
+                "[DATA] stage=regular_kis_audit status=ERROR date=%s error=%s",
+                ref_day.isoformat(),
+                str(exc),
+                exc_info=True,
+            )
+            return None
+        try:
+            write_session_audit(kis_audit, self._paths.session_audit_path(ref_day, "kis"))
+        except (OSError, KrxAlphaError, ValueError) as exc:
+            logger.error(
+                "[DATA] stage=regular_kis_audit status=WRITE_FAIL date=%s error=%s",
+                ref_day.isoformat(),
+                str(exc),
+                exc_info=True,
+            )
+        log_session_audit(kis_audit, settings=runtime_audit, anchors=anchors, date=ref_day)
+        kis_loss = kis_audit.totals.loss_ratio
+        ls_loss = ls_audit.totals.loss_ratio if ls_audit is not None else float("nan")
+        logger.info(
+            "[DATA] stage=regular_kis_compare date=%s kis_loss_ratio=%.6g ls_loss_ratio=%.6g kis_open_max_lag_s=%s ls_open_max_lag_s=%s kis_symbols=%d",
+            ref_day.isoformat(),
+            kis_loss,
+            ls_loss,
+            _tick_open_max_latency_s(kis_audit, anchors),
+            _tick_open_max_latency_s(ls_audit, anchors) if ls_audit is not None else "-",
+            len(kis_audit.symbols),
+        )
+        return kis_audit
+
     def _reconcile_regular_session(
         self, ref_day: dt.date, day: TradingDayView, anchors: SessionAnchors, *, audit: SessionAudit | None = None
     ) -> tuple[bool, bool]:
@@ -2771,6 +3038,18 @@ class DaemonRunner:
         self._state.aftermarket_results.clear()
         if clear_circuit_alerts:
             self._state.aftermarket_circuit_alerted.clear()
+
+    def _stop_regular_kis_children(self, *, clear_circuit_alerts: bool) -> None:
+        """Stop all regular KIS shard supervisors and drop their handles.
+
+        Circuit-open alert dedup survives a holiday stop and is cleared only on the next session
+        day, so a same-day restart does not re-alert shards already reported.
+        """
+        for sup in self._children.regular_kis.values():
+            sup.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
+        self._children.regular_kis.clear()
+        if clear_circuit_alerts:
+            self._state.regular_kis_circuit_alerted.clear()
 
 
 def _migrate_market_stores(paths: DataPaths) -> None:
