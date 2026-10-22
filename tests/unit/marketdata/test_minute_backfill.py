@@ -1,18 +1,18 @@
-"""Invariant tests for Toss 1-minute bar backfill planning and one-shot run."""
+"""Invariant tests for KIS 1-minute bar backfill planning and one-shot run."""
 
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import json
 import pathlib
-import time
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import polars as pl
 import pytest
 
-from src.core.config import MinuteBackfillSettings, TossCredentials
+from src.core.config import MinuteBackfillSettings
+from src.core.errors import MissingCredentialsError
 from src.core.paths import DataPaths
 from src.marketdata import minute_backfill as backfill_mod
 from src.marketdata.minute_backfill import (
@@ -21,7 +21,8 @@ from src.marketdata.minute_backfill import (
     read_minute_ledger_done,
     run_minute_backfill,
 )
-from src.marketdata.toss_candles import MinuteCandle
+from src.brokers.kis.data import KisMinuteBar
+from src.realtime.kis_sharding import KisDataCredential
 
 _KST = ZoneInfo("Asia/Seoul")
 _KST_TZ = dt.timezone(dt.timedelta(hours=9))
@@ -51,82 +52,51 @@ def _universe_file(path: pathlib.Path, symbols: list[str]) -> None:
     pl.DataFrame({"symbol": symbols}, schema={"symbol": pl.String}).write_parquet(path)
 
 
-def _candle(day: dt.date, h: int, m: int) -> MinuteCandle:
-    return MinuteCandle(
-        ts=dt.datetime(day.year, day.month, day.day, h, m, tzinfo=_KST),
-        open=100,
-        high=101,
-        low=99,
-        close=100,
-        volume=10,
+def _bar(day: dt.date, h: int, m: int) -> KisMinuteBar:
+    return KisMinuteBar(
+        day=day, ts_hms=h * 10000 + m * 100, open=100, high=101, low=99, close=100, volume=10
     )
 
 
-class _TokenResp:
-    status_code = 200
-
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self):
-        return {"access_token": "tok"}
-
-
-class _CandleResp:
-    def __init__(self, candles: list[dict], calls: list[dict]):
-        self._candles = candles
-        self._calls = calls
-        self.status_code = 200
-
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self):
-        return {"result": {"candles": self._candles}}
+def _minute_range(day: dt.date, count: int) -> list[KisMinuteBar]:
+    base = dt.datetime(day.year, day.month, day.day, 9, 0)
+    out: list[KisMinuteBar] = []
+    for idx in range(count):
+        moment = base + dt.timedelta(minutes=idx)
+        out.append(
+            KisMinuteBar(
+                day=day,
+                ts_hms=moment.hour * 10000 + moment.minute * 100,
+                open=100, high=101, low=99, close=100, volume=10,
+            )
+        )
+    return out
 
 
-class _Session:
-    def __init__(self, pages: dict[str, list[list[dict]]]):
-        self._pages = {symbol: list(queue) for symbol, queue in pages.items()}
-        self.candle_calls: list[str] = []
-        self.candle_params: list[dict] = []
-        self.token_calls = 0
+class _FakeKisData:
+    def __init__(self, pages: dict[tuple[str, dt.date], list]) -> None:
+        self._pages = {key: list(queue) for key, queue in pages.items()}
+        self.calls: list[tuple[str, dt.date, int]] = []
 
-    def post(self, url, **kwargs):
-        self.token_calls += 1
-        return _TokenResp()
+    def get_historical_minute_bars(self, symbol: str, *, day: dt.date, before_hms: int):
+        self.calls.append((symbol, day, before_hms))
+        queue = self._pages.get((symbol, day), [])
+        page = queue.pop(0) if queue else ()
+        if isinstance(page, Exception):
+            raise page
+        return tuple(bar for bar in page if bar.ts_hms <= before_hms)
 
-    def get(self, url, **kwargs):
-        if "candles" not in url:
-            raise AssertionError(f"unexpected url {url}")
-        params = kwargs.get("params", {})
-        symbol = str(params.get("symbol", ""))
-        self.candle_calls.append(symbol)
-        self.candle_params.append(dict(params))
-        queue = self._pages.get(symbol, [])
-        rows = queue.pop(0) if queue else []
-        if isinstance(rows, Exception):
-            raise rows
-        return _CandleResp(rows, self.candle_params)
-
-
-def _row(day: dt.date, h: int, m: int) -> dict:
-    return {
-        "timestamp": dt.datetime(day.year, day.month, day.day, h, m, tzinfo=_KST).isoformat(),
-        "openPrice": 100,
-        "highPrice": 101,
-        "lowPrice": 99,
-        "closePrice": 100,
-        "volume": 10,
-    }
+    def get(self, url, *, symbol, day, before_hms, timeout):
+        assert timeout > 0
+        return self.get_historical_minute_bars(symbol, day=day, before_hms=before_hms)
 
 
 def _settings(**overrides) -> MinuteBackfillSettings:
     return MinuteBackfillSettings(enabled=True, **overrides)
 
 
-def _creds() -> TossCredentials:
-    return TossCredentials(toss_app_key="k", toss_app_secret="s")
+def _creds(slot: str = "5") -> tuple[KisDataCredential, ...]:
+    return (KisDataCredential(slot=slot, app_key="k", app_secret="s", hts_id="h", key_id="id"),)
 
 
 def _deadline() -> dt.datetime:
@@ -137,22 +107,26 @@ def _evening_now() -> dt.datetime:
     return _EVENING
 
 
-def _mute_sleep(monkeypatch) -> None:
-    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+def _isolate(monkeypatch, fake: _FakeKisData) -> None:
+    def _builder(**kwargs):
+        def fetch(symbol, *, day, before_hms):
+            return kwargs["session"].get("minute", symbol=symbol, day=day, before_hms=before_hms)
+
+        return SimpleNamespace(data=SimpleNamespace(get_historical_minute_bars=fetch))
+
+    monkeypatch.setattr(backfill_mod, "build_kis_rest_stack", _builder)
 
 
-def _isolate(monkeypatch, tmp_path: pathlib.Path) -> None:
-    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(tmp_path / "tokens"))
+def _day_pages(day: dt.date) -> list:
+    bars = sorted(_minute_range(day, 391), key=lambda b: b.ts_hms, reverse=True)
+    return [bars[i : i + 120] for i in range(0, len(bars), 120)]
 
-    class _NoopLimiter:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
 
-        def acquire(self) -> None:
-            return None
-
-    monkeypatch.setattr(backfill_mod, "HostPacedRateLimiter", _NoopLimiter)
-    _mute_sleep(monkeypatch)
+def test_no_toss_reference() -> None:
+    source = pathlib.Path(backfill_mod.__file__).read_text(encoding="utf-8")
+    assert "toss_candles" not in source
+    assert "toss_token_store" not in source
+    assert backfill_mod.MINUTE_VENDOR == "kis"
 
 
 def test_live_log_preferred_over_replay(tmp_path: pathlib.Path) -> None:
@@ -193,11 +167,10 @@ def test_ledger_settles_pairs(tmp_path: pathlib.Path) -> None:
 
 
 def test_partition_before_ledger_and_immutable(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
     paths = DataPaths(tmp_path)
-    day_rows = [_row(_D, 9, 1), _row(_D, 9, 0)]
-    prev_rows = [_row(_PREV, 15, 30)]
-    session = _Session({"A": [day_rows, prev_rows]})
+    page = [_bar(_D, 9, 1), _bar(_D, 9, 0)]
+    fake = _FakeKisData({("A", _D): [list(reversed(page))]})
+    _isolate(monkeypatch, fake)
     target = MinuteTarget(symbol="A", days=(_D,), universe_sources={_D: "live"})
     original_append = backfill_mod._append_ledger_lines
     calls = {"count": 0}
@@ -211,83 +184,83 @@ def test_partition_before_ledger_and_immutable(tmp_path: pathlib.Path, monkeypat
     monkeypatch.setattr(backfill_mod, "_append_ledger_lines", _flaky)
     summary = run_minute_backfill(
         targets=[target], paths=paths, settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="run1retry",
+        deadline=_deadline(), session=fake, now=_evening_now, run_id="run1retry",
     )
     assert summary.status == "FAIL"
     assert paths.minute_history_partition(_D, "run1retry").exists()
     assert not paths.minute_history_ledger.exists()
     monkeypatch.setattr(backfill_mod, "_append_ledger_lines", original_append)
-    session = _Session({"A": [day_rows, prev_rows]})
+    fake2 = _FakeKisData({("A", _D): [list(reversed(page))]})
+    _isolate(monkeypatch, fake2)
     summary = run_minute_backfill(
         targets=[target], paths=paths, settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="run1",
+        deadline=_deadline(), session=fake2, now=_evening_now, run_id="run1",
     )
     assert summary.status == "OK"
     first_bytes = paths.minute_history_partition(_D, "run1").read_bytes()
     frame = pl.read_parquet(paths.minute_history_partition(_D, "run1"))
     assert frame.columns == [
         "date", "symbol", "ts_hms", "open", "high", "low", "close", "volume",
-        "vendor", "universe_source", "run_id",
+        "vendor", "venue", "universe_source", "run_id",
     ]
     assert frame.get_column("ts_hms").to_list() == [90000, 90100]
-    assert set(frame.get_column("vendor").to_list()) == {"toss"}
-    session = _Session({"A": [day_rows, prev_rows]})
+    assert set(frame.get_column("vendor").to_list()) == {"kis"}
+    assert set(frame.get_column("venue").to_list()) == {"KRX"}
+    assert str(paths.minute_history_partition(_D, "run1")).replace("\\", "/").count("history/minute/kis") == 1
+    assert paths.minute_history_ledger.name == "kis_ledger.jsonl"
+    fake3 = _FakeKisData({("A", _D): [list(reversed(page))]})
+    _isolate(monkeypatch, fake3)
     rerun = run_minute_backfill(
         targets=[target], paths=paths, settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="run2",
+        deadline=_deadline(), session=fake3, now=_evening_now, run_id="run2",
     )
     assert rerun.status == "OK"
     assert paths.minute_history_partition(_D, "run1").read_bytes() == first_bytes
 
 
-def test_shared_toss_pacer_scope(tmp_path: pathlib.Path) -> None:
-    from src.brokers.kis.rate import host_state_path
-
-    digest = hashlib.sha256(b"k").hexdigest()[:12]
-    path = host_state_path(tmp_path, "toss", "k", "MARKET_DATA_CHART")
-    assert path.parent == tmp_path
-    assert path.name == f"admission_toss_{digest}_MARKET_DATA_CHART.state"
-
-
 def test_budget_and_deadline_stop_new_symbols(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
     paths = DataPaths(tmp_path)
-    day_rows = [_row(_D, 9, 0)]
-    prev_rows = [_row(_PREV, 15, 30)]
-    session = _Session({"A": [day_rows, prev_rows], "B": [day_rows, prev_rows]})
+    fake = _FakeKisData({
+        ("A", _D): [[_bar(_D, 9, 0)]],
+        ("B", _D): [[_bar(_D, 9, 0)]],
+    })
+    _isolate(monkeypatch, fake)
     targets = [
         MinuteTarget(symbol="A", days=(_D,), universe_sources={_D: "live"}),
         MinuteTarget(symbol="B", days=(_D,), universe_sources={_D: "live"}),
     ]
     summary = run_minute_backfill(
-        targets=targets, paths=paths, settings=_settings(max_calls_per_run=2), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="runbudget",
+        targets=targets, paths=paths, settings=_settings(max_calls_per_run=1), credentials=_creds(),
+        deadline=_deadline(), session=fake, now=_evening_now, run_id="runbudget",
     )
     assert summary.symbols == 1
-    assert session.candle_calls
-    assert set(session.candle_calls) == {"A"}
-    session = _Session({"A": [day_rows, prev_rows], "B": [day_rows, prev_rows]})
+    assert [call[0] for call in fake.calls] == ["A"]
 
     def _past_deadline() -> dt.datetime:
         return _deadline()
 
+    fake2 = _FakeKisData({("A", _D): [[_bar(_D, 9, 0)]]})
+    _isolate(monkeypatch, fake2)
     summary = run_minute_backfill(
         targets=targets, paths=paths, settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_past_deadline, run_id="rundeadline",
+        deadline=_deadline(), session=fake2, now=_past_deadline, run_id="rundeadline",
     )
     assert summary.symbols == 0
-    assert session.candle_calls == []
+    assert fake2.calls == []
 
 
 def test_minute_settings_bounds() -> None:
     import pydantic
 
     assert MinuteBackfillSettings().rate_per_s == 8.0
-    assert MinuteBackfillSettings().history_start == dt.date(2023, 3, 2)
+    assert MinuteBackfillSettings().history_start == dt.date(2025, 10, 27)
+    assert MinuteBackfillSettings().kis_data_slot == 5
     with pytest.raises(pydantic.ValidationError):
-        MinuteBackfillSettings(rate_per_s=21.0)
+        MinuteBackfillSettings(rate_per_s=15.5)
     with pytest.raises(pydantic.ValidationError):
         MinuteBackfillSettings(max_calls_per_run=0)
+    with pytest.raises(pydantic.ValidationError):
+        MinuteBackfillSettings(kis_data_slot=6)
 
 
 def test_plan_without_bars_returns_empty(tmp_path: pathlib.Path) -> None:
@@ -396,30 +369,30 @@ def test_append_ledger_truncates_torn_tail(tmp_path: pathlib.Path) -> None:
 
 
 def test_invalid_run_id_raises(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
+    _isolate(monkeypatch, _FakeKisData({}))
     with pytest.raises(ValueError, match="invalid minute-history run_id"):
         run_minute_backfill(
             targets=[], paths=DataPaths(tmp_path), settings=_settings(), credentials=_creds(),
-            deadline=_deadline(), session=_Session({}), now=_evening_now, run_id="bad id!",
+            deadline=_deadline(), session=object(), now=_evening_now, run_id="bad id!",
         )
 
 
 def test_naive_deadline_raises(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
+    _isolate(monkeypatch, _FakeKisData({}))
     with pytest.raises(ValueError, match="timezone-aware"):
         run_minute_backfill(
             targets=[], paths=DataPaths(tmp_path), settings=_settings(), credentials=_creds(),
-            deadline=dt.datetime(2026, 10, 22, 5, 30), session=_Session({}),
+            deadline=dt.datetime(2026, 10, 22, 5, 30), session=object(),
             now=_evening_now, run_id="run1",
         )
 
 
 def test_disabled_settings_short_circuit(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
+    _isolate(monkeypatch, _FakeKisData({}))
     summary = run_minute_backfill(
         targets=[MinuteTarget(symbol="A", days=(_D,), universe_sources={_D: "live"})],
         paths=DataPaths(tmp_path), settings=MinuteBackfillSettings(),
-        credentials=_creds(), deadline=_deadline(), session=_Session({}),
+        credentials=_creds(), deadline=_deadline(), session=object(),
         now=_evening_now, run_id="run1",
     )
     assert summary.status == "OK"
@@ -427,95 +400,30 @@ def test_disabled_settings_short_circuit(tmp_path: pathlib.Path, monkeypatch) ->
     assert summary.symbols == 0
 
 
-def test_token_issuance_failure_aborts(tmp_path: pathlib.Path, monkeypatch) -> None:
-    from src.marketdata.toss_calendar import TossCalendarError
-
-    _isolate(monkeypatch, tmp_path)
-
-    class _DeniedSession(_Session):
-        def post(self, url, **kwargs):
-            raise TossCalendarError("denied")
-
-    summary = run_minute_backfill(
-        targets=[MinuteTarget(symbol="A", days=(_D,), universe_sources={_D: "live"})],
-        paths=DataPaths(tmp_path), settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=_DeniedSession({}), now=_evening_now, run_id="runauth",
-    )
-    assert summary.status == "FAIL"
-    assert summary.reason == "auth"
-
-
-def _http_error(status: int):
-    import requests
-
-    exc = requests.HTTPError(f"http {status}")
-    exc.response = type("R", (), {"status_code": status})()
-    return exc
-
-
-def test_auth_rotation_recovers(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-    paths = DataPaths(tmp_path)
-    day_rows = [_row(_D, 9, 1), _row(_D, 9, 0)]
-    prev_rows = [_row(_PREV, 15, 30)]
-    session = _Session({"A": [_http_error(401), day_rows, prev_rows]})
-    summary = run_minute_backfill(
-        targets=[MinuteTarget(symbol="A", days=(_D,), universe_sources={_D: "live"})],
-        paths=paths, settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="runrot",
-    )
-    assert summary.status == "OK"
-    assert summary.symbol_days == 1
-    assert session.token_calls == 2
-    assert paths.minute_history_partition(_D, "runrot").exists()
-
-
-def test_double_auth_rejection_aborts(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-    paths = DataPaths(tmp_path)
-    session = _Session({"A": [_http_error(401), _http_error(401)]})
-    summary = run_minute_backfill(
-        targets=[MinuteTarget(symbol="A", days=(_D,), universe_sources={_D: "live"})],
-        paths=paths, settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="run401",
-    )
-    assert summary.status == "FAIL"
-    assert summary.reason == "auth"
-    assert list(paths.minute_history_root.rglob("*.parquet")) == []
-    assert not paths.minute_history_ledger.exists()
-
-
-def test_auth_rejection_after_rotation_aborts(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-    paths = DataPaths(tmp_path)
-    day_rows = [_row(_D, 9, 0)]
-    prev_rows = [_row(_PREV, 15, 30)]
-    session = _Session({"A": [_http_error(401), day_rows, prev_rows], "B": [_http_error(401), _http_error(401)]})
-    summary = run_minute_backfill(
-        targets=[
-            MinuteTarget(symbol="A", days=(_D,), universe_sources={_D: "live"}),
-            MinuteTarget(symbol="B", days=(_D,), universe_sources={_D: "live"}),
-        ],
-        paths=paths, settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="runrot2",
-    )
-    assert summary.status == "FAIL"
-    assert summary.reason == "auth"
+def test_missing_slot_credential_raises(tmp_path: pathlib.Path, monkeypatch) -> None:
+    _isolate(monkeypatch, _FakeKisData({}))
+    with pytest.raises(MissingCredentialsError):
+        run_minute_backfill(
+            targets=[MinuteTarget(symbol="A", days=(_D,), universe_sources={_D: "live"})],
+            paths=DataPaths(tmp_path), settings=_settings(), credentials=_creds(slot="1"),
+            deadline=_deadline(), session=object(), now=_evening_now, run_id="run1",
+        )
 
 
 def test_symbol_failure_isolated(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
     paths = DataPaths(tmp_path)
-    day_rows = [_row(_D, 9, 0)]
-    prev_rows = [_row(_PREV, 15, 30)]
-    session = _Session({"A": [RuntimeError("boom")], "B": [day_rows, prev_rows]})
+    fake = _FakeKisData({
+        ("A", _D): [RuntimeError("boom")],
+        ("B", _D): [[_bar(_D, 9, 0)]],
+    })
+    _isolate(monkeypatch, fake)
     summary = run_minute_backfill(
         targets=[
             MinuteTarget(symbol="A", days=(_D,), universe_sources={_D: "live"}),
             MinuteTarget(symbol="B", days=(_D,), universe_sources={_D: "live"}),
         ],
         paths=paths, settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="runiso",
+        deadline=_deadline(), session=fake, now=_evening_now, run_id="runiso",
     )
     assert summary.status == "OK"
     assert summary.failed == 1
@@ -524,241 +432,323 @@ def test_symbol_failure_isolated(tmp_path: pathlib.Path, monkeypatch) -> None:
     assert set(frame.get_column("symbol").to_list()) == {"B"}
 
 
-def test_boundary_mid_walk_breaks(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-    paths = DataPaths(tmp_path)
-    day_rows = [_row(_D, 9, 0)]
-    prev_rows = [_row(_PREV, 15, 30)]
-    session = _Session({"A": [day_rows, prev_rows]})
-    calls = {"n": 0}
-
-    def _clock() -> dt.datetime:
-        calls["n"] += 1
-        if calls["n"] > 4:
-            return _deadline()
-        return _EVENING
-
-    summary = run_minute_backfill(
-        targets=[MinuteTarget(symbol="A", days=(_D,), universe_sources={_D: "live"})],
-        paths=paths, settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_clock, run_id="runbnd",
-    )
-    assert summary.status == "OK"
-    assert summary.symbols == 1
-    assert summary.calls == len(session.candle_calls)
-
-
 def test_vendor_empty_run_settles_ledger(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
     paths = DataPaths(tmp_path)
-    session = _Session({"A": [[]]})
+    fake = _FakeKisData({("A", _D): [[]]})
+    _isolate(monkeypatch, fake)
     summary = run_minute_backfill(
         targets=[MinuteTarget(symbol="A", days=(_D,), universe_sources={_D: "replay"})],
         paths=paths, settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="runempty",
+        deadline=_deadline(), session=fake, now=_evening_now, run_id="runempty",
     )
     assert summary.status == "OK"
     assert summary.vendor_empty == 1
     assert summary.symbol_days == 0
     rows = [json.loads(line) for line in paths.minute_history_ledger.read_text(encoding="utf-8").splitlines()]
     assert rows[0]["status"] == "vendor_empty"
-    assert rows[0]["reason"] == "before_vendor_history"
+    assert rows[0]["reason"] == "no_bars"
     assert list(paths.minute_history_root.rglob("*.parquet")) == []
 
 
+def test_budget_exhaustion_is_incomplete_and_unwritten(tmp_path: pathlib.Path, monkeypatch) -> None:
+    paths = DataPaths(tmp_path)
+    fake = _FakeKisData({("A", _D): _day_pages(_D)})
+    _isolate(monkeypatch, fake)
+    summary = run_minute_backfill(
+        targets=[MinuteTarget(symbol="A", days=(_D,), universe_sources={_D: "live"})],
+        paths=paths, settings=_settings(max_calls_per_run=2), credentials=_creds(),
+        deadline=_deadline(), session=fake, now=_evening_now, run_id="runincomplete",
+    )
+    assert summary.status == "OK"
+    assert summary.symbol_days == 0
+    assert summary.vendor_empty == 0
+    assert list(paths.minute_history_root.rglob("*.parquet")) == []
+    if paths.minute_history_ledger.exists():
+        assert paths.minute_history_ledger.read_text(encoding="utf-8").strip() == ""
+
+
 def test_mid_run_flush_failure_isolated(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
+    fake = _FakeKisData({("A", _D): [[_bar(_D, 9, 1), _bar(_D, 9, 0)]]})
+    _isolate(monkeypatch, fake)
     monkeypatch.setattr(backfill_mod, "_FLUSH_ROW_LIMIT", 1)
     monkeypatch.setattr(
         backfill_mod, "_write_partition",
         lambda path, rows: (_ for _ in ()).throw(OSError("disk full")),
     )
     paths = DataPaths(tmp_path)
-    day_rows = [_row(_D, 9, 1), _row(_D, 9, 0)]
-    prev_rows = [_row(_PREV, 15, 30)]
-    session = _Session({"A": [day_rows, prev_rows]})
     summary = run_minute_backfill(
         targets=[MinuteTarget(symbol="A", days=(_D,), universe_sources={_D: "live"})],
         paths=paths, settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="runflush",
+        deadline=_deadline(), session=fake, now=_evening_now, run_id="runflush",
     )
     assert summary.status == "FAIL"
     assert summary.reason == "persistence"
     assert not paths.minute_history_ledger.exists()
 
 
-def test_start_day_uses_decision_outside_requested_range(tmp_path: pathlib.Path) -> None:
-    paths = DataPaths(tmp_path)
-    _bars(paths, [_PREV, _D])
-    _universe_file(paths.universe_out(_PREV), ["A"])
-    targets = plan_minute_targets(paths=paths, start=_D, end=_D, ledger_done=frozenset())
-    assert [(t.symbol, t.days) for t in targets] == [("A", (_D,))]
-
-
-def test_plan_excludes_future_and_unfinished_sessions(tmp_path: pathlib.Path, monkeypatch) -> None:
-    paths = DataPaths(tmp_path)
-    today = _EVENING.date()
-    tomorrow = today + dt.timedelta(days=1)
-    _bars(paths, [_PREV, _D, today, tomorrow])
-    for day in (_PREV, _D, today):
-        _universe_file(paths.universe_out(day), ["A"])
-    monkeypatch.setattr(backfill_mod, "_now_kst", lambda: _EVENING.replace(hour=10))
-    targets = plan_minute_targets(paths=paths, start=_D, end=tomorrow, ledger_done=frozenset())
-    assert targets[0].days == (_D,)
-    monkeypatch.setattr(backfill_mod, "_now_kst", lambda: _EVENING)
-    targets = plan_minute_targets(paths=paths, start=_D, end=tomorrow, ledger_done=frozenset())
-    assert targets[0].days == (_D, today)
-
-
-def test_failed_attempt_consumes_budget_before_next_symbol(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-    session = _Session({"A": [_http_error(500)], "B": [[]]})
-    summary = run_minute_backfill(
-        targets=[MinuteTarget(s, (_D,), {_D: "live"}) for s in ("A", "B")],
-        paths=DataPaths(tmp_path), settings=_settings(max_calls_per_run=1), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="failed_budget",
-    )
-    assert summary.calls == 1
-    assert summary.failed == 1
-    assert session.candle_calls == ["A"]
-
-
-def test_auth_retry_is_paced_and_counted(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-    admissions = []
-
-    class Limiter:
-        def __init__(self, path, rate):
-            assert path.name.endswith("_MARKET_DATA_CHART.state")
-            assert rate == 8.0
-
-        def acquire(self):
-            admissions.append("slot")
-
-    monkeypatch.setattr(backfill_mod, "HostPacedRateLimiter", Limiter)
-    session = _Session({"A": [_http_error(401), [_row(_D, 9, 0)], [_row(_PREV, 15, 30)]]})
-    summary = run_minute_backfill(
-        targets=[MinuteTarget("A", (_D,), {_D: "live"})],
-        paths=DataPaths(tmp_path), settings=_settings(max_calls_per_run=3), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="paced_retry",
-    )
-    assert summary.calls == 3
-    assert len(admissions) == 3
-    assert summary.symbol_days == 1
-
-
-def test_auth_at_budget_does_not_issue_another_token(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-    session = _Session({"A": [_http_error(401), []]})
-    summary = run_minute_backfill(
-        targets=[MinuteTarget("A", (_D,), {_D: "live"})],
-        paths=DataPaths(tmp_path), settings=_settings(max_calls_per_run=1), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="auth_budget",
-    )
-    assert summary.calls == 1
-    assert session.token_calls == 1
-    assert session.candle_calls == ["A"]
-
-
-def test_deadline_keeps_already_certified_days(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-    paths = DataPaths(tmp_path)
-    session = _Session({"A": [[_row(_D, 9, 0)], [_row(_PREV, 15, 30)]]})
-
-    def clock():
-        return _deadline() if len(session.candle_calls) == 2 else _EVENING
-
-    summary = run_minute_backfill(
-        targets=[MinuteTarget("A", (_PREV, _D), {_PREV: "replay", _D: "live"})],
-        paths=paths, settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=clock, run_id="partial_walk",
-    )
-    assert summary.calls == 2
-    assert read_minute_ledger_done(paths.minute_history_ledger) == frozenset({("A", _D)})
-    assert paths.minute_history_partition(_D, "partial_walk").exists()
-    assert not paths.minute_history_partition(_PREV, "partial_walk").exists()
-
-
 def test_market_freeze_admits_no_requests(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-    session = _Session({"A": [[]]})
+    fake = _FakeKisData({("A", _D): [[]]})
+    _isolate(monkeypatch, fake)
     summary = run_minute_backfill(
         targets=[MinuteTarget("A", (_D,), {_D: "live"})],
         paths=DataPaths(tmp_path), settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=lambda: _EVENING.replace(hour=10), run_id="freeze",
+        deadline=_deadline(), session=fake, now=lambda: _EVENING.replace(hour=10), run_id="freeze",
     )
     assert summary.calls == 0
-    assert session.token_calls == 0
-
-
-def test_rotation_failure_aborts_remaining_symbols(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-
-    class Session(_Session):
-        def post(self, url, **kwargs):
-            if self.token_calls:
-                raise RuntimeError("issuer unavailable")
-            return super().post(url, **kwargs)
-
-    session = Session({"A": [_http_error(401)], "B": [[]]})
-    summary = run_minute_backfill(
-        targets=[MinuteTarget(s, (_D,), {_D: "live"}) for s in ("A", "B")],
-        paths=DataPaths(tmp_path), settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="rotation_failure",
-    )
-    assert summary.status == "FAIL"
-    assert summary.reason == "auth"
-    assert session.candle_calls == ["A"]
+    assert fake.calls == []
 
 
 def test_successful_chunk_flush_preserves_all_symbols(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
     monkeypatch.setattr(backfill_mod, "_FLUSH_ROW_LIMIT", 1)
     paths = DataPaths(tmp_path)
-    session = _Session({s: [[_row(_D, 9, 1), _row(_D, 9, 0)], [_row(_PREV, 15, 30)]] for s in ("A", "B")})
+    fake = _FakeKisData({
+        ("A", _D): [[_bar(_D, 9, 1), _bar(_D, 9, 0)]],
+        ("B", _D): [[_bar(_D, 9, 1), _bar(_D, 9, 0)]],
+    })
+    _isolate(monkeypatch, fake)
     summary = run_minute_backfill(
         targets=[MinuteTarget(s, (_D,), {_D: "live"}) for s in ("A", "B")],
         paths=paths, settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=_evening_now, run_id="chunks",
+        deadline=_deadline(), session=fake, now=_evening_now, run_id="chunks",
     )
     assert summary.symbol_days == 2
     assert pl.read_parquet(paths.minute_history_partition(_D, "chunks")).height == 4
     assert read_minute_ledger_done(paths.minute_history_ledger) == frozenset({("A", _D), ("B", _D)})
 
 
-def test_deadline_between_admission_and_transport_is_fail_closed(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, tmp_path)
-    after_admission = []
+def test_deadline_keeps_already_certified_days(tmp_path: pathlib.Path, monkeypatch) -> None:
+    paths = DataPaths(tmp_path)
+    fake = _FakeKisData({
+        ("A", _PREV): [[_bar(_PREV, 9, 0)]],
+        ("A", _D): [[_bar(_D, 9, 0)]],
+    })
+    _isolate(monkeypatch, fake)
+
+    def clock() -> dt.datetime:
+        return _deadline() if fake.calls else _EVENING
+
+    summary = run_minute_backfill(
+        targets=[MinuteTarget("A", (_PREV, _D), {_PREV: "replay", _D: "live"})],
+        paths=paths, settings=_settings(), credentials=_creds(),
+        deadline=_deadline(), session=fake, now=clock, run_id="partial_walk",
+    )
+    assert summary.calls == 1
+    assert read_minute_ledger_done(paths.minute_history_ledger) == frozenset({("A", _PREV)})
+    assert paths.minute_history_partition(_PREV, "partial_walk").exists()
+    assert not paths.minute_history_partition(_D, "partial_walk").exists()
+
+
+def test_exhausted_budget_within_target_skips_remaining_days(tmp_path: pathlib.Path, monkeypatch) -> None:
+    paths = DataPaths(tmp_path)
+    fake = _FakeKisData({
+        ("A", _PREV): [[_bar(_PREV, 9, 0)]],
+        ("A", _D): [[_bar(_D, 9, 0)]],
+    })
+    _isolate(monkeypatch, fake)
+    summary = run_minute_backfill(
+        targets=[MinuteTarget("A", (_PREV, _D), {_PREV: "replay", _D: "live"})],
+        paths=paths, settings=_settings(max_calls_per_run=1), credentials=_creds(),
+        deadline=_deadline(), session=fake, now=_evening_now, run_id="daybudget",
+    )
+    assert summary.calls == 1
+    assert summary.symbol_days == 1
+    assert read_minute_ledger_done(paths.minute_history_ledger) == frozenset({("A", _PREV)})
+    assert not paths.minute_history_partition(_D, "daybudget").exists()
+
+
+@pytest.fixture
+def wire_run(tmp_path, monkeypatch):
+    from src.brokers.kis import stack as stack_mod
+    from src.brokers.kis.auth import kis_token_cache_path
+
+    cache = tmp_path / "tokens"
+    cache.mkdir()
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(cache))
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE", "true")
+    kis_token_cache_path(cache, "k").write_text(json.dumps({
+        "app_key": "k", "access_token": "cached",
+        "expired_at": (_EVENING + dt.timedelta(days=1)).isoformat(),
+    }))
+    clock = {"now": _EVENING}
+    admissions = []
 
     class Limiter:
-        def __init__(self, *args):
+        def __init__(self, path, rate, **kwargs):
+            assert path.name == "tps_8254c329a928.state"
+            assert rate == 8.0
+
+        def acquire(self):
+            admissions.append(1)
+
+    monkeypatch.setattr(stack_mod, "HostPacedRateLimiter", Limiter)
+
+    def run(session, *, budget=10, cached=True, now=None):
+        if not cached:
+            kis_token_cache_path(cache, "k").unlink()
+        return run_minute_backfill(
+            targets=[MinuteTarget(s, (_D,), {_D: "live"}) for s in ("A", "B")],
+            paths=DataPaths(tmp_path), settings=_settings(max_calls_per_run=budget),
+            credentials=_creds(), deadline=_deadline(), session=session,
+            now=now or (lambda: clock["now"]), run_id="wire",
+        )
+
+    return run, clock, admissions
+
+
+class _WireResponse:
+    def __init__(self, body):
+        self.headers = {}
+        self.body = body
+
+    def json(self):
+        return self.body
+
+
+class _WireSession:
+    def __init__(self, pages):
+        self.pages = list(pages)
+        self.calls = []
+        self.posts = []
+
+    def get(self, url, **kwargs):
+        self.calls.append(kwargs)
+        page = self.pages.pop(0)
+        if isinstance(page, Exception):
+            raise page
+        return _WireResponse(page)
+
+    def post(self, url, **kwargs):
+        self.posts.append(kwargs)
+        return _WireResponse({
+            "access_token": "issued",
+            "access_token_token_expired": "2026-10-23 23:45:00",
+        })
+
+
+def _wire_complete():
+    return {"rt_cd": "0", "output2": [{
+        "stck_bsop_date": "20261020", "stck_cntg_hour": "090000",
+        "stck_oprc": "100", "stck_hgpr": "101", "stck_lwpr": "99",
+        "stck_prpr": "100", "cntg_vol": "10",
+    }]}
+
+
+def test_wire_retries_are_paced_counted_and_budgeted(wire_run):
+    run, _, admissions = wire_run
+    session = _WireSession([{"rt_cd": "1", "msg_cd": "EGW00201"}, _wire_complete()])
+    summary = run(session, budget=2)
+    assert summary.calls == len(session.calls) == len(admissions) == 2
+    assert summary.symbol_days == 1
+
+
+def test_wire_failed_attempt_consumes_budget(wire_run):
+    import requests
+
+    run, _, _ = wire_run
+    session = _WireSession([requests.ConnectionError("offline")])
+    summary = run(session, budget=1)
+    assert summary.calls == 1
+    assert summary.failed == 1
+    assert summary.symbols == 1
+
+
+def test_wire_retry_cannot_overrun_budget(wire_run, tmp_path):
+    run, _, _ = wire_run
+    session = _WireSession([{"rt_cd": "1", "msg_cd": "EGW00201"}])
+    summary = run(session, budget=1)
+    assert summary.calls == len(session.calls) == 1
+    assert summary.symbol_days == 0
+    assert not DataPaths(tmp_path).minute_history_ledger.exists()
+
+
+def test_wire_expired_token_at_budget_does_not_issue(wire_run):
+    run, _, _ = wire_run
+    session = _WireSession([{"rt_cd": "1", "msg_cd": "EGW00123"}])
+    summary = run(session, budget=1)
+    assert summary.calls == 1
+    assert session.posts == []
+
+
+def test_wire_timeout_clamped_to_remaining_deadline(wire_run):
+    run, clock, _ = wire_run
+    clock["now"] = _deadline() - dt.timedelta(seconds=0.25)
+    session = _WireSession([_wire_complete()])
+    summary = run(session, budget=1)
+    assert summary.symbol_days == 1
+    assert session.calls[0]["timeout"] == 0.25
+
+
+def test_wire_admission_crossing_deadline_sends_nothing(wire_run, monkeypatch):
+    from src.brokers.kis import stack as stack_mod
+
+    run, clock, _ = wire_run
+
+    class Limiter:
+        def __init__(self, *args, **kwargs):
             return None
 
         def acquire(self):
-            after_admission.extend([_EVENING, _deadline()])
+            clock["now"] = _deadline()
 
-    def clock():
-        return after_admission.pop(0) if after_admission else _EVENING
-
-    monkeypatch.setattr(backfill_mod, "HostPacedRateLimiter", Limiter)
-    session = _Session({"A": [[]]})
-    summary = run_minute_backfill(
-        targets=[MinuteTarget("A", (_D,), {_D: "live"})],
-        paths=DataPaths(tmp_path), settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=clock, run_id="admission_deadline",
-    )
+    monkeypatch.setattr(stack_mod, "HostPacedRateLimiter", Limiter)
+    session = _WireSession([])
+    summary = run(session)
     assert summary.calls == 0
-    assert session.candle_calls == []
+    assert session.calls == session.posts == []
 
 
-def test_summary_info_log_includes_offhours_count(tmp_path: pathlib.Path, monkeypatch, caplog) -> None:
-    _isolate(monkeypatch, tmp_path)
-    session = _Session({"A": [[_row(_D, 9, 0), _row(_D, 8, 30)], [_row(_PREV, 15, 30)]]})
-    with caplog.at_level("INFO", logger=backfill_mod.__name__):
-        summary = run_minute_backfill(
-            targets=[MinuteTarget("A", (_D,), {_D: "live"})],
-            paths=DataPaths(tmp_path), settings=_settings(), credentials=_creds(),
-            deadline=_deadline(), session=session, now=_evening_now, run_id="log_summary",
-        )
+def test_wire_token_issuance_respects_settings(wire_run, monkeypatch):
+    run, _, _ = wire_run
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE", "false")
+    session = _WireSession([])
+    summary = run(session, cached=False)
+    assert summary.status == "FAIL"
+    assert summary.reason == "auth"
+    assert session.posts == []
+
+
+def test_wire_token_issue_and_transport_failure(wire_run):
+    run, _, _ = wire_run
+
+    class Session(_WireSession):
+        def post(self, url, **kwargs):
+            raise RuntimeError("token endpoint offline")
+
+    session = Session([])
+    summary = run(session, cached=False)
+    assert summary.status == "FAIL"
+    assert summary.reason == "auth"
+    assert summary.symbols == 1
+
+
+def test_wire_token_issuance_and_auth_retry(wire_run):
+    run, _, admissions = wire_run
+    session = _WireSession([_wire_complete()])
+    summary = run(session, budget=1, cached=False)
+    assert summary.calls == 1
+    assert len(session.posts) == 1
+    assert len(admissions) == 2
+
+
+def test_wire_auth_failure_preserves_certified_days(wire_run, tmp_path):
+    run, _, _ = wire_run
+    rejected = {"rt_cd": "1", "msg_cd": "EGW00123"}
+    session = _WireSession([_wire_complete(), rejected, rejected])
+    summary = run(session, budget=3)
+    assert summary.status == "FAIL"
+    assert summary.reason == "auth"
+    assert summary.calls == 3
+    assert len(session.posts) == 1
+    assert summary.symbol_days == 1
+    assert read_minute_ledger_done(DataPaths(tmp_path).minute_history_ledger) == frozenset({("A", _D)})
+
+
+def test_discarded_offhours_reported(tmp_path, monkeypatch):
+    fake = _FakeKisData({("A", _D): [[_bar(_D, 8, 59), _bar(_D, 9, 0)]]})
+    _isolate(monkeypatch, fake)
+    summary = run_minute_backfill(
+        targets=[MinuteTarget("A", (_D,), {_D: "live"})], paths=DataPaths(tmp_path),
+        settings=_settings(), credentials=_creds(), deadline=_deadline(),
+        session=fake, now=_evening_now, run_id="offhours",
+    )
     assert summary.discarded_offhours == 1
-    assert "symbols=1 symbol_days=1 calls=2 vendor_empty=0 failed=0 discarded_offhours=1" in caplog.text

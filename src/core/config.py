@@ -330,14 +330,15 @@ class TickTapeBackfillSettings(BaseSettings):
 
 
 class MinuteBackfillSettings(BaseSettings):
-    """Toss 1m backfill pacing, budget and range; inert when `enabled` is false."""
+    """KIS historical 1m backfill pacing, slot, budget and range; inert when `enabled` is false."""
 
     model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_MINUTE_BACKFILL_", extra="ignore")
 
     enabled: bool = False
-    rate_per_s: float = Field(default=8.0, gt=0, le=20.0)
+    kis_data_slot: int = Field(default=5, ge=1, le=5)
+    rate_per_s: float = Field(default=8.0, gt=0, le=15.0)
     max_calls_per_run: int = Field(default=60000, ge=1)
-    history_start: dt.date = dt.date(2023, 3, 2)
+    history_start: dt.date = dt.date(2025, 10, 27)
     request_timeout_s: float = Field(default=10.0, gt=0)
 
 

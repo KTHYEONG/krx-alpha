@@ -1,4 +1,4 @@
-"""backfill-minute-bars CLI (one-shot Toss 1m backfill for the replayed universe)."""
+"""backfill-minute-bars CLI (one-shot KIS 1m backfill for the replayed universe)."""
 
 from __future__ import annotations
 
@@ -17,8 +17,6 @@ from src.core.config import (
     CollectorSettings,
     MinuteBackfillSettings,
     TickTapeBackfillSettings,
-    TossCredentials,
-    load_credentials,
 )
 from src.core.errors import KrxAlphaError, MissingCredentialsError
 from src.core.paths import DataPaths
@@ -29,10 +27,12 @@ from src.marketdata.minute_backfill import (
     read_minute_ledger_done,
     run_minute_backfill,
 )
+from src.realtime.kis_sharding import load_kis_data_credentials
 
 logger = logging.getLogger(__name__)
 
 _KST = ZoneInfo("Asia/Seoul")
+_RETENTION_DAYS = 364
 
 
 def _now_kst() -> dt.datetime:
@@ -85,7 +85,7 @@ def _parse_deadline(raw: str | None, now: dt.datetime) -> dt.datetime:
 
 
 def run(args: argparse.Namespace) -> int:
-    """Plan replayed-universe symbol-days and fetch their Toss 1m bars."""
+    """Plan replayed-universe symbol-days and fetch their KIS 1m bars."""
     settings = MinuteBackfillSettings()
     if not settings.enabled and not getattr(args, "dry_run", False):
         logger.info("[DATA] stage=minute_backfill status=SKIP reason=disabled")
@@ -106,6 +106,13 @@ def run(args: argparse.Namespace) -> int:
         return 4
     if end > upper:
         end = upper
+    floor = upper - dt.timedelta(days=_RETENTION_DAYS)
+    if start < floor:
+        logger.info(
+            "[DATA] stage=minute_backfill status=clamped start=%s effective_start=%s",
+            start.isoformat(), floor.isoformat(),
+        )
+        start = floor
     try:
         ledger_done = read_minute_ledger_done(paths.minute_history_ledger)
         targets: tuple[MinuteTarget, ...] = plan_minute_targets(paths=paths, start=start, end=end, ledger_done=ledger_done)
@@ -123,8 +130,10 @@ def run(args: argparse.Namespace) -> int:
         logger.info("[DATA] stage=minute_backfill status=OK reason=nothing_to_do")
         return 2
     try:
-        credentials = load_credentials(TossCredentials)
-    except MissingCredentialsError as exc:
+        credentials = load_kis_data_credentials()
+        if not any(c.slot == str(settings.kis_data_slot) for c in credentials):
+            raise MissingCredentialsError(f"no data credential for slot {settings.kis_data_slot}")
+    except (KrxAlphaError, MissingCredentialsError) as exc:
         logger.error("[DATA] stage=minute_backfill status=FAIL reason=missing_credentials:%s", str(exc))
         return 4
     override = getattr(args, "max_calls", None)

@@ -33,6 +33,7 @@ TR_INDEX_MINUTE_CHART: str = "FHKUP03500200"
 TR_MINUTE_CHART: str = "FHKST03010200"
 TR_NEWS_TITLE: str = "FHKST01011800"
 TR_TIME_CONCLUSION: str = "FHPST01060000"
+TR_HISTORICAL_MINUTE_CHART: str = "FHKST03010230"
 
 _PATH_PRICE = "/uapi/domestic-stock/v1/quotations/inquire-price"
 _PATH_ASKING = "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
@@ -46,6 +47,7 @@ _PATH_INDEX_MINUTE_CHART = "/uapi/domestic-stock/v1/quotations/inquire-time-inde
 _PATH_MINUTE_CHART = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
 _PATH_NEWS_TITLE = "/uapi/domestic-stock/v1/quotations/news-title"
 _PATH_TIME_CONCLUSION = "/uapi/domestic-stock/v1/quotations/inquire-time-itemconclusion"
+_PATH_HISTORICAL_MINUTE_CHART = "/uapi/domestic-stock/v1/quotations/inquire-time-dailychartprice"
 
 _KST: dt.tzinfo = ZoneInfo("Asia/Seoul")
 
@@ -171,6 +173,30 @@ def _snapshot_news_ns(date_text: str, time_text: str) -> int:
         raise KisApiError("SCHEMA", "malformed news publication time") from exc
     delta = moment.astimezone(dt.UTC) - dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
     return (delta.days * 86_400 + delta.seconds) * 1_000_000_000
+
+
+@dataclass(frozen=True)
+class KisMinuteBar:
+    """KIS historical 1m bar for one KRX symbol-day page."""
+
+    day: dt.date
+    ts_hms: int
+    open: int
+    high: int
+    low: int
+    close: int
+    volume: int
+
+
+def _minute_int(raw: Any, name: str) -> int:
+    text = str(raw).strip() if raw is not None else ""
+    try:
+        value = Decimal(text)
+    except (ArithmeticError, ValueError) as exc:
+        raise KisApiError("SCHEMA", f"invalid minute field: {name}") from exc
+    if not value.is_finite() or value != value.to_integral_value() or int(value) < 0:
+        raise KisApiError("SCHEMA", f"invalid minute field: {name}")
+    return int(value)
 
 
 class KisDataClient:
@@ -748,3 +774,57 @@ class KisDataClient:
             })
         logger.debug("[DATA] stage=kis_snapshot tr=%s symbol=%s rows=%d", TR_NEWS_TITLE, "", len(parsed))
         return tuple(parsed)
+
+    def get_historical_minute_bars(
+        self, symbol: str, *, day: dt.date, before_hms: int
+    ) -> tuple[KisMinuteBar, ...]:
+        """FHKST03010230 for one KRX symbol-day page ending at before_hms (HHMMSS); returns bars newest first; raises KisApiError."""
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": symbol,
+            "FID_INPUT_DATE_1": day.strftime("%Y%m%d"),
+            "FID_INPUT_HOUR_1": f"{before_hms:06d}",
+            "FID_PW_DATA_INCU_YN": "Y",
+            "FID_FAKE_TICK_INCU_YN": "",
+        }
+        body, _ = self._transport.get(
+            _PATH_HISTORICAL_MINUTE_CHART, TR_HISTORICAL_MINUTE_CHART, params
+        )
+        rows = body.get("output2")
+        if not isinstance(rows, list):
+            raise KisApiError("SCHEMA", "invalid historical minute output2")
+        stamp = day.strftime("%Y%m%d")
+        bars: list[KisMinuteBar] = []
+        dropped = 0
+        for raw in rows:
+            if not isinstance(raw, Mapping):
+                raise KisApiError("SCHEMA", "invalid historical minute row")
+            if str(raw.get("stck_bsop_date", "")) != stamp:
+                dropped += 1
+                continue
+            hour = str(raw.get("stck_cntg_hour", "")).strip()
+            if len(hour) != 6 or not hour.isdigit():
+                raise KisApiError("SCHEMA", f"malformed minute bar time: {hour!r}")
+            try:
+                dt.time(int(hour[:2]), int(hour[2:4]), int(hour[4:]))
+            except ValueError as exc:
+                raise KisApiError("SCHEMA", f"malformed minute bar time: {hour!r}") from exc
+            bars.append(
+                KisMinuteBar(
+                    day=day,
+                    ts_hms=int(hour),
+                    open=_minute_int(raw.get("stck_oprc"), "stck_oprc"),
+                    high=_minute_int(raw.get("stck_hgpr"), "stck_hgpr"),
+                    low=_minute_int(raw.get("stck_lwpr"), "stck_lwpr"),
+                    close=_minute_int(raw.get("stck_prpr"), "stck_prpr"),
+                    volume=_minute_int(raw.get("cntg_vol"), "cntg_vol"),
+                )
+            )
+        if dropped:
+            logger.debug(
+                "[DATA] stage=kis_minute tr=%s symbol=%s dropped_cross_date=%d",
+                TR_HISTORICAL_MINUTE_CHART,
+                symbol,
+                dropped,
+            )
+        return tuple(sorted(bars, key=lambda bar: bar.ts_hms, reverse=True))
