@@ -51,6 +51,13 @@ class DataPaths:
         return self.root / "universe"
 
     @property
+    def universe_replay_dir(self) -> pathlib.Path:
+        return self.root / "universe_replay"
+
+    def universe_replay_out(self, day: dt.date) -> pathlib.Path:
+        return self.universe_replay_dir / f"{day.isoformat()}.parquet"
+
+    @property
     def manifest_dir(self) -> pathlib.Path:
         return self.root / "manifest"
 

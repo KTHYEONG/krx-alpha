@@ -7,9 +7,11 @@ import datetime as dt
 import logging
 import pathlib
 
+import polars as pl
+
 from src.core.config import KrxCredentials, load_credentials
-from src.core.errors import MissingCredentialsError
-from src.marketdata.krx_bars import KrxBarsError
+from src.core.errors import KrxAlphaError, MissingCredentialsError
+from src.marketdata.krx_bars import KrxBarsError, extend_bars_history
 from src.marketdata.service import BarsRefreshResult as BarsRefreshResult
 from src.marketdata.service import refresh_bars
 
@@ -23,6 +25,8 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--market-map-path", required=True)
     parser.add_argument("--ref-date", required=True)
     parser.add_argument("--window-days", type=int, default=90)
+    parser.add_argument("--history-start", default=None)
+    parser.add_argument("--history-max-days", type=int, default=400)
     parser.set_defaults(handler=run)
 
 
@@ -49,4 +53,16 @@ def run(args: argparse.Namespace) -> int:
         logger.error("[DATA] stage=bars_refresh status=FAIL reason=%s", str(exc))
         return 4
     logger.info("[DATA] stage=bars_refresh date=%s appended=%d status=OK", result.trading_day.isoformat(), result.appended_rows)
+    history_start = getattr(args, "history_start", None)
+    if history_start is not None:
+        try:
+            extend_bars_history(
+                store,
+                auth_key=creds.krx_openapi_key,
+                start_date=dt.date.fromisoformat(str(history_start)),
+                max_trading_days=int(args.history_max_days),
+            )
+        except (KrxAlphaError, OSError, ValueError, pl.exceptions.PolarsError) as exc:
+            logger.error("[DATA] stage=bars_history status=FAIL reason=%s", str(exc))
+            return 4
     return 0
