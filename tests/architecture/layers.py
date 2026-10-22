@@ -70,3 +70,6 @@ LAYER_RANK['src/realtime/lag_monitor.py'] = 1
 LAYER_RANK['src/realtime/regular_open_watch.py'] = 1
 LAYER_RANK['src/realtime/connection_handover.py'] = 2
 LAYER_RANK['src/cli/collect_regular_kis.py'] = 7
+LAYER_RANK['src/marketdata/kiwoom_ticks.py'] = 1
+LAYER_RANK['src/marketdata/tick_tape_backfill.py'] = 4
+LAYER_RANK['src/cli/backfill_tick_tape.py'] = 7

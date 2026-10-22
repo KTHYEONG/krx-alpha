@@ -58,7 +58,7 @@ RUNTIME_ENV_SPEC: tuple[RuntimeEnvKey, ...] = (
 )
 
 # DB crosscheck credentials are optional: CI accepts them but never requires them.
-OPTIONAL_RUNTIME_ENV_KEYS: tuple[str, ...] = ("DB_APP_KEY", "DB_APP_SECRET")
+OPTIONAL_RUNTIME_ENV_KEYS: tuple[str, ...] = ("DB_APP_KEY", "DB_APP_SECRET", "KIWOOM_APP_KEY", "KIWOOM_SECRET_KEY")
 
 REMOTE_RUNTIME_INSTALL_SCRIPT = """set -euo pipefail
 dest="/home/ubuntu/quant-secrets/krx-alpha.env"

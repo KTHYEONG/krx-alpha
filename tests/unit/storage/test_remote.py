@@ -402,6 +402,22 @@ def test_sync_manifest_tree_uploads_sorted_json_and_verifies_size(tmp_path, fake
     assert fake_rclone.upload_order == ['a.json', 'b.json']
 
 
+def test_sync_manifest_tree_offloads_growing_tick_tape_ledger(tmp_path, fake_rclone):
+    from src.storage.remote import GDriveArchiver
+
+    ledger = tmp_path / "tick_tape" / "kiwoom_ledger.jsonl"
+    ledger.parent.mkdir()
+    ledger.write_text('{"symbol":"A"}\n')
+    (ledger.parent / "ignored.tmp").write_bytes(b"temporary")
+    archiver = GDriveArchiver(fake_rclone.config)
+    assert archiver.sync_manifest_tree(tmp_path).uploaded == 1
+    assert fake_rclone.upload_order == ["tick_tape/kiwoom_ledger.jsonl"]
+    with ledger.open("a") as handle:
+        handle.write('{"symbol":"B"}\n')
+    assert archiver.sync_manifest_tree(tmp_path).uploaded == 1
+    assert fake_rclone.remote_sizes["manifests/tick_tape/kiwoom_ledger.jsonl"] == ledger.stat().st_size
+
+
 
 def test_remote_file_sizes_raises_on_unparseable_size():
     import json

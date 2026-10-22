@@ -1821,3 +1821,22 @@ def test_prune_progress_fires_for_reused_partition(tmp_path) -> None:
     assert len(calls) == 2
     assert stats.normalized == 2
     assert stats.reused == 1
+def test_prune_tick_tape_uses_parent_partition_date(tmp_path):
+    import datetime as dt
+
+    from src.core.paths import DataPaths
+    from src.storage.layout import l1_repo_path
+    from src.storage.retention import prune_local_l1
+
+    paths = DataPaths(tmp_path)
+    old = paths.tick_tape_partition(dt.date(2026, 9, 1), "old")
+    recent = paths.tick_tape_partition(dt.date(2026, 10, 21), "recent")
+    unconfirmed = paths.tick_tape_partition(dt.date(2026, 9, 1), "unconfirmed")
+    for path in (old, recent, unconfirmed):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"tape")
+    confirmed = {l1_repo_path(p.relative_to(paths.archive_root)) for p in (old, recent)}
+    assert prune_local_l1(paths.archive_root, reference_date=dt.date(2026, 10, 22), confirmed_remote=confirmed) == 1
+    assert not old.exists()
+    assert recent.exists()
+    assert unconfirmed.exists()
