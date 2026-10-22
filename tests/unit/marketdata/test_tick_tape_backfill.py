@@ -164,6 +164,21 @@ def test_cheap_names_first_deterministic(tmp_path: pathlib.Path) -> None:
     assert first == second
 
 
+def test_expiring_days_first_then_cheap(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = DataPaths(tmp_path)
+    monkeypatch.setattr(backfill_mod, "_prev_business_day", lambda day, _paths: _prev(day))
+    older = _prev(_D)
+    _universe(paths, _prev(older), ["HEAVY_OLD"])
+    _universe(paths, _prev(_D), ["CHEAP_NEW", "MID_NEW"])
+    _bars(
+        paths,
+        [(older, "HEAVY_OLD", 9000.0), (_D, "HEAVY_OLD", 9000.0), (_D, "CHEAP_NEW", 1.0), (_D, "MID_NEW", 50.0)],
+    )
+    targets = plan_tick_tape_targets(sessions=[older, _D], paths=paths, ledger_done=frozenset())
+    assert [item.symbol for item in targets] == ["HEAVY_OLD", "CHEAP_NEW", "MID_NEW"]
+    assert targets[0].days[0] == older
+
+
 class _ChartResp:
     def __init__(self, rows, *, status=200, cont=None, next_key=None):
         self.status_code = status
