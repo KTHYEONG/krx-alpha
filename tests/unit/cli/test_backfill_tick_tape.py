@@ -235,3 +235,29 @@ def test_default_data_root_respects_collector_environment(tmp_path, monkeypatch,
     args = build_parser().parse_args(["backfill-tick-tape", "--dry-run"])
     assert cli.run(args) == 0
     assert json.loads(capsys.readouterr().out)["symbols"] == 0
+
+
+def test_post_midnight_run_includes_session_whose_bar_is_pending(tmp_path):
+    from src.core.paths import DataPaths
+
+    paths = DataPaths(tmp_path)
+    _history(paths, today=dt.date(2026, 10, 22))
+    sessions = cli.resolve_backfill_sessions(paths, 19, dt.date(2026, 10, 23))
+    assert sessions[-1] == dt.date(2026, 10, 22)
+    assert sessions[-2] == dt.date(2026, 10, 21)
+    assert len(sessions) == 19
+
+
+def test_two_session_bar_lag_still_fails_closed(tmp_path):
+    import pytest
+
+    from src.core.paths import DataPaths
+    from src.marketdata.toss_calendar import TradingDay, save_trading_day_cache
+
+    paths = DataPaths(tmp_path)
+    _history(paths, today=dt.date(2026, 10, 21))
+    save_trading_day_cache(
+        paths.calendar_cache, TradingDay(dt.date(2026, 10, 22), True, dt.date(2026, 10, 21), dt.date(2026, 10, 23))
+    )
+    with pytest.raises(ValueError, match="historical calendar incomplete"):
+        cli.resolve_backfill_sessions(paths, 19, dt.date(2026, 10, 23))

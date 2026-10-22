@@ -57,10 +57,21 @@ def _last_completed_session(today: dt.date, paths: DataPaths) -> dt.date:
     raise ValueError("tick-tape current calendar unavailable")
 
 
+def _calendar_previous(day: dt.date, paths: DataPaths) -> dt.date | None:
+    from src.marketdata.toss_calendar import load_trading_day_cache, trading_day_from_cache
+
+    cached = load_trading_day_cache(paths.calendar_cache)
+    derived = trading_day_from_cache(cached, day) if cached is not None else None
+    return derived.previous_business_day if derived is not None else None
+
+
 def resolve_backfill_sessions(paths: DataPaths, window_sessions: int, today: dt.date) -> tuple[dt.date, ...]:
     """Return the last ``window_sessions`` completed business sessions (ascending) at or before the previous business day."""
     upper = _last_completed_session(today, paths)
     sessions = tape_calendar_sessions(paths, upper)
+    if sessions and sessions[-1] != upper and sessions[-1] == _calendar_previous(upper, paths):
+        # The latest session's daily bar lands at the next pre-session refresh, so a post-midnight run lags by one session.
+        sessions = (*sessions, upper)
     if not sessions or sessions[-1] != upper or len(sessions) < window_sessions + 1:
         raise ValueError("tick-tape historical calendar incomplete")
     return sessions[-window_sessions:]
