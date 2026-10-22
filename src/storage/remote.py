@@ -206,7 +206,7 @@ class GDriveArchiver:
         root = pathlib.Path(manifest_root)
         sizes = self.remote_file_sizes("manifests/")
         stats = SyncStats()
-        for jf in sorted(root.rglob("*.json")):
+        for jf in sorted(path for path in root.rglob("*") if path.is_file() and path.suffix in {".json", ".jsonl"}):
             repo_path = self.manifest_repo_path_for(root, jf)
             local_size = jf.stat().st_size
             if sizes.get(repo_path) == local_size:

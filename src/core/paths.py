@@ -63,6 +63,17 @@ class DataPaths:
         return self.root / "l1"
 
     @property
+    def tick_tape_root(self) -> pathlib.Path:
+        return self.archive_root / "history" / "tick_tape" / "kiwoom"
+
+    def tick_tape_partition(self, day: dt.date, run_id: str) -> pathlib.Path:
+        return self.tick_tape_root / f"dt={day.isoformat()}" / f"run-{run_id}.parquet"
+
+    @property
+    def tick_tape_ledger(self) -> pathlib.Path:
+        return self.manifest_dir / "tick_tape" / "kiwoom_ledger.jsonl"
+
+    @property
     def quarantine_root(self) -> pathlib.Path:
         return self.root / "quarantine"
 

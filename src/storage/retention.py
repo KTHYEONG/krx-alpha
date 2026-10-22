@@ -260,6 +260,8 @@ def prune_local_l1(
     purged = 0
     for pq_file in sorted(root.rglob("*.parquet")):
         m = _DT_RE.search(pq_file.name)
+        if m is None and pq_file.is_relative_to(root / "history" / "tick_tape" / "kiwoom"):
+            m = _DT_RE.fullmatch(pq_file.parent.name)
         part_date = dt.date.fromisoformat(m.group(0)[3:]) if m else None
         if part_date is None or part_date >= cutoff:
             continue

@@ -300,6 +300,35 @@ class LsCredentials(BaseSettings):
     ls_app_secret: str
 
 
+class KiwoomCredentials(BaseSettings):
+    """Kiwoom REST credentials (required, no empty defaults)."""
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+    kiwoom_app_key: str = Field(min_length=1, repr=False)
+    kiwoom_secret_key: str = Field(min_length=1, repr=False)
+
+
+class TickTapeBackfillSettings(BaseSettings):
+    """Kiwoom tick-tape backfill pacing, budget and window; inert when `enabled` is false."""
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_TICK_TAPE_", extra="ignore")
+
+    enabled: bool = False
+    rate_per_s: float = Field(default=2.0, gt=0, le=5.0)
+    max_pages_per_run: int = Field(default=20000, ge=1)
+    window_start_kst: dt.time = dt.time(23, 30)
+    window_end_kst: dt.time = dt.time(5, 30)
+    vendor_window_sessions: int = Field(default=19, ge=1)
+    request_timeout_s: float = Field(default=10.0, gt=0)
+
+    @model_validator(mode="after")
+    def check_window_spans(self) -> TickTapeBackfillSettings:
+        if self.window_start_kst == self.window_end_kst:
+            raise ValueError("window_start_kst must differ from window_end_kst")
+        return self
+
+
 class DbCredentials(BaseSettings):
     """DB증권 자격증명 (필수, 빈 기본값 금지)."""
 

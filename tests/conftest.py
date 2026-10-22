@@ -71,6 +71,7 @@ _CREDENTIAL_ENV_PREFIXES: tuple[str, ...] = (
     "KRX_OPENAPI",
     "OPENDART",
     "KIWOM_",
+    "KIWOOM_",
     "BINANCE_",
     # healthchecks.io ping URL authorizes pings, so it is credential-like; scrub it
     # to keep liveness disabled by default in unit tests.
