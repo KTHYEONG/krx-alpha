@@ -10,6 +10,7 @@ import pathlib
 import shutil
 import tempfile
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -48,6 +49,8 @@ _GATHER_ROWS: int = 20_000
 _TICK_BUCKETS: int = 16
 _RAW_HASH_SEEDS: tuple[int, int] = (0x9E3779B1, 0x85EBCA77)
 _WORK_DIR_PREFIX: str = 'krx-l1-normalize-'
+_CONN_CODE_MAX: int = 2**31 - 1
+_KEY_BUF_INIT: int = 131_072
 
 
 class L1NormalizationError(KrxAlphaError):
@@ -81,31 +84,62 @@ def _iter_line_batches(path: pathlib.Path, batch_bytes: int) -> Iterator[bytes]:
         yield carry
 
 
-def _dedup_sort_order(keys: pl.DataFrame) -> tuple[np.ndarray, int, np.ndarray, np.ndarray]:
-    conn = keys["conn_id"].rank("dense").to_numpy().astype(np.int64)
-    seq = keys["conn_seq"].to_numpy()
-    wall = keys["recv_wall_ns"].to_numpy()
-    h1 = keys["h1"].to_numpy()
-    h2 = keys["h2"].to_numpy()
-    perm = np.lexsort((h2, h1, seq, conn))
-    c = conn[perm]
-    s = seq[perm]
-    a = h1[perm]
-    b = h2[perm]
-    new_key = np.empty(seq.size, dtype=bool)
+@dataclass(frozen=True, slots=True)
+class _KeyColumns:
+    conn_code: np.ndarray
+    conn_seq: np.ndarray
+    recv_wall_ns: np.ndarray
+    h1: np.ndarray
+    h2: np.ndarray
+
+
+def _dedup_sort_order(keys: _KeyColumns) -> tuple[np.ndarray, int, np.ndarray, np.ndarray]:
+    """Return wall-ordered row ids, conflict count and aligned dropped/kept ids.
+
+    Pair enumeration order depends on connection codes, not connection strings.
+    """
+    n = int(keys.conn_seq.size)
+    if n == 0:
+        z = np.empty(0, dtype=np.int64)
+        return (z, 0, z.copy(), z.copy())
+    perm = np.lexsort((keys.h2, keys.h1, keys.conn_seq, keys.conn_code))
+    new_key = np.empty(n, dtype=bool)
     new_key[0] = True
-    new_key[1:] = (c[1:] != c[:-1]) | (s[1:] != s[:-1])
+    tmp = keys.conn_code[perm]
+    new_key[1:] = tmp[1:] != tmp[:-1]
+    del tmp
+    tmp = keys.conn_seq[perm]
+    new_key[1:] |= tmp[1:] != tmp[:-1]
+    del tmp
     new_raw = new_key.copy()
-    new_raw[1:] |= (a[1:] != a[:-1]) | (b[1:] != b[:-1])
+    tmp = keys.h1[perm]
+    new_raw[1:] |= tmp[1:] != tmp[:-1]
+    del tmp
+    tmp = keys.h2[perm]
+    new_raw[1:] |= tmp[1:] != tmp[:-1]
+    del tmp
     key_starts = np.flatnonzero(new_key)
-    conflict = int((np.add.reduceat(new_raw.astype(np.int64), key_starts) > 1).sum())
+    del new_key
+    conflict = int((np.add.reduceat(new_raw, key_starts, dtype=np.int64) > 1).sum())
+    del new_raw
     keep = np.minimum.reduceat(perm, key_starts)
-    kept_for = keep[np.cumsum(new_key) - 1]
-    mask = perm != kept_for
-    dropped = perm[mask]
-    kept = kept_for[mask]
-    order = keep[np.lexsort((keep, wall[keep]))]
-    return (order.astype(np.int64), conflict, dropped.astype(np.int64), kept.astype(np.int64))
+    dropped = np.empty(n - keep.size, dtype=np.int64)
+    kept = np.empty_like(dropped)
+    if dropped.size:
+        offset = 0
+        for lo in range(0, n, _GATHER_ROWS):
+            hi = min(lo + _GATHER_ROWS, n)
+            kept_for = keep[np.searchsorted(key_starts, np.arange(lo, hi), side="right") - 1]
+            mask = perm[lo:hi] != kept_for
+            count = int(mask.sum())
+            dropped[offset : offset + count] = perm[lo:hi][mask]
+            kept[offset : offset + count] = kept_for[mask]
+            offset += count
+            del kept_for, mask
+    del key_starts, perm
+    order = keep[np.lexsort((keep, keys.recv_wall_ns[keep]))].astype(np.int64, copy=False)
+    del keep
+    return (order, conflict, dropped, kept)
 
 
 class _SpillReader:
@@ -182,7 +216,13 @@ def normalize_l0_partition(
     try:
         spill_paths: list[pathlib.Path] = []
         starts: list[int] = []
-        key_frames: list[pl.DataFrame] = []
+        conn_index: dict[str, int] = {}
+        cap = 0
+        code_buf = np.empty(0, dtype=np.int32)
+        seq_buf = np.empty(0, dtype=np.int64)
+        wall_buf = np.empty(0, dtype=np.int64)
+        h1_buf = np.empty(0, dtype=np.uint64)
+        h2_buf = np.empty(0, dtype=np.uint64)
         raw_records = 0
         for zf in zst_files:
             for blob in _iter_line_batches(zf, _BATCH_BYTES):
@@ -202,20 +242,43 @@ def normalize_l0_partition(
                 df.write_parquet(spill, compression="lz4")
                 starts.append(raw_records)
                 spill_paths.append(spill)
-                key_frames.append(
-                    df.select(
-                        "conn_id",
-                        "conn_seq",
-                        "recv_wall_ns",
-                        pl.col("raw").hash(_RAW_HASH_SEEDS[0]).alias("h1"),
-                        pl.col("raw").hash(_RAW_HASH_SEEDS[1]).alias("h2"),
-                    )
-                )
-                raw_records += df.height
+                n = df.height
+                if raw_records + n > cap:
+                    cap = max(_KEY_BUF_INIT, cap * 2 if cap else _KEY_BUF_INIT, raw_records + n)
+                    code_buf.resize(cap, refcheck=False)
+                    seq_buf.resize(cap, refcheck=False)
+                    wall_buf.resize(cap, refcheck=False)
+                    h1_buf.resize(cap, refcheck=False)
+                    h2_buf.resize(cap, refcheck=False)
+                for i, cid in enumerate(df["conn_id"].to_list()):
+                    code = conn_index.get(cid)
+                    if code is None:
+                        code = len(conn_index)
+                        if code >= _CONN_CODE_MAX:
+                            raise L1NormalizationError(f"too many conn_id in {part}")
+                        conn_index[cid] = code
+                    code_buf[raw_records + i] = code
+                seq_buf[raw_records : raw_records + n] = df["conn_seq"].to_numpy()
+                wall_buf[raw_records : raw_records + n] = df["recv_wall_ns"].to_numpy()
+                h1_buf[raw_records : raw_records + n] = df["raw"].hash(_RAW_HASH_SEEDS[0]).to_numpy()
+                h2_buf[raw_records : raw_records + n] = df["raw"].hash(_RAW_HASH_SEEDS[1]).to_numpy()
+                del df
+                raw_records += n
         if raw_records == 0:
             raise L1NormalizationError(f"zero rows: {part}")
-        keys = pl.concat(key_frames, rechunk=True)
-        del key_frames
+        code_buf.resize(raw_records, refcheck=False)
+        seq_buf.resize(raw_records, refcheck=False)
+        wall_buf.resize(raw_records, refcheck=False)
+        h1_buf.resize(raw_records, refcheck=False)
+        h2_buf.resize(raw_records, refcheck=False)
+        keys = _KeyColumns(
+            conn_code=code_buf,
+            conn_seq=seq_buf,
+            recv_wall_ns=wall_buf,
+            h1=h1_buf,
+            h2=h2_buf,
+        )
+        del code_buf, seq_buf, wall_buf, h1_buf, h2_buf, conn_index, blob
         order, conflict, dropped_idx, kept_idx = _dedup_sort_order(keys)
         del keys
         if conflict > 0:
