@@ -555,3 +555,27 @@ def test_mid_run_flush_failure_isolated(tmp_path: pathlib.Path, monkeypatch) -> 
     assert not paths.tick_tape_ledger.exists()
     frame = pl.read_parquet(paths.tick_tape_partition(day, "runflush"))
     assert frame.group_by("symbol").len().sort("symbol").rows() == [("A", 2), ("B", 2)]
+
+
+def _replay(paths: DataPaths, decision: dt.date, symbols: list[str]) -> None:
+    path = paths.universe_replay_out(decision)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"symbol": symbols}, schema={"symbol": pl.String}).write_parquet(path)
+
+
+def test_replayed_tiered_universe_joins_live_targets(tmp_path: pathlib.Path) -> None:
+    paths = DataPaths(tmp_path)
+    _universe(paths, _prev(_D), ["A", "EVENT"])
+    _replay(paths, _prev(_D), ["A", "CORE"])
+    _manifest(paths, _D, ["A", "EVENT"])
+    targets = plan_tick_tape_targets(sessions=[_D], paths=paths, ledger_done=frozenset())
+    assert [(item.symbol, item.days) for item in targets] == [("CORE", (_D,))]
+
+
+def test_replay_alone_is_a_universe_source(tmp_path: pathlib.Path) -> None:
+    paths = DataPaths(tmp_path)
+    _universe(paths, _prev(_D), [])
+    paths.universe_out(_prev(_D)).unlink()
+    _replay(paths, _prev(_D), ["CORE"])
+    targets = plan_tick_tape_targets(sessions=[_D], paths=paths, ledger_done=frozenset())
+    assert [item.symbol for item in targets] == ["CORE"]
