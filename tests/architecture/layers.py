@@ -73,3 +73,5 @@ LAYER_RANK['src/cli/collect_regular_kis.py'] = 7
 LAYER_RANK['src/marketdata/kiwoom_ticks.py'] = 1
 LAYER_RANK['src/marketdata/tick_tape_backfill.py'] = 4
 LAYER_RANK['src/cli/backfill_tick_tape.py'] = 7
+LAYER_RANK['src/universe/replay.py'] = 4
+LAYER_RANK['src/cli/universe_replay.py'] = 7

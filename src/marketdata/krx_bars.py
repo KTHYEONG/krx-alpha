@@ -43,6 +43,7 @@ __all__ = [
     "KrxNoTradingDataError",
     "KrxTransportError",
     "append_daily_bars",
+    "extend_bars_history",
     "validate_daily_bars",
     "write_market_map",
 ]
@@ -206,6 +207,62 @@ def latest_trading_day(
 
 def derive_market_map(bars: pl.DataFrame) -> dict[str, str]:
     return dict(zip(bars["symbol"].to_list(), bars["market"].to_list(), strict=True))
+
+
+def _earliest_stored_date(store_path: pathlib.Path) -> dt.date | None:
+    """Earliest stored bar date, read from the oldest month file only."""
+    store = pathlib.Path(store_path)
+    if store.exists() and not store.is_dir():
+        raise KrxBarsError(f"bars store is not a directory: {store}")
+    files = sorted(store.glob("*.parquet"))
+    for path in files:
+        try:
+            value = pl.scan_parquet(path).select(pl.col("date").min()).collect().item()
+        except Exception as exc:
+            raise KrxBarsError(f"partition unreadable at {path}: {exc}") from exc
+        if value is not None:
+            return cast("dt.date", value)
+    return None
+
+
+def extend_bars_history(
+    store_path: pathlib.Path, *, auth_key: str, start_date: dt.date, max_trading_days: int, session: Any | None = None
+) -> dict[str, int]:
+    """Fetch and append trading dates in [start_date, earliest stored date) that are missing, newest first, up to max_trading_days; returns counts."""
+    if max_trading_days < 1:
+        raise KrxBarsError("max_trading_days must be >= 1")
+    store = pathlib.Path(store_path)
+    earliest = _earliest_stored_date(store)
+    if earliest is None:
+        raise KrxBarsError("empty bars store; run refresh_bars first")
+    appended_days = 0
+    appended_rows = 0
+    cursor = earliest - dt.timedelta(days=1)
+    while cursor >= start_date and appended_days < max_trading_days:
+        try:
+            bars = fetch_daily_bars(cursor, auth_key=auth_key, session=session)
+        except KrxNoTradingDataError:
+            cursor -= dt.timedelta(days=1)
+            continue
+        if bars.is_empty() or bars["date"].to_list() != [cursor] * bars.height:
+            raise KrxBarsError(f"unexpected bar dates for {cursor}")
+        appended_rows += append_daily_bars(store, bars, reference="nearest")
+        appended_days += 1
+        earliest = min(earliest, cursor)
+        if appended_days % 20 == 0:
+            logger.info(
+                "[DATA] stage=bars_history progress=%d/%d earliest=%s",
+                appended_days,
+                max_trading_days,
+                earliest.isoformat(),
+            )
+        cursor -= dt.timedelta(days=1)
+    logger.info(
+        "[DATA] stage=bars_history status=OK appended_days=%d earliest=%s",
+        appended_days,
+        earliest.isoformat(),
+    )
+    return {"appended_days": appended_days, "appended_rows": appended_rows}
 
 
 def backfill_bars(
