@@ -13,6 +13,7 @@ COLLECTION_AFTERMARKET_BOOK_SLOTS = [2, 3]
 [selectors.krx]
 KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT = 2
 KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT = 5
+KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS = [1, 2, 3, 4]
 
 [[assignment]]
 slot = 1
@@ -62,6 +63,34 @@ project = "krx"
 purpose = "premarket_ws"
 channel = "ws"
 windows = ["07:58-08:50"]
+
+[[assignment]]
+slot = 1
+project = "krx"
+purpose = "regular_kis_ws"
+channel = "ws"
+windows = ["08:28-15:32"]
+
+[[assignment]]
+slot = 2
+project = "krx"
+purpose = "regular_kis_ws"
+channel = "ws"
+windows = ["08:28-15:32"]
+
+[[assignment]]
+slot = 3
+project = "krx"
+purpose = "regular_kis_ws"
+channel = "ws"
+windows = ["08:28-15:32"]
+
+[[assignment]]
+slot = 4
+project = "krx"
+purpose = "regular_kis_ws"
+channel = "ws"
+windows = ["08:28-15:32"]
 
 [[assignment]]
 slot = 1

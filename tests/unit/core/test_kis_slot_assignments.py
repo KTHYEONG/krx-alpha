@@ -32,6 +32,9 @@ def _krx_rows() -> dict[str, dict[str, object]]:
         if row["channel"] == "rest":
             name = "snapshot_rest"
             assert row["slot"] == selectors["KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT"]
+        elif row["purpose"] == "regular_kis_ws":
+            name = "regular_kis_ws"
+            assert str(row["slot"]) in [str(slot) for slot in selectors["KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS"]]
         elif row["slot"] == selectors["KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT"]:
             name = "premarket_ws"
         else:
@@ -90,7 +93,9 @@ def test_table_has_no_conflicts() -> None:
         for right in rows[index + 1 :]:
             if left["channel"] != right["channel"]:
                 continue
-            if left["slot"] != right["slot"] or left["project"] == right["project"]:
+            if left["slot"] != right["slot"]:
+                continue
+            if left["channel"] == "rest" and left["project"] == right["project"]:
                 continue
             for left_window in left["windows"]:
                 for right_window in right["windows"]:
@@ -113,7 +118,7 @@ def test_window_overlap_boundaries(left: list[str], right: list[str], overlaps: 
 
 def test_krx_rows_exact() -> None:
     krx = _krx_rows()
-    assert set(krx) == {"snapshot_rest", "premarket_ws", "aftermarket_ws"}
+    assert set(krx) == {"snapshot_rest", "premarket_ws", "regular_kis_ws", "aftermarket_ws"}
 
     assert krx["snapshot_rest"]["channel"] == "rest"
     assert krx["snapshot_rest"]["slots"] == ["2"]
@@ -122,6 +127,10 @@ def test_krx_rows_exact() -> None:
     assert krx["premarket_ws"]["channel"] == "ws"
     assert krx["premarket_ws"]["slots"] == ["5"]
     assert krx["premarket_ws"]["window_kst"] == ["07:58", "08:50"]
+
+    assert krx["regular_kis_ws"]["channel"] == "ws"
+    assert krx["regular_kis_ws"]["slots"] == ["1", "2", "3", "4"]
+    assert krx["regular_kis_ws"]["window_kst"] == ["08:28", "15:32"]
 
     assert krx["aftermarket_ws"]["channel"] == "ws"
     assert krx["aftermarket_ws"]["slots"] == ["1", "2", "3", "4"]
@@ -137,6 +146,22 @@ def test_compose_premarket_slot_matches_table() -> None:
     env = _compose_env()
     assert env["KRX_ALPHA_PREMARKET_ENABLED"] == "true"
     assert [env["KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT"]] == _krx_rows()["premarket_ws"]["slots"]
+
+
+def test_compose_regular_kis_slots_match_table(monkeypatch) -> None:
+    import json
+
+    from src.core.config import RegularKisSettings
+
+    env = _compose_env()
+    assert env["KRX_ALPHA_REGULAR_KIS_ENABLED"] == "false"
+    assert json.loads(env["KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS"]) == _krx_rows()["regular_kis_ws"]["slots"]
+    assert env["KRX_ALPHA_REGULAR_KIS_PAIR_CAPACITY_PER_CONNECTION"] == "41"
+    for key, value in env.items():
+        if key.startswith("KRX_ALPHA_REGULAR_KIS_"):
+            monkeypatch.setenv(key, value)
+    assert RegularKisSettings().enabled is False
+    assert RegularKisSettings(enabled=True).credential_slots == ("1", "2", "3", "4")
 
 
 def test_aftermarket_derived_slots_match_table(caplog, monkeypatch) -> None:
@@ -183,4 +208,4 @@ def test_assignment_table_excluded_from_image() -> None:
 def test_canonical_table_hash_pinned() -> None:
     raw = TABLE_PATH.read_bytes()
     assert raw.splitlines()[0] == b"# canonical: krx-alpha/deploy/shared/kis_slot_assignments.toml schema=1"
-    assert hashlib.sha256(raw).hexdigest() == "49c39b9957a1fd64a91b0804cdfd1decdc26b6cb1a7e477805e9b75e8e93af9a"
+    assert hashlib.sha256(raw).hexdigest() == "4c0b40679733c885e16c0846893f3f4022b4fe252ed8ecf7faa75c4e20260ca3"

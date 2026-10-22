@@ -3,7 +3,7 @@
 Agent-executable. Verify that every automated routine ran **and that what it wrote is correct**, then report. New automation is added as rows (section 12), never as a new document.
 
 - Host `or-vps` (SSH alias; host clock is UTC, always print KST with `TZ=Asia/Seoul`), container `krx-collector`, data root host `~/krx-alpha/data` = container `/app/data`.
-- Probes last run against production 2026-10-18 (rev `40ad278`): L0 of 2026-10-13..16, L1 of 2026-10-12, snapshots/bars/backup/offload as of 2026-10-18. Never exercised: A3/A4 failure paths, deferred recreate with a failed verify, `program_trades_sync` after fix `c8288e7` (first run 2026-10-19 ~20:40).
+- Probes last run against production 2026-10-18 (rev `40ad278`): L0 of 2026-10-13..16, L1 of 2026-10-12, snapshots/bars/backup/offload as of 2026-10-18. RK module added 2026-10-22; production probes NOT VERIFIED, pending G-KIS-HEAVY. Never exercised: A3/A4 failure paths, deferred recreate with a failed verify, `program_trades_sync` after fix `c8288e7` (first run 2026-10-19 ~20:40).
 - Report in Korean; keys, IDs, badges in English (section 10). This file stays English.
 - Retired IDs (do not reuse): H9 (merged into H1), C3 (merged into C8), Q7 (merged into C7).
 
@@ -81,6 +81,7 @@ Standard anchors; shift per C0. "By" = latest acceptable time.
 | 08:20 | `STREAMER_ACTIVE`: calendar gate, bars refresh, `market_map.json`, `candidates.json`, LS token reissue | S2, S6, S7, H10 | `candidates_not_ready` still failing at 08:50 = SEV1 |
 | by 08:50 | `FULL_ACTIVE` | S2, S3 | SEV1 |
 | 09:00 | first regular ticks | H11, C1 | SEV1 |
+| 08:28–15:32 | KIS regular shards (disabled until G-MEM; slot plan `deploy/shared/kis_slot_assignments.toml`) | RK rows | SEV2 when enabled |
 | 08:00–15:39 | Snapshot REST jobs (9 kinds) | C4 | SEV2 |
 | 15:20–15:30 | Closing auction (no trades in tick stream) | C2 gaps | SEV2 |
 | by 15:31 | `universe/aftermarket/D.json` (KRX, J screens) and `D.nxt.json` (NXT, NX screens) | C7 | SEV1 for aftermarket |
@@ -97,6 +98,7 @@ Neighbors sharing `~/.cache/kis`, the LS key, DB금융투자 key, Toss key, KIS 
 | 07:05 / 07:10 | `kca-kis-token-warmup` / `kca-kiwoom-token-rotate` | KIS token files |
 | 08:30, 11:30, 21:30 | `kca-price-ingest` | Kiwoom, Toss |
 | 08:32 / 08:39:30 | `kse-morning` / `kse-auction-open` | KIS slot 5 REST (krx premarket WS uses slot 5) |
+| 08:28–15:32 | krx `regular_kis` WS shards (disabled until G-MEM) | KIS slots 1–4 WS (krx; aftermarket WS takes the same slots 15:40–20:00) |
 | 08:39:55–09:01 | `kca-auction-open`, `kca-order-exit`, `kca-order-reconcile-exit`, `kca-paper-exit` | KIS main account |
 | 15:20–15:45 | `kca-collect/predict/auction-close/order-entry/finalize-close/aftermarket-book/archive-intraday-regular/auction-path` | KIS slots 1·5, Toss `STOCK_TRADING_TREND` (shared with krx snapshots), Kiwoom, DB금융투자 |
 | 18:30–19:40 | `kse-collect-eve` | LS REST (`admission_ls_*`), KIS slot 5 |
@@ -125,6 +127,7 @@ Commands run on the host after `cd ~/krx-alpha/data` unless the probe says conta
 | H13 | M4 | Stop grace | P-BROKER `stop_timeout` | 95 | lower = SEV3 |
 | H14 | M0 (Tue–Sat) M4 | Deferred recreate verified | `journalctl --user -u krx-deferred-recreate --since "26 hours ago" --no-pager \| grep -E 'deferred_verify\|Recreate\|Failed'`; `systemctl --user show krx-deferred-recreate.service -p Result` | `Result=success`; if a recreate happened: `deferred_verify status=ok check=stable` (its `sha` is the image pending at 22:00; a later CI deploy may supersede it, H1 judges the final `rev`) | `Result≠success` or `running_revision_mismatch` = SEV2 |
 | H15 | M0 W | Image GC | `journalctl --user -u vps-image-gc --since "26 hours ago" --no-pager \| grep stage=image_gc` | `status=OK` (2026-10-16/17: removed 1/6, kept 13, protected 4) | missing/FAIL = SEV3 (disk creep) |
+| H16 | M0 M4 | Unattended upgrades off-hours | `systemctl list-timers apt-daily-upgrade.timer --no-pager`; `systemctl cat apt-daily-upgrade.timer \| grep -E 'OnCalendar\|Randomized'` | `OnCalendar` drop-in `19:00 UTC` (04:00 KST) with `RandomizedDelaySec=30m`; `LAST` never inside 08:10–22:00 KST | default `06:00 UTC` + 60 min = 15:00–16:00 KST: a `liblzma5` upgrade re-executed systemd and restarted networkd at 15:03:48 on 2026-10-22, silencing the LS regular stream for 16.6 s (SEV2) |
 
 ### S: Scheduling and daemon
 
@@ -213,9 +216,11 @@ print("streams_found", len(rows))
 import collections, datetime as dt, glob, json, os, subprocess
 D = os.environ["D"]; base = os.path.expanduser("~/krx-alpha/data"); K = dt.timezone(dt.timedelta(hours=9))
 WIN = {"regular": ("083000", "200059"), "krx_after": ("154000", "200059"), "nxt_after": ("153000", "200059"), "nxt_pre": ("075800", "085059")}
-def planned(session, venue):
+def planned(session, venue, vendor):
     fs = {"regular": [f"{base}/manifest/{D}.json"], "nxt_pre": [f"{base}/manifest/premarket/{D}.nxt.shard-00.json"]}.get(
         session, glob.glob(f"{base}/manifest/aftermarket/{D}.{venue}.shard-*.json"))
+    if vendor == "kis" and session == "regular":
+        fs = glob.glob(f"{base}/manifest/regular_kis/{D}.krx.shard-*.json")
     return {a["symbol"] for f in fs if os.path.exists(f) for a in json.load(open(f))["subscription_acks"] if a.get("accepted")}
 for sdir in sorted(glob.glob(f"{base}/l0/*/*/*/*/dt={D}")):
     vendor, venue, session, stream = sdir.split("/l0/")[1].split("/")[:4]; quote = stream.endswith("ASP0"); lo, hi = WIN[session]
@@ -241,7 +246,7 @@ for sdir in sorted(glob.glob(f"{base}/l0/*/*/*/*/dt={D}")):
             if not t: evt_empty += 1
             else: tmin, tmax = min(tmin, t), max(tmax, t); out_win += not lo <= t <= hi
             px_le0 += px <= 0; crossed += a1 > 0 and b1 > 0 and b1 >= a1
-    pl = planned(session, venue)
+    pl = planned(session, venue, vendor)
     print(f"{vendor}/{venue}/{session}/{stream} rec={n} B_per_rec={size // max(n, 1)} parse_fail={bad} dup_seq={dup} seq_regress={regress} "
           f"hour_mismatch={hour_mis} evt={tmin}-{tmax} evt_empty={evt_empty} out_win={out_win} px_le0={px_le0} crossed={crossed} "
           f"syms={len(sym)} planned={len(pl)} no_data={len(pl - set(sym))} unplanned={len(set(sym) - pl)} thin_lt100={sum(1 for x in pl if 0 < sym[x] < 100)}")
@@ -254,7 +259,9 @@ import datetime as dt, glob, json, os
 D = os.environ["D"]; K = dt.timezone(dt.timedelta(hours=9))
 hm = lambda ns: dt.datetime.fromtimestamp(ns / 1e9, K).strftime("%H:%M:%S")
 for f in sorted(glob.glob(os.path.expanduser(f"~/krx-alpha/data/manifest/**/{D}*.json"), recursive=True)):
-    m = json.load(open(f)); acc = {(a["symbol"], a["tr_id"]) for a in m["subscription_acks"] if a.get("accepted")}
+    m = json.load(open(f))
+    if "subscription_acks" not in m: continue
+    acc = {(a["symbol"], a["tr_id"]) for a in m["subscription_acks"] if a.get("accepted")}
     plan = {(p["symbol"], p["tr_id"]) for p in m["planned_pairs"]}
     spans = sorted({(g["gap_start_ns"], g["gap_end_ns"], g.get("reason")) for g in m["gaps"]})
     big = max(spans, key=lambda s: s[1] - s[0], default=None)
@@ -590,6 +597,7 @@ Every ID of the run's modes needs a status; list skipped IDs with the reason.
 | Manifest `degraded_reason`, unacked pairs | `subscription_acks[].rt_cd`; KIS 41-pair/connection cap; `work/kis_ws_leases/<key_id>.lock` (`key_lease_busy`) |
 | L0 stalled / zero size | `docker logs --since 30m`, `docker exec krx-collector pgrep -af collect-`, H3, H4 |
 | All streams silent at once in session | KRX circuit breaker / halt first (2026-10-15 CB: ~900 s regular gap, streams connected); watchdog is not halt-aware |
+| All streams silent at once, then `stream_disconnect` + clean reconnect | `journalctl --since <UTC> --until <UTC>` for `Reexecuting`, `systemd-networkd`, `RTM_DELROUTE`, `apt-daily-upgrade` (2026-10-22 15:03:48); H16 |
 | Q9/Q10 violation | which stream/hour; `dup_seq`/`seq_regress` → writer replay after restart (S4); `hour_mismatch` → clock (H4); `crossed`/`px_le0` → decoder field drift (vendor format change) |
 | `StorageExhaustedError` | disk floor; free space only after 22:00 |
 | `ClockUnsyncedError` | `chronyc tracking`, NTP reachability |
@@ -631,3 +639,17 @@ One stream-child spec row (`role=crosscheck`) gated by `KRX_ALPHA_DB_CROSSCHECK_
 | ID | Modes | Check | How | PASS |
 |---|---|---|---|---|
 | DB1 | M0 | Stays dormant | P-BROKER `db_crosscheck_env`; `docker logs --since 14h krx-collector 2>&1 \| grep -c db_crosscheck`; `ls -d l0/db manifest/*.db.json 2>/dev/null` | `0`, `0`, nothing listed; any DB activity = SEV2 (config drift) |
+
+## RK. Module: KIS regular shards (lifecycle: disabled since 2026-10-22; enable only after G-MEM)
+
+Co-primary dual feed for the candidate prefix (`KRX_ALPHA_REGULAR_KIS_ENABLED`, slots 1–4 WS 08:28–15:32 per `deploy/shared/kis_slot_assignments.toml`, `docker-compose.yml`). The LS regular stream stays the EOD primary for reconciliation and status; KIS outcomes are reported and never flip `eod_maintenance` status until a user G-PROMOTE decision.
+
+| ID | Modes | Check | How | PASS |
+|---|---|---|---|---|
+| RK1 | M3 | Shards and acks | `ls manifest/regular_kis/D.krx.shard-*.json`; P-MANIFEST with D on the `regular_kis` files | one file per planned shard (≤4), each `closed` by ~15:32:10, `acked_pairs == planned`, `unacked=0`, `degraded None` |
+| RK2 | M3 | L0 present | P-L0 with D | `kis/krx/regular/H0STCNT0` and `H0STASP0` present, sizes >0, hours `08`–`15` |
+| RK3 | M3 | EOD comparison | `docker logs --since 14h krx-collector 2>&1 \| grep regular_kis_compare`; `manifest/audit/D.{kis,ls}.regular.audit.json` | one line `date=D`; KIS loss ≤ `AuditSettings.loss_warn_ratio`; open lag ≤10 s. G-KIS-LOSS compares LS loss on the KIS symbols from the persisted ledgers (the logged LS baseline spans its full universe), not the aggregate line alone |
+| RK4 | M2 M3 | Lease/slot conflicts | `docker logs --since 14h krx-collector 2>&1 \| grep -E "key_lease_busy\|slot_busy_regular_kis"` | no `key_lease_busy` on slots 1–4; `slot_busy_regular_kis` DEFERRED only while a regular shard overruns 15:32, and the aftermarket shard starts on the next cycle |
+| RK5 | M3 W | Content and lifecycle | P-L0C with D; P-DQ / P-L1C on expired `kis/krx/regular/*`; H8 verified remote L1 | planned/acked symbols have data, Q9/Q10 invariants hold, no confirmed loss interval inside 09:00–09:05; expired partitions normalized and offloaded before L0 deletion. Baseline not yet measured; collect five comparable enabled days, then use per-symbol medians (section 9) |
+
+Rollout: leave `KRX_ALPHA_REGULAR_KIS_ENABLED=false` until G-MEM passes. Enable only outside the freeze; then H1 and the CI deploy job. Disabling does not require a gate. RK rows are NOT APPLICABLE while disabled; new KIS regular activity then indicates config drift.

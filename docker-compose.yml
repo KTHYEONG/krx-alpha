@@ -29,6 +29,11 @@ services:
       - KRX_ALPHA_PREMARKET_ENABLED=true
       - KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT=5
       - KRX_ALPHA_PREMARKET_PAIR_CAPACITY_PER_CONNECTION=41
+      # KIS 정규장 코프라이머리 샤드 (정규 확장 Part4; G-MEM 통과 전까지 비활성).
+      # 슬롯 1-4 WS 08:28-15:32 (애프터마켓 15:40-20:00·프리마켓 슬롯 5와 비중첩, deploy/shared/kis_slot_assignments.toml).
+      - KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS=["1","2","3","4"]
+      - KRX_ALPHA_REGULAR_KIS_PAIR_CAPACITY_PER_CONNECTION=41
+      - KRX_ALPHA_REGULAR_KIS_ENABLED=false
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
