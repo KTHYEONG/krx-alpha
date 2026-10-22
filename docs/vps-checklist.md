@@ -89,6 +89,7 @@ Standard anchors; shift per C0. "By" = latest acceptable time.
 | 20:00 | `POST_MARKET_EOD`: writers close within ~2 s, EOD normalize → offload → verified L0 delete → remote L0 purge → reconcile → backup freshness → digest | C2, S5 | SEV2 |
 | by 20:45 (Monday and post-holiday batch with `deleted_partitions` ≥200: by 21:00, 2026-10-12 20:51, 10-19 20:58 — tracked slowdown, see S5) | `eod_maintenance status=OK` (2026-10-12..16: 20:27–20:51); then `program_trades_sync STARTED` (timeout 2400 s from launch); `premarket_pool status=OK target=N`; `NIGHT_SLEEP` | S5, C5, C7 | WARN 20:45, **SEV1 21:00**; sync FAIL = SEV2 |
 | 22:00 Mon–Fri | `krx-deferred-recreate` (recreates only if a pulled image is pending) + `deferred_verify` | H14 | SEV2 |
+| 23:30–05:30 nightly | `backfill-tick-tape` then `backfill-minute-bars` (one child at a time, one attempt per window per job, `--deadline` = window end) | HB rows | `stage=nightly_*` OK/NOOP; FAIL = SEV3 (best-effort, never pages) |
 | 23:30 daily | `krx-host-backup` to Drive (shared lock) | H7 | SEV2 if `last_ok_at` >26 h |
 
 Neighbors sharing `~/.cache/kis`, the LS key, DB금융투자 key, Toss key, KIS data slots (`deploy/shared/kis_slot_assignments.toml`) and the Drive lock. Attribute H12 contention by time; their own failures are SEV3 here (audited by `k-closing-alpha/docs/vps-checklist.md`, `k-stock-engine/docs/vps-checklist.md`).
@@ -100,6 +101,8 @@ Neighbors sharing `~/.cache/kis`, the LS key, DB금융투자 key, Toss key, KIS 
 | 08:32 / 08:39:30 | `kse-morning` / `kse-auction-open` | KIS slot 5 REST (krx premarket WS uses slot 5) |
 | 08:28–15:32 | krx `regular_kis` WS shards (enabled 2026-10-23) | KIS slots 1–4 WS (krx; aftermarket WS takes the same slots 15:40–20:00) |
 | 08:39:55–09:01 | `kca-auction-open`, `kca-order-exit`, `kca-order-reconcile-exit`, `kca-paper-exit` | KIS main account |
+| 23:30–05:30 | krx nightly backfill (`backfill-tick-tape`, then `backfill-minute-bars`) | Kiwoom `ka10079` (host pacer, shared with kca) |
+| 23:30–05:30 | krx nightly backfill (`backfill-minute-bars`) | Toss `MARKET_DATA_CHART` (shared with kca) |
 | 15:20–15:45 | `kca-collect/predict/auction-close/order-entry/finalize-close/aftermarket-book/archive-intraday-regular/auction-path` | KIS slots 1·5, Toss `STOCK_TRADING_TREND` (shared with krx snapshots), Kiwoom, DB금융투자 |
 | 18:30–19:40 | `kse-collect-eve` | LS REST (`admission_ls_*`), KIS slot 5 |
 | 20:05 / 20:35 / 20:40 | `kca-archive-intraday` / `kca-tape-sweep` / `kse-collect-dbsec` | LS, DB금융투자 (1 token/min/key), Kiwoom |
@@ -653,3 +656,16 @@ Co-primary dual feed for the candidate prefix (`KRX_ALPHA_REGULAR_KIS_ENABLED`, 
 | RK5 | M3 W | Content and lifecycle | P-L0C with D; P-DQ / P-L1C on expired `kis/krx/regular/*`; H8 verified remote L1 | planned/acked symbols have data, Q9/Q10 invariants hold, no confirmed loss interval inside 09:00–09:05; expired partitions normalized and offloaded before L0 deletion. Baseline not yet measured; collect five comparable enabled days, then use per-symbol medians (section 9) |
 
 Rollout: leave `KRX_ALPHA_REGULAR_KIS_ENABLED=false` until G-MEM passes. Enable only outside the freeze; then H1 and the CI deploy job. Disabling does not require a gate. RK rows are NOT APPLICABLE while disabled; new KIS regular activity then indicates config drift.
+
+## HB. Module: history backfill nightly (lifecycle: disabled; enable only after Part 1 gates pass)
+
+Nightly window 23:30–05:30 KST. `TICK_TAPE` first (Kiwoom `ka10079` vendor window expires daily), then `MINUTE_BARS` (Toss `MARKET_DATA_CHART`); one child at a time, one attempt per window per job, `--deadline` = window end (daemon termination after an additional 120 s grace). Enabled by `KRX_ALPHA_TICK_TAPE_ENABLED=true` (`docker-compose.yml`); minute bars join the same slot when Part 4 lands.
+
+| ID | Modes | Check | How | PASS |
+|---|---|---|---|---|
+| HB1 | M4 | Nightly children ran | `docker logs --since 14h krx-collector 2>&1 \| grep -E 'stage=nightly_'` | `STARTED` then `OK` (or `NOOP` when nothing to do) per enabled job; `FAIL` = SEV3 |
+| HB2 | M4 | Tick-tape summary | `docker logs --since 14h krx-collector 2>&1 \| grep stage=tick_tape_backfill` | last-night summary `symbol_days`, `edge_partial=0`, `failed=0` |
+| HB3 | M4 | Ledger growth | `manifest/tick_tape/kiwoom_ledger.jsonl` | new `complete` lines for the night's symbol-days; no duplicate Settled pairs re-planned |
+| HB4 | W | Drive presence | P-STORE `l1/history/tick_tape` | new `dt=<day>` partitions present remotely (`=` only) |
+
+Rollout: keep `KRX_ALPHA_TICK_TAPE_ENABLED=false` until Part 1 gates pass. Enable only outside the freeze; then H1 and the CI deploy job. HB rows are NOT APPLICABLE while disabled.
