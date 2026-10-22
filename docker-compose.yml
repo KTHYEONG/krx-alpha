@@ -29,11 +29,14 @@ services:
       - KRX_ALPHA_PREMARKET_ENABLED=true
       - KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT=5
       - KRX_ALPHA_PREMARKET_PAIR_CAPACITY_PER_CONNECTION=41
-      # KIS 정규장 코프라이머리 샤드 (정규 확장 Part4; G-MEM 통과 전까지 비활성).
+      # KIS 정규장 코프라이머리 샤드 (정규 확장 Part4; 2026-10-22 G-MEM 통과 후 활성, G-KIS-HEAVY/LOSS/SLOT-COEXIST 관찰 중).
       # 슬롯 1-4 WS 08:28-15:32 (애프터마켓 15:40-20:00·프리마켓 슬롯 5와 비중첩, deploy/shared/kis_slot_assignments.toml).
       - KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS=["1","2","3","4"]
       - KRX_ALPHA_REGULAR_KIS_PAIR_CAPACITY_PER_CONNECTION=41
-      - KRX_ALPHA_REGULAR_KIS_ENABLED=false
+      - KRX_ALPHA_REGULAR_KIS_ENABLED=true
+      # 2층 유니버스 (Part5; 2026-10-22 G-UNIVERSE 오프라인 20일 재현 PASS: 코어 65-71, 교체율 최대 4.2%).
+      # 코어가 후보 앞쪽(거래대금 순)을 차지하므로 KIS 샤드 0이 최대 거래대금 20종목이 되어 G-KIS-HEAVY 조건을 충족한다.
+      - KRX_ALPHA_UNIVERSE_CORE_ENABLED=true
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
