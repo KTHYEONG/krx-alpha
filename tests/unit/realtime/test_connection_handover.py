@@ -84,7 +84,9 @@ async def _until(cond: Callable[[], bool]) -> None:
 
 
 class _Rig:
-    def __init__(self, *, new: _Adapter, max_s: float = 60.0, cooldown_s: float = 0.0) -> None:
+    def __init__(
+        self, *, new: _Adapter, max_s: float = 60.0, cooldown_s: float = 0.0, window: Callable[[], bool] | None = None
+    ) -> None:
         self.old = _Adapter()
         self.new = new
         self.calls = 0
@@ -95,7 +97,8 @@ class _Rig:
             return self.new
 
         self.handover = Handover(
-            adapter_factory=_factory, pairs=_PAIRS, request=self.request, max_s=max_s, cooldown_s=cooldown_s
+            adapter_factory=_factory, pairs=_PAIRS, request=self.request, max_s=max_s, cooldown_s=cooldown_s,
+            window=window,
         )
         self.sink = _Sink()
         self.stop = asyncio.Event()
@@ -297,4 +300,58 @@ async def test_retiring_the_old_adapter_tolerates_a_failing_close() -> None:
     await _until(lambda: rig.streamer._adapter is rig.new)  # noqa: SLF001
     rig.new.q.put_nowait(_frame("n1", "090040", "new"))
     await _until(lambda: "n1" in rig.sink.raws)
+    assert await rig.finish() == "stopped"
+
+
+@_sync
+async def test_window_starts_a_standby_ahead_of_time_and_holds_both_connections() -> None:
+    window = {"open": True}
+    rig = _Rig(new=_Adapter(), max_s=0.05, window=lambda: window["open"])
+    rig.start()
+    await rig.first_frame()
+    await _until(lambda: rig.new.subscribed)
+    rig.new.q.put_nowait(_frame("x1", "090005", "new"))
+    rig.old.q.put_nowait(_frame("x1", "090005", "old"))
+    await _until(lambda: "x1" in rig.sink.raws)
+    await asyncio.sleep(0.15)
+    assert not rig.old.closed
+    assert rig.streamer._adapter is rig.old  # noqa: SLF001
+    window["open"] = False
+    await _until(lambda: rig.old.closed)
+    assert await rig.finish() == "stopped"
+    assert rig.calls == 1
+
+
+@_sync
+async def test_primary_failure_inside_the_window_promotes_the_ready_standby() -> None:
+    rig = _Rig(new=_Adapter(), window=lambda: True)
+    rig.start()
+    await rig.first_frame()
+    await _until(lambda: rig.new.subscribed)
+    await asyncio.sleep(0.05)
+    rig.old.q.put_nowait(VendorDisconnected("closed"))
+    await _until(lambda: rig.old.closed)
+    rig.new.q.put_nowait(_frame("n1", "090030", "new"))
+    await _until(lambda: "n1" in rig.sink.raws)
+    assert await rig.finish() == "stopped"
+
+
+@_sync
+async def test_duplicate_memory_is_bounded() -> None:
+    from src.realtime import connection_handover
+
+    rig = _Rig(new=_Adapter(), window=lambda: True)
+    rig.start()
+    await rig.first_frame()
+    await _until(lambda: rig.new.subscribed)
+    await asyncio.sleep(0.05)
+    original = connection_handover._SEEN_CAP  # noqa: SLF001
+    connection_handover._SEEN_CAP = 8  # noqa: SLF001
+    try:
+        for index in range(40):
+            rig.old.q.put_nowait(_frame(f"o{index}", "090001", "old"))
+        await _until(lambda: len(rig.sink.raws) >= 41)
+        assert len(rig.handover._seen) <= 9  # noqa: SLF001
+    finally:
+        connection_handover._SEEN_CAP = original  # noqa: SLF001
     assert await rig.finish() == "stopped"

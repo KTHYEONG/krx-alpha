@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import logging
 import time
 from collections.abc import Callable
@@ -14,6 +15,9 @@ from src.realtime.contracts import L0Frame, VendorAdapter
 from src.realtime.lag_monitor import event_second_of
 
 logger = logging.getLogger(__name__)
+
+# Duplicate-suppression memory: only payloads still in flight on the lagging connection matter, so the oldest quarter is dropped beyond this.
+_SEEN_CAP = 400_000
 
 
 class SwapRequest:
@@ -50,7 +54,8 @@ class Handover:
     The old connection stays open while a standby subscribes the same pairs, because frames the vendor
     is still delivering late exist only on the old connection. The cut-over happens once the old
     connection's event time has reached the standby's first event, the old connection fails, or
-    `max_s` elapsed. While both are open, a frame whose raw payload was already recorded from the
+    `max_s` elapsed. A `window` additionally starts a standby ahead of time and keeps both connections live
+    until it closes, so a vendor that stalls subscriptions at the open still has a ready connection. While both are open, a frame whose raw payload was already recorded from the
     other connection is dropped, so L0 and downstream partitions never hold the same event twice.
     A standby failure never affects the old connection.
     """
@@ -63,6 +68,7 @@ class Handover:
         request: SwapRequest,
         max_s: float,
         cooldown_s: float,
+        window: Callable[[], bool] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if max_s <= 0 or cooldown_s < 0:
@@ -72,6 +78,7 @@ class Handover:
         self._request = request
         self._max_s = max_s
         self._cooldown_s = cooldown_s
+        self._window = window
         self._monotonic = monotonic
         self._opening: asyncio.Task[VendorAdapter | None] | None = None
         self._standby: _Standby | None = None
@@ -94,8 +101,9 @@ class Handover:
         return found
 
     def maybe_start(self, *, eligible: bool) -> None:
-        """Start a standby when the monitor asked for one, `eligible`, and the cooldown has passed."""
-        if not self._request.take() or not eligible or self.active:
+        """Start a standby when the monitor asked for one or the hot-standby window is open, `eligible`, and the cooldown has passed."""
+        requested = self._request.take()
+        if not (requested or (self._window is not None and self._window())) or not eligible or self.active:
             return
         now = self._monotonic()
         if self._last_start is not None and now - self._last_start < self._cooldown_s:
@@ -140,6 +148,9 @@ class Handover:
             else:
                 self._primary_event_s = max(self._primary_event_s, event_s)
         key = hash((frame.stream, frame.symbol, frame.raw))
+        if len(self._seen) > _SEEN_CAP:
+            for stale in list(itertools.islice(self._seen, _SEEN_CAP // 4)):
+                del self._seen[stale]
         owner = self._seen.setdefault(key, from_standby)
         if owner != from_standby:
             self._dropped += 1
@@ -162,6 +173,8 @@ class Handover:
         if standby.recv_task.done() and standby.recv_task in done and standby.recv_task.exception() is not None:
             logger.warning("[DATA] stage=stream_handover status=STANDBY_LOST")
             await self._drop_standby()
+            return None
+        if self._window is not None and self._window():
             return None
         caught_up = standby.first_event_s is not None and self._primary_event_s >= standby.first_event_s
         expired = self._monotonic() - standby.started >= self._max_s

@@ -27,7 +27,8 @@ class _Clock:
 
 def _watch(clock: _Clock) -> RegularOpenWatch:
     return RegularOpenWatch(
-        anchors=standard_session_anchors(_DAY), silence_limit_s=30.0, open_grace_s=600.0, alert_after_s=30.0, now=clock
+        anchors=standard_session_anchors(_DAY), silence_limit_s=30.0, open_grace_s=600.0, alert_after_s=30.0,
+        standby_lead_s=120.0, standby_hold_s=300.0, now=clock
     )
 
 
@@ -88,9 +89,21 @@ def test_invalid_arguments_and_bad_timestamps() -> None:
     clock = _Clock(9, 0, 0)
     anchors = standard_session_anchors(_DAY)
     with pytest.raises(ValueError, match="positive"):
-        RegularOpenWatch(anchors=anchors, silence_limit_s=0, open_grace_s=600, alert_after_s=30, now=clock)
+        RegularOpenWatch(anchors=anchors, silence_limit_s=0, open_grace_s=600, alert_after_s=30,
+                         standby_lead_s=120, standby_hold_s=300, now=clock)
     with pytest.raises(ValueError, match="open_grace_s"):
-        RegularOpenWatch(anchors=anchors, silence_limit_s=30, open_grace_s=10, alert_after_s=30, now=clock)
+        RegularOpenWatch(anchors=anchors, silence_limit_s=30, open_grace_s=10, alert_after_s=30,
+                         standby_lead_s=120, standby_hold_s=300, now=clock)
+    with pytest.raises(ValueError, match="standby"):
+        RegularOpenWatch(anchors=anchors, silence_limit_s=30, open_grace_s=600, alert_after_s=30,
+                         standby_lead_s=0, standby_hold_s=300, now=clock)
     watch = _watch(clock)
     watch.observe(L0Frame("ls", "H0STCNT0", "005930", "{}", 1, 2**70, 1, "c"))
     assert watch.silence_limit() == 600.0
+
+
+def test_standby_window_opens_before_the_open_and_closes_after_the_hold() -> None:
+    assert not _watch(_Clock(8, 57, 59)).standby_window()
+    assert _watch(_Clock(8, 58, 0)).standby_window()
+    assert _watch(_Clock(9, 4, 59)).standby_window()
+    assert not _watch(_Clock(9, 5, 0)).standby_window()
