@@ -87,6 +87,106 @@ def _ok_quote(recv_ns=None):
     return _quote("005930", "090100", recv_ns or _ns(9, 1, 1))
 
 
+def _as_kis(record):
+    body = json.loads(record["raw"])["body"]
+    fields = [""] * 17
+    for index, key in ((0, "shcode"), (1, "chetime"), (2, "price"), (12, "cvolume"),
+                       (13, "volume"), (15, "mdchecnt"), (16, "mschecnt")):
+        fields[index] = body[key]
+    return {**record, "vendor": "kis", "raw": "^".join(fields)}
+
+
+@pytest.mark.parametrize(("counters", "volumes", "expected"), [
+    ([100, 101, 105], [1000, 1010, 1050], (3, 0, 0, 0)),
+    ([100, 101, 105], [1000, 1010, 1020], (0, 3, 0, 0)),
+    ([100, 100, 101], [1000, 1000, 1010], (0, 0, 1, 0)),
+    ([500, 2, 3, 4, 5], [5000, 20, 30, 40, 50], (0, 0, 0, 1)),
+    ([500, 9, 8, 7, 501], [5000, 90, 80, 70, 5010], (0, 0, 0, 0)),
+])
+def test_kis_ledger_matches_ls(tmp_path, counters, volumes, expected):
+    from src.core.config import AuditSettings
+    from src.storage.l0_audit import AuditStatus
+
+    records = [
+        _tick("005930", counter - 1, 1, volume, 10, "090001", _ns(9, 0, i + 3), seq=i + 1)
+        for i, (counter, volume) in enumerate(zip(counters, volumes, strict=True))
+    ]
+    _write(tmp_path, TICK, records)
+    _write(tmp_path, TICK, [_as_kis(record) for record in records], vendor="kis")
+    settings = AuditSettings(latency_streams=(TICK,), counter_reset_confirm_frames=3)
+    ls = _derive(tmp_path, settings=settings, wall_ns=lambda: 42)
+    kis = _derive(tmp_path, settings=settings, vendor="kis", wall_ns=lambda: 42)
+
+    assert kis.status is ls.status is AuditStatus.OK
+    assert kis.symbols == ls.symbols
+    assert kis.totals == ls.totals
+    assert kis.latency == ls.latency
+    ledger = kis.symbols[0]
+    assert (ledger.confirmed_missing, ledger.count_only_missing, ledger.duplicates, ledger.resets) == expected
+
+
+def test_kis_short_record_skipped_and_received_ticks_normalized(tmp_path):
+    from src.core.config import AuditSettings
+    from src.storage.l0_audit import AuditStatus, ReceivedTick, iter_received_ticks
+
+    records = [_as_kis(_tick("005930", counter, 0, counter * 10, 10, "090001", _ns(9, 0, 3)))
+               for counter in (100, 101)]
+    short = {**records[0], "raw": "^".join(records[0]["raw"].split("^")[:16])}
+    _write(tmp_path, TICK, [records[0], short, records[1]], vendor="kis")
+    audit = _derive(tmp_path, settings=AuditSettings(latency_streams=(TICK,)), vendor="kis")
+
+    assert audit.status is AuditStatus.OK
+    assert audit.symbols[0].frames == audit.symbols[0].trades_observed == 2
+    assert audit.latency[0].event_time_missing == 1
+    assert list(iter_received_ticks(tmp_path, vendor="kis", venue="krx", session="regular", day=DAY)) == [
+        ReceivedTick("005930", 90001, 100, 70000, 10),
+        ReceivedTick("005930", 90001, 101, 70000, 10),
+    ]
+
+
+def test_kis_latency_and_read_only_determinism(tmp_path):
+    from src.core.config import AuditSettings
+    from src.storage.l0_audit import _audit_to_jsonable
+
+    record = _as_kis(_tick("005930", 100, 0, 1000, 10, "090001", _ns(9, 0, 3)))
+    _write(tmp_path, TICK, [record], vendor="kis")
+    before = {p: (p.stat().st_mtime_ns, p.read_bytes()) for p in tmp_path.rglob("*.zst")}
+    settings = AuditSettings(latency_streams=(TICK,))
+    first = _derive(tmp_path, settings=settings, vendor="kis", wall_ns=lambda: 42)
+    second = _derive(tmp_path, settings=settings, vendor="kis", wall_ns=lambda: 42)
+
+    assert json.dumps(_audit_to_jsonable(first)) == json.dumps(_audit_to_jsonable(second))
+    assert before == {p: (p.stat().st_mtime_ns, p.read_bytes()) for p in tmp_path.rglob("*.zst")}
+    (minute,) = first.latency[0].minutes
+    assert (minute.minute_kst, minute.count) == ("09:00", 1)
+    assert minute.max_s == pytest.approx(2.0, abs=1e-3)
+
+
+def test_kis_latency_replays_noncontiguous_receive_minute(tmp_path):
+    from src.core.config import AuditSettings
+
+    records = [_as_kis(_tick("005930", 100 + i, 0, 1000 + i * 10, 10, "090001", recv))
+               for i, recv in enumerate((_ns(9, 0, 3), _ns(9, 1, 3), _ns(9, 0, 5)))]
+    _write(tmp_path, TICK, records, vendor="kis")
+    audit = _derive(tmp_path, settings=AuditSettings(latency_streams=(TICK,)), vendor="kis")
+    first, second = audit.latency[0].minutes
+    assert (first.minute_kst, first.count, first.min_s, first.max_s) == ("09:00", 2, 2.0, 4.0)
+    assert (second.minute_kst, second.count, second.max_s) == ("09:01", 1, 62.0)
+
+
+@pytest.mark.parametrize("with_records", [False, True])
+def test_db_ledger_stays_unsupported(tmp_path, with_records):
+    from src.core.config import AuditSettings
+    from src.storage.l0_audit import AuditStatus
+
+    if with_records:
+        _write(tmp_path, TICK, [_tick("005930", 100, 0, 1000, 10, "090001", _ns(9, 0, 3))], vendor="db")
+    audit = _derive(tmp_path, settings=AuditSettings(latency_streams=(TICK,)), vendor="db")
+    assert audit.status is AuditStatus.UNAVAILABLE
+    assert audit.reason == "unsupported_vendor"
+    assert audit.symbols == ()
+
+
 def test_recv_minute_bucketing(tmp_path) -> None:
     from src.storage.l0_audit import AuditStatus
 
@@ -255,7 +355,7 @@ def test_quote_hotime_path_and_envelope_precedence(tmp_path) -> None:
     assert audit.reason == "no_decodable_records"
 
 
-def test_kis_record_uses_envelope_time_and_reports_unsupported_ledger(tmp_path) -> None:
+def test_malformed_kis_record_uses_envelope_time_without_ledger(tmp_path) -> None:
     from src.storage.l0_audit import AuditStatus
 
     _write(tmp_path / "l0", TICK, [
@@ -265,7 +365,7 @@ def test_kis_record_uses_envelope_time_and_reports_unsupported_ledger(tmp_path) 
     audit = _derive(tmp_path / "l0", vendor="kis")
 
     assert audit.status is AuditStatus.UNAVAILABLE
-    assert audit.reason == "unsupported_vendor"
+    assert audit.reason == "no_decodable_records"
     (entry,) = [item for item in audit.latency if item.stream == TICK]
     assert entry.status is AuditStatus.OK
     (minute,) = entry.minutes
