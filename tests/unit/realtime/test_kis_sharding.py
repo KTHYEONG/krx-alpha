@@ -314,3 +314,78 @@ def test_aftermarket_rank_cap_is_maximal_for_unequal_and_empty_venue_lists() -> 
             assert tuple(symbol for shard in shards for symbol in shard.symbols) == symbols[:cap]
             assert [shard.shard_index for shard in shards] == list(range(len(shards)))
         assert [shard.credential_slot for shard in plan] == [str(i) for i in range(len(plan))]
+
+
+def test_regular_plan_slices_in_rank_order() -> None:
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    keys = tuple(KisDataCredential(str(i), f"key{i}", "s", "h", f"id{i}") for i in (1, 2, 3, 4))
+    symbols = tuple(f"{i:06d}" for i in range(45))
+    plan = plan_regular_kis_shards(
+        symbols=symbols, credentials=keys, credential_slots=("1", "2", "3", "4"),
+        pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
+    )
+    assert [(s.shard_index, len(s.symbols), s.credential_slot) for s in plan] == [(0, 20, "1"), (1, 20, "2"), (2, 5, "3")]
+    assert all(s.venue is MarketVenue.KRX for s in plan)
+    assert tuple(sym for s in plan for sym in s.symbols) == symbols
+    again = plan_regular_kis_shards(
+        symbols=symbols, credentials=keys, credential_slots=("1", "2", "3", "4"),
+        pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
+    )
+    assert [s.symbols for s in again] == [s.symbols for s in plan]
+
+
+def test_regular_plan_truncates_instead_of_aborting(caplog) -> None:
+    import logging
+
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    keys = tuple(KisDataCredential(str(i), f"key{i}", "s", "h", f"id{i}") for i in (1, 2, 3, 4))
+    symbols = tuple(f"{i:06d}" for i in range(100))
+    with caplog.at_level(logging.WARNING, logger="src.realtime.kis_sharding"):
+        plan = plan_regular_kis_shards(
+            symbols=symbols, credentials=keys, credential_slots=("1", "2", "3", "4"),
+            pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
+        )
+    kept = sum(len(s.symbols) for s in plan)
+    assert kept == 80
+    assert any("stage=regular_kis_plan" in r.message and "status=TRUNCATED" in r.message and "kept=80" in r.message and "dropped=20" in r.message for r in caplog.records)
+
+
+def test_regular_plan_missing_slot_fails_closed() -> None:
+    import pytest
+
+    from src.core.errors import MissingCredentialsError
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    keys = (KisDataCredential("1", "k", "s", "h", "id1"),)
+    with pytest.raises(MissingCredentialsError):
+        plan_regular_kis_shards(
+            symbols=("005930",), credentials=keys, credential_slots=("4",),
+            pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
+        )
+
+
+def test_regular_plan_rejects_duplicate_or_empty_symbols() -> None:
+    import pytest
+
+    from src.core.errors import KrxAlphaError, SlotBudgetExceededError
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    keys = (KisDataCredential("1", "k", "s", "h", "id1"),)
+    with pytest.raises(KrxAlphaError):
+        plan_regular_kis_shards(
+            symbols=(), credentials=keys, credential_slots=("1",),
+            pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
+        )
+    with pytest.raises(KrxAlphaError):
+        plan_regular_kis_shards(
+            symbols=("005930", "005930"), credentials=keys, credential_slots=("1",),
+            pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
+        )
+    with pytest.raises(SlotBudgetExceededError):
+        plan_regular_kis_shards(
+            symbols=("005930",), credentials=keys, credential_slots=("1",),
+            pair_capacity_per_connection=1, streams=("H0STCNT0", "H0STASP0"),
+        )

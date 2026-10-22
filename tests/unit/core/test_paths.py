@@ -92,3 +92,15 @@ def test_session_audit_path_rejects_empty_vendor(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="vendor"):
         paths.session_audit_path(dt.date(2026, 10, 15), "")
+
+
+def test_regular_kis_manifest_path_layout() -> None:
+    import datetime as dt
+    import pathlib
+
+    from src.core.paths import DataPaths
+
+    paths = DataPaths(pathlib.Path("var/krx"))
+    assert paths.regular_kis_manifest_path(dt.date(2026, 10, 22), 3) == pathlib.Path(
+        "var/krx/manifest/regular_kis/2026-10-22.krx.shard-03.json"
+    )

@@ -68,3 +68,4 @@ LAYER_RANK['src/cli/gapfill_ticks.py'] = 7
 LAYER_RANK['src/realtime/lag_monitor.py'] = 1
 LAYER_RANK['src/realtime/regular_open_watch.py'] = 1
 LAYER_RANK['src/realtime/connection_handover.py'] = 2
+LAYER_RANK['src/cli/collect_regular_kis.py'] = 7

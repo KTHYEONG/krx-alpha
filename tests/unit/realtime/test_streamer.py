@@ -2383,3 +2383,21 @@ def test_counts_accumulate_across_same_day_restart(tmp_path) -> None:
     legacy.persist()
     assert legacy.manifest.frame_counts is None
     assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8"))["frame_counts"] is None
+
+
+def test_regular_kis_silence_never_forces_reconnect_in_auctions() -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.realtime.streamer import regular_kis_silence_limit_s
+
+    kst = ZoneInfo("Asia/Seoul")
+    anchors = standard_session_anchors(dt.date(2026, 10, 22))
+    assert regular_kis_silence_limit_s(dt.datetime(2026, 10, 22, 8, 45, tzinfo=kst), anchors=anchors) is None
+    assert regular_kis_silence_limit_s(dt.datetime(2026, 10, 22, 15, 25, tzinfo=kst), anchors=anchors) is None
+    assert regular_kis_silence_limit_s(dt.datetime(2026, 10, 22, 10, 0, tzinfo=kst), anchors=anchors) == 30.0
+    assert (
+        regular_kis_silence_limit_s(dt.datetime(2026, 10, 22, 10, 0, tzinfo=kst), anchors=anchors, limit_s=7.5)
+        == 7.5
+    )

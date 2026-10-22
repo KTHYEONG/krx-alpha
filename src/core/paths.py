@@ -141,6 +141,10 @@ class DataPaths:
         venue_s = str(getattr(venue, "value", venue))
         return self.manifest_dir / "aftermarket" / f"{day.isoformat()}.{venue_s}.shard-{shard_index:02d}.json"
 
+    def regular_kis_manifest_path(self, day: dt.date, shard_index: int) -> pathlib.Path:
+        """Return `manifest/regular_kis/<day>.krx.shard-<NN>.json`; pure path algebra."""
+        return self.manifest_dir / "regular_kis" / f"{day.isoformat()}.krx.shard-{shard_index:02d}.json"
+
     def premarket_candidates(self, day: dt.date) -> pathlib.Path:
         return self.universe_dir / "premarket" / f"{day.isoformat()}.json"
 
