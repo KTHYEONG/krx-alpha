@@ -75,3 +75,6 @@ LAYER_RANK['src/marketdata/tick_tape_backfill.py'] = 4
 LAYER_RANK['src/cli/backfill_tick_tape.py'] = 7
 LAYER_RANK['src/universe/replay.py'] = 4
 LAYER_RANK['src/cli/universe_replay.py'] = 7
+LAYER_RANK['src/marketdata/toss_candles.py'] = 1
+LAYER_RANK['src/marketdata/minute_backfill.py'] = 4
+LAYER_RANK['src/cli/backfill_minute_bars.py'] = 7

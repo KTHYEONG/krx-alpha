@@ -329,6 +329,18 @@ class TickTapeBackfillSettings(BaseSettings):
         return self
 
 
+class MinuteBackfillSettings(BaseSettings):
+    """Toss 1m backfill pacing, budget and range; inert when `enabled` is false."""
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_MINUTE_BACKFILL_", extra="ignore")
+
+    enabled: bool = False
+    rate_per_s: float = Field(default=8.0, gt=0, le=20.0)
+    max_calls_per_run: int = Field(default=60000, ge=1)
+    history_start: dt.date = dt.date(2023, 3, 2)
+    request_timeout_s: float = Field(default=10.0, gt=0)
+
+
 class DbCredentials(BaseSettings):
     """DB증권 자격증명 (필수, 빈 기본값 금지)."""
 
