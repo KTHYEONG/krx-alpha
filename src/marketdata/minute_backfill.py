@@ -1,4 +1,4 @@
-"""Toss 1-minute bar backfill for the replayed universe, isolated under L1 history."""
+"""KIS 1-minute bar backfill for the replayed universe, isolated under L1 history."""
 
 from __future__ import annotations
 
@@ -17,27 +17,25 @@ from zoneinfo import ZoneInfo
 
 import polars as pl
 
-from src.brokers.kis.rate import HostPacedRateLimiter, host_state_path
-from src.core.config import KisTokenSettings, MinuteBackfillSettings, TossCredentials
+from src.brokers.kis.auth import KisAppAuth
+from src.brokers.kis.data import KisMinuteBar
+from src.brokers.kis.stack import build_kis_rest_stack
+from src.core.config import KisTokenSettings, MinuteBackfillSettings
+from src.core.errors import MissingCredentialsError
 from src.core.paths import DataPaths
 from src.core.session_anchors import resolve_session_anchors
-from src.marketdata.partitioned_store import PartitionedStoreError, scan_month_partitions
-from src.marketdata.toss_calendar import issue_access_token
-from src.marketdata.toss_candles import (
-    TOSS_MARKET_DATA_CHART_GROUP,
+from src.execution.contracts import KisApiError
+from src.marketdata.kis_minute_history import (
     MinuteBackfillBoundaryError,
-    MinuteCandle,
-    MinuteWalk,
-    TossCandlesError,
-    _TossCandlesAuthRejected,
-    fetch_minute_candles,
-    walk_minute_history,
+    walk_kis_minute_day,
 )
-from src.marketdata.toss_token_store import IssuedToken, TossTokenStore, toss_token_path
+from src.marketdata.partitioned_store import PartitionedStoreError, scan_month_partitions
+from src.realtime.kis_sharding import KisDataCredential
 
 logger = logging.getLogger(__name__)
 
-MINUTE_VENDOR: str = "toss"
+MINUTE_VENDOR: str = "kis"
+MINUTE_VENUE: str = "KRX"
 _LEDGER_OK_STATUSES: frozenset[str] = frozenset({"complete", "vendor_empty"})
 _FLUSH_ROW_LIMIT: int = 2_000_000
 _KST = ZoneInfo("Asia/Seoul")
@@ -56,9 +54,14 @@ MINUTE_PARTITION_SCHEMA: dict[str, Any] = {
     "close": pl.Int64,
     "volume": pl.Int64,
     "vendor": pl.String,
+    "venue": pl.String,
     "universe_source": pl.String,
     "run_id": pl.String,
 }
+
+
+class _RunAuthError(KisApiError):
+    """Token issuance failed; stop the run without discarding certified days."""
 
 
 @dataclass(frozen=True)
@@ -191,10 +194,6 @@ def read_minute_ledger_done(path: pathlib.Path) -> frozenset[tuple[str, dt.date]
     return frozenset(done)
 
 
-class _RunAuthError(TossCandlesError):
-    """Second auth rejection inside one run; aborts the whole run."""
-
-
 def _write_partition(path: pathlib.Path, rows: Sequence[Mapping[str, Any]]) -> None:
     frame = pl.DataFrame(
         list(rows),
@@ -250,23 +249,18 @@ def _append_ledger_lines(path: pathlib.Path, lines: Sequence[Mapping[str, Any]])
         _sync_directory(target.parent)
 
 
-def _ts_hms(moment: dt.datetime) -> int:
-    wall = moment.astimezone(_KST)
-    return wall.hour * 10000 + wall.minute * 100 + wall.second
-
-
 def run_minute_backfill(
     *,
     targets: Sequence[MinuteTarget],
     paths: DataPaths,
     settings: MinuteBackfillSettings,
-    credentials: TossCredentials,
+    credentials: Sequence[KisDataCredential],
     deadline: dt.datetime,
     session: Any,
     now: Callable[[], dt.datetime],
     run_id: str,
 ) -> MinuteRunSummary:
-    """Fetch under the host Toss pacer with the call budget and deadline; write partitions before ledger lines; never raises per-symbol."""
+    """Fetch one KIS symbol-day at a time under the host KIS pacer; write partitions before ledger lines; never raises per-symbol."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
         raise ValueError("invalid minute-history run_id")
     if deadline.tzinfo is None or now().tzinfo is None:
@@ -277,15 +271,12 @@ def run_minute_backfill(
         return MinuteRunSummary("OK", "nothing_to_do", run_id, 0, 0, 0, 0, 0, 0)
     run_marker = paths.minute_history_ledger.parent / "runs" / run_id
     run_marker.mkdir(parents=True, exist_ok=False)
-    cache_dir = KisTokenSettings().token_cache_dir
-    limiter = HostPacedRateLimiter(
-        host_state_path(cache_dir, "toss", credentials.toss_app_key, TOSS_MARKET_DATA_CHART_GROUP),
-        settings.rate_per_s,
-    )
-    store = TossTokenStore(toss_token_path(cache_dir, credentials.toss_app_key))
-
-    token: str | None = None
+    cred = next((c for c in credentials if c.slot == str(settings.kis_data_slot)), None)
+    if cred is None:
+        raise MissingCredentialsError(f"no data credential for slot {settings.kis_data_slot}")
     calls_used = 0
+    boundary_stopped = False
+    token_transport_failed = False
     started = 0
     settled_days = 0
     empty_days = 0
@@ -297,64 +288,44 @@ def run_minute_backfill(
     staged: dict[dt.date, list[pathlib.Path]] = {}
     staging_root = paths.work_root / "minute_history" / run_id
 
-    def _boundary() -> None:
+    def _boundary() -> dt.datetime:
+        nonlocal boundary_stopped
         current = now().astimezone(_KST)
         if calls_used >= settings.max_calls_per_run or current >= deadline or dt.time(8, 10) <= current.time() < dt.time(22):
-            raise MinuteBackfillBoundaryError("minute-history request boundary")
-
-    def _token_post(url: str, **kwargs: Any) -> Any:
-        _boundary()
-        kwargs["timeout"] = _timeout()
-        return session.post(url, **kwargs)
+            boundary_stopped = True
+            raise MinuteBackfillBoundaryError("EXHAUSTED", "minute-history request boundary")
+        return current
 
     def _timeout() -> float:
-        remaining = (deadline - now()).total_seconds()
-        if remaining <= 0:
-            raise MinuteBackfillBoundaryError("minute-history deadline reached")
-        return min(settings.request_timeout_s, remaining)
+        current = _boundary()
+        return min(settings.request_timeout_s, (deadline - current).total_seconds())
 
-    def _issue() -> IssuedToken:
-        return IssuedToken(issue_access_token(
-            app_key=credentials.toss_app_key, app_secret=credentials.toss_app_secret,
-            session=SimpleNamespace(post=_token_post),
-        ), None)
+    def _get(url: str, **kwargs: Any) -> Any:
+        nonlocal calls_used
+        kwargs["timeout"] = _timeout()
+        calls_used += 1
+        return session.get(url, **kwargs)
 
-    def _fetch_page(symbol: str, before: dt.datetime | None) -> tuple[MinuteCandle, ...]:
-        nonlocal token, calls_used
+    def _post(url: str, **kwargs: Any) -> Any:
+        nonlocal token_transport_failed
+        kwargs["timeout"] = _timeout()
         try:
-            _boundary()
-            if token is None:
-                token = store.get_or_issue(_issue)
-        except MinuteBackfillBoundaryError:
-            raise
+            return session.post(url, **kwargs)
         except Exception as exc:
-            raise _RunAuthError("toss minute token issuance failed") from exc
+            token_transport_failed = True
+            raise _RunAuthError("TOKEN", "token issuance transport failed") from exc
 
-        def _request(access_token: str) -> tuple[MinuteCandle, ...]:
-            nonlocal calls_used
-            _boundary()
-            limiter.acquire()
-            _boundary()
-            timeout_s = _timeout()
-            calls_used += 1
-            return fetch_minute_candles(
-                symbol, access_token=access_token, before=before, session=session, timeout_s=timeout_s
-            )
-
-        try:
-            return _request(token)
-        except _TossCandlesAuthRejected:
-            try:
-                _boundary()
-                token = store.replace_rejected(token, _issue)
-            except MinuteBackfillBoundaryError:
-                raise
-            except Exception as exc:
-                raise _RunAuthError("toss minute token rotation failed") from exc
-            try:
-                return _request(token)
-            except _TossCandlesAuthRejected as exc:
-                raise _RunAuthError("toss minute auth rejected after rotation") from exc
+    token_settings = KisTokenSettings()
+    stack = build_kis_rest_stack(
+        auth=KisAppAuth(cred.app_key, cred.app_secret),
+        cache_dir=token_settings.token_cache_dir,
+        session=SimpleNamespace(get=_get, post=_post),
+        now=now,
+        rate_per_s=settings.rate_per_s,
+        max_lead_s=1.0,
+        timeout_s=settings.request_timeout_s,
+        allow_issue=token_settings.allow_issue,
+    )
 
     def _flush(*, final: bool = False) -> None:
         nonlocal buffers, buffered_rows
@@ -383,45 +354,70 @@ def run_minute_backfill(
             _boundary()
         except MinuteBackfillBoundaryError:
             break
-        remaining = settings.max_calls_per_run - calls_used
-        calls_before = calls_used
         started += 1
-        wanted = frozenset(target.days)
+        for day in sorted(target.days):
+            try:
+                _boundary()
+            except MinuteBackfillBoundaryError:
+                break
+            remaining = settings.max_calls_per_run - calls_used
+            calls_before = calls_used
 
-        def _fetch(before: dt.datetime | None, _symbol: str = target.symbol) -> tuple[MinuteCandle, ...]:
-            return _fetch_page(_symbol, before)
+            def _fetch(before_hms: int, _symbol: str = target.symbol, _day: dt.date = day) -> tuple[KisMinuteBar, ...]:
+                _boundary()
+                try:
+                    return stack.data.get_historical_minute_bars(_symbol, day=_day, before_hms=before_hms)
+                except KisApiError as exc:
+                    if boundary_stopped:
+                        raise MinuteBackfillBoundaryError("EXHAUSTED", "minute-history request boundary") from exc
+                    if token_transport_failed or exc.msg_cd.startswith("TOKEN") or exc.msg_cd in {"EGW00121", "EGW00123", "EGW00133"}:
+                        raise _RunAuthError(exc.msg_cd, "minute history authentication failed") from exc
+                    raise
 
-        try:
-            walk: MinuteWalk = walk_minute_history(target.symbol, wanted_days=wanted, fetch=_fetch, max_calls=remaining)
-        except _RunAuthError:
-            logger.error("[DATA] stage=minute_backfill status=FAIL reason=auth run_id=%s", run_id)
-            status = "FAIL"
-            reason = "auth"
-            failed += 1
-            break
-        except Exception as exc:
-            logger.warning(
-                "[DATA] stage=minute_history symbol=%s status=FAIL reason=%s", target.symbol, type(exc).__name__
-            )
-            failed += 1
-            continue
-        discarded_total += walk.discarded_offhours
-        for day in sorted(walk.complete):
+            try:
+                walked = walk_kis_minute_day(target.symbol, day, fetch=_fetch, max_calls=remaining)
+            except _RunAuthError:
+                status, reason = "FAIL", "auth"
+                failed += 1
+                break
+            except Exception as exc:
+                logger.warning(
+                    "[DATA] stage=minute_history symbol=%s status=FAIL reason=%s", target.symbol, type(exc).__name__
+                )
+                failed += 1
+                continue
+            discarded_total += walked.discarded_offhours
+            if walked.status == "incomplete":
+                continue
+            if walked.status == "vendor_empty":
+                ledger_queue.append(
+                    {"date": day.isoformat(), "symbol": target.symbol, "status": "vendor_empty",
+                     "rows": 0, "run_id": run_id, "vendor": MINUTE_VENDOR,
+                     "universe_source": str(target.universe_sources.get(day, "")),
+                     "reason": walked.reason}
+                )
+                empty_days += 1
+                logger.info(
+                    "[DATA] stage=minute_history symbol=%s days=%d calls=%d",
+                    target.symbol, 0, calls_used - calls_before,
+                )
+                continue
             rows = [
                 {
                     "date": day,
                     "symbol": target.symbol,
-                    "ts_hms": _ts_hms(candle.ts),
-                    "open": candle.open,
-                    "high": candle.high,
-                    "low": candle.low,
-                    "close": candle.close,
-                    "volume": candle.volume,
+                    "ts_hms": bar.ts_hms,
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
                     "vendor": MINUTE_VENDOR,
+                    "venue": MINUTE_VENUE,
                     "universe_source": str(target.universe_sources.get(day, "")),
                     "run_id": run_id,
                 }
-                for candle in walk.complete[day]
+                for bar in walked.bars
             ]
             buffers.setdefault(day, []).extend(rows)
             buffered_rows += len(rows)
@@ -430,29 +426,21 @@ def run_minute_backfill(
                  "rows": len(rows), "run_id": run_id, "vendor": MINUTE_VENDOR,
                  "universe_source": str(target.universe_sources.get(day, ""))}
             )
-        ledger_queue.extend(
-            {"date": day.isoformat(), "symbol": target.symbol, "status": "vendor_empty",
-             "rows": 0, "run_id": run_id, "vendor": MINUTE_VENDOR,
-             "universe_source": str(target.universe_sources.get(day, "")),
-             "reason": str(walk.empty_reasons.get(day, ""))}
-            for day in sorted(walk.vendor_empty)
-        )
-        settled_days += len(walk.complete)
-        empty_days += len(walk.vendor_empty)
-        logger.info(
-            "[DATA] stage=minute_history symbol=%s days=%d calls=%d",
-            target.symbol,
-            len(walk.complete),
-            calls_used - calls_before,
-        )
-        if buffered_rows > _FLUSH_ROW_LIMIT:
-            try:
-                _flush()
-            except (OSError, pl.exceptions.PolarsError) as exc:
-                logger.warning("[DATA] stage=minute_history status=FAIL reason=%s", type(exc).__name__)
-                failed += 1
-                status, reason = "FAIL", "persistence"
-                break
+            settled_days += 1
+            logger.info(
+                "[DATA] stage=minute_history symbol=%s days=%d calls=%d",
+                target.symbol, 1, calls_used - calls_before,
+            )
+            if buffered_rows > _FLUSH_ROW_LIMIT:
+                try:
+                    _flush()
+                except (OSError, pl.exceptions.PolarsError) as exc:
+                    logger.warning("[DATA] stage=minute_history status=FAIL reason=%s", type(exc).__name__)
+                    failed += 1
+                    status, reason = "FAIL", "persistence"
+                    break
+        if status == "FAIL":
+            break
     try:
         if reason != "persistence":
             _flush(final=True)
@@ -468,23 +456,10 @@ def run_minute_backfill(
         empty_days = 0
     logger.info(
         "[DATA] stage=minute_backfill status=%s run_id=%s symbols=%d symbol_days=%d calls=%d vendor_empty=%d failed=%d discarded_offhours=%d",
-        status,
-        run_id,
-        started,
-        settled_days,
-        calls_used,
-        empty_days,
-        failed,
-        discarded_total,
+        status, run_id, started, settled_days, calls_used, empty_days, failed, discarded_total,
     )
     return MinuteRunSummary(
-        status=status,
-        reason=reason,
-        run_id=run_id,
-        symbols=started,
-        symbol_days=settled_days,
-        calls=calls_used,
-        vendor_empty=empty_days,
-        failed=failed,
-        discarded_offhours=discarded_total,
+        status=status, reason=reason, run_id=run_id, symbols=started,
+        symbol_days=settled_days, calls=calls_used, vendor_empty=empty_days,
+        failed=failed, discarded_offhours=discarded_total,
     )

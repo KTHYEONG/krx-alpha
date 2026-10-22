@@ -29,6 +29,12 @@ def _krx_rows() -> dict[str, dict[str, object]]:
     for row in _load_rows():
         if row["project"] != "krx":
             continue
+        if row["channel"] == "rest" and row.get("purpose") == "minute_history_rest":
+            name = "minute_history_rest"
+            group = groups.setdefault(name, {"channel": row["channel"], "slots": [], "window_kst": row["windows"]})
+            assert row["windows"] == group["window_kst"]
+            group["slots"].append(str(row["slot"]))
+            continue
         if row["channel"] == "rest":
             name = "snapshot_rest"
             assert row["slot"] == selectors["KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT"]
@@ -118,11 +124,15 @@ def test_window_overlap_boundaries(left: list[str], right: list[str], overlaps: 
 
 def test_krx_rows_exact() -> None:
     krx = _krx_rows()
-    assert set(krx) == {"snapshot_rest", "premarket_ws", "regular_kis_ws", "aftermarket_ws"}
+    assert set(krx) == {"snapshot_rest", "minute_history_rest", "premarket_ws", "regular_kis_ws", "aftermarket_ws"}
 
     assert krx["snapshot_rest"]["channel"] == "rest"
     assert krx["snapshot_rest"]["slots"] == ["2"]
     assert krx["snapshot_rest"]["window_kst"] == ["08:00", "15:39"]
+
+    assert krx["minute_history_rest"]["channel"] == "rest"
+    assert krx["minute_history_rest"]["slots"] == ["5"]
+    assert krx["minute_history_rest"]["window_kst"] == ["23:30-24:00", "00:00-05:30"]
 
     assert krx["premarket_ws"]["channel"] == "ws"
     assert krx["premarket_ws"]["slots"] == ["5"]
@@ -209,4 +219,4 @@ def test_assignment_table_excluded_from_image() -> None:
 def test_canonical_table_hash_pinned() -> None:
     raw = TABLE_PATH.read_bytes()
     assert raw.splitlines()[0] == b"# canonical: krx-alpha/deploy/shared/kis_slot_assignments.toml schema=1"
-    assert hashlib.sha256(raw).hexdigest() == "4c0b40679733c885e16c0846893f3f4022b4fe252ed8ecf7faa75c4e20260ca3"
+    assert hashlib.sha256(raw).hexdigest() == "5064bbb38e126f37befdbd26a80578000bfd061fb0e4dd49478f2e8386e6a751"

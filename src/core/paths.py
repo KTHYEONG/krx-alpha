@@ -82,14 +82,14 @@ class DataPaths:
 
     @property
     def minute_history_root(self) -> pathlib.Path:
-        return self.archive_root / "history" / "minute" / "toss"
+        return self.archive_root / "history" / "minute" / "kis"
 
     def minute_history_partition(self, day: dt.date, run_id: str) -> pathlib.Path:
         return self.minute_history_root / f"dt={day.isoformat()}" / f"run-{run_id}.parquet"
 
     @property
     def minute_history_ledger(self) -> pathlib.Path:
-        return self.manifest_dir / "minute_history" / "toss_ledger.jsonl"
+        return self.manifest_dir / "minute_history" / "kis_ledger.jsonl"
 
     @property
     def quarantine_root(self) -> pathlib.Path:
