@@ -307,7 +307,7 @@ class RealtimeStreamer:
                         timeout = min(timeout, remaining)
                     handover = self._handover
                     if handover is not None:
-                        handover.maybe_start(eligible=limit is not None and frames > 0)
+                        handover.maybe_start(eligible=frames > 0)
                     waiting = {recv_task, stop_task} | (handover.tasks() if handover is not None else set())
                     done, _ = await asyncio.wait(waiting, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
                     if handover is not None:

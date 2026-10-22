@@ -116,6 +116,8 @@ async def run_regular_stream(
         silence_limit_s=SILENCE_LIMIT_S,
         open_grace_s=settings.regular_open_grace_s,
         alert_after_s=settings.regular_open_alert_after_s,
+        standby_lead_s=settings.regular_open_standby_lead_s,
+        standby_hold_s=settings.regular_open_standby_hold_s,
     )
     swap_request = SwapRequest()
     await run_streaming_child(
@@ -133,7 +135,9 @@ async def run_regular_stream(
         ),
         frame_observers=(open_watch,),
         handover=(
-            HandoverSettings(swap_request, settings.lag_handover_max_s, settings.lag_handover_cooldown_s)
+            HandoverSettings(
+                swap_request, settings.lag_handover_max_s, settings.lag_handover_cooldown_s, open_watch.standby_window
+            )
             if profile.proactive_handover
             else None
         ),

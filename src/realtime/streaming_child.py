@@ -25,6 +25,7 @@ class HandoverSettings:
     request: SwapRequest
     max_s: float
     cooldown_s: float
+    window: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,7 @@ async def run_streaming_child(
                 request=handover.request,
                 max_s=handover.max_s,
                 cooldown_s=handover.cooldown_s,
+                window=handover.window,
             )
         streamer = streamer_factory(
             adapter=adapter,
