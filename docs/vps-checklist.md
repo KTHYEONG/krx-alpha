@@ -551,7 +551,7 @@ print(j.filter(pl.col("ratio") != 1.0).sort("ratio").head(10))
 | EOD | `eod_maintenance status=OK` 20:21–20:51; `deleted_partitions` 0 on most days, ~70–210 when a 3-day-old batch ages out; `uploaded` 9 per normalized day |
 | Host backup | lock_wait 0 on quiet nights, up to 6174 s when another project holds the Drive lock; run 20 s–2 min after the lock; P-STORE backup 400 `=` (10-18) |
 | Clock | chrony offset <1 ms; manifest offsets ≤0.6 ms |
-| Memory | weekend/idle 80–100 MiB; regular session 380–420 MiB; aftermarket with 4 KIS children ~610 MiB; EOD normalizer child ≤500 MiB |
+| Memory | weekend/idle 80–100 MiB; regular session 380–420 MiB; aftermarket with 4 KIS children ~610 MiB; EOD normalizer child ≤500 MiB. Regular-expansion G-MEM: **PENDING** (2026-10-22 19:33 KST); candidate K=6 H0STASP0/H0STCNT0 peak RSS and elapsed time not measured. Read-only inspection: deployed revision `d1bfec7afd46fe984bbfa7ff9e37a7144486f1ab`, memory/swap 1 GiB, `OOMKilled=false` (not candidate gate evidence). Run the candidate image outside the 08:10–22:00 freeze in sequential isolated 3 GiB containers; require exit 0, `OOMKilled=false`, peak RSS ≤2.2 GiB and independent dedup row-count agreement for both streams before enabling Parts 4–5; record each peak RSS, elapsed time, expected/actual rows and image revision here. |
 | Dashboard on closed days | every `krx.*` OK; `daemon_heartbeat` shows `WEEKEND_SLEEP`/"휴장일 건너뜀" |
 
 ### Open items (re-check each run; remove when closed)

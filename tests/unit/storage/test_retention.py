@@ -825,17 +825,18 @@ def test_iter_line_batches_splits_only_at_newline_and_yields_trailing_line(tmp_p
 
 def test_dedup_sort_order_keeps_first_occurrence_and_breaks_wall_ties_by_read_order() -> None:
     # Given: (b,1) 동일 해시 중복 1건 + recv_wall_ns 동률(행 1, 3)
-    import polars as pl
+    import numpy as np
 
+    from src.storage.normalization import _KeyColumns
     from src.storage.retention import _dedup_sort_order
 
-    keys = pl.DataFrame({
-        'conn_id': ['b', 'a', 'b', 'a'],
-        'conn_seq': [1, 1, 1, 2],
-        'recv_wall_ns': [5, 3, 5, 3],
-        'h1': pl.Series([7, 8, 7, 9], dtype=pl.UInt64),
-        'h2': pl.Series([70, 80, 70, 90], dtype=pl.UInt64),
-    })
+    keys = _KeyColumns(
+        conn_code=np.array([0, 1, 0, 1], dtype=np.int32),
+        conn_seq=np.array([1, 1, 1, 2], dtype=np.int64),
+        recv_wall_ns=np.array([5, 3, 5, 3], dtype=np.int64),
+        h1=np.array([7, 8, 7, 9], dtype=np.uint64),
+        h2=np.array([70, 80, 70, 90], dtype=np.uint64),
+    )
 
     # When
     order, conflict, dropped, kept = _dedup_sort_order(keys)
@@ -848,17 +849,18 @@ def test_dedup_sort_order_keeps_first_occurrence_and_breaks_wall_ties_by_read_or
 
 def test_dedup_sort_order_counts_groups_with_distinct_payload_hashes() -> None:
     # Given: (a,1) 그룹이 h2 만 다른 두 행
-    import polars as pl
+    import numpy as np
 
+    from src.storage.normalization import _KeyColumns
     from src.storage.retention import _dedup_sort_order
 
-    keys = pl.DataFrame({
-        'conn_id': ['a', 'a', 'a', 'c'],
-        'conn_seq': [1, 1, 2, 2],
-        'recv_wall_ns': [1, 2, 3, 4],
-        'h1': pl.Series([5, 5, 6, 6], dtype=pl.UInt64),
-        'h2': pl.Series([1, 2, 3, 3], dtype=pl.UInt64),
-    })
+    keys = _KeyColumns(
+        conn_code=np.array([0, 0, 0, 1], dtype=np.int32),
+        conn_seq=np.array([1, 1, 2, 2], dtype=np.int64),
+        recv_wall_ns=np.array([1, 2, 3, 4], dtype=np.int64),
+        h1=np.array([5, 5, 6, 6], dtype=np.uint64),
+        h2=np.array([1, 2, 3, 3], dtype=np.uint64),
+    )
 
     # When
     order, conflict, dropped, kept = _dedup_sort_order(keys)
