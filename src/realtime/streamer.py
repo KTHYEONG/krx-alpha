@@ -89,6 +89,15 @@ def premarket_silence_limit_s(
     return None
 
 
+def regular_kis_silence_limit_s(
+    now: dt.datetime, *, anchors: SessionAnchors, limit_s: float = SILENCE_LIMIT_S
+) -> float | None:
+    """Silence limit for a KIS regular shard at `now`: `limit_s` inside [regular_open, closing_auction_start), otherwise effectively unbounded."""
+    if anchors.regular_open <= now.astimezone(_KST).time() < anchors.closing_auction_start:
+        return limit_s
+    return None
+
+
 class FrameSink(Protocol):
     def record(self, frame: L0Frame) -> None: ...
     def note_ack(self, vendor: str, ack: VendorAck) -> None: ...

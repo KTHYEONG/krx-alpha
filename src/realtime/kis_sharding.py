@@ -160,6 +160,58 @@ def plan_aftermarket_shards(
     return tuple(plan)
 
 
+def plan_regular_kis_shards(
+    *,
+    symbols: tuple[str, ...],
+    credentials: tuple[KisDataCredential, ...],
+    credential_slots: tuple[str, ...],
+    pair_capacity_per_connection: int,
+    streams: tuple[str, str],
+) -> tuple[AftermarketShard, ...]:
+    """Assign the rank-ordered regular candidates prefix to one KRX shard per configured slot."""
+    ordered = tuple(symbols)
+    if not ordered:
+        raise KrxAlphaError("empty regular_kis symbols")
+    if len(set(ordered)) != len(ordered):
+        raise KrxAlphaError("duplicate regular_kis symbols")
+    per_shard = pair_capacity_per_connection // len(streams)
+    if per_shard < 1:
+        raise SlotBudgetExceededError(
+            f"regular_kis pair capacity {pair_capacity_per_connection} cannot hold one symbol"
+        )
+    by_slot = {cred.slot: cred for cred in credentials}
+    ordered_creds: list[KisDataCredential] = []
+    for slot in credential_slots:
+        cred = by_slot.get(slot)
+        if cred is None:
+            raise MissingCredentialsError(f"no data credential for slot {slot}")
+        ordered_creds.append(cred)
+    capacity = len(credential_slots) * per_shard
+    if len(ordered) > capacity:
+        logger.warning(
+            "[DATA] stage=regular_kis_plan status=TRUNCATED kept=%d dropped=%d",
+            capacity,
+            len(ordered) - capacity,
+        )
+        ordered = ordered[:capacity]
+    plan: list[AftermarketShard] = []
+    for index, cred in enumerate(ordered_creds):
+        chunk = ordered[index * per_shard : (index + 1) * per_shard]
+        if not chunk:
+            continue
+        plan.append(
+            AftermarketShard(
+                MarketVenue.KRX,
+                index,
+                chunk,
+                streams,
+                cred.slot,
+                cred.key_id,
+            )
+        )
+    return tuple(plan)
+
+
 def plan_premarket_shard(
     *,
     symbols: tuple[str, ...],

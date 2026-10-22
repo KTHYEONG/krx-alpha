@@ -21,7 +21,10 @@ from src.core.paths import (
     DEFAULT_KIS_TOKEN_CACHE_DIR,
     DataPaths,
 )
-from src.core.session_anchors import STANDARD_NXT_AFTER_MARKET_OPEN
+from src.core.session_anchors import (
+    STANDARD_NXT_AFTER_MARKET_OPEN,
+    STANDARD_REGULAR_CLOSE,
+)
 
 __all__ = ["DataPaths"]
 
@@ -202,6 +205,40 @@ class PremarketSettings(BaseSettings):
                 f"{self.pair_capacity_per_connection // len(self.nxt_streams)}"
             )
         return self
+
+
+class RegularKisSettings(BaseSettings):
+    """KRX regular-session KIS co-primary shard settings; inert when disabled."""
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_REGULAR_KIS_", extra="ignore")
+
+    enabled: bool = False
+    credential_slots: tuple[str, ...] = ()
+    pair_capacity_per_connection: int | None = None
+    streams: tuple[str, str] = ("H0STCNT0", "H0STASP0")
+    start_lead_s: float = Field(default=1920.0, gt=0)
+    close_grace_s: float = Field(default=120.0, ge=0)
+    silence_limit_s: float = Field(default=30.0, gt=0)
+
+    @model_validator(mode="after")
+    def check_verified_capacity_when_enabled(self) -> RegularKisSettings:
+        if not self.enabled:
+            return self
+        if not self.credential_slots or len(set(self.credential_slots)) != len(self.credential_slots):
+            raise ValueError("credential_slots must be non-empty and duplicate-free when enabled")
+        if self.pair_capacity_per_connection is None or self.pair_capacity_per_connection <= 0:
+            raise ValueError("pair_capacity_per_connection must be a positive verified value when enabled")
+        if self.pair_capacity_per_connection // len(self.streams) < 1:
+            raise ValueError("pair_capacity_per_connection must hold at least one symbol across streams")
+        return self
+
+    @property
+    def max_symbols(self) -> int:
+        if not self.enabled:
+            return 0
+        if self.pair_capacity_per_connection is None:
+            return 0
+        return len(self.credential_slots) * (self.pair_capacity_per_connection // len(self.streams))
 
 
 class KrxCredentials(BaseSettings):
@@ -637,6 +674,7 @@ class CollectorRuntime:
     premarket: PremarketSettings = field(default_factory=lambda: PremarketSettings())
     shard_watchdog: ShardWatchdogSettings = field(default_factory=lambda: ShardWatchdogSettings())
     audit: AuditSettings = field(default_factory=lambda: AuditSettings())
+    regular_kis: RegularKisSettings = field(default_factory=lambda: RegularKisSettings())
 
 
 def resolve_collector_runtime(
@@ -647,6 +685,7 @@ def resolve_collector_runtime(
     premarket: PremarketSettings | None = None,
     shard_watchdog: ShardWatchdogSettings | None = None,
     audit: AuditSettings | None = None,
+    regular_kis: RegularKisSettings | None = None,
 ) -> CollectorRuntime:
     """Resolve one coherent collector configuration before child processes start.
 
@@ -657,6 +696,7 @@ def resolve_collector_runtime(
         premarket: Optional prevalidated premarket settings.
         shard_watchdog: Optional prevalidated shard watchdog settings.
         audit: Optional prevalidated session-audit settings.
+        regular_kis: Optional prevalidated regular KIS shard settings.
 
     Returns:
         Settings and data paths from one resolved process configuration.
@@ -665,12 +705,14 @@ def resolve_collector_runtime(
         ValueError: Explicit aftermarket enablement conflicts with collector enablement.
         ValueError: Enabled premarket shares the snapshot REST data slot.
         ValueError: Enabled watchdog stale limit does not exceed the in-process silence limit.
+        ValueError: Enabled regular KIS overlaps the premarket window or the aftermarket prearm.
     """
     resolved_collector = collector if collector is not None else CollectorSettings()
     resolved_snapshot = snapshot if snapshot is not None else SnapshotSettings()
     resolved_premarket = premarket if premarket is not None else PremarketSettings()
     resolved_watchdog = shard_watchdog if shard_watchdog is not None else ShardWatchdogSettings()
     resolved_audit = audit if audit is not None else AuditSettings()
+    resolved_regular_kis = regular_kis if regular_kis is not None else RegularKisSettings()
     if aftermarket is None:
         resolved_aftermarket = AftermarketSettings(enabled=resolved_collector.after_market_enabled)
     else:
@@ -688,6 +730,19 @@ def resolve_collector_runtime(
             raise ValueError(
                 "premarket_stale_limit_s must exceed premarket silence_limit_s"
             )
+    if resolved_regular_kis.enabled:
+        if resolved_premarket.enabled and resolved_premarket.credential_slot in resolved_regular_kis.credential_slots:
+            raise ValueError("regular_kis credential_slots must not overlap the premarket credential slot")
+        if resolved_aftermarket.enabled:
+            base = dt.date(2000, 1, 1)
+            regular_end = dt.datetime.combine(base, STANDARD_REGULAR_CLOSE) + dt.timedelta(
+                seconds=float(resolved_regular_kis.close_grace_s)
+            )
+            prearm = dt.datetime.combine(base, STANDARD_NXT_AFTER_MARKET_OPEN) - dt.timedelta(
+                seconds=float(resolved_aftermarket.prearm_lead_s)
+            )
+            if not regular_end < prearm:
+                raise ValueError("regular_kis window must end strictly before the aftermarket prearm moment")
     return CollectorRuntime(
         collector=resolved_collector,
         aftermarket=resolved_aftermarket,
@@ -696,6 +751,7 @@ def resolve_collector_runtime(
         premarket=resolved_premarket,
         shard_watchdog=resolved_watchdog,
         audit=resolved_audit,
+        regular_kis=resolved_regular_kis,
     )
 
 

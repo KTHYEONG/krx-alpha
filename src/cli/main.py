@@ -20,6 +20,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
         collect_aftermarket,
         collect_init,
         collect_premarket,
+        collect_regular_kis,
         collect_snapshots,
         collect_status,
         collect_stream,
@@ -40,6 +41,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
     gapfill_ticks.add_parser(subparsers)
     collect_aftermarket.add_parser(subparsers)
     collect_premarket.add_parser(subparsers)
+    collect_regular_kis.add_parser(subparsers)
     collect_snapshots.add_parser(subparsers)
     bars_refresh.add_parser(subparsers)
     toss_program_trades_backfill.add_parser(subparsers)

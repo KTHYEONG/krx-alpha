@@ -217,6 +217,8 @@ def bootstrap_session(
                 close_at = dt.datetime.combine(
                     cfg.session_date, anchors.shift_pre_open(STANDARD_NXT_PREMARKET_END), tzinfo=_KST
                 )
+            elif cfg.route.session is MarketSession.REGULAR:
+                close_at = dt.datetime.combine(cfg.session_date, anchors.regular_close, tzinfo=_KST)
             else:
                 close_at = dt.datetime.combine(cfg.session_date, anchors.after_market_end, tzinfo=_KST)
             expected_close_ns = int(close_at.timestamp() * 1_000_000_000)

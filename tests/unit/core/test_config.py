@@ -1138,3 +1138,74 @@ def test_runtime_carries_audit_without_changing_existing_fields(monkeypatch, tmp
 
     assert off.audit.mode is AuditMode.OFF
     assert off.collector.data_root == pathlib.Path(tmp_path)
+
+
+def test_disabled_regular_kis_is_inert(monkeypatch) -> None:
+    import os
+
+    from src.core.config import RegularKisSettings
+
+    for name in [n for n in os.environ if n.startswith("KRX_ALPHA_REGULAR_KIS_")]:
+        monkeypatch.delenv(name, raising=False)
+    settings = RegularKisSettings()
+    assert settings.enabled is False
+    assert settings.max_symbols == 0
+
+
+def test_regular_kis_rejects_premarket_slot_overlap() -> None:
+    import pytest
+
+    from src.core.config import PremarketSettings, RegularKisSettings, resolve_collector_runtime
+
+    with pytest.raises(ValueError, match="premarket"):
+        resolve_collector_runtime(
+            premarket=PremarketSettings(enabled=True, credential_slot="5", pair_capacity_per_connection=41),
+            regular_kis=RegularKisSettings(enabled=True, credential_slots=("5",), pair_capacity_per_connection=41),
+        )
+
+
+def test_regular_kis_window_must_end_before_aftermarket_prearm() -> None:
+    import pytest
+
+    from src.core.config import (
+        AftermarketSettings,
+        CollectorSettings,
+        RegularKisSettings,
+        resolve_collector_runtime,
+    )
+
+    collector = CollectorSettings(after_market_enabled=True)
+    aftermarket = AftermarketSettings(enabled=True, pair_capacity_per_connection=41)
+    with pytest.raises(ValueError, match="prearm"):
+        resolve_collector_runtime(
+            collector=collector,
+            aftermarket=aftermarket,
+            regular_kis=RegularKisSettings(
+                enabled=True, credential_slots=("1",), pair_capacity_per_connection=41, close_grace_s=600
+            ),
+        )
+    runtime = resolve_collector_runtime(
+        collector=collector,
+        aftermarket=aftermarket,
+        regular_kis=RegularKisSettings(enabled=True, credential_slots=("1",), pair_capacity_per_connection=41),
+    )
+    assert runtime.regular_kis.max_symbols == 20
+
+
+def test_regular_kis_capacity_branches_are_fail_closed() -> None:
+    import pytest
+
+    from src.core.config import RegularKisSettings
+
+    with pytest.raises(ValueError, match="credential_slots"):
+        RegularKisSettings(enabled=True, credential_slots=(), pair_capacity_per_connection=41)
+    with pytest.raises(ValueError, match="credential_slots"):
+        RegularKisSettings(enabled=True, credential_slots=("1", "1"), pair_capacity_per_connection=41)
+    with pytest.raises(ValueError, match="pair_capacity_per_connection"):
+        RegularKisSettings(enabled=True, credential_slots=("1",), pair_capacity_per_connection=None)
+    with pytest.raises(ValueError, match="pair_capacity_per_connection"):
+        RegularKisSettings(enabled=True, credential_slots=("1",), pair_capacity_per_connection=0)
+    with pytest.raises(ValueError, match="one symbol"):
+        RegularKisSettings(enabled=True, credential_slots=("1",), pair_capacity_per_connection=1)
+    constructed = RegularKisSettings.model_construct(enabled=True, credential_slots=("1",), pair_capacity_per_connection=None, streams=("H0STCNT0", "H0STASP0"))
+    assert constructed.max_symbols == 0
