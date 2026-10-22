@@ -194,7 +194,8 @@ def plan_tick_tape_targets(
         ascending = tuple(sorted(days))
         hint = _bars_value_sum(paths.bars_daily_dir, symbol, ascending[0], last_session)
         targets.append(TickTapeTarget(symbol=symbol, days=ascending, cost_hint=hint))
-    targets.sort(key=lambda item: (item.cost_hint, item.symbol))
+    # The vendor drops the oldest session every day, so expiry outranks cost; cost then maximizes days per page.
+    targets.sort(key=lambda item: (item.days[0], item.cost_hint, item.symbol))
     return tuple(targets)
 
 
