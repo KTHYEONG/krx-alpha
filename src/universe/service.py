@@ -12,12 +12,13 @@ from typing import Protocol
 
 import polars as pl
 
+from src.core.config import UniverseTierSettings
 from src.execution.contracts import KisApiError
 from src.marketdata.partitioned_store import scan_month_partitions
 from src.marketdata.snapshot_contracts import SnapshotDataset
 from src.storage.snapshot_store import SnapshotStore, SnapshotStoreError
 from src.universe.ipc import emit_candidates
-from src.universe.policy import compute_selection_features, select_universe_detailed
+from src.universe.policy import compute_selection_features, select_universe_detailed, select_universe_tiered
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ def plan_universe(
     status_source: SecurityStatusSource | None = None,
     snapshot_store: SnapshotStore | None = None,
     wall_ns: Callable[[], int] = time.time_ns,
+    tiers: UniverseTierSettings | None = None,
 ) -> UniversePlanResult:
     """Select the session universe, drop designated managed stocks, and publish candidates.
 
@@ -79,7 +81,10 @@ def plan_universe(
     ).collect()
     bars = bars.filter(pl.col("date") <= decision_date)
     featured = compute_selection_features(bars)
-    selection = select_universe_detailed(featured, decision_date, slot_budget=slot_budget)
+    if tiers is None or not tiers.core_enabled:
+        selection = select_universe_detailed(featured, decision_date, slot_budget=slot_budget)
+    else:
+        selection = select_universe_tiered(featured, decision_date, slot_budget=slot_budget, tiers=tiers)
     selected = selection.selected
     status_excluded = 0
     status_unknown = 0

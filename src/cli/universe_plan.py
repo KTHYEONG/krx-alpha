@@ -7,7 +7,7 @@ import datetime as dt
 import logging
 import pathlib
 
-from src.core.config import CollectorSettings
+from src.core.config import CollectorSettings, UniverseTierSettings
 from src.universe.service import UniversePlanResult as UniversePlanResult
 from src.universe.service import plan_universe
 
@@ -42,6 +42,7 @@ def run(args: argparse.Namespace) -> int:
         candidates_path=(
             pathlib.Path(str(args.candidates_path)) if getattr(args, "candidates_path", None) else None
         ),
+        tiers=UniverseTierSettings(),
     )
     logger.info(
         "[DATA] stage=universe_plan decision=%s selected=%d dropped=%d status=OK",

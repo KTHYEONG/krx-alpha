@@ -40,6 +40,7 @@ from src.core.config import (
     SnapshotSettings,
     TossCredentials,
     TossProgramTradesSettings,
+    UniverseTierSettings,
     child_process_env,
     load_credentials,
     resolve_collector_runtime,
@@ -320,6 +321,7 @@ def run_session_orchestration(
     settings: CollectorSettings,
     trading_day: TradingDay | None = None,
     progress: Callable[[], None] | None = None,
+    tiers: UniverseTierSettings | None = None,
 ) -> bool:
     """bars 갱신 + 유니버스 선정을 타입드 인자로 직접 호출하고 후보 준비 여부를 반환한다."""
     paths = settings.paths
@@ -391,6 +393,7 @@ def run_session_orchestration(
         session_date=today,
         status_source=status_source,
         snapshot_store=SnapshotStore(paths=paths, session_date=today),
+        tiers=tiers,
     )
     tick()
     ready = _candidates_ready(paths.candidates)
@@ -1164,6 +1167,8 @@ class DaemonRunner:
         self._after_cfg = runtime.aftermarket
         self._snapshot_cfg = runtime.snapshot
         self._premarket_cfg = runtime.premarket
+        _tiers = getattr(runtime, "universe_tiers", None)
+        self._universe_tiers = _tiers if _tiers is not None else UniverseTierSettings()
         _wd = getattr(runtime, "shard_watchdog", None)
         if _wd is None:
             _wd = ShardWatchdogSettings()
@@ -1547,6 +1552,7 @@ class DaemonRunner:
                     settings=cfg,
                     trading_day=trading_day,
                     progress=lambda: self._maybe_ping(time.monotonic()),
+                    tiers=self._universe_tiers,
                 )
             except Exception as e:  # noqa: BLE001 - isolate orchestration crashes so they never kill the daemon
                 logger.critical(

@@ -163,8 +163,13 @@ def emit_candidates(path: pathlib.Path, rows: list[dict[str, Any]], *, rev: int,
 
     ``dropped_symbols`` are symbols removed by capacity truncation; they are recorded as ``dropped_count`` and ``dropped_symbols`` (priority order) beside ``candidates`` so offline analysis can explain missing symbols. Consumers must not read them to drive subscriptions.
     """
-    mapped: list[dict[str, object]] = [
-        {"symbol": str(row["symbol"]), "selection_reasons": list(row["selection_reasons"])} for row in rows
-    ]
+    mapped: list[dict[str, object]] = []
+    for row in rows:
+        entry: dict[str, object] = {"symbol": str(row["symbol"]), "selection_reasons": list(row["selection_reasons"])}
+        if "tier" in row:
+            entry["tier"] = row["tier"]
+        if "core_rank" in row:
+            entry["core_rank"] = row["core_rank"]
+        mapped.append(entry)
     write_candidates(pathlib.Path(path), mapped, rev=rev, dropped_symbols=dropped_symbols)
     return len(mapped)
