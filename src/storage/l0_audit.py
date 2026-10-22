@@ -24,10 +24,20 @@ from src.core.session_anchors import SessionAnchors
 from src.realtime.contracts import MarketVenue
 from src.storage.layout import L0_JOURNAL_GLOB, l0_partition_key, l0_partition_relpath
 from src.storage.market_phase import EventKind, MarketPhase, classify_market_phase, phase_windows_for
+from src.storage.quality_kis import (
+    KIS_TICK_CVOLUME,
+    KIS_TICK_MDCHECNT,
+    KIS_TICK_MIN_FIELDS,
+    KIS_TICK_MSCHECNT,
+    KIS_TICK_PRICE,
+    KIS_TICK_SYMBOL,
+    KIS_TICK_TIME,
+    KIS_TICK_VOLUME,
+)
 
 _KST: Final = ZoneInfo("Asia/Seoul")
 _TICK_STREAM: Final = "H0STCNT0"
-_LEDGER_VENDOR: Final = "ls"
+_LEDGER_VENDORS: Final[frozenset[str]] = frozenset({"ls", "kis"})
 _BATCH_BYTES: Final = 32 * 1024 * 1024
 _SCHEMA_VERSION: Final = 1
 _SEQUENCE_CACHE_SIZE: Final = 1024
@@ -393,6 +403,24 @@ def _parse_body(raw: str) -> dict[str, object]:
     return body if isinstance(body, dict) else {}
 
 
+def _tick_body(vendor: str, raw: str) -> dict[str, object]:
+    """Return the normalized tick body of one L0 record; empty dict when undecodable."""
+    if vendor != "kis":
+        return _parse_body(raw)
+    parts = raw.split("^")
+    if len(parts) < KIS_TICK_MIN_FIELDS:
+        return {}
+    return {
+        "shcode": parts[KIS_TICK_SYMBOL],
+        "chetime": parts[KIS_TICK_TIME],
+        "price": parts[KIS_TICK_PRICE],
+        "cvolume": parts[KIS_TICK_CVOLUME],
+        "volume": parts[KIS_TICK_VOLUME],
+        "mdchecnt": parts[KIS_TICK_MDCHECNT],
+        "mschecnt": parts[KIS_TICK_MSCHECNT],
+    }
+
+
 def _finalize_minute(minute: str, samples: list[float]) -> LatencyMinute:
     ordered = sorted(samples)
     return LatencyMinute(
@@ -560,7 +588,7 @@ class _Derivation:
         body: dict[str, object] | None = None
         if moment is None:
             if stream == _TICK_STREAM:
-                body = _parse_body(record.raw)
+                body = _tick_body(self._vendor, record.raw)
                 moment = _valid_hhmmss(body.get("chetime"))
             else:
                 match = _HOTIME_RE.search(record.raw)
@@ -574,9 +602,9 @@ class _Derivation:
             acc.event_seconds.add(moment.hour * 3600 + moment.minute * 60 + moment.second)
             minute = dt.datetime.fromtimestamp(record.recv_ns // 1_000_000_000, tz=_KST).strftime("%H:%M")
             self.add_sample(acc, minute, (record.recv_ns - int(event_epoch) * 1_000_000_000) / 1_000_000_000)
-        if stream == _TICK_STREAM and self._vendor == _LEDGER_VENDOR:
-            if body is None:
-                body = _parse_body(record.raw)
+        if stream == _TICK_STREAM and self._vendor in _LEDGER_VENDORS:
+            if body is None or self._vendor != "ls":
+                body = _tick_body(self._vendor, record.raw)
             self.accept_tick(record, body)
 
     def add_sample(self, acc: _StreamAccumulator, minute: str, latency: float) -> None:
@@ -603,7 +631,7 @@ class _Derivation:
             moment = _valid_hhmmss(record.exchange_event_time)
             if moment is None:
                 if stream == _TICK_STREAM:
-                    moment = _valid_hhmmss(_parse_body(record.raw).get("chetime"))
+                    moment = _valid_hhmmss(_tick_body(self._vendor, record.raw).get("chetime"))
                 else:
                     match = _HOTIME_RE.search(record.raw)
                     moment = _valid_hhmmss(match.group(1) if match is not None else None)
@@ -915,7 +943,7 @@ def iter_received_ticks(
                 record = _decode_envelope(line)
                 if record is None:
                     continue
-                body = _parse_body(record.raw)
+                body = _tick_body(vendor, record.raw)
                 symbol = body.get("shcode")
                 moment = _valid_hhmmss(body.get("chetime"))
                 cum, price, volume = _tick_cum(body), _parse_int(body.get("price")), _parse_int(body.get("cvolume"))
@@ -970,7 +998,7 @@ def derive_session_audit(
             monotonic=monotonic,
         )
         ordered = list(dict.fromkeys(settings.latency_streams))
-        if vendor == _LEDGER_VENDOR or _TICK_STREAM in ordered:
+        if vendor in _LEDGER_VENDORS or _TICK_STREAM in ordered:
             ordered = [_TICK_STREAM, *(stream for stream in ordered if stream != _TICK_STREAM)]
         results = tuple(run.process_stream(stream) for stream in ordered)
         latency = tuple(entry for entry in results if entry.stream in settings.latency_streams)
@@ -985,7 +1013,7 @@ def derive_session_audit(
                 venue=venue,
                 session=session,
                 status=AuditStatus.UNAVAILABLE,
-                reason="unsupported_vendor" if vendor != _LEDGER_VENDOR else results[0].reason,
+                reason="unsupported_vendor" if vendor not in _LEDGER_VENDORS else results[0].reason,
                 generated_at_ns=generated_at_ns,
                 sources=tuple(run._sources),
                 latency=latency,
@@ -994,7 +1022,7 @@ def derive_session_audit(
                 tail_silence_s=None,
                 last_regular_tick_recv_ns=None,
             )
-        if vendor != _LEDGER_VENDOR:
+        if vendor not in _LEDGER_VENDORS:
             return SessionAudit(
                 schema_version=_SCHEMA_VERSION,
                 session_date=day,
