@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 def register_subcommands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """서브커맨드를 파서에 등록한다."""
     from src.cli import (
+        backfill_minute_bars,
         backfill_tick_tape,
         bars_refresh,
         collect_aftermarket,
@@ -43,6 +44,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
     probe_db_stream.add_parser(subparsers)
     gapfill_ticks.add_parser(subparsers)
     backfill_tick_tape.add_parser(subparsers)
+    backfill_minute_bars.add_parser(subparsers)
     collect_aftermarket.add_parser(subparsers)
     collect_premarket.add_parser(subparsers)
     collect_regular_kis.add_parser(subparsers)
