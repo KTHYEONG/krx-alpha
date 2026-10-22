@@ -172,8 +172,11 @@ def plan_tick_tape_targets(
     by_symbol: dict[str, list[dt.date]] = {}
     skip_logged: set[dt.date] = set()
     for day in ordered:
-        universe_path = paths.universe_out(_prev_business_day(day, paths))
-        universe = _read_universe_symbols(universe_path)
+        decision = _prev_business_day(day, paths)
+        live = _read_universe_symbols(paths.universe_out(decision))
+        # The tiered research universe is the recovery target; days planned before it went live exist only as replay.
+        replay = _read_universe_symbols(paths.universe_replay_out(decision))
+        universe = None if live is None and replay is None else (live or frozenset()) | (replay or frozenset())
         if universe is None:
             if day not in skip_logged:
                 skip_logged.add(day)
