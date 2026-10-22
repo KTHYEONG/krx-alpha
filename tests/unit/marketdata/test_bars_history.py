@@ -286,3 +286,79 @@ def test_history_cli_storage_failure_preserves_refreshed_artifacts(tmp_path, mon
     assert market_map.read_text(encoding="utf-8") == '{"000001":"KOSPI"}'
     args.history_start = "invalid"
     assert cli_mod.run(args) == 4
+
+
+def _day_with_errata(day: dt.date, count: int, bad: int) -> pl.DataFrame:
+    frame = _day(day, count).with_columns(
+        pl.lit(100.0).alias("open"), pl.lit(101.0).alias("high"), pl.lit(99.0).alias("low")
+    )
+    return frame.with_columns(
+        pl.when(pl.int_range(pl.len()) < bad).then(pl.lit(0.0)).otherwise(pl.col("low")).alias("low")
+    )
+
+
+def test_history_quarantines_isolated_errata_and_keeps_the_day(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    import src.marketdata.krx_bars as bars_mod
+    from src.marketdata.bar_store import append_daily_bars
+    from src.marketdata.krx_bars import extend_bars_history, history_quarantine_path
+    from src.marketdata.partitioned_store import scan_month_partitions
+
+    store = tmp_path / "bars" / "daily"
+    append_daily_bars(store, _day(dt.date(2026, 9, 10), 10))
+    errata_day = dt.date(2026, 9, 9)
+    monkeypatch.setattr(bars_mod, "fetch_daily_bars", lambda date, **kw: _day_with_errata(date, 10, 1))
+
+    with caplog.at_level(logging.WARNING):
+        result = extend_bars_history(store, auth_key="k", start_date=errata_day, max_trading_days=1)
+
+    assert result == {"appended_days": 1, "appended_rows": 9}
+    stored = scan_month_partitions(store).filter(pl.col("date") == errata_day).collect()
+    assert "000000" not in stored["symbol"].to_list()
+    quarantined = pl.read_parquet(history_quarantine_path(store, errata_day))
+    assert quarantined["symbol"].to_list() == ["000000"]
+    assert quarantined["violations"].to_list() == [["low_positive"]]
+    assert "status=QUARANTINED" in caplog.text
+    assert "symbols=000000" in caplog.text
+
+
+def test_history_fails_closed_when_errata_exceed_cap(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    import src.marketdata.krx_bars as bars_mod
+    from src.marketdata.bar_store import append_daily_bars
+    from src.marketdata.bar_validation import MAX_HISTORY_QUARANTINE_ROWS_PER_DAY, ImplausibleBarValuesError
+    from src.marketdata.krx_bars import extend_bars_history, history_quarantine_path
+
+    store = tmp_path / "bars" / "daily"
+    append_daily_bars(store, _day(dt.date(2026, 9, 10), 20))
+    bad = MAX_HISTORY_QUARANTINE_ROWS_PER_DAY + 1
+    monkeypatch.setattr(bars_mod, "fetch_daily_bars", lambda date, **kw: _day_with_errata(date, 20, bad))
+
+    with pytest.raises(ImplausibleBarValuesError):
+        extend_bars_history(store, auth_key="k", start_date=dt.date(2026, 9, 9), max_trading_days=1)
+    assert not history_quarantine_path(store, dt.date(2026, 9, 9)).exists()
+
+
+def test_live_append_still_rejects_errata_day(tmp_path) -> None:
+    import pytest
+
+    from src.marketdata.bar_store import append_daily_bars
+    from src.marketdata.bar_validation import ImplausibleBarValuesError
+
+    with pytest.raises(ImplausibleBarValuesError):
+        append_daily_bars(tmp_path / "daily", _day_with_errata(dt.date(2026, 9, 9), 10, 1))
+
+
+def test_split_invalid_rows_partitions_without_loss() -> None:
+    from src.marketdata.bar_validation import split_invalid_rows
+
+    frame = _day_with_errata(dt.date(2026, 9, 9), 10, 3)
+    valid, invalid = split_invalid_rows(frame)
+    assert valid.height + invalid.height == frame.height
+    assert valid.columns == frame.columns
+    assert set(valid["symbol"]).isdisjoint(set(invalid["symbol"]))
+    clean_valid, clean_invalid = split_invalid_rows(frame.select("date", "symbol"))
+    assert clean_valid.height == 10
+    assert clean_invalid.is_empty()

@@ -19,8 +19,10 @@ from src.marketdata.bar_store import (
 )
 from src.marketdata.bar_validation import (
     MAX_CHANGE_PCT_DISAGREEMENT_PP,
+    MAX_HISTORY_QUARANTINE_ROWS_PER_DAY,
     ImplausibleBarValuesError,
     KrxBarsError,
+    split_invalid_rows,
     validate_daily_bars,
 )
 from src.marketdata.schema import BAR_SCHEMA
@@ -225,6 +227,30 @@ def _earliest_stored_date(store_path: pathlib.Path) -> dt.date | None:
     return None
 
 
+def history_quarantine_path(store_path: pathlib.Path, day: dt.date) -> pathlib.Path:
+    """Sidecar file holding rows of `day` withheld from the bars store by the history path."""
+    return pathlib.Path(store_path).parent / "bars_quarantine" / f"{day.isoformat()}.parquet"
+
+
+def _quarantine_history_errata(store: pathlib.Path, bars: pl.DataFrame, day: dt.date) -> pl.DataFrame:
+    valid, invalid = split_invalid_rows(bars)
+    if invalid.is_empty() or invalid.height > MAX_HISTORY_QUARANTINE_ROWS_PER_DAY:
+        return bars  # clean day, or too broken: append_daily_bars fails the whole day closed
+    target = history_quarantine_path(store, day)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".parquet.tmp")
+    invalid.write_parquet(tmp)
+    tmp.replace(target)
+    logger.warning(
+        "[DATA] stage=bars_history status=QUARANTINED date=%s rows=%d symbols=%s rules=%s",
+        day.isoformat(),
+        invalid.height,
+        ",".join(invalid["symbol"].to_list()),
+        ",".join(sorted({r for rs in invalid["violations"].to_list() for r in rs})),
+    )
+    return valid
+
+
 def extend_bars_history(
     store_path: pathlib.Path, *, auth_key: str, start_date: dt.date, max_trading_days: int, session: Any | None = None
 ) -> dict[str, int]:
@@ -246,6 +272,7 @@ def extend_bars_history(
             continue
         if bars.is_empty() or bars["date"].to_list() != [cursor] * bars.height:
             raise KrxBarsError(f"unexpected bar dates for {cursor}")
+        bars = _quarantine_history_errata(store, bars, cursor)
         appended_rows += append_daily_bars(store, bars, reference="nearest")
         appended_days += 1
         earliest = min(earliest, cursor)
