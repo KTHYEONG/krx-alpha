@@ -154,14 +154,15 @@ def test_compose_regular_kis_slots_match_table(monkeypatch) -> None:
     from src.core.config import RegularKisSettings
 
     env = _compose_env()
-    assert env["KRX_ALPHA_REGULAR_KIS_ENABLED"] == "false"
+    assert env["KRX_ALPHA_REGULAR_KIS_ENABLED"] == "true"
     assert json.loads(env["KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS"]) == _krx_rows()["regular_kis_ws"]["slots"]
     assert env["KRX_ALPHA_REGULAR_KIS_PAIR_CAPACITY_PER_CONNECTION"] == "41"
     for key, value in env.items():
         if key.startswith("KRX_ALPHA_REGULAR_KIS_"):
             monkeypatch.setenv(key, value)
-    assert RegularKisSettings().enabled is False
-    assert RegularKisSettings(enabled=True).credential_slots == ("1", "2", "3", "4")
+    resolved = RegularKisSettings()
+    assert resolved.enabled is True
+    assert resolved.credential_slots == ("1", "2", "3", "4")
 
 
 def test_aftermarket_derived_slots_match_table(caplog, monkeypatch) -> None:

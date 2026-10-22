@@ -81,7 +81,7 @@ Standard anchors; shift per C0. "By" = latest acceptable time.
 | 08:20 | `STREAMER_ACTIVE`: calendar gate, bars refresh, `market_map.json`, `candidates.json`, LS token reissue | S2, S6, S7, H10 | `candidates_not_ready` still failing at 08:50 = SEV1 |
 | by 08:50 | `FULL_ACTIVE` | S2, S3 | SEV1 |
 | 09:00 | first regular ticks | H11, C1 | SEV1 |
-| 08:28–15:32 | KIS regular shards (disabled until G-MEM; slot plan `deploy/shared/kis_slot_assignments.toml`) | RK rows | SEV2 when enabled |
+| 08:28–15:32 | KIS regular shards (enabled 2026-10-23 after G-MEM PASS; slot plan `deploy/shared/kis_slot_assignments.toml`) | RK rows | SEV2 when enabled |
 | 08:00–15:39 | Snapshot REST jobs (9 kinds) | C4 | SEV2 |
 | 15:20–15:30 | Closing auction (no trades in tick stream) | C2 gaps | SEV2 |
 | by 15:31 | `universe/aftermarket/D.json` (KRX, J screens) and `D.nxt.json` (NXT, NX screens) | C7 | SEV1 for aftermarket |
@@ -98,7 +98,7 @@ Neighbors sharing `~/.cache/kis`, the LS key, DB금융투자 key, Toss key, KIS 
 | 07:05 / 07:10 | `kca-kis-token-warmup` / `kca-kiwoom-token-rotate` | KIS token files |
 | 08:30, 11:30, 21:30 | `kca-price-ingest` | Kiwoom, Toss |
 | 08:32 / 08:39:30 | `kse-morning` / `kse-auction-open` | KIS slot 5 REST (krx premarket WS uses slot 5) |
-| 08:28–15:32 | krx `regular_kis` WS shards (disabled until G-MEM) | KIS slots 1–4 WS (krx; aftermarket WS takes the same slots 15:40–20:00) |
+| 08:28–15:32 | krx `regular_kis` WS shards (enabled 2026-10-23) | KIS slots 1–4 WS (krx; aftermarket WS takes the same slots 15:40–20:00) |
 | 08:39:55–09:01 | `kca-auction-open`, `kca-order-exit`, `kca-order-reconcile-exit`, `kca-paper-exit` | KIS main account |
 | 15:20–15:45 | `kca-collect/predict/auction-close/order-entry/finalize-close/aftermarket-book/archive-intraday-regular/auction-path` | KIS slots 1·5, Toss `STOCK_TRADING_TREND` (shared with krx snapshots), Kiwoom, DB금융투자 |
 | 18:30–19:40 | `kse-collect-eve` | LS REST (`admission_ls_*`), KIS slot 5 |
