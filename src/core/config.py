@@ -665,6 +665,26 @@ class AuditSettings(BaseSettings):
         return self
 
 
+class UniverseTierSettings(BaseSettings):
+    """Core-panel and follow-up layer parameters for the regular universe; inert when core_enabled is false."""
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_UNIVERSE_", extra="ignore")
+
+    core_enabled: bool = False
+    core_enter_rank: int = Field(default=60, ge=1)
+    core_exit_rank: int = Field(default=75, ge=1)
+    core_warmup_sessions: int = Field(default=20, ge=1)
+    follow_sessions: int = Field(default=3, ge=0)
+
+    @model_validator(mode="after")
+    def check_core_rank_order(self) -> UniverseTierSettings:
+        if self.core_exit_rank < self.core_enter_rank:
+            raise ValueError(
+                f"core_exit_rank {self.core_exit_rank} must be >= core_enter_rank {self.core_enter_rank}"
+            )
+        return self
+
+
 @dataclass(frozen=True)
 class CollectorRuntime:
     collector: CollectorSettings
@@ -675,6 +695,7 @@ class CollectorRuntime:
     shard_watchdog: ShardWatchdogSettings = field(default_factory=lambda: ShardWatchdogSettings())
     audit: AuditSettings = field(default_factory=lambda: AuditSettings())
     regular_kis: RegularKisSettings = field(default_factory=lambda: RegularKisSettings())
+    universe_tiers: UniverseTierSettings = field(default_factory=lambda: UniverseTierSettings())
 
 
 def resolve_collector_runtime(
@@ -686,6 +707,7 @@ def resolve_collector_runtime(
     shard_watchdog: ShardWatchdogSettings | None = None,
     audit: AuditSettings | None = None,
     regular_kis: RegularKisSettings | None = None,
+    universe_tiers: UniverseTierSettings | None = None,
 ) -> CollectorRuntime:
     """Resolve one coherent collector configuration before child processes start.
 
@@ -743,6 +765,12 @@ def resolve_collector_runtime(
             )
             if not regular_end < prearm:
                 raise ValueError("regular_kis window must end strictly before the aftermarket prearm moment")
+    resolved_tiers = universe_tiers if universe_tiers is not None else UniverseTierSettings()
+    if resolved_tiers.core_enabled and resolved_tiers.core_exit_rank > resolved_collector.universe_slot_budget:
+        raise SlotBudgetExceededError(
+            f"core_exit_rank {resolved_tiers.core_exit_rank} exceeds "
+            f"universe_slot_budget {resolved_collector.universe_slot_budget}"
+        )
     return CollectorRuntime(
         collector=resolved_collector,
         aftermarket=resolved_aftermarket,
@@ -752,6 +780,7 @@ def resolve_collector_runtime(
         shard_watchdog=resolved_watchdog,
         audit=resolved_audit,
         regular_kis=resolved_regular_kis,
+        universe_tiers=resolved_tiers,
     )
 
 
