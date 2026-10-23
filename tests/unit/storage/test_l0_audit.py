@@ -1290,7 +1290,7 @@ def test_budget_checked_even_without_files(tmp_path) -> None:
     from src.core.config import AuditSettings
 
     ticks = iter([0.0, 301.0])
-    audit = _derive(tmp_path, settings=AuditSettings(), monotonic=lambda: next(ticks))
+    audit = _derive(tmp_path, settings=AuditSettings(time_budget_s=300.0), monotonic=lambda: next(ticks))
     assert audit.reason == "time_budget"
 
 
