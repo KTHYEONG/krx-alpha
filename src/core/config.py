@@ -32,6 +32,11 @@ SettingsT = TypeVar("SettingsT", bound=BaseSettings)
 
 RUN_ID_ENV: str = "KRX_ALPHA_RUN_ID"
 
+# LS vendor session/subscription ceilings (notices 2026-09-23 and 2026-10-16).
+# Single source for the defaults; env may only override via the settings fields below.
+LS_MAX_SESSIONS: int = 3
+LS_MAX_SUBSCRIPTIONS_PER_SESSION: int = 200
+
 
 class KisVenue(StrEnum):
     """KIS server environment an app key is issued for."""
@@ -64,7 +69,10 @@ class CollectorSettings(BaseSettings):
     max_clock_offset_ns: int = Field(default=2_000_000_000, gt=0, le=2_000_000_000)
     vendor: str = "ls"
     streams: tuple[str, ...] = ("H0STCNT0", "H0STASP0")
-    ls_capacity_pairs: int = 200
+    ls_capacity_pairs: int = Field(default=LS_MAX_SUBSCRIPTIONS_PER_SESSION, ge=1)
+    # LS vendor ceilings below; env-overridable, never literals in stream logic.
+    ls_max_sessions: int = Field(default=LS_MAX_SESSIONS, ge=1)
+    ls_max_subscriptions_per_session: int = Field(default=LS_MAX_SUBSCRIPTIONS_PER_SESSION, ge=1)
     # Rotation of a fresh token is a transport problem, not expiry.
     ls_token_rotation_cooldown_s: float = Field(default=300.0, ge=0)
     regular_open_grace_s: float = Field(default=600.0, gt=0)

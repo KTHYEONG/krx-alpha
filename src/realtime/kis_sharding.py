@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from src.core.config import kis_data_env
 from src.core.errors import KrxAlphaError, MissingCredentialsError, SlotBudgetExceededError
+from src.core.observability import EVENT
 from src.realtime.contracts import MarketVenue
 
 logger = logging.getLogger(__name__)
@@ -167,13 +168,18 @@ def plan_regular_kis_shards(
     credential_slots: tuple[str, ...],
     pair_capacity_per_connection: int,
     streams: tuple[str, str],
+    ls_covered_symbols: frozenset[str] | None = None,
 ) -> tuple[AftermarketShard, ...]:
-    """Assign the rank-ordered regular candidates prefix to one KRX shard per configured slot."""
+    """Assign LS-uncovered symbols first, then fill configured KIS slots in priority order."""
     ordered = tuple(symbols)
     if not ordered:
         raise KrxAlphaError("empty regular_kis symbols")
     if len(set(ordered)) != len(ordered):
         raise KrxAlphaError("duplicate regular_kis symbols")
+    if ls_covered_symbols is not None:
+        ordered = tuple(s for s in symbols if s not in ls_covered_symbols) + tuple(
+            s for s in symbols if s in ls_covered_symbols
+        )
     per_shard = pair_capacity_per_connection // len(streams)
     if per_shard < 1:
         raise SlotBudgetExceededError(
@@ -187,6 +193,22 @@ def plan_regular_kis_shards(
             raise MissingCredentialsError(f"no data credential for slot {slot}")
         ordered_creds.append(cred)
     capacity = len(credential_slots) * per_shard
+    if ls_covered_symbols is not None:
+        selected = set(ordered[:capacity])
+        uncovered = tuple(s for s in symbols if s not in ls_covered_symbols and s not in selected)
+        log = logger.critical if uncovered else logger.info
+        log(
+            "[DATA] stage=regular_feed_coverage status=%s candidates=%d ls_covered=%d kis_planned=%d "
+            "kis_exclusive=%d uncovered=%d uncovered_symbols=%s",
+            "VIOLATION" if uncovered else "OK",
+            len(symbols),
+            len(set(symbols) & ls_covered_symbols),
+            len(selected),
+            len(selected - ls_covered_symbols),
+            len(uncovered),
+            ",".join(uncovered) or "none",
+            extra=EVENT,
+        )
     if len(ordered) > capacity:
         logger.warning(
             "[DATA] stage=regular_kis_plan status=TRUNCATED kept=%d dropped=%d",

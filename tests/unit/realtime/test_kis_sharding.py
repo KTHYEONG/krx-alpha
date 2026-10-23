@@ -367,6 +367,55 @@ def test_regular_plan_missing_slot_fails_closed() -> None:
         )
 
 
+def test_regular_plan_covers_ls_overflow_before_core_overlap(caplog) -> None:
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    keys = tuple(KisDataCredential(str(i), f"key{i}", "s", "h", f"id{i}") for i in (1, 2, 3, 4))
+    symbols = tuple(f"{i:06d}" for i in range(110))
+    ls_covered = frozenset(symbols[:100])
+    with caplog.at_level("INFO"):
+        plan = plan_regular_kis_shards(
+            symbols=symbols, credentials=keys, credential_slots=("1", "2", "3", "4"),
+            pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
+            ls_covered_symbols=ls_covered,
+        )
+    selected = tuple(symbol for shard in plan for symbol in shard.symbols)
+    assert selected == symbols[100:] + symbols[:70]
+    assert len(selected) == len(set(selected)) == 80
+    assert set(selected) | ls_covered == set(symbols)
+    assert {shard.credential_slot for shard in plan} == {"1", "2", "3", "4"}
+    assert "kis_exclusive=10 uncovered=0" in caplog.text
+
+
+def test_regular_plan_reports_uncovered_tail_beyond_combined_capacity(caplog) -> None:
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    keys = tuple(KisDataCredential(str(i), f"key{i}", "s", "h", f"id{i}") for i in (1, 2, 3, 4))
+    symbols = tuple(f"{i:06d}" for i in range(185))
+    with caplog.at_level("CRITICAL"):
+        plan = plan_regular_kis_shards(
+            symbols=symbols, credentials=keys, credential_slots=("1", "2", "3", "4"),
+            pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
+            ls_covered_symbols=frozenset(symbols[:100]),
+        )
+    assert tuple(s for shard in plan for s in shard.symbols) == symbols[100:180]
+    assert "stage=regular_feed_coverage status=VIOLATION" in caplog.text
+    assert "uncovered=5 uncovered_symbols=" + ",".join(symbols[180:]) in caplog.text
+
+
+def test_regular_plan_retains_original_order_when_ls_covers_every_symbol() -> None:
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    keys = (KisDataCredential("1", "key", "s", "h", "id"),)
+    symbols = ("005930", "000660", "000020")
+    plan = plan_regular_kis_shards(
+        symbols=symbols, credentials=keys, credential_slots=("1",),
+        pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
+        ls_covered_symbols=frozenset(symbols),
+    )
+    assert plan[0].symbols == symbols
+
+
 def test_regular_plan_rejects_duplicate_or_empty_symbols() -> None:
     import pytest
 

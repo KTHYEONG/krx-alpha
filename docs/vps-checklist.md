@@ -39,7 +39,7 @@ Every run starts with C0 and ends with the report.
 | Mode | When (KST) | Checks |
 |---|---|---|
 | M0 pre-open | business day 07:45–08:15 | C0, H1–H8, H10, H12, H14, H15, S1, S7, C5, C6, C7 (premarket D), A1, DB1, X1 (on P) |
-| M1 open | business day 09:05–09:30 | C0, H2, H10, H11, S2–S4, S6–S8, C1 (current hour), C2 (regular) |
+| M1 open | business day 09:05–09:30 | C0, H2, H10, H11, S2–S4, S6–S9, C1 (current hour), C2 (regular) |
 | M2 close | business day 15:45–16:15 | C0, H11, S2, C2, C4, C7 (aftermarket D) |
 | **M3 EOD** | business day 20:35–21:45 (**finish before 22:00**) | all rows of sections 7, NP, DB except W-only rows |
 | M4 night | every day 23:45–00:15 | H5–H7, H12–H15, C5, C7 (premarket N), S1 (N) |
@@ -144,6 +144,7 @@ Commands run on the host after `cd ~/krx-alpha/data` unless the probe says conta
 | S6 | M1 | Candidates armed | P-UNIV `candidates` line (after 08:20) | `rev` = P (YYYYMMDD); n ≤ `universe_slot_budget` 100 (= LS 200 pairs / 2 streams); unique; no `candidates_not_ready`/`orchestration_error` since 08:20; `market_map.json` mtime today ~08:20 with ~2760 entries | stale rev/errors after 08:50 = SEV1; n=0 = SEV1 |
 | S7 | M0 M1 M3 | Bars refresh | P-BARS `latest_date` | M0: business day before P; from 08:50: = P | older than P after 08:50 = SEV3 (KRX timeout WARN retried every 5 min) |
 | S8 | M1 | First frame | events `stage=ingest_watchdog status=NO_FIRST_FRAME` for D (08:36–09:05) | absent | present = SEV1 |
+| S9 | M1 | LS limits and union coverage | `docker logs --since 14h krx-collector 2>&1 \| grep -E 'stage=ls_limits\|stage=ls_subscriptions\|stage=regular_feed_coverage\|reason=ls_limit\|reason=session_cap'` (after deployment, business days after 09:05; session cap starts 2026-10-31) | record requested `pairs` and ACK `accepted_pairs`; no PARTIAL; limits OK/WARN, no VIOLATION; when KIS enabled, planned union `uncovered=0`; no `reason=ls_limit` closes; no session-cap handover failures | VIOLATION, PARTIAL, uncovered symbols or `ls_limit`/`session_cap` hits = SEV2; missing measurement = UNKNOWN |
 
 ### C: Collection completeness
 
@@ -575,6 +576,18 @@ print(j.filter(pl.col("ratio") != 1.0).sort("ratio").head(10))
 | OI-3 | ≥2026-10-14 | KIS `krx_after` max cumulative tick volume < daily bar volume for many symbols (10-14: exact 26/40, min 0.914 `005930`; 10-15: 29/39, min 0.961), last tick 19:59:59; LS regular mostly exact | closed as a definition difference: bars include off-book volume while tick cumulative does not (no tick loss); verify with the X1 KIS continuity variant |
 | OI-4 | 2026-10-20 | LS regular open delivery lag grows from the first second of 09:00: recv-minus-chetime max 0 s (10-16) → 14 s (10-19) → 53 s (10-20, linear ~0.5 s/s). On 10-20 LS dropped the socket at 09:01:48 (manifest gap 4.8 s) and the undelivered ~55 s was never replayed: session_audit `confirmed_missing=15873` of 795893 trades (2.0 %, all 42 symbols, `chetime_prev` 09:00:5x → `chetime_next` 09:01:5x). Collector was not the bottleneck (10-19 sustained 1586 frames/s vs 630 peak on 10-20); quality status of the retained L0 stays PASS because the check has no count-continuity rule. Gap-fill: `data/gapfill/ls/regular/2026-10-20.{parquet,report.json}` holds 15 713 of the 15 873 lost trades (volume 99.5 % of the audited deficit) from the kca Kiwoom tick tape plus KIS `FHPST01060000` for symbols absent from that tape; rows carry `vendor`/`provenance`, L0 untouched; rerun with `gapfill-ticks` (heavy: run off the collector container, which OOM-kills a 5.5 M-row tape load; pass `--journal-root <local copy of the day's H0STCNT0 partition>` so boundary and same-second gaps reconcile against the received frames — 10-21: 3768 of 3771 trades, 99.75 % of the audited volume; without it only seconds strictly between the two frames are taken) | each business day compare per-minute latency of 09:00–09:03 (`ingest_latency` lines, `manifest/audit/<D>.ls.regular.audit.json`); latency >10 s or `confirmed_missing` >0 inside 09:00–09:05 = SEV2 until a vendor-side cause or a second feed/gap-fill is decided |
 | OI-5 | 2026-10-23 | `eod_minute_bars@153500` attempted=60 failed=3 rows=22287 (57 full 391-bar days) reason=`TRANSPORT: ConnectionError`; one transport error discarded the whole symbol with no retry, no failed-key evidence, single daily pass | known condition, closed by this spec once deployed (transport retry + in-job re-sweep + `failed_keys`); track C9 until then |
+| OI-6 | 2026-10-31 | LS system work 08:00–12:00 KST (Saturday): per-app-key sessions capped at 3 from 08:00 (first business day under the cap 2026-11-02); one-time check, expires after 2026-11-02 | verify nothing runs LS inside the window and the LS token reissue works Monday 08:20 (H10); drop this row after the 2026-11-02 M1 pass |
+
+### Known conditions (vendor notices; guard deployment acknowledgment pending)
+
+Coverage policy: regular KIS keeps four slots (80 symbols; slot 5 remains reserved). It plans LS-uncovered symbols first, preserving core/event/follow priority, then fills remaining places from the priority universe. `stage=regular_feed_coverage` describes planned coverage, not proven receipt: require `uncovered=0`, KIS acks and fresh L0. Any `VIOLATION` is SEV2 and lists the symbols neither feed plans to cover; the LS manifest `note` records every LS omission. Recording an omission does not make collection lossless.
+
+Measurement-first rollout: the 200-subscription notice has no announced enforcement date; 2026-11-02 is the first business day of the three-session cap, not a confirmed subscription-cap date. Existing 200-pair technical budgeting stays conservative. After deployment, inspect `stage=ls_limits pairs=N` (requested plan before the guard) and `stage=ls_subscriptions accepted_pairs=M` (unique accepted subscription acks) at the next business open, including 2026-10-26 if deployed beforehand. No actual count has been verified yet. Operational review bands: <=120 pairs, observe; >120 through 200, review headroom and coverage ordering; >200, review reducing event/follow budgets before considering extra LS sessions. The machine WARN threshold remains >80% of the configured cap. Do not change budgets based only on the 130–140 estimate, add keys/slots, or split LS sessions without a separate decision. Re-check union coverage throughout the day: KIS regular shards stop near 15:32 while LS continues through 20:00.
+
+| Since | Notice | Guard / deployment ack |
+|---|---|---|
+| 2026-09-23 | LS subscriptions head toward 200 per session (effective date unannounced), counted per (tr, symbol) (tick + orderbook of one symbol = 2) | `src/realtime/ls_limits.py`, `tests/unit/realtime/test_ls_limits.py` (S9); ack ID pending deployment |
+| 2026-10-16 | LS per-app-key sessions capped at 3 from 2026-10-31 08:00 KST (was unlimited, IP cap 20) | `src/realtime/ls_limits.py`, `tests/unit/realtime/test_ls_limits.py` (S9); ack ID pending deployment |
 
 ## 10. Reporting
 
@@ -649,7 +662,7 @@ One stream-child spec row (`role=crosscheck`) gated by `KRX_ALPHA_DB_CROSSCHECK_
 
 ## RK. Module: KIS regular shards (lifecycle: enabled since 2026-10-23 after G-MEM PASS; G-KIS-HEAVY/G-KIS-LOSS/G-SLOT-COEXIST observation through 2026-10-27)
 
-Co-primary dual feed for the candidate prefix (`KRX_ALPHA_REGULAR_KIS_ENABLED`, slots 1–4 WS 08:28–15:32 per `deploy/shared/kis_slot_assignments.toml`, `docker-compose.yml`). The LS regular stream stays the EOD primary for reconciliation and status; KIS outcomes are reported and never flip `eod_maintenance` status until a user G-PROMOTE decision.
+Co-primary dual feed with LS-uncovered candidates first, then priority-order overlap (`KRX_ALPHA_REGULAR_KIS_ENABLED`, slots 1–4 WS 08:28–15:32 per `deploy/shared/kis_slot_assignments.toml`, `docker-compose.yml`). The LS regular stream stays the EOD primary for reconciliation and status; KIS outcomes are reported and never flip `eod_maintenance` status until a user G-PROMOTE decision.
 
 | ID | Modes | Check | How | PASS |
 |---|---|---|---|---|
@@ -659,7 +672,7 @@ Co-primary dual feed for the candidate prefix (`KRX_ALPHA_REGULAR_KIS_ENABLED`, 
 | RK4 | M2 M3 | Lease/slot conflicts | `docker logs --since 14h krx-collector 2>&1 \| grep -E "key_lease_busy\|slot_busy_regular_kis"` | no `key_lease_busy` on slots 1–4; `slot_busy_regular_kis` DEFERRED only while a regular shard overruns 15:32, and the aftermarket shard starts on the next cycle |
 | RK5 | M3 W | Content and lifecycle | P-L0C with D; P-DQ / P-L1C on expired `kis/krx/regular/*`; H8 verified remote L1 | planned/acked symbols have data, Q9/Q10 invariants hold, no confirmed loss interval inside 09:00–09:05; expired partitions normalized and offloaded before L0 deletion. Baseline not yet measured; collect five comparable enabled days, then use per-symbol medians (section 9) |
 
-Rollout: enabled with the 2-tier universe (`KRX_ALPHA_UNIVERSE_CORE_ENABLED=true`; candidates prefix = core by trade value, so shard 0 holds the 20 largest names). `regular_kis_plan status=TRUNCATED kept=80` is expected (4 slots x 20 symbols). Disabling does not require a gate. G-PROMOTE (using KIS gap spans for LS holes) stays a user decision after three clean days.
+Rollout: enabled with the 2-tier universe (`KRX_ALPHA_UNIVERSE_CORE_ENABLED=true`). Shard 0 holds LS omissions first when present; without omissions the original core-first allocation is unchanged. `regular_kis_plan status=TRUNCATED kept=80` is expected (4 slots x 20 symbols) only when union coverage remains complete: require `regular_feed_coverage status=OK uncovered=0`. Disabling does not require a gate. G-PROMOTE (using KIS gap spans for LS holes) stays a user decision after three clean days.
 
 ## HB. Module: history backfill nightly (lifecycle: tick tape enabled 2026-10-22 after G-TAPE-RUN PASS; minute bars built on KIS `FHKST03010230`, disabled until G-MINUTE)
 

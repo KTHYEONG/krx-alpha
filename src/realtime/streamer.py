@@ -32,6 +32,7 @@ from src.realtime.contracts import (
     VendorAuthRejected,
     VendorDisconnected,
 )
+from src.realtime.ls_limits import stream_disconnect_reason
 from src.realtime.session import CollectorSession
 from src.storage.journal import JournalWriteError
 
@@ -279,6 +280,16 @@ class RealtimeStreamer:
                 self._sink.note_ack(self._adapter.name, ack)
             subscribed_ns = self._wall_ns()
             accepted = sum(1 for a in acks if a.accepted)
+            if self._adapter.name == "ls":
+                accepted_pairs = {(ack.symbol, ack.stream) for ack in acks if ack.accepted}
+                logger.info(
+                    "[DATA] stage=ls_subscriptions status=%s pairs=%d accepted_pairs=%d rejected_pairs=%d",
+                    "OK" if len(accepted_pairs) == len(self._replay_pairs) else "PARTIAL",
+                    len(self._replay_pairs),
+                    len(accepted_pairs),
+                    len({(ack.symbol, ack.stream) for ack in acks if not ack.accepted}),
+                    extra=EVENT,
+                )
             logger.info(
                 "[DATA] stage=stream_connect pairs=%d accepted=%d rejected=%d",
                 len(acks),
@@ -316,7 +327,7 @@ class RealtimeStreamer:
                         timeout = min(timeout, remaining)
                     handover = self._handover
                     if handover is not None:
-                        handover.maybe_start(eligible=frames > 0)
+                        handover.maybe_start(eligible=frames > 0, live_connections=2 if handover.active else 1)
                     waiting = {recv_task, stop_task} | (handover.tasks() if handover is not None else set())
                     done, _ = await asyncio.wait(waiting, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
                     if handover is not None:
@@ -437,7 +448,7 @@ class RealtimeStreamer:
             logger.warning(
                 "[DATA] stage=stream_disconnect reason=%s frames=%d consecutive_failures=%d backoff_s=%.2f "
                 "last_frame_age_s=%s last_pingpong_age_s=%s pingpongs=%s detail=%s",
-                reason,
+                stream_disconnect_reason(reason, self._last_disconnect_detail) if self._adapter.name == "ls" else reason,
                 self._last_pump_frames,
                 self._failures,
                 delay,

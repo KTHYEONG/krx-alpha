@@ -26,6 +26,7 @@ class HandoverSettings:
     max_s: float
     cooldown_s: float
     window: Callable[[], bool] | None = None
+    max_sessions: int | None = None
 
 
 @dataclass(frozen=True)
@@ -102,9 +103,10 @@ async def run_streaming_child(
     try:
         http = aiohttp.ClientSession()
         adapter = adapter_factory(http)
+        pairs = list(replay_pairs)
         capacity = getattr(adapter, "capacity_pairs", None)
-        if capacity is not None and len(replay_pairs) > capacity:
-            raise SlotBudgetExceededError(f"planned pairs {len(replay_pairs)} exceed capacity {capacity}")
+        if capacity is not None and len(pairs) > capacity:
+            raise SlotBudgetExceededError(f"planned pairs {len(pairs)} exceed capacity {capacity}")
         sink: FrameSink = SessionFrameSink(session=session)
         if lag_monitor is not None:
             sink = LagMonitoringSink(sink, lag_monitor)
@@ -114,16 +116,17 @@ async def run_streaming_child(
         if handover is not None:
             extra["handover"] = Handover(
                 adapter_factory=lambda: adapter_factory(http),
-                pairs=replay_pairs,
+                pairs=pairs,
                 request=handover.request,
                 max_s=handover.max_s,
                 cooldown_s=handover.cooldown_s,
                 window=handover.window,
+                max_sessions=handover.max_sessions,
             )
         streamer = streamer_factory(
             adapter=adapter,
             sink=sink,
-            replay_pairs=replay_pairs,
+            replay_pairs=pairs,
             silence_limit=silence_limit,
             **extra,
         )
