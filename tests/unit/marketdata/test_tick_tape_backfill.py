@@ -549,12 +549,14 @@ def test_mid_run_flush_failure_isolated(tmp_path: pathlib.Path, monkeypatch) -> 
         deadline=_deadline(), session=session, now=_evening_now, run_id="runflush",
     )
     assert summary.status == "FAIL"
+    assert summary.reason == "persistence"
     assert summary.failed == 1
-    assert summary.symbols == 2
+    assert summary.symbols == 1
+    assert summary.symbol_days == 0
     assert paths.tick_tape_partition(day, "runflush").exists()
     assert not paths.tick_tape_ledger.exists()
     frame = pl.read_parquet(paths.tick_tape_partition(day, "runflush"))
-    assert frame.group_by("symbol").len().sort("symbol").rows() == [("A", 2), ("B", 2)]
+    assert frame.group_by("symbol").len().sort("symbol").rows() == [("A", 2)]
 
 
 def _replay(paths: DataPaths, decision: dt.date, symbols: list[str]) -> None:

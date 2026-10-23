@@ -24,6 +24,7 @@ from src.marketdata.kiwoom_ticks import (
     KiwoomThrottled,
     KiwoomTickTapeError,
     TapeBoundaryError,
+    TapeTick,
     TapeWalk,
     TickPage,
     fetch_tick_page,
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 TAPE_VENDOR: str = "kiwoom"
 _LEDGER_OK_STATUSES: frozenset[str] = frozenset({"complete", "vendor_empty"})
+# Rows staged on disk between durable checkpoints: bounds the work a killed run can lose, not memory.
 _FLUSH_ROW_LIMIT: int = 2_000_000
 
 TAPE_PARTITION_SCHEMA: dict[str, Any] = {
@@ -239,28 +241,29 @@ class _SymbolThrottleError(KiwoomTickTapeError):
     """Persistent throttle on one symbol; aborts only that symbol."""
 
 
-def _write_partition(path: pathlib.Path, rows: Sequence[Mapping[str, Any]]) -> None:
-    frame = pl.DataFrame(
-        list(rows),
-        schema={
-            "date": pl.Date,
-            "symbol": pl.String,
-            "tape_seq": pl.Int64,
-            "ts_hms": pl.Int64,
-            "price": pl.Int64,
-            "volume": pl.Int64,
-            "vendor": pl.String,
-            "run_id": pl.String,
-        },
-    ).with_columns([pl.col(name).cast(dtype) for name, dtype in TAPE_PARTITION_SCHEMA.items()])
+def _write_day_chunk(path: pathlib.Path, symbol: str, day: dt.date, ticks: Sequence[TapeTick], label: str) -> None:
+    frame = (
+        pl.DataFrame(
+            {
+                "tape_seq": pl.int_range(len(ticks), eager=True),
+                "ts_hms": [tick.ts_hms for tick in ticks],
+                "price": [tick.price for tick in ticks],
+                "volume": [tick.volume for tick in ticks],
+            }
+        )
+        .with_columns(
+            pl.lit(day).alias("date"),
+            pl.lit(symbol).alias("symbol"),
+            pl.lit(TAPE_VENDOR).alias("vendor"),
+            pl.lit(label).alias("run_id"),
+        )
+        .select([pl.col(name).cast(dtype) for name, dtype in TAPE_PARTITION_SCHEMA.items()])
+    )
     target = pathlib.Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.parent / f".{target.name}.tmp"
     frame.write_parquet(tmp, compression="zstd")
-    with open(tmp, "rb+") as handle:
-        handle.flush()
-        os.fsync(handle.fileno())
-    _publish_partition(tmp, target)
+    os.replace(tmp, target)
 
 
 def _publish_partition(tmp: pathlib.Path, target: pathlib.Path) -> None:
@@ -303,6 +306,10 @@ def _append_ledger_lines(path: pathlib.Path, lines: Sequence[Mapping[str, Any]])
         _sync_directory(target.parent)
 
 
+class _PersistenceError(Exception):
+    """Staging or checkpoint I/O failed; aborts the run without settling the in-flight symbol."""
+
+
 def run_tick_tape_backfill(
     *,
     targets: Sequence[TickTapeTarget],
@@ -314,7 +321,7 @@ def run_tick_tape_backfill(
     now: Callable[[], dt.datetime],
     run_id: str,
 ) -> TickTapeRunSummary:
-    """Fetch targets under the host-shared pacer, page budget and deadline; persist partitions then ledger lines; never raises for per-symbol failures."""
+    """Fetch targets under the host-shared pacer, page budget and deadline; persist partitions then ledger lines at durable checkpoints; never raises for per-symbol failures."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
         raise ValueError("invalid tick-tape run_id")
     if deadline.tzinfo is None or now().tzinfo is None:
@@ -331,14 +338,17 @@ def run_tick_tape_backfill(
     auth_retried = False
     pages_used = 0
     started = 0
-    settled_days = 0
+    committed_days = 0
     edge_days = 0
     failed = 0
-    buffers: dict[dt.date, list[dict[str, Any]]] = {}
-    buffered_rows = 0
     ledger_queue: list[dict[str, Any]] = []
     staged: dict[dt.date, list[pathlib.Path]] = {}
+    staged_rows = 0
+    checkpoint_no = 0
     staging_root = paths.work_root / "tick_tape" / run_id
+
+    def _label() -> str:
+        return run_id if checkpoint_no == 0 else f"{run_id}-{checkpoint_no}"
 
     def _boundary() -> None:
         current = now()
@@ -390,25 +400,26 @@ def run_tick_tape_backfill(
                 auth_retried = True
                 token = _issue()
 
-    def _flush(*, final: bool = False) -> None:
-        nonlocal buffers, buffered_rows
-        for day in sorted(buffers):
-            parts = staged.setdefault(day, [])
-            chunk = staging_root / day.isoformat() / f"chunk-{len(parts)}.parquet"
-            _write_partition(chunk, buffers[day])
-            parts.append(chunk)
-        buffers = {}
-        buffered_rows = 0
-        if final:
-            for day, parts in sorted(staged.items()):
-                target_path = paths.tick_tape_partition(day, run_id)
-                target_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = target_path.with_suffix(".tmp")
-                pl.scan_parquet(parts).sink_parquet(tmp, compression="zstd")
-                _publish_partition(tmp, target_path)
-            for parts in staged.values():
-                for part in parts:
-                    part.unlink()
+    def _checkpoint() -> None:
+        nonlocal staged, ledger_queue, staged_rows, checkpoint_no, committed_days
+        if not staged and not ledger_queue:
+            return
+        label = _label()
+        for day, parts in sorted(staged.items()):
+            target_path = paths.tick_tape_partition(day, label)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target_path.with_suffix(".tmp")
+            pl.scan_parquet(parts).sink_parquet(tmp, compression="zstd")
+            _publish_partition(tmp, target_path)
+        for parts in staged.values():
+            for part in parts:
+                part.unlink()
+        _append_ledger_lines(paths.tick_tape_ledger, ledger_queue)
+        committed_days += sum(1 for record in ledger_queue if record["status"] in _LEDGER_OK_STATUSES)
+        staged = {}
+        ledger_queue = []
+        staged_rows = 0
+        checkpoint_no += 1
 
     status = "OK"
     reason: str | None = None
@@ -419,9 +430,29 @@ def run_tick_tape_backfill(
             break
         remaining = settings.max_pages_per_run - pages_used
         started += 1
+        label = _label()
+        symbol_chunks: list[tuple[dt.date, pathlib.Path, int]] = []
 
         def _fetch_page(key: str | None, _symbol: str = target.symbol) -> TickPage:
             return _fetch(_symbol, key)
+
+        def _stage_day(
+            day: dt.date,
+            ticks: tuple[TapeTick, ...],
+            _symbol: str = target.symbol,
+            _label: str = label,
+            _chunks: list[tuple[dt.date, pathlib.Path, int]] = symbol_chunks,
+        ) -> None:
+            chunk = staging_root / day.isoformat() / f"{_symbol}.parquet"
+            try:
+                _write_day_chunk(chunk, _symbol, day, ticks, _label)
+            except (OSError, pl.exceptions.PolarsError) as exc:
+                raise _PersistenceError(type(exc).__name__) from exc
+            _chunks.append((day, chunk, len(ticks)))
+
+        def _discard_symbol(_chunks: list[tuple[dt.date, pathlib.Path, int]] = symbol_chunks) -> None:
+            for _day, chunk, _rows in _chunks:
+                chunk.unlink(missing_ok=True)
 
         try:
             walk: TapeWalk = walk_symbol_tape(
@@ -429,94 +460,76 @@ def run_tick_tape_backfill(
                 wanted_days=frozenset(target.days),
                 fetch_page=_fetch_page,
                 max_pages=remaining,
-            )
-            if walk.termination == "tape_end" and not walk.complete and not walk.vendor_empty and not walk.edge_partial:
-                logger.info(
-                    "[DATA] stage=tick_tape symbol=%s days=%d pages=%d termination=%s",
-                    target.symbol,
-                    0,
-                    walk.pages,
-                    walk.termination,
-                )
-                continue
-            for day in sorted(walk.complete):
-                ticks = walk.complete[day]
-                rows = [
-                    {
-                        "date": day,
-                        "symbol": target.symbol,
-                        "tape_seq": seq,
-                        "ts_hms": tick.ts_hms,
-                        "price": tick.price,
-                        "volume": tick.volume,
-                        "vendor": TAPE_VENDOR,
-                        "run_id": run_id,
-                    }
-                    for seq, tick in enumerate(ticks)
-                ]
-                buffers.setdefault(day, []).extend(rows)
-                buffered_rows += len(rows)
-                ledger_queue.append(
-                    {"date": day.isoformat(), "symbol": target.symbol, "status": "complete",
-                     "rows": len(rows), "run_id": run_id, "vendor": TAPE_VENDOR}
-                )
-            ledger_queue.extend(
-                {"date": day.isoformat(), "symbol": target.symbol, "status": "vendor_empty",
-                 "rows": 0, "run_id": run_id, "vendor": TAPE_VENDOR}
-                for day in sorted(walk.vendor_empty)
-            )
-            ledger_queue.extend(
-                {"date": day.isoformat(), "symbol": target.symbol, "status": "edge_partial",
-                 "rows": len(walk.complete.get(day, ())), "run_id": run_id, "vendor": TAPE_VENDOR}
-                for day in sorted(walk.edge_partial & frozenset(target.days))
+                on_day_complete=_stage_day,
             )
         except _RunAuthError:
+            _discard_symbol()
             logger.error("[DATA] stage=tick_tape_backfill status=FAIL reason=auth run_id=%s", run_id)
             status = "FAIL"
             reason = "auth"
             failed += 1
             break
+        except _PersistenceError as exc:
+            _discard_symbol()
+            logger.warning("[DATA] stage=tick_tape status=FAIL reason=%s", exc)
+            failed += 1
+            status, reason = "FAIL", "persistence"
+            break
         except Exception as exc:
+            _discard_symbol()
             logger.warning(
                 "[DATA] stage=tick_tape symbol=%s status=FAIL reason=%s", target.symbol, type(exc).__name__
             )
             failed += 1
             continue
-        settled_days += len(walk.complete) + len(walk.vendor_empty)
+        for day, chunk, rows in symbol_chunks:
+            staged.setdefault(day, []).append(chunk)
+            staged_rows += rows
+            ledger_queue.append(
+                {"date": day.isoformat(), "symbol": target.symbol, "status": "complete",
+                 "rows": rows, "run_id": label, "vendor": TAPE_VENDOR}
+            )
+        ledger_queue.extend(
+            {"date": day.isoformat(), "symbol": target.symbol, "status": "vendor_empty",
+             "rows": 0, "run_id": label, "vendor": TAPE_VENDOR}
+            for day in sorted(walk.vendor_empty)
+        )
+        ledger_queue.extend(
+            {"date": day.isoformat(), "symbol": target.symbol, "status": "edge_partial",
+             "rows": 0, "run_id": label, "vendor": TAPE_VENDOR}
+            for day in sorted(walk.edge_partial & frozenset(target.days))
+        )
         edge_days += len(walk.edge_partial)
         logger.info(
             "[DATA] stage=tick_tape symbol=%s days=%d pages=%d termination=%s",
             target.symbol,
-            len(walk.complete),
+            len(symbol_chunks),
             walk.pages,
             walk.termination,
         )
-        if buffered_rows > _FLUSH_ROW_LIMIT:
+        if staged_rows > _FLUSH_ROW_LIMIT:
             try:
-                _flush()
+                _checkpoint()
             except (OSError, pl.exceptions.PolarsError) as exc:
                 logger.warning("[DATA] stage=tick_tape status=FAIL reason=%s", type(exc).__name__)
                 failed += 1
                 status, reason = "FAIL", "persistence"
                 break
-    try:
-        if reason != "persistence":
-            _flush(final=True)
-            _append_ledger_lines(paths.tick_tape_ledger, ledger_queue)
-    except (OSError, pl.exceptions.PolarsError) as exc:
-        logger.warning("[DATA] stage=tick_tape_backfill status=FAIL reason=%s run_id=%s", type(exc).__name__, run_id)
-        failed += 1
-        if status == "OK":
-            status = "FAIL"
-            reason = type(exc).__name__
-    if status == "FAIL" and reason != "auth":
-        settled_days = 0
+    if reason != "persistence":
+        try:
+            _checkpoint()
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            logger.warning("[DATA] stage=tick_tape_backfill status=FAIL reason=%s run_id=%s", type(exc).__name__, run_id)
+            failed += 1
+            if status == "OK":
+                status = "FAIL"
+                reason = type(exc).__name__
     logger.info(
         "[DATA] stage=tick_tape_backfill status=%s run_id=%s symbols=%d symbol_days=%d pages=%d edge_partial=%d failed=%d",
         status,
         run_id,
         started,
-        settled_days,
+        committed_days,
         pages_used,
         edge_days,
         failed,
@@ -526,7 +539,7 @@ def run_tick_tape_backfill(
         reason=reason,
         run_id=run_id,
         symbols=started,
-        symbol_days=settled_days,
+        symbol_days=committed_days,
         pages=pages_used,
         edge_partial=edge_days,
         failed=failed,

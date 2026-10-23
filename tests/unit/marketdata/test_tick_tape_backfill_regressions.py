@@ -35,16 +35,21 @@ def test_threshold_flush_preserves_every_symbol_and_ledger_count(tmp_path, monke
     paths = DataPaths(tmp_path)
     session = _Session(pages={s: _walk_day_pages(DAY, OLDER) for s in ("A", "B", "C")})
     result = _run(paths, session, targets=[module.TickTapeTarget(s, (DAY,), 1.0) for s in ("A", "B", "C")])
-    frame = pl.read_parquet(paths.tick_tape_partition(DAY, "regression"))
+    labels = ["regression", "regression-1", "regression-2"]
+    parts = [paths.tick_tape_partition(DAY, label) for label in labels]
+    assert all(part.exists() for part in parts)
+    assert not paths.tick_tape_partition(DAY, "regression-3").exists()
+    frame = pl.concat([pl.read_parquet(part) for part in parts])
     ledger = [json.loads(line) for line in paths.tick_tape_ledger.read_text().splitlines()]
     assert result.symbol_days == 3
     assert frame.height == 6
     assert frame.group_by("symbol").len().sort("symbol").rows() == [("A", 2), ("B", 2), ("C", 2)]
     assert {row["symbol"]: row["rows"] for row in ledger} == {"A": 2, "B": 2, "C": 2}
-    original = paths.tick_tape_partition(DAY, "regression").read_bytes()
+    assert all(paths.tick_tape_partition(DAY, row["run_id"]).exists() for row in ledger)
+    original = [part.read_bytes() for part in parts]
     with pytest.raises(FileExistsError):
         _run(paths, session)
-    assert paths.tick_tape_partition(DAY, "regression").read_bytes() == original
+    assert [part.read_bytes() for part in parts] == original
 
 
 def test_budget_counts_failed_http_attempts(tmp_path, monkeypatch):
@@ -209,10 +214,10 @@ def test_staging_io_failure_aborts_without_settling_any_day(tmp_path, monkeypatc
     _mute_sleep(monkeypatch)
     monkeypatch.setattr(module, "_FLUSH_ROW_LIMIT", 1)
 
-    def fail_stage(path, rows):
+    def fail_stage(path, symbol, day, ticks, label):
         raise OSError("disk full")
 
-    monkeypatch.setattr(module, "_write_partition", fail_stage)
+    monkeypatch.setattr(module, "_write_day_chunk", fail_stage)
     paths = DataPaths(tmp_path)
     session = _Session(pages={s: _walk_day_pages(DAY, OLDER) for s in ("A", "B")})
     result = _run(paths, session, targets=[module.TickTapeTarget(s, (DAY,), 1.0) for s in ("A", "B")])
@@ -237,3 +242,61 @@ def test_token_http_error_with_success_envelope_rejected():
 
     with pytest.raises(KiwoomTickTapeError, match="HTTP failure"):
         issue_kiwoom_token(app_key="k", secret_key="s", session=Session(), timeout_s=1)
+
+
+def test_streamed_days_survive_a_later_symbol_crash_via_checkpoint(tmp_path, monkeypatch):
+    _mute_sleep(monkeypatch)
+    monkeypatch.setattr(module, "_FLUSH_ROW_LIMIT", 1)
+    paths = DataPaths(tmp_path)
+
+    class _Crash(BaseException):  # noqa: N818 - simulates a hard kill that bypasses `except Exception`
+        pass
+
+    session = _Session(pages={"A": _walk_day_pages(DAY, OLDER), "B": _walk_day_pages(DAY, OLDER)})
+    original_post = session.post
+
+    def post(url, **kwargs):
+        if kwargs.get("json", {}).get("stk_cd") == "B":
+            raise _Crash
+        return original_post(url, **kwargs)
+
+    session.post = post
+    with pytest.raises(_Crash):
+        _run(paths, session, targets=[module.TickTapeTarget(s, (DAY,), 1.0) for s in ("A", "B")])
+    assert module.read_ledger_done(paths.tick_tape_ledger) == frozenset({("A", DAY)})
+    assert pl.read_parquet(paths.tick_tape_partition(DAY, "regression"))["symbol"].unique().to_list() == ["A"]
+
+
+def test_symbol_failure_discards_its_staged_days(tmp_path, monkeypatch):
+    _mute_sleep(monkeypatch)
+    paths = DataPaths(tmp_path)
+
+    def walk_then_fail(*args, on_day_complete, **kwargs):
+        on_day_complete(DAY, (TapeTick(DAY, 90000, 1, 1),))
+        raise KiwoomTickTapeError("tape is not newest-first")
+
+    monkeypatch.setattr(module, "walk_symbol_tape", walk_then_fail)
+    result = _run(paths, _Session(), targets=[module.TickTapeTarget("A", (DAY,), 1.0)])
+    assert result.failed == 1
+    assert result.symbol_days == 0
+    assert not paths.tick_tape_ledger.exists()
+    assert list((paths.work_root / "tick_tape").rglob("*.parquet")) == []
+
+
+def test_walk_emits_certified_days_and_frees_them():
+    emitted = []
+    pages = iter(
+        [
+            TickPage((TapeTick(DAY, 90001, 2, 1), TapeTick(DAY, 90000, 1, 1)), "1"),
+            TickPage((TapeTick(OLDER, 150000, 3, 1),), None),
+        ]
+    )
+    walk = walk_symbol_tape(
+        "A", wanted_days=frozenset({DAY, OLDER}), fetch_page=lambda key: next(pages), max_pages=5,
+        on_day_complete=lambda day, ticks: emitted.append((day, [t.price for t in ticks])),
+    )
+    assert emitted == [(DAY, [1, 2])]
+    assert walk.emitted == frozenset({DAY})
+    assert DAY not in walk.complete
+    assert walk.edge_partial == frozenset({OLDER})
+    assert DAY not in walk.vendor_empty

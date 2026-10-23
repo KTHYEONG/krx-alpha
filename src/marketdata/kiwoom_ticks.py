@@ -36,7 +36,7 @@ class KiwoomThrottled(KiwoomTickTapeError):  # noqa: N818 - spec-fixed vendor si
     """Vendor rate-limit rejection (HTTP 429 with return_code 5)."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TapeTick:
     day: dt.date
     ts_hms: int
@@ -57,6 +57,7 @@ class TapeWalk:
     edge_partial: frozenset[dt.date]
     pages: int
     termination: Literal["crossed", "tape_end", "page_budget"]
+    emitted: frozenset[dt.date] = frozenset()
 
 
 class TapeBoundaryError(KiwoomTickTapeError):
@@ -207,8 +208,13 @@ def walk_symbol_tape(
     wanted_days: frozenset[dt.date],
     fetch_page: Callable[[str | None], TickPage],
     max_pages: int,
+    on_day_complete: Callable[[dt.date, tuple[TapeTick, ...]], None] | None = None,
 ) -> TapeWalk:
-    """Walk one symbol's tape newest-first until older than min(wanted_days), the tape ends, or max_pages; return certified days."""
+    """Walk one symbol's tape newest-first until older than min(wanted_days), the tape ends, or max_pages; return certified days.
+
+    With ``on_day_complete`` each certified day is delivered chronologically as soon as an older tick proves it whole,
+    then dropped from memory and reported in ``TapeWalk.emitted`` instead of ``complete``.
+    """
     _ = symbol
     if max_pages < 1:
         raise ValueError("max_pages must be >= 1")
@@ -220,6 +226,7 @@ def walk_symbol_tape(
     oldest: dt.date | None = None
     previous: tuple[dt.date, int] | None = None
     cursors: set[str] = set()
+    emitted: set[dt.date] = set()
     pages = 0
     next_key: str | None = None
     termination: Literal["crossed", "tape_end", "page_budget"] = "page_budget"
@@ -238,6 +245,11 @@ def walk_symbol_tape(
             oldest = tick.day if oldest is None else min(oldest, tick.day)
             if tick.day in per_day:
                 per_day[tick.day].append(tick)
+        if on_day_complete is not None and oldest is not None:
+            for day in sorted(d for d, ticks in per_day.items() if ticks and d > oldest):
+                on_day_complete(day, tuple(reversed(per_day[day])))
+                per_day[day] = []
+                emitted.add(day)
         if oldest is not None and oldest < floor:
             termination = "crossed"
             break
@@ -252,7 +264,7 @@ def walk_symbol_tape(
         termination = "page_budget"
     complete: dict[dt.date, tuple[TapeTick, ...]] = {}
     vendor_empty: set[dt.date] = set()
-    for day in wanted_days:
+    for day in wanted_days - emitted:
         rows = per_day[day]
         older = oldest is not None and oldest < day
         newer = newest is not None and newest > day
@@ -266,7 +278,7 @@ def walk_symbol_tape(
         edge_partial.add(edge)
         complete.pop(edge, None)
         vendor_empty.discard(edge)
-        for day in wanted_days:
+        for day in wanted_days - emitted:
             if not per_day[day] and day < edge:
                 vendor_empty.add(day)
     return TapeWalk(
@@ -275,4 +287,5 @@ def walk_symbol_tape(
         edge_partial=frozenset(edge_partial),
         pages=pages,
         termination=termination,
+        emitted=frozenset(emitted),
     )
