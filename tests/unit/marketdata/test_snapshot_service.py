@@ -853,3 +853,194 @@ def test_index_minute_bar_job_with_empty_bars_persists_nothing(tmp_path) -> None
     assert result.attempted == len(settings.index_codes)
     assert result.rows_added == 0
     assert result.truncated is False
+
+
+def test_eod_failed_key_recorded_without_resweep(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    _seed_ranking(store, [_ranking_row("000001", 1, 50), _ranking_row("000002", 2, 60)])
+    source = _FakeSource()
+    source.bars = {"000001": (_bar_row("000001"),), "000002": KisApiError("TRANSPORT", "ConnectionError")}
+    job = _job(SnapshotJobKind.EOD_MINUTE_BARS, _t(15, 35), _t(15, 39))
+
+    result = run_snapshot_job(
+        job, source=source, store=store, settings=SnapshotSettings(eod_minute_resweeps=0), symbols=(),
+        news_seen=set(), now_fn=lambda: _t(15, 35, 5), wall_ns=_counter(),
+    )
+
+    assert result.failed_keys == ("000002",)
+    assert result.failed == 1
+    assert store.frame(SnapshotDataset.STOCK_MINUTE_BAR)["symbol"].to_list() == ["000001"]
+
+
+def test_eod_resweep_recovers_failed_symbol_once(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    _seed_ranking(store, [_ranking_row("000001", 1, 50), _ranking_row("000002", 2, 60)])
+    state = {"n": 0}
+
+    def _flaky():
+        if state["n"] == 0:
+            state["n"] += 1
+            raise KisApiError("TRANSPORT", "ConnectionError")
+        return (_bar_row("000002"),)
+
+    source = _FakeSource()
+    source.bars = {"000001": lambda: (_bar_row("000001"),), "000002": _flaky}
+    job = _job(SnapshotJobKind.EOD_MINUTE_BARS, _t(15, 35), _t(15, 39))
+
+    result = run_snapshot_job(
+        job, source=source, store=store, settings=SnapshotSettings(eod_minute_resweeps=1), symbols=(),
+        news_seen=set(), now_fn=lambda: _t(15, 35, 5), wall_ns=_counter(),
+    )
+
+    assert result.failed == 0
+    assert result.failed_keys == ()
+    assert (result.attempted, result.succeeded) == (3, 2)
+    frame = store.frame(SnapshotDataset.STOCK_MINUTE_BAR)
+    assert sorted(frame["symbol"].to_list()) == ["000001", "000002"]
+
+
+def test_eod_resweep_never_duplicates_on_full_success(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    _seed_ranking(store, [_ranking_row("000001", 1, 50), _ranking_row("000002", 2, 60)])
+    source = _FakeSource()
+    source.bars = {key: (_bar_row(key),) for key in ("000001", "000002")}
+    job = _job(SnapshotJobKind.EOD_MINUTE_BARS, _t(15, 35), _t(15, 39))
+
+    result = run_snapshot_job(
+        job, source=source, store=store, settings=SnapshotSettings(eod_minute_resweeps=3), symbols=(),
+        news_seen=set(), now_fn=lambda: _t(15, 35, 5), wall_ns=_counter(),
+    )
+
+    assert result.failed == 0
+    assert sum(1 for call in source.calls if call[0] == "bars") == 2
+    frame = store.frame(SnapshotDataset.STOCK_MINUTE_BAR)
+    assert frame.select("symbol", "bar_time").unique().height == frame.height == 2
+
+
+def test_eod_deadline_skip_is_not_a_failure(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    _seed_ranking(store, [_ranking_row("000001", 1, 50), _ranking_row("000002", 2, 60)])
+    source = _FakeSource()
+    source.bars = {"*": lambda: (_bar_row("x"),)}
+    job = _job(SnapshotJobKind.EOD_MINUTE_BARS, _t(15, 35), _t(15, 35, 30))
+    ticks = [_t(15, 35, 5), _t(15, 35, 31)]
+
+    result = run_snapshot_job(
+        job, source=source, store=store, settings=SnapshotSettings(eod_minute_resweeps=1), symbols=(),
+        news_seen=set(), now_fn=lambda: ticks.pop(0), wall_ns=_counter(),
+    )
+
+    assert result.truncated is True
+    assert result.failed_keys == ()
+    assert result.failed == 0
+
+
+def test_eod_resweep_respects_deadline(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    _seed_ranking(store, [_ranking_row("000001", 1, 50), _ranking_row("000002", 2, 60)])
+    source = _FakeSource()
+    source.bars = {"000001": KisApiError("TRANSPORT", "ConnectionError"), "000002": lambda: (_bar_row("000002"),)}
+    job = _job(SnapshotJobKind.EOD_MINUTE_BARS, _t(15, 35), _t(15, 35, 30))
+    ticks = [_t(15, 35, 5), _t(15, 35, 5), _t(15, 35, 31)]
+
+    run_snapshot_job(
+        job, source=source, store=store, settings=SnapshotSettings(eod_minute_resweeps=3), symbols=(),
+        news_seen=set(), now_fn=lambda: ticks.pop(0) if len(ticks) > 1 else ticks[0], wall_ns=_counter(),
+    )
+
+    after_deadline = sum(1 for call in source.calls if call[0] == "bars")
+    assert after_deadline == 2
+
+
+def test_eod_minute_resweeps_config_bound() -> None:
+    import pytest
+
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        SnapshotSettings(eod_minute_resweeps=4)
+    with pytest.raises(ValidationError):
+        SnapshotSettings(eod_minute_resweeps=-1)
+    for value in (-1.0, float("nan"), float("inf")):
+        with pytest.raises(ValidationError):
+            SnapshotSettings(transport_retry_backoff_s=value)
+
+
+def test_format_failed_keys_truncates_beyond_twenty() -> None:
+    from src.marketdata.snapshot_service import _format_failed_keys
+
+    keys = tuple(f"K{i:06d}" for i in range(25))
+    rendered = _format_failed_keys(keys)
+    assert rendered == ",".join(keys[:20]) + " +5 more"
+    assert _format_failed_keys(()) == ""
+
+
+def test_eod_resweeps_do_not_expand_target_cap(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    _seed_ranking(store, [_ranking_row("000001", 1, 50), _ranking_row("000002", 2, 60)])
+    source = _FakeSource()
+    source.bars = {key: (_bar_row(key),) for key in ("000001", "000002")}
+    result = run_snapshot_job(
+        _job(SnapshotJobKind.EOD_MINUTE_BARS, _t(15, 35), _t(15, 39)),
+        source=source, store=store, settings=SnapshotSettings(stock_minute_max_symbols=1), symbols=(),
+        news_seen=set(), now_fn=lambda: _t(15, 35), wall_ns=_counter(),
+    )
+    assert result.attempted == 1
+    assert [call[1] for call in source.calls] == ["000001"]
+    assert store.frame(SnapshotDataset.STOCK_MINUTE_BAR)["symbol"].to_list() == ["000001"]
+
+
+def test_eod_persistent_failure_counts_final_symbol_not_attempts(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    _seed_ranking(store, [_ranking_row("000001", 1, 50)])
+    source = _FakeSource()
+    source.bars = {"*": KisApiError("TRANSPORT", "ConnectionError")}
+    result = run_snapshot_job(
+        _job(SnapshotJobKind.EOD_MINUTE_BARS, _t(15, 35), _t(15, 39)),
+        source=source, store=store, settings=SnapshotSettings(eod_minute_resweeps=3), symbols=(),
+        news_seen=set(), now_fn=lambda: _t(15, 35), wall_ns=_counter(),
+    )
+    assert (result.attempted, result.succeeded, result.failed) == (4, 0, 1)
+    assert result.failed_keys == ("000001",)
+    assert store.frame(SnapshotDataset.STOCK_MINUTE_BAR).is_empty()
+
+
+def test_partial_index_failure_log_includes_key_and_reason(tmp_path, caplog) -> None:
+    import logging
+
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    source = _session_source()
+    source.index["1001"] = KisApiError("TRANSPORT", "Timeout")
+    with caplog.at_level(logging.DEBUG, logger="src.marketdata.snapshot_service"):
+        run_snapshot_session(
+            settings=SnapshotSettings(), session_date=SESSION_DATE, source=source,
+            store=SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE),
+            symbols=(), now_fn=lambda: _t(9, 0, 10), sleep_fn=lambda _: None,
+            wall_ns=_counter(), max_iterations=1,
+        )
+    messages = [r.message for r in caplog.records if "job=index_snapshot@" in r.message]
+    assert len(messages) == 1
+    assert "failed_keys=1001 reason=TRANSPORT: Timeout" in messages[0]

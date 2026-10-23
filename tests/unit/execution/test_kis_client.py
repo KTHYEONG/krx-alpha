@@ -187,7 +187,7 @@ def test_reads_refresh_token_once_retry_rate_limit_and_raise_on_error(tmp_path) 
     assert excinfo.value.msg_cd == "APBK1234"
 
     # When / Then: 전송 오류/비JSON 응답은 TRANSPORT
-    client, _, _ = make_client(tmp_path / "d", [requests.ConnectionError("down")])
+    client, _, _ = make_client(tmp_path / "d", [requests.ConnectionError("down")] * 3)
     with pytest.raises(KisApiError) as excinfo:
         client.get_quote("005930")
     assert excinfo.value.msg_cd == "TRANSPORT"

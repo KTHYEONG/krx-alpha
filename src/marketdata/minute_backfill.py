@@ -16,6 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import polars as pl
+import requests
 
 from src.brokers.kis.auth import KisAppAuth
 from src.brokers.kis.data import KisMinuteBar
@@ -304,7 +305,12 @@ def run_minute_backfill(
         nonlocal calls_used
         kwargs["timeout"] = _timeout()
         calls_used += 1
-        return session.get(url, **kwargs)
+        try:
+            return session.get(url, **kwargs)
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            if calls_used >= settings.max_calls_per_run:
+                raise KisApiError("TRANSPORT", type(exc).__name__) from exc
+            raise
 
     def _post(url: str, **kwargs: Any) -> Any:
         nonlocal token_transport_failed

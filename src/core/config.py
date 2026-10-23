@@ -434,6 +434,7 @@ class SnapshotSettings(BaseSettings):
     kis_data_slot: str = "1"
     rest_rate_per_s: float = 18.0
     request_timeout_s: float = 5.0
+    transport_retry_backoff_s: float = Field(default=0.5, ge=0, allow_inf_nan=False)
     auction_open_times: tuple[dt.time, ...] = (
         dt.time(8, 40),
         dt.time(8, 50),
@@ -469,6 +470,7 @@ class SnapshotSettings(BaseSettings):
     eod_collect_time: dt.time = dt.time(15, 35)
     run_end: dt.time = dt.time(15, 39)
     stock_minute_max_symbols: int = 60
+    eod_minute_resweeps: int = Field(default=1, ge=0, le=3)
     idle_sleep_cap_s: float = 5.0
     # Host-wide KIS pacing reservation lead for snapshot collection (standard work).
     rest_max_lead_s: float = Field(default=1.0, gt=0)

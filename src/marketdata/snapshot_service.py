@@ -6,7 +6,7 @@ import datetime as dt
 import logging
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Protocol, TypeVar, assert_never, cast
 from zoneinfo import ZoneInfo
@@ -63,6 +63,7 @@ class SnapshotJobResult:
     rows_added: int
     truncated: bool
     first_error: str | None = None
+    failed_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,7 @@ class _JobBudget:
     failed: int = 0
     truncated: bool = False
     first_error: str | None = None
+    failed_keys: list[str] = field(default_factory=list)
 
     def call(self, fetch: Callable[[], _T]) -> tuple[_T, int] | None:
         """Return ``(result, observed_at_ns)``, or None when the deadline passed or the vendor failed."""
@@ -150,9 +152,13 @@ class _JobBudget:
     def each(self, keys: Iterable[str], fetch: Callable[[str], _T]) -> Iterator[tuple[_T, int]]:
         """Fetch keys in order, skipping vendor failures and stopping at the deadline."""
         for key in keys:
+            failed_before = self.failed
             taken = self.call(partial(fetch, key))
             if taken is not None:
                 yield taken
+            elif self.failed > failed_before:
+                if key not in self.failed_keys:
+                    self.failed_keys.append(key)
             elif self.truncated:
                 return
 
@@ -273,9 +279,29 @@ def run_snapshot_job(
             session_open=settings.intraday_start,
             session_close=settings.intraday_end,
         )
+        succeeded: set[str] = set()
+
+        def _fetch(key: str) -> tuple[dict[str, object], ...]:
+            rows: tuple[dict[str, object], ...] = fetch(key)
+            succeeded.add(key)
+            return rows
+
         added = 0
-        for result, observed in budget.each(_eod_targets(store, settings, symbols), fetch):
-            added += append(SnapshotDataset.STOCK_MINUTE_BAR, [stamp(row, observed) for row in result])
+        initial_targets = set(_eod_targets(store, settings, symbols))
+        for _ in range(settings.eod_minute_resweeps + 1):
+            targets = tuple(
+                k for k in _eod_targets(store, settings, symbols) if k in initial_targets and k not in succeeded
+            )
+            if not targets:
+                break
+            for result, observed in budget.each(targets, _fetch):
+                added += append(SnapshotDataset.STOCK_MINUTE_BAR, [stamp(row, observed) for row in result])
+            if budget.truncated:
+                break
+        if budget.failed_keys:
+            pruned = [key for key in budget.failed_keys if key not in succeeded]
+            budget.failed_keys[:] = pruned
+            budget.failed = len(pruned)
         return added
 
     match job.kind:
@@ -308,7 +334,15 @@ def run_snapshot_job(
         rows_added=rows_added,
         truncated=budget.truncated,
         first_error=budget.first_error,
+        failed_keys=tuple(budget.failed_keys),
     )
+
+
+def _format_failed_keys(keys: tuple[str, ...]) -> str:
+    shown = ",".join(keys[:20])
+    if len(keys) > 20:
+        shown += f" +{len(keys) - 20} more"
+    return shown
 
 
 def run_snapshot_session(
@@ -383,33 +417,37 @@ def run_snapshot_session(
                 failed_jobs += 1
                 logger.warning(
                     "[DATA] stage=snapshot_job job=%s attempted=%d failed=%d rows=%d truncated=%s status=NO_SUCCESS"
-                    " reason=%s",
+                    " reason=%s%s",
                     result.job_id,
                     result.attempted,
                     result.failed,
                     result.rows_added,
                     result.truncated,
                     result.first_error,
+                    f" failed_keys={_format_failed_keys(result.failed_keys)}" if result.failed else "",
                 )
             elif job.kind in (SnapshotJobKind.RANKING, SnapshotJobKind.INDEX_SNAPSHOT, SnapshotJobKind.NEWS_TITLE):
                 logger.debug(
-                    "[DATA] stage=snapshot_job job=%s attempted=%d failed=%d rows=%d truncated=%s",
+                    "[DATA] stage=snapshot_job job=%s attempted=%d failed=%d rows=%d truncated=%s%s",
                     result.job_id,
                     result.attempted,
                     result.failed,
                     result.rows_added,
                     result.truncated,
+                    f" failed_keys={_format_failed_keys(result.failed_keys)} reason={result.first_error}"
+                    if result.failed else "",
                 )
             else:
                 logger.log(
                     logging.WARNING if result.failed else logging.INFO,
-                    "[DATA] stage=snapshot_job job=%s attempted=%d failed=%d rows=%d truncated=%s reason=%s",
+                    "[DATA] stage=snapshot_job job=%s attempted=%d failed=%d rows=%d truncated=%s reason=%s%s",
                     result.job_id,
                     result.attempted,
                     result.failed,
                     result.rows_added,
                     result.truncated,
                     result.first_error,
+                    f" failed_keys={_format_failed_keys(result.failed_keys)}" if result.failed else "",
                 )
         if stop:
             break

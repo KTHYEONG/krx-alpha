@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import time
+from collections.abc import Callable
 from enum import StrEnum
 from typing import Any
 
@@ -11,10 +14,13 @@ from src.brokers.kis.auth import KisAppAuth, KisTokenProvider, TokenSource
 from src.brokers.kis.rate import Pacer
 from src.execution.contracts import KisApiError
 
+logger = logging.getLogger(__name__)
+
 _RATE_LIMIT_CODES: frozenset[str] = frozenset({"EGW00201", "EGW00215"})  # live, VTS per-second limit
 _EXPIRED_TOKEN_CODES: frozenset[str] = frozenset({"EGW00121", "EGW00123"})
 MAX_SAFE_RETRIES: int = 2
 """Retry budget for requests the vendor provably did not execute."""
+MAX_TRANSPORT_RETRIES: int = 2
 _MAX_PAGES = 100
 
 
@@ -45,6 +51,8 @@ class KisGetTransport:
         limiter: Pacer,
         timeout_s: float,
         base_url: str,
+        retry_backoff_s: float = 0.5,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._auth = auth
         self._tokens = tokens
@@ -52,6 +60,8 @@ class KisGetTransport:
         self._limiter = limiter
         self._timeout_s = timeout_s
         self._base_url = base_url
+        self._retry_backoff_s = retry_backoff_s
+        self._sleep = sleep
 
     def authorized_headers(self, tr_id: str, tr_cont: str = "") -> tuple[dict[str, str], str]:
         """Build signed KIS headers and return (headers, bearer_token)."""
@@ -93,13 +103,17 @@ class KisGetTransport:
         params: dict[str, str],
         tr_cont: str = "",
     ) -> tuple[dict[str, Any], str]:
-        """Fetch one KIS page with bounded safe retries and token refresh."""
+        """Fetch one KIS page with bounded safe retries and transport retry."""
         refreshed = False
         retries = 0
+        transport_retries = 0
         while True:
             self._limiter.acquire()
             try:
                 sent_headers, sent_token = self.authorized_headers(tr_id, tr_cont)
+            except (requests.RequestException, ValueError) as exc:
+                raise KisApiError("TRANSPORT", type(exc).__name__) from exc
+            try:
                 resp = self._session.get(
                     self._base_url + path,
                     headers=sent_headers,
@@ -107,6 +121,18 @@ class KisGetTransport:
                     timeout=self._timeout_s,
                 )
                 body = resp.json()
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                if transport_retries < MAX_TRANSPORT_RETRIES:
+                    transport_retries += 1
+                    logger.warning(
+                        "[DATA] stage=kis_transport_retry tr_id=%s attempt=%d error=%s",
+                        tr_id,
+                        transport_retries,
+                        type(exc).__name__,
+                    )
+                    self._sleep(self._retry_backoff_s)
+                    continue
+                raise KisApiError("TRANSPORT", type(exc).__name__) from exc
             except (requests.RequestException, ValueError) as exc:
                 raise KisApiError("TRANSPORT", type(exc).__name__) from exc
             msg_cd = str(body.get("msg_cd", ""))
