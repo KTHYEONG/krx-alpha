@@ -70,6 +70,7 @@ def build_kis_rest_stack(
     venue: KisVenue = KisVenue.LIVE,
     clock: Callable[[], float] = time.time,
     sleep: Callable[[float], None] = time.sleep,
+    transport_retry_backoff_s: float = 0.5,
 ) -> KisRestStack:
     """Assemble the stack with on-disk paths derived from ``auth.app_key`` under ``cache_dir``.
 
@@ -105,6 +106,8 @@ def build_kis_rest_stack(
         limiter=limiter,
         timeout_s=timeout_s,
         base_url=base_url,
+        retry_backoff_s=transport_retry_backoff_s,
+        sleep=sleep,
     )
     data = KisDataClient(transport=transport)
     return KisRestStack(
@@ -155,5 +158,6 @@ def build_kis_data_slot_stack(
         max_lead_s=snapshot.rest_max_lead_s,
         timeout_s=snapshot.request_timeout_s,
         allow_issue=token_settings.allow_issue,
+        transport_retry_backoff_s=snapshot.transport_retry_backoff_s,
     )
     return stack, cred.key_id

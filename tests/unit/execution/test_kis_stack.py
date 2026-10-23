@@ -278,7 +278,7 @@ def test_data_slot_picks_configured_slot(tmp_path) -> None:
 
     # When: 데이터 슬롯 스택을 조립한다
     stack, key_id = build_kis_data_slot_stack(
-        snapshot=SnapshotSettings(kis_data_slot="2"),
+        snapshot=SnapshotSettings(kis_data_slot="2", transport_retry_backoff_s=0.125),
         credentials=creds,
         token_settings=token_settings,
         session=_FakeSession([]),
@@ -290,6 +290,7 @@ def test_data_slot_picks_configured_slot(tmp_path) -> None:
     assert key_id == "kid-2"
     assert stack.tokens._token_cache_path == kis_token_cache_path(cache, "key-two")
     assert stack.tokens._allow_token_issue is token_settings.allow_issue
+    assert stack.transport._retry_backoff_s == 0.125
 
 
 def test_data_slot_missing_fails_closed(tmp_path) -> None:
@@ -385,3 +386,31 @@ def test_stack_binds_venue_to_base_url_and_propagates(tmp_path) -> None:
     assert default.base_url == KIS_LIVE_BASE_URL
     assert default.venue is KisVenue.LIVE
     assert default.trading_client(creds).venue is KisVenue.LIVE
+
+
+def test_transport_retry_uses_stack_sleep_and_backoff(tmp_path) -> None:
+    import requests
+
+    from src.brokers.kis.stack import build_kis_rest_stack
+
+    (tmp_path / ".host-admission").touch()
+    clock = [T0.timestamp()]
+    sleeps = []
+
+    def sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+
+    session = _FakeSession([requests.ConnectionError(), _ok_body()])
+    stack = build_kis_rest_stack(
+        auth=_auth(), cache_dir=tmp_path, session=session, now=lambda: T0,
+        rate_per_s=10.0, max_lead_s=None, timeout_s=5.0, allow_issue=False,
+        clock=lambda: clock[0], sleep=sleep, transport_retry_backoff_s=0.25,
+    )
+    stack.tokens._token = "tok"
+    stack.tokens._token_expires_at = T0 + dt.timedelta(hours=20)
+    body, cont = stack.transport.get("/p", "TR", {})
+    assert body["rt_cd"] == "0"
+    assert cont == "D"
+    assert sleeps == [0.25]
+    assert len(session.calls) == 2

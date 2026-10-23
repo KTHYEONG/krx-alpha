@@ -652,6 +652,28 @@ def test_wire_failed_attempt_consumes_budget(wire_run):
     assert summary.symbols == 1
 
 
+def test_wire_transport_retry_recovers_within_budget(wire_run):
+    import requests
+
+    run, _, admissions = wire_run
+    session = _WireSession([requests.Timeout("offline"), _wire_complete()])
+    summary = run(session, budget=2)
+    assert summary.calls == len(session.calls) == len(admissions) == 2
+    assert summary.symbol_days == 1
+    assert summary.failed == 0
+
+
+def test_wire_transport_retry_exhausting_budget_keeps_failure(wire_run):
+    import requests
+
+    run, _, _ = wire_run
+    session = _WireSession([requests.ConnectionError("offline")] * 2)
+    summary = run(session, budget=2)
+    assert summary.calls == len(session.calls) == 2
+    assert summary.failed == 1
+    assert summary.symbol_days == 0
+
+
 def test_wire_retry_cannot_overrun_budget(wire_run, tmp_path):
     run, _, _ = wire_run
     session = _WireSession([{"rt_cd": "1", "msg_cd": "EGW00201"}])
