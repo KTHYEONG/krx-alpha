@@ -586,3 +586,44 @@ def test_live_session_child_blocks_nightly_in_sleep_state(tmp_path, monkeypatch,
     runner._maybe_launch_nightly(now)
     assert runner.children.nightly is None
     assert _FakePopen.instances == []
+
+
+def test_restart_after_eod_still_launches_when_digest_archived(tmp_path, monkeypatch) -> None:
+    from src.orchestration import daemon as daemon_mod
+
+    _FakePopen.instances.clear()
+    day = dt.date(2026, 9, 25)
+    now = _at(day, 23, 45)
+    runner = _runner(tmp_path, monkeypatch, now=now)
+    monkeypatch.setattr(runner._gate, "view", lambda today, at: _business_view(day))
+    monkeypatch.setattr(daemon_mod.subprocess, "Popen", _FakePopen)
+    assert runner._state.eod_attempted_for is None
+
+    runner._maybe_launch_nightly(now)
+    assert _FakePopen.instances == []
+
+    digest = runner._paths.eod_digest_path(day)
+    digest.parent.mkdir(parents=True, exist_ok=True)
+    digest.write_text("subject\n\nbody\n", encoding="utf-8")
+    runner._maybe_launch_nightly(now)
+
+    assert len(_FakePopen.instances) == 1
+    assert "backfill-tick-tape" in _FakePopen.instances[0].cmd
+
+
+def test_digest_of_another_day_does_not_open_the_gate(tmp_path, monkeypatch) -> None:
+    from src.orchestration import daemon as daemon_mod
+
+    _FakePopen.instances.clear()
+    day = dt.date(2026, 9, 25)
+    now = _at(day, 23, 45)
+    runner = _runner(tmp_path, monkeypatch, now=now)
+    monkeypatch.setattr(runner._gate, "view", lambda today, at: _business_view(day))
+    monkeypatch.setattr(daemon_mod.subprocess, "Popen", _FakePopen)
+    other = runner._paths.eod_digest_path(day - dt.timedelta(days=1))
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_text("x", encoding="utf-8")
+
+    runner._maybe_launch_nightly(now)
+
+    assert _FakePopen.instances == []
