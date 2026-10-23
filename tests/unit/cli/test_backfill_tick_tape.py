@@ -261,3 +261,138 @@ def test_two_session_bar_lag_still_fails_closed(tmp_path):
     )
     with pytest.raises(ValueError, match="historical calendar incomplete"):
         cli.resolve_backfill_sessions(paths, 19, dt.date(2026, 10, 23))
+
+
+def _cli_args(tmp_path, **overrides):
+    base = {"dry_run": False, "data_root": tmp_path, "max_pages": None, "deadline": None, "only_symbols": None}
+    base.update(overrides)
+    return type("Args", (), base)()
+
+
+def test_only_symbols_filters_and_never_adds(tmp_path, monkeypatch, caplog):
+    from src.core.paths import DataPaths
+    from src.marketdata.tick_tape_backfill import TickTapeTarget, TickTapeRunSummary
+
+    paths = DataPaths(tmp_path)
+    _history(paths)
+    _enabled(monkeypatch)
+    universe_path = paths.universe_out(dt.date(2026, 10, 16))
+    universe_path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"symbol": ["A", "B"]}, schema={"symbol": pl.String}).write_parquet(universe_path)
+    monkeypatch.setenv("KIWOOM_APP_KEY", "k")
+    monkeypatch.setenv("KIWOOM_SECRET_KEY", "s")
+    seen: dict = {}
+
+    def _ok(**kwargs):
+        seen.update(kwargs)
+        return TickTapeRunSummary(
+            status="OK", reason=None, run_id="r", symbols=1, symbol_days=1, pages=1, edge_partial=0, failed=0
+        )
+
+    monkeypatch.setattr(cli, "run_tick_tape_backfill", _ok)
+    monkeypatch.setattr(
+        cli, "plan_tick_tape_targets",
+        lambda **kwargs: (TickTapeTarget("00000A", (dt.date(2026, 10, 20),), 1.0),
+                          TickTapeTarget("00000B", (dt.date(2026, 10, 20),), 2.0)),
+    )
+    with caplog.at_level("INFO"):
+        assert cli.run(_cli_args(tmp_path, only_symbols="B,Z")) == 0
+    assert [t.symbol for t in seen["targets"]] == ["00000B"]
+    assert any("symbol_not_planned" in r.getMessage() and "symbol=00000Z" in r.getMessage() for r in caplog.records)
+    assert cli.run(_cli_args(tmp_path, only_symbols="ZZZ")) == 2
+
+
+def test_signal_handlers_are_scoped(tmp_path, monkeypatch):
+    import signal
+
+    import pytest
+
+    from src.core.paths import DataPaths
+
+    paths = DataPaths(tmp_path)
+    _history(paths)
+    _enabled(monkeypatch)
+    monkeypatch.setenv("KIWOOM_APP_KEY", "k")
+    monkeypatch.setenv("KIWOOM_SECRET_KEY", "s")
+    monkeypatch.setattr(
+        cli, "plan_tick_tape_targets",
+        lambda **kwargs: (cli_tick_target(),),
+    )
+    before_term = signal.getsignal(signal.SIGTERM)
+    before_int = signal.getsignal(signal.SIGINT)
+
+    def _boom(**kwargs):
+        raise SystemExit(3)
+
+    monkeypatch.setattr(cli, "run_tick_tape_backfill", _boom)
+    with pytest.raises(SystemExit, match="3"):
+        cli.run(_cli_args(tmp_path))
+    assert signal.getsignal(signal.SIGTERM) == before_term
+    assert signal.getsignal(signal.SIGINT) == before_int
+
+
+def cli_tick_target():
+    from src.marketdata.tick_tape_backfill import TickTapeTarget
+
+    return TickTapeTarget("A", (dt.date(2026, 10, 20),), 1.0)
+
+
+def test_sigterm_maps_to_graceful_stop(tmp_path, monkeypatch):
+    import signal
+
+    from src.core.paths import DataPaths
+    from src.marketdata.tick_tape_backfill import TickTapeRunSummary
+
+    paths = DataPaths(tmp_path)
+    _history(paths)
+    _enabled(monkeypatch)
+    monkeypatch.setenv("KIWOOM_APP_KEY", "k")
+    monkeypatch.setenv("KIWOOM_SECRET_KEY", "s")
+    monkeypatch.setattr(cli, "plan_tick_tape_targets", lambda **kwargs: (cli_tick_target(),))
+    observed: dict = {}
+
+    def _inspect(**kwargs):
+        should_stop = kwargs["should_stop"]
+        signal.raise_signal(signal.SIGTERM)
+        observed["stopped"] = should_stop()
+        return TickTapeRunSummary(
+            status="OK", reason="stop_requested", run_id="r", symbols=0, symbol_days=0,
+            pages=0, edge_partial=0, failed=0,
+        )
+
+    monkeypatch.setattr(cli, "run_tick_tape_backfill", _inspect)
+    assert cli.run(_cli_args(tmp_path)) == 0
+    assert observed["stopped"] is True
+
+
+def test_only_symbols_dry_run_respects_ledger_and_plan(tmp_path, monkeypatch, capsys, caplog):
+    from src.core.paths import DataPaths
+
+    paths = DataPaths(tmp_path)
+    _history(paths)
+    _enabled(monkeypatch)
+    monkeypatch.setenv("KIWOOM_APP_KEY", "k")
+    monkeypatch.setenv("KIWOOM_SECRET_KEY", "s")
+    day = dt.date(2026, 10, 20)
+    monkeypatch.setattr(cli, "resolve_backfill_sessions", lambda *args: (day,))
+    paths.universe_dir.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"symbol": ["005930", "000660"]}).write_parquet(paths.universe_out(dt.date(2026, 10, 19)))
+    paths.tick_tape_ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger = json.dumps({"symbol": "005930", "date": day.isoformat(), "status": "complete", "rows": 2}) + "\n"
+    paths.tick_tape_ledger.write_text(ledger)
+
+    def unexpected_run(**kwargs):
+        raise AssertionError("dry-run must not call runner")
+
+    monkeypatch.setattr(cli, "run_tick_tape_backfill", unexpected_run)
+    args = build_parser().parse_args([
+        "backfill-tick-tape", "--data-root", str(tmp_path), "--dry-run", "--only-symbols", "5930,660,999999",
+    ])
+    with caplog.at_level("INFO"):
+        assert cli.run(args) == 0
+    assert json.loads(capsys.readouterr().out) == {"symbols": 1, "symbol_days": 1, "cost_hint": 0.0}
+    assert {record.getMessage().split("symbol=")[-1] for record in caplog.records
+            if "symbol_not_planned" in record.getMessage()} == {"005930", "999999"}
+    args.only_symbols = "5930"
+    assert cli.run(args) == 2
+    assert paths.tick_tape_ledger.read_text() == ledger

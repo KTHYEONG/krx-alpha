@@ -664,8 +664,12 @@ Nightly window 23:30–05:30 KST. `TICK_TAPE` first (Kiwoom `ka10079` vendor win
 | ID | Modes | Check | How | PASS |
 |---|---|---|---|---|
 | HB1 | M4 | Nightly children ran | `docker logs --since 14h krx-collector 2>&1 \| grep -E 'stage=nightly_'` | `STARTED` then `OK` (or `NOOP` when nothing to do) per enabled job; `FAIL` = SEV3 |
-| HB2 | M4 | Tick-tape summary | `docker logs --since 14h krx-collector 2>&1 \| grep stage=tick_tape_backfill` | last-night summary `symbol_days`, `edge_partial=0`, `failed=0` |
+| HB2 | M4 | Tick-tape summary | `docker logs --since 14h krx-collector 2>&1 \| grep stage=tick_tape_backfill` | last-night summary `symbol_days`, `edge_partial=0`, `failed=0`, `oversize=0` |
 | HB3 | M4 | Ledger growth | `manifest/tick_tape/kiwoom_ledger.jsonl` | new `complete` lines for the night's symbol-days; no duplicate settled pairs re-planned; every `complete` line's `run_id` names an existing `l1/history/tick_tape/kiwoom/dt=<day>/run-<run_id>.parquet`; no `OOM-kill` of the nightly child in `journalctl -k` (a `python` kill with the 3 GiB cgroup of `krx-collector` = SEV2) |
 | HB4 | W | Drive presence | P-STORE `l1/history/tick_tape` | new `dt=<day>` partitions present remotely (`=` only) |
+| HB5 | M4 | Tick-tape progress and oversize | `docker logs --since 14h krx-collector 2>&1 \| grep -E 'stage=tick_tape_progress\|status=OVERSIZE'` | heartbeat lines exist while the child runs; `status=OVERSIZE` is a SEV3 finding naming symbol and day (vendor anomaly, investigate before the next run) |
+| HB6 | M4 | Scale gate after backfill deploys | G-TAPE-SCALE | after any deploy touching the backfill, run the scale gate below |
 
 Ad-hoc runs on the host use a detached container (`docker run -d --rm --name krx-tick-tape-manual -m 1g ...`), never a foreground ssh session, and honour the 23:30-05:30 window. Minute bars: keep `KRX_ALPHA_MINUTE_BACKFILL_ENABLED` unset until G-MINUTE (1m volume sum within +-1% of the KRX daily volume on >=95% of sampled symbol-days) passes on KIS data.
+
+Rollout Gate G-TAPE-SCALE (production, ops): after the deploy that contains this spec, outside 08:10–22:00 on a business day, run `backfill-tick-tape --max-pages 6000 --only-symbols <two heaviest planned symbols>` in a detached throwaway container (`-m 1g --memory-swap 1g`), inside the 23:30–05:30 window. PASS: `OOMKilled=false`, container peak memory from `docker stats` < 400 MiB, at least one `tick_tape_progress` line per 500 pages, ledger lines equal committed partition rows per (symbol, day). Do NOT claim this gate from synthetic data only.

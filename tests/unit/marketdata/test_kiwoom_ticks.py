@@ -322,3 +322,61 @@ def test_older_than_edge_is_vendor_empty() -> None:
     assert newer in walk.complete
     assert old in walk.vendor_empty
     assert mid in walk.edge_partial
+
+
+def _many(day, count, base=90000):
+    return tuple(_tick(day, base + count - 1 - idx) for idx in range(count))
+
+
+def test_oversize_stops_without_certifying() -> None:
+    newer = _D
+    big = _D - dt.timedelta(days=1)
+    older = _D - dt.timedelta(days=2)
+    pages = [
+        TickPage(ticks=(_tick(newer, 150000),), next_key="k1"),
+        TickPage(ticks=_many(big, 5, 90000), next_key="k2"),
+        TickPage(ticks=(_tick(older, 150000),), next_key=None),
+    ]
+    fetch_page, _ = _walk_pages(pages)
+    emitted: list = []
+    walk = walk_symbol_tape(
+        "005930", wanted_days=frozenset({newer, big, older}), fetch_page=fetch_page,
+        max_pages=10, max_ticks_per_day=3,
+        on_day_complete=lambda day, ticks: emitted.append(day),
+    )
+    assert walk.termination == "oversize"
+    assert walk.oversize_day == big
+    assert walk.emitted == frozenset({newer})
+    for bucket in (walk.complete, walk.vendor_empty, walk.edge_partial):
+        assert big not in bucket
+        assert older not in bucket
+
+
+def test_cap_off_is_identical() -> None:
+    newer = _D
+    big = _D - dt.timedelta(days=1)
+    pages = [
+        TickPage(ticks=(_tick(newer, 150000), _tick(big, 90003), _tick(big, 90002)), next_key="k1"),
+        TickPage(ticks=(_tick(big, 90001), _tick(big, 90000)), next_key=None),
+    ]
+    fetch_page_a, _ = _walk_pages([TickPage(t, k) for t, k in [(p.ticks, p.next_key) for p in pages]])
+    fetch_page_b, _ = _walk_pages([TickPage(t, k) for t, k in [(p.ticks, p.next_key) for p in pages]])
+    baseline = walk_symbol_tape("005930", wanted_days=frozenset({big}), fetch_page=fetch_page_a, max_pages=10)
+    capped = walk_symbol_tape(
+        "005930", wanted_days=frozenset({big}), fetch_page=fetch_page_b, max_pages=10, max_ticks_per_day=None,
+    )
+    assert capped == baseline
+
+
+def test_cap_ignores_unwanted_days() -> None:
+    wanted = _D - dt.timedelta(days=1)
+    huge = _D
+    pages = [TickPage(ticks=_many(huge, 10, 90000), next_key="k1"),
+             TickPage(ticks=(_tick(wanted, 150000), _tick(wanted, 90000)), next_key=None)]
+    fetch_page, _ = _walk_pages(pages)
+    walk = walk_symbol_tape(
+        "005930", wanted_days=frozenset({wanted}), fetch_page=fetch_page,
+        max_pages=10, max_ticks_per_day=3,
+    )
+    assert walk.termination != "oversize"
+    assert walk.oversize_day is None

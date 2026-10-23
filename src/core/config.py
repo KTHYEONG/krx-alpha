@@ -321,6 +321,8 @@ class TickTapeBackfillSettings(BaseSettings):
     window_end_kst: dt.time = dt.time(5, 30)
     vendor_window_sessions: int = Field(default=19, ge=1)
     request_timeout_s: float = Field(default=10.0, gt=0)
+    max_ticks_per_day: int = Field(default=1_200_000, ge=1)
+    progress_every_pages: int = Field(default=500, ge=1)
 
     @model_validator(mode="after")
     def check_window_spans(self) -> TickTapeBackfillSettings:

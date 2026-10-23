@@ -7,6 +7,8 @@ import datetime as dt
 import json
 import logging
 import pathlib
+import signal
+import threading
 import uuid
 from zoneinfo import ZoneInfo
 
@@ -43,6 +45,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--max-pages", type=int, default=None, help="override the per-run page budget")
     parser.add_argument("--dry-run", action="store_true", help="print the plan summary without any vendor call")
     parser.add_argument("--data-root", type=pathlib.Path, default=None)
+    parser.add_argument("--only-symbols", default=None, help="comma-separated symbols; restrict to planned targets")
     parser.set_defaults(handler=run)
 
 
@@ -94,6 +97,13 @@ def _parse_deadline(raw: str | None, settings: TickTapeBackfillSettings, now: dt
     return moment.astimezone(_KST)
 
 
+def _parse_only_symbols(raw: str | None) -> frozenset[str] | None:
+    if raw is None:
+        return None
+    names = {part.strip().zfill(6) for part in str(raw).split(",") if part.strip()}
+    return frozenset(names)
+
+
 def run(args: argparse.Namespace) -> int:
     """Plan LS-uncovered symbol-days inside the vendor window and fetch their Kiwoom tapes."""
     settings = TickTapeBackfillSettings()
@@ -115,6 +125,15 @@ def run(args: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         logger.error("[DATA] stage=tick_tape_backfill status=FAIL reason=calendar_or_ledger error=%s", type(exc).__name__)
         return 4
+    only = _parse_only_symbols(getattr(args, "only_symbols", None))
+    if only is not None:
+        planned = {item.symbol for item in targets}
+        for symbol in sorted(only - planned):
+            logger.info("[DATA] stage=tick_tape_backfill status=INFO reason=symbol_not_planned symbol=%s", symbol)
+        targets = tuple(item for item in targets if item.symbol in only)
+        if not targets:
+            logger.info("[DATA] stage=tick_tape_backfill status=OK reason=nothing_to_do")
+            return 2
     if getattr(args, "dry_run", False):
         plan = {
             "symbols": len(targets),
@@ -144,6 +163,15 @@ def run(args: argparse.Namespace) -> int:
         logger.error("[DATA] stage=tick_tape_backfill status=FAIL reason=invalid_deadline")
         return 4
     run_id = uuid.uuid4().hex[:12]
+    stop_event = threading.Event()
+
+    def _request_stop(signum: int, frame: object) -> None:
+        stop_event.set()
+
+    prev_sigterm = signal.getsignal(signal.SIGTERM)
+    prev_sigint = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGTERM, _request_stop)
+    signal.signal(signal.SIGINT, _request_stop)
     try:
         summary = run_tick_tape_backfill(
             targets=targets,
@@ -154,10 +182,14 @@ def run(args: argparse.Namespace) -> int:
             session=requests,
             now=_now_kst,
             run_id=run_id,
+            should_stop=stop_event.is_set,
         )
     except (KrxAlphaError, OSError, ValueError) as exc:
         logger.error("[DATA] stage=tick_tape_backfill status=FAIL reason=setup error=%s", type(exc).__name__)
         return 4
+    finally:
+        signal.signal(signal.SIGTERM, prev_sigterm)
+        signal.signal(signal.SIGINT, prev_sigint)
     if summary.status == "FAIL":
         return 4
     return 0
