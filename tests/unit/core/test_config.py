@@ -1121,6 +1121,44 @@ def test_audit_settings_non_positive_bounds_rejected(monkeypatch) -> None:
         AuditSettings(counter_reset_confirm_frames=1)
 
 
+def test_audit_settings_latency_sample_budget_bound(monkeypatch) -> None:
+    from pydantic import ValidationError
+
+    from src.core.config import AuditSettings
+
+    _clear_audit_env(monkeypatch)
+
+    with pytest.raises(ValidationError):
+        AuditSettings(latency_sample_budget_bytes=0)
+    with pytest.raises(ValidationError):
+        AuditSettings(latency_sample_budget_bytes=1_048_575)
+    assert AuditSettings(latency_sample_budget_bytes=1_048_576).latency_sample_budget_bytes == 1_048_576
+    assert AuditSettings().latency_sample_budget_bytes == 402_653_184
+
+
+def test_audit_settings_latency_sample_budget_env_bound(monkeypatch) -> None:
+    from pydantic import ValidationError
+
+    from src.core.config import AuditSettings
+
+    _clear_audit_env(monkeypatch)
+    monkeypatch.setenv("KRX_ALPHA_AUDIT_LATENCY_SAMPLE_BUDGET_BYTES", "1048575")
+    with pytest.raises(ValidationError):
+        AuditSettings()
+    monkeypatch.setenv("KRX_ALPHA_AUDIT_LATENCY_SAMPLE_BUDGET_BYTES", "1048576")
+    assert AuditSettings().latency_sample_budget_bytes == 1_048_576
+
+
+def test_audit_settings_temporary_kis_budget_removed(monkeypatch) -> None:
+    from src.core.config import AuditSettings
+
+    _clear_audit_env(monkeypatch)
+
+    settings = AuditSettings()
+    assert not hasattr(settings, "kis_time_budget_s")
+    assert settings.time_budget_s == 1800.0
+
+
 def test_runtime_carries_audit_without_changing_existing_fields(monkeypatch, tmp_path) -> None:
     import pathlib
 

@@ -83,6 +83,14 @@ def _derive(root, settings=None, **overrides):
     return derive_session_audit(root, **params)
 
 
+def _sample_settings(monkeypatch, budget, **kwargs):
+    from src.core.config import AuditSettings
+
+    settings = AuditSettings(**kwargs)
+    monkeypatch.setattr(settings, "latency_sample_budget_bytes", budget)
+    return settings
+
+
 def _ok_quote(recv_ns=None):
     return _quote("005930", "090100", recv_ns or _ns(9, 1, 1))
 
@@ -1289,7 +1297,7 @@ def test_compressed_expansion_is_batched_and_progresses(tmp_path) -> None:
 def test_budget_checked_even_without_files(tmp_path) -> None:
     from src.core.config import AuditSettings
 
-    ticks = iter([0.0, 301.0])
+    ticks = iter([0.0, 0.0, 301.0, 301.0])
     audit = _derive(tmp_path, settings=AuditSettings(time_budget_s=300.0), monotonic=lambda: next(ticks))
     assert audit.reason == "time_budget"
 
@@ -1356,24 +1364,6 @@ def test_sequence_replay_is_exact_after_cache_eviction(tmp_path, monkeypatch) ->
     ledger, = _derive(tmp_path).symbols
     assert (ledger.frames, ledger.duplicates, ledger.regressions) == (3, 1, 0)
     assert ledger.net_missing == 0
-
-
-def test_sequence_replay_cannot_ignore_disappearing_input(tmp_path) -> None:
-    part = _write(tmp_path, TICK, [_tick("005930", 1, 0, 10, 10, "090100", _ns(9, 1))])
-    _write(tmp_path, TICK, [_tick("005930", 2, 0, 20, 10, "090101", _ns(9, 1, 1), conn="b")], name="10.jsonl.zst")
-    source = part / "10.jsonl.zst"
-    calls = 0
-
-    def disappear():
-        nonlocal calls
-        calls += 1
-        if calls == 3:
-            source.unlink()
-
-    # The primary reader already owns a descriptor; a replay must not certify a different file set.
-    audit = _derive(tmp_path, progress=disappear)
-    assert audit.status.value == "UNAVAILABLE"
-    assert audit.reason == "io_error"
 
 
 def test_event_holes_helper_boundaries() -> None:
@@ -1502,3 +1492,503 @@ def test_overlap_fill_of_a_count_only_interval(tmp_path) -> None:
     assert ledger.count_only_missing == 1
     assert ledger.confirmed_missing == 0
     assert [(iv.kind, iv.missing_trades) for iv in ledger.intervals] == [("count_only", 1)]
+
+
+def _hand_fixture_records():
+    a1 = _tick("000001", 1, 0, 100, 10, "090001", _ns(9, 0, 3), seq=1)
+    a2 = _tick("000001", 2, 0, 110, 10, "090002", _ns(9, 2, 10), seq=2)
+    b1 = _tick("000002", 1, 0, 100, 10, "090001", _ns(9, 1, 3), seq=3)
+    b2 = _tick("000002", 2, 0, 110, 10, "090003", _ns(9, 1, 5), seq=4)
+    return a1, a2, b1, b2
+
+
+def test_interleaved_shards_equal_single_stream(tmp_path):
+    from src.core.config import AuditSettings
+
+    a1, a2, b1, b2 = _hand_fixture_records()
+    single = tmp_path / "single"
+    _write(single, TICK, [a1, a2, b1, b2])
+    shards = tmp_path / "shards"
+    _write(shards, TICK, [a1], name="09.s0.jsonl.zst")
+    _write(shards, TICK, [b1], name="09.s1.jsonl.zst")
+    _write(shards, TICK, [a2], name="09.s2.jsonl.zst")
+    _write(shards, TICK, [b2], name="09.s3.jsonl.zst")
+
+    settings = AuditSettings(latency_streams=(TICK,))
+    first = _derive(single, settings=settings, wall_ns=lambda: 42)
+    second = _derive(shards, settings=settings, wall_ns=lambda: 42)
+
+    assert second.latency == first.latency
+    assert second.totals == first.totals
+    assert second.symbols == first.symbols
+    tick = next(entry for entry in second.latency if entry.stream == TICK)
+    assert [(m.minute_kst, m.count, m.p50_s, m.max_s, m.min_s) for m in tick.minutes] == [
+        ("09:00", 1, 2.0, 2.0, 2.0),
+        ("09:01", 2, 62.0, 62.0, 62.0),
+        ("09:02", 1, 128.0, 128.0, 128.0),
+    ]
+    assert second.totals.trades_observed == 4
+    assert second.totals.confirmed_missing == 0
+    assert second.totals.symbols == 2
+
+
+@pytest.mark.parametrize("n_minutes", [10, 390])
+def test_file_passes_independent_of_dirty_minutes(tmp_path, monkeypatch, n_minutes):
+    import datetime as dt
+
+    import src.storage.l0_audit as module
+    from src.core.config import AuditSettings
+
+    calls: list[str] = []
+    real = module._iter_line_batches
+
+    def counting(path, batch_bytes, truncated):
+        calls.append(path.name)
+        yield from real(path, batch_bytes, truncated)
+
+    monkeypatch.setattr(module, "_iter_line_batches", counting)
+    names = [f"09.s{i}.jsonl.zst" for i in range(4)]
+    for idx, name in enumerate(names):
+        records = []
+        for pos in range(n_minutes):
+            recv = int(dt.datetime(DAY.year, DAY.month, DAY.day, 9 + pos // 60, pos % 60, 10, tzinfo=KST).timestamp() * 1e9)
+            records.append(_tick("005930", idx * n_minutes + pos + 1, 0, 100, 10, "090001", recv, seq=idx * n_minutes + pos + 1))
+        _write(tmp_path, TICK, records, name=name)
+
+    _derive(tmp_path, settings=AuditSettings(latency_streams=(TICK,)))
+
+    assert sorted(calls) == sorted(names)
+
+
+def test_median_is_lower_median_over_merged_samples(tmp_path):
+    from src.core.config import AuditSettings
+
+    first = [
+        _tick("005930", 1, 0, 100, 10, "090100", _ns(9, 1, 1), seq=1),
+        _tick("005930", 2, 0, 110, 10, "090100", _ns(9, 1, 4), seq=2),
+    ]
+    second = [
+        _tick("005930", 3, 0, 120, 10, "090100", _ns(9, 1, 2), seq=3),
+        _tick("005930", 4, 0, 130, 10, "090100", _ns(9, 1, 3), seq=4),
+    ]
+    _write(tmp_path, TICK, first, name="09.jsonl.zst")
+    _write(tmp_path, TICK, second, name="10.jsonl.zst")
+
+    audit = _derive(tmp_path, settings=AuditSettings(latency_streams=(TICK,)))
+    (entry,) = [item for item in audit.latency if item.stream == TICK]
+    (minute,) = entry.minutes
+    ordered = sorted([1.0, 4.0, 2.0, 3.0])
+    assert minute.count == 4
+    assert minute.p50_s == ordered[(len(ordered) - 1) // 2] == 2.0
+    assert (minute.min_s, minute.max_s) == (1.0, 4.0)
+
+
+def test_budget_overflow_preserves_exactness(tmp_path, caplog, monkeypatch):
+    import logging
+    import re
+
+    from src.core.config import AuditSettings
+
+    records = [
+        _tick("005930", 1, 0, 100, 10, "090001", _ns(9, 0, 3), seq=1),
+        _tick("005930", 2, 0, 110, 10, "090001", _ns(9, 0, 4), seq=2),
+        _tick("005930", 3, 0, 120, 10, "090001", _ns(9, 0, 5), seq=3),
+        _tick("005930", 4, 0, 130, 10, "090001", _ns(9, 1, 3), seq=4),
+        _tick("005930", 5, 0, 140, 10, "090001", _ns(9, 2, 10), seq=5),
+        _tick("005930", 6, 0, 150, 10, "090001", _ns(9, 2, 11), seq=6),
+        _tick("005930", 7, 0, 160, 10, "090001", _ns(9, 2, 12), seq=7),
+        _tick("005930", 8, 0, 170, 10, "090001", _ns(9, 2, 13), seq=8),
+        _tick("005930", 9, 0, 180, 10, "090001", _ns(9, 2, 14), seq=9),
+    ]
+    _write(tmp_path, TICK, records)
+
+    plain = _derive(tmp_path, settings=AuditSettings(latency_streams=(TICK,)), wall_ns=lambda: 42)
+    with caplog.at_level(logging.INFO, logger="src.storage.l0_audit"):
+        caplog.clear()
+        tight = _derive(
+            tmp_path,
+            settings=_sample_settings(monkeypatch, 104, latency_streams=(TICK,)),
+            wall_ns=lambda: 42,
+        )
+    assert tight.latency == plain.latency
+    assert tight.totals == plain.totals
+    assert tight.symbols == plain.symbols
+    tick = next(entry for entry in tight.latency if entry.stream == TICK)
+    assert [(m.minute_kst, m.count, m.p50_s) for m in tick.minutes] == [
+        ("09:00", 3, 3.0), ("09:01", 1, 62.0), ("09:02", 5, 131.0),
+    ]
+
+    lines = [r.getMessage() for r in caplog.records if "session_audit_timing" in r.getMessage()]
+    assert len(lines) == 1
+    passes = int(re.search(r"file_passes=(\d+)", lines[0]).group(1))
+    total_bytes = 9 * 8 + 3 * 80
+    import math
+
+    assert passes <= 1 + min(2, math.ceil(2 * total_bytes / 104))
+    assert "sample_bytes_peak=120" in lines[0]
+
+
+def test_sample_storage_is_compact():
+    import pathlib
+    import time
+    import tracemalloc
+    from array import array
+
+    from src.core.config import AuditSettings
+    from src.core.session_anchors import standard_session_anchors
+    from src.storage.l0_audit import _Derivation, _StreamAccumulator
+
+    run = _Derivation(
+        journal_root=pathlib.Path("/nonexistent"),
+        vendor="ls", venue="krx", session="regular", day=DAY,
+        anchors=standard_session_anchors(DAY), settings=AuditSettings(),
+        manifest_frame_counts=None, progress=None, monotonic=time.monotonic,
+    )
+    acc = _StreamAccumulator(stream=TICK)
+    tracemalloc.start()
+    try:
+        for idx in range(200_000):
+            run.add_sample(acc, "09:00", float(idx))
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert acc.counts == {"09:00": 200_000}
+    assert isinstance(acc.samples["09:00"], array)
+    assert acc.samples["09:00"].itemsize == 8
+    assert peak <= 2 * 8 * 200_000
+
+
+def test_sequence_duplicate_without_rescan(tmp_path, monkeypatch):
+    import src.storage.l0_audit as module
+    from src.core.config import AuditSettings
+
+    monkeypatch.setattr(module, "_SEQUENCE_CACHE_SIZE", 1)
+    calls: list[str] = []
+    real = module._iter_line_batches
+
+    def counting(path, batch_bytes, truncated):
+        calls.append(path.name)
+        yield from real(path, batch_bytes, truncated)
+
+    monkeypatch.setattr(module, "_iter_line_batches", counting)
+
+    def rec(cum, conn, seq, second):
+        return _tick("005930", cum, 0, cum * 10, 10, "090001", _ns(9, 0, second), conn=conn, seq=seq)
+
+    first = [rec(10, "a", 1, 1), rec(11, "b", 1, 2), rec(12, "a", 2, 3)]
+    replay_a = rec(10, "a", 1, 4)
+    second = [replay_a, rec(13, "b", 2, 5), rec(14, "c", 1, 6), rec(15, "a", 3, 7), rec(14, "c", 1, 8)]
+    _write(tmp_path, TICK, first, name="09.jsonl.zst")
+    _write(tmp_path, TICK, second, name="10.jsonl.zst")
+
+    audit = _derive(tmp_path, settings=AuditSettings(latency_streams=(TICK,)))
+    (ledger,) = audit.symbols
+    assert (ledger.frames, ledger.duplicates, ledger.regressions) == (6, 2, 0)
+    assert ledger.net_missing == 0
+    assert sorted(calls) == ["09.jsonl.zst", "10.jsonl.zst"]
+
+
+def test_add_sample_evicts_newest_when_retained_minute_overflows(monkeypatch):
+    import pathlib
+    import time
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.storage.l0_audit import _Derivation, _StreamAccumulator
+
+    settings = _sample_settings(monkeypatch, 96)
+    run = _Derivation(
+        journal_root=pathlib.Path("/nonexistent"),
+        vendor="ls", venue="krx", session="regular", day=DAY,
+        anchors=standard_session_anchors(DAY), settings=settings,
+        manifest_frame_counts=None, progress=None, monotonic=time.monotonic,
+    )
+    acc = _StreamAccumulator(stream=TICK)
+    run.add_sample(acc, "09:00", 1.0)
+    run.add_sample(acc, "09:00", 2.0)
+    run.add_sample(acc, "09:01", 3.0)
+    assert acc.samples.keys() == {"09:00"}
+    run.add_sample(acc, "09:00", 4.0)
+    assert acc.samples == {}
+    assert acc.evicted == {"09:00", "09:01"}
+    assert acc.counts == {"09:00": 3, "09:01": 1}
+
+
+def test_add_sample_evicts_newer_minutes_to_keep_earliest_prefix(monkeypatch):
+    import pathlib
+    import time
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.storage.l0_audit import _Derivation, _StreamAccumulator
+
+    settings = _sample_settings(monkeypatch, 264)
+    run = _Derivation(
+        journal_root=pathlib.Path("/nonexistent"),
+        vendor="ls", venue="krx", session="regular", day=DAY,
+        anchors=standard_session_anchors(DAY), settings=settings,
+        manifest_frame_counts=None, progress=None, monotonic=time.monotonic,
+    )
+    acc = _StreamAccumulator(stream=TICK)
+    run.add_sample(acc, "09:00", 1.0)
+    run.add_sample(acc, "09:01", 2.0)
+    run.add_sample(acc, "09:02", 3.0)
+    run.add_sample(acc, "09:00", 4.0)
+    assert set(acc.samples) == {"09:00", "09:01"}
+    assert acc.evicted == {"09:02"}
+    assert acc.counts == {"09:00": 2, "09:01": 1, "09:02": 1}
+    assert acc.stored_bytes == 24 + 2 * 80
+
+
+def test_latency_sample_maps_oversized_recv_to_none():
+    from src.storage.l0_audit import _Envelope, _latency_sample
+
+    record = _Envelope(raw="{}", recv_ns=10**30, conn_id="", conn_seq=None, exchange_event_time="090001", symbol="")
+    assert _latency_sample(TICK, "ls", DAY, record) is None
+
+
+def test_quote_stream_extra_pass_uses_hotime_and_skips_undecodable(tmp_path, monkeypatch):
+    import zstandard as zstd
+
+    from src.core.config import AuditSettings
+
+    _write(tmp_path, QUOTE, [
+        _quote("005930", "090100", _ns(9, 1, 10)),
+        _quote("005930", "090100", _ns(9, 1, 20)),
+        _quote("005930", "090200", _ns(9, 2, 10)),
+        _quote("005930", "", _ns(9, 2, 20)),
+    ])
+    part = tmp_path / "ls" / "krx" / "regular" / QUOTE / f"dt={DAY.isoformat()}"
+    with (part / "09.jsonl.zst").open("ab") as handle:
+        handle.write(zstd.ZstdCompressor(level=3).compress(b"bad line\n"))
+
+    settings = _sample_settings(monkeypatch, 96, latency_streams=(QUOTE,))
+    tight = _derive(tmp_path, settings=settings, wall_ns=lambda: 42)
+    plain = _derive(tmp_path, settings=AuditSettings(latency_streams=(QUOTE,)), wall_ns=lambda: 42)
+    assert tight.latency == plain.latency
+    quote = next(entry for entry in tight.latency if entry.stream == QUOTE)
+    assert [(m.minute_kst, m.count, m.p50_s) for m in quote.minutes] == [
+        ("09:01", 2, 10.0), ("09:02", 1, 10.0),
+    ]
+    assert quote.event_time_missing == 1
+
+
+def test_seen_sequences_matches_set_oracle():
+    from src.storage.l0_audit import _SeenSequences
+
+    values = [(idx * 37 + 11) % 51 for idx in range(200)] + [5, 6, 7, 4, 3, 20, 19, 18, 20, 0, 50, 49]
+    oracle: set[int] = set()
+    seen = _SeenSequences()
+    for value in values:
+        assert (value in seen) == (value in oracle)
+        seen.add(value)
+        oracle.add(value)
+    for value in range(-1, 53):
+        assert (value in seen) == (value in oracle)
+    assert ("x" in seen) is False
+    assert (True in seen) is False
+    runs, prev = 0, None
+    for value in sorted(oracle):
+        if prev is None or value != prev + 1:
+            runs += 1
+        prev = value
+    assert len(seen) == runs
+
+
+def test_timing_line_emitted_on_ok(tmp_path, caplog):
+    import logging
+
+    from src.core.config import AuditSettings
+    from src.storage.l0_audit import AuditStatus
+
+    _write(tmp_path, TICK, [_tick("005930", 1, 0, 100, 10, "090100", _ns(9, 0, 10))])
+    with caplog.at_level(logging.INFO, logger="src.storage.l0_audit"):
+        audit = _derive(tmp_path, settings=AuditSettings(latency_streams=(TICK,)), monotonic=lambda: 7.0)
+    lines = [r for r in caplog.records if "session_audit_timing" in r.getMessage()]
+    assert len(lines) == 1
+    assert lines[0].levelno == logging.INFO
+    assert audit.status is AuditStatus.OK
+    assert "elapsed_s=" in lines[0].getMessage()
+    assert "file_passes=" in lines[0].getMessage()
+
+
+def test_timing_line_emitted_on_time_budget(tmp_path, caplog):
+    import logging
+
+    from src.core.config import AuditSettings
+    from src.storage.l0_audit import AuditStatus
+
+    _write(tmp_path, TICK, [_tick("005930", 1, 0, 100, 10, "090100", _ns(9, 0, 10))], name="09.jsonl.zst")
+    _write(tmp_path, TICK, [_tick("005930", 2, 0, 110, 10, "090101", _ns(9, 0, 20))], name="10.jsonl.zst")
+    ticks = iter([0.0, 0.0, 0.0, 0.0, 5.0, 5.0])
+    with caplog.at_level(logging.INFO, logger="src.storage.l0_audit"):
+        audit = _derive(
+            tmp_path,
+            settings=AuditSettings(latency_streams=(TICK,), time_budget_s=0.001),
+            monotonic=lambda: next(ticks),
+        )
+    assert audit.status is AuditStatus.UNAVAILABLE
+    assert audit.reason == "time_budget"
+    lines = [r for r in caplog.records if "session_audit_timing" in r.getMessage()]
+    assert len(lines) == 1
+    assert lines[0].levelno == logging.WARNING
+    assert "elapsed_s=" in lines[0].getMessage()
+    assert "file_passes=" in lines[0].getMessage()
+
+
+def test_budget_guard_raises_mid_pass_without_partials(tmp_path):
+    from src.core.config import AuditSettings
+    from src.storage.l0_audit import AuditStatus
+
+    _write(tmp_path, TICK, [_tick("005930", 1, 0, 100, 10, "090100", _ns(9, 0, 10))], name="09.jsonl.zst")
+    _write(tmp_path, TICK, [_tick("005930", 2, 0, 110, 10, "090101", _ns(9, 0, 20))], name="10.jsonl.zst")
+    ticks = iter([0.0, 0.0, 0.0, 0.0, 5.0, 5.0])
+    audit = _derive(
+        tmp_path,
+        settings=AuditSettings(latency_streams=(TICK,), time_budget_s=0.001),
+        monotonic=lambda: next(ticks),
+    )
+    assert audit.status is AuditStatus.UNAVAILABLE
+    assert audit.reason == "time_budget"
+    assert audit.symbols == ()
+
+
+def test_linear_scale_decode_bound(tmp_path, monkeypatch):
+    import datetime as dt
+
+    import src.storage.l0_audit as module
+    from src.core.config import AuditSettings
+
+    decodes = []
+    real = module._decode_envelope
+
+    def counting(line):
+        decodes.append(1)
+        return real(line)
+
+    monkeypatch.setattr(module, "_decode_envelope", counting)
+    n_files, per_file, n_minutes = 4, 2000, 390
+    for shard in range(n_files):
+        records = []
+        for idx in range(per_file):
+            pos = idx % n_minutes
+            recv = int(dt.datetime(DAY.year, DAY.month, DAY.day, 9 + pos // 60, pos % 60, 10, tzinfo=KST).timestamp() * 1e9)
+            cum = shard * per_file + idx + 1
+            records.append(_tick(f"{idx % 50:06d}", cum, 0, cum * 10, 10, "090001", recv, conn=f"c{shard}", seq=idx + 1))
+        _write(tmp_path, TICK, records, name=f"09.s{shard}.jsonl.zst")
+
+    _derive(tmp_path, settings=AuditSettings(latency_streams=(TICK,)))
+
+    assert len(decodes) <= 2 * n_files * per_file
+
+
+def test_finalization_keeps_sample_memory_compact():
+    import tracemalloc
+    from array import array
+
+    from src.storage.l0_audit import _finalize_minute
+
+    tracemalloc.start()
+    try:
+        samples = array("d", (float(i) for i in range(200_000, 0, -1)))
+        minute = _finalize_minute("09:00", samples)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert (minute.count, minute.p50_s, minute.min_s, minute.max_s) == (200_000, 100_000.0, 1.0, 200_000.0)
+    assert peak <= 2 * 8 * 200_000
+
+
+def test_sequence_duplicate_includes_earlier_undecodable_tick(tmp_path):
+    from src.core.config import AuditSettings
+
+    _write(tmp_path, TICK, [
+        _env("{}", _ns(9, 0, 1), seq=1),
+        _tick("005930", 10, 0, 100, 10, "090001", _ns(9, 0, 2), seq=1),
+        _tick("005930", 11, 0, 110, 10, "090001", _ns(9, 0, 3), seq=2),
+    ])
+    audit = _derive(tmp_path, settings=AuditSettings(latency_streams=(TICK,)))
+    ledger, = audit.symbols
+    assert (ledger.frames, ledger.duplicates, ledger.trades_observed) == (1, 1, 1)
+
+
+def test_latency_recollection_contains_disappearing_file(tmp_path, monkeypatch):
+    part = _write(tmp_path, TICK, [
+        _tick("005930", i, 0, i * 10, 10, "090001", _ns(9, i, 3), seq=i)
+        for i in range(1, 4)
+    ])
+
+    def disappear():
+        (part / "09.jsonl.zst").unlink(missing_ok=True)
+
+    audit = _derive(tmp_path, settings=_sample_settings(monkeypatch, 88, latency_streams=(TICK,)), progress=disappear)
+    assert audit.status.value == "UNAVAILABLE"
+    assert audit.reason == "io_error"
+    assert audit.symbols == ()
+
+
+@pytest.mark.parametrize(("counts", "budget", "expected_passes", "deferred"), [
+    ([3] * 8, 160, 8, 7),
+    ([10, 2, 1], 112, 3, 2),
+    ([2, 3, 1], 208, 2, 1),
+    ([1, 1], 176, 1, 0),
+    ([1], 8, 2, 1),
+])
+def test_whole_minute_budget_exceptions_and_fragmentation(
+    tmp_path, monkeypatch, caplog, counts, budget, expected_passes, deferred,
+):
+    import logging
+    import math
+    import re
+
+    import src.storage.l0_audit as module
+    from src.core.config import AuditSettings
+
+    records = []
+    for minute, count in enumerate(counts):
+        for idx in range(count):
+            seq = len(records) + 1
+            records.append(_tick(
+                "005930", seq, 0, seq * 10, 10, f"09{minute:02d}01",
+                _ns(9, minute, idx + 2) + seq, seq=seq,
+            ))
+    _write(tmp_path, TICK, records)
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    plain = _derive(tmp_path, settings=AuditSettings(latency_streams=(TICK,)), wall_ns=lambda: 42)
+    calls = []
+    reader = module._iter_line_batches
+
+    def counting(path, batch_bytes, truncated):
+        calls.append(path)
+        yield from reader(path, batch_bytes, truncated)
+
+    monkeypatch.setattr(module, "_iter_line_batches", counting)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=module.logger.name):
+        tight = _derive(
+            tmp_path, settings=_sample_settings(monkeypatch, budget, latency_streams=(TICK,)),
+            wall_ns=lambda: 42,
+        )
+    assert module._audit_to_jsonable(tight) == module._audit_to_jsonable(plain)
+    assert before == {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    timing, = [r.getMessage() for r in caplog.records if "session_audit_timing" in r.getMessage()]
+    passes = int(re.search(r"file_passes=(\d+)", timing).group(1))
+    peak = int(re.search(r"sample_bytes_peak=(\d+)", timing).group(1))
+    sizes = [8 * count + 80 for count in counts]
+    assert passes == len(calls) == expected_passes
+    assert passes <= 1 + min(deferred, math.ceil(2 * sum(sizes) / budget))
+    assert peak <= max(budget, max(sizes))
+    if max(sizes) > budget:
+        assert peak == max(sizes)
+
+
+def test_sample_accounting_resets_between_streams(tmp_path, monkeypatch, caplog):
+    import logging
+
+    _write(tmp_path, TICK, [_tick("005930", 1, 0, 10, 10, "090001", _ns(9, 0, 2))])
+    _write(tmp_path, QUOTE, [_quote("005930", "090001", _ns(9, 0, 2))])
+    with caplog.at_level(logging.INFO, logger="src.storage.l0_audit"):
+        audit = _derive(tmp_path, settings=_sample_settings(monkeypatch, 88))
+    assert audit.status.value == "OK"
+    assert [len(stream.minutes) for stream in audit.latency] == [1, 1]
+    timing, = [r.getMessage() for r in caplog.records if "session_audit_timing" in r.getMessage()]
+    assert "file_passes=2" in timing
+    assert "sample_bytes_peak=88" in timing

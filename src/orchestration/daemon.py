@@ -3160,7 +3160,7 @@ class DaemonRunner:
                 session=MarketSession.REGULAR.value,
                 day=ref_day,
                 anchors=anchors,
-                settings=runtime_audit.model_copy(update={"time_budget_s": runtime_audit.kis_time_budget_s}),
+                settings=runtime_audit,
                 manifest_frame_counts=None,
                 progress=self._eod_progress,
             )
