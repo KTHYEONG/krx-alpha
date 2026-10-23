@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import dataclasses
 import datetime as dt
 import itertools
 import json
+import logging
 import os
 import pathlib
 import re
 import time
-from collections.abc import Callable, Iterator, Mapping
+from array import array
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import BinaryIO, Final, NamedTuple
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import zstandard as zstd
 
 from src.core.config import AuditSettings
@@ -39,12 +43,15 @@ _KST: Final = ZoneInfo("Asia/Seoul")
 _TICK_STREAM: Final = "H0STCNT0"
 _LEDGER_VENDORS: Final[frozenset[str]] = frozenset({"ls", "kis"})
 _BATCH_BYTES: Final = 32 * 1024 * 1024
+_MINUTE_SAMPLE_OVERHEAD_BYTES: Final = 80
 _SCHEMA_VERSION: Final = 1
 _SEQUENCE_CACHE_SIZE: Final = 1024
 _OK_REASON: Final = "ok"
 _REGULAR_PHASE: Final = MarketPhase.REGULAR.value
 _HOTIME_RE: Final = re.compile(r'"hotime"\s*:\s*"([^"]*)"')
 _INT_RE: Final = re.compile(r"[+-]?\d+")
+
+logger = logging.getLogger(__name__)
 
 
 class AuditStatus(StrEnum):
@@ -245,20 +252,57 @@ class _StreamAccumulator:
     rows: int = 0
     missing: int = 0
     failed: bool = False
-    current_minute: str | None = None
-    current: list[float] = field(default_factory=list)
-    finished: list[LatencyMinute] = field(default_factory=list)
-    dirty_minutes: set[str] = field(default_factory=set)
-    seen_minutes: set[str] = field(default_factory=set)
+    order: list[str] = field(default_factory=list)
+    counts: dict[str, int] = field(default_factory=dict)
+    samples: dict[str, array[float]] = field(default_factory=dict)
+    evicted: set[str] = field(default_factory=set)
+    stored_bytes: int = 0
     event_seconds: set[int] = field(default_factory=set)
+    final: dict[str, LatencyMinute] = field(default_factory=dict)
 
 
 class _BudgetExceededError(Exception):
     """Internal control flow: the derivation ran past its monotonic time budget."""
 
 
-class _JournalChangedError(Exception):
-    """A replay no longer contains the current primary-reader record."""
+class _SeenSequences:
+    """Exact per-connection set of observed conn_seq values stored as merged integer intervals."""
+
+    def __init__(self) -> None:
+        self._starts: list[int] = []
+        self._ends: list[int] = []
+
+    def __contains__(self, seq: object) -> bool:
+        if not isinstance(seq, int) or isinstance(seq, bool):
+            return False
+        idx = bisect.bisect_right(self._starts, seq) - 1
+        return idx >= 0 and seq <= self._ends[idx]
+
+    def add(self, seq: int) -> None:
+        starts, ends = self._starts, self._ends
+        idx = bisect.bisect_left(starts, seq)
+        if idx > 0 and seq <= ends[idx - 1] + 1:
+            idx -= 1
+            new_start = starts[idx]
+            new_end = ends[idx] if ends[idx] >= seq else seq
+        elif idx < len(starts) and seq >= starts[idx] - 1 and seq <= ends[idx] + 1:
+            new_start = starts[idx] if starts[idx] <= seq else seq
+            new_end = ends[idx] if ends[idx] >= seq else seq
+        else:
+            starts.insert(idx, seq)
+            ends.insert(idx, seq)
+            return
+        starts[idx] = new_start
+        ends[idx] = new_end
+        nxt = idx + 1
+        while nxt < len(starts) and starts[nxt] - 1 <= ends[idx]:
+            if ends[nxt] > ends[idx]:
+                ends[idx] = ends[nxt]
+            del starts[nxt]
+            del ends[nxt]
+
+    def __len__(self) -> int:
+        return len(self._starts)
 
 
 def _valid_hhmmss(value: object) -> dt.time | None:
@@ -421,15 +465,39 @@ def _tick_body(vendor: str, raw: str) -> dict[str, object]:
     }
 
 
-def _finalize_minute(minute: str, samples: list[float]) -> LatencyMinute:
-    ordered = sorted(samples)
+def _finalize_minute(minute: str, samples: Sequence[float]) -> LatencyMinute:
+    """Return count/p50/max/min over the recv-minute's latency samples; samples non-empty."""
+    ordered = np.frombuffer(samples, dtype=np.float64) if isinstance(samples, array) else np.array(samples, dtype=np.float64)
+    median_index = (len(ordered) - 1) // 2
+    minimum, maximum = float(ordered.min()), float(ordered.max())
+    ordered.partition(median_index)
     return LatencyMinute(
         minute_kst=minute,
         count=len(ordered),
-        p50_s=ordered[(len(ordered) - 1) // 2],
-        max_s=ordered[-1],
-        min_s=ordered[0],
+        p50_s=float(ordered[median_index]),
+        max_s=maximum,
+        min_s=minimum,
     )
+
+
+def _latency_sample(stream: str, vendor: str, day: dt.date, record: _Envelope) -> tuple[str, float] | None:
+    try:
+        moment = _valid_hhmmss(record.exchange_event_time)
+        if moment is None:
+            if stream == _TICK_STREAM:
+                moment = _valid_hhmmss(_tick_body(vendor, record.raw).get("chetime"))
+            else:
+                match = _HOTIME_RE.search(record.raw)
+                moment = _valid_hhmmss(match.group(1) if match is not None else None)
+        if moment is None:
+            return None
+        event_epoch = dt.datetime(
+            day.year, day.month, day.day, moment.hour, moment.minute, moment.second, tzinfo=_KST
+        ).timestamp()
+        minute = dt.datetime.fromtimestamp(record.recv_ns // 1_000_000_000, tz=_KST).strftime("%H:%M")
+        return minute, (record.recv_ns - int(event_epoch) * 1_000_000_000) / 1_000_000_000
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def _zero_totals() -> LedgerTotals:
@@ -494,10 +562,9 @@ class _Derivation:
         self._sources: list[SourceFile] = []
         self._symbols: dict[str, _SymbolState] = {}
         self._last_regular_tick_ns: int | None = None
-        self._sequence_max: dict[str, int] = {}
-        self._tick_files: list[pathlib.Path] = []
-        self._current_path: pathlib.Path | None = None
-        self._current_line = 0
+        self._seen: dict[str, _SeenSequences] = {}
+        self._file_passes = 0
+        self._sample_bytes_peak = 0
 
     def ping(self) -> None:
         if self._progress is not None:
@@ -525,25 +592,61 @@ class _Derivation:
         files = sorted((self._journal_root / l0_partition_relpath(key)).glob(L0_JOURNAL_GLOB), key=lambda p: p.name)
         if not files:
             return self._finish_stream(acc, AuditStatus.UNAVAILABLE, "journal_missing")
-        if stream == _TICK_STREAM:
-            self._tick_files = files
+        budget = self._settings.latency_sample_budget_bytes
         for path in files:
             self.check_budget()
             self.process_file(stream, acc, path)
-        self.flush_minute(acc)
-        for minute in sorted(acc.dirty_minutes):
-            samples: list[float] = []
+        while acc.samples:
+            minute, held = acc.samples.popitem()
+            acc.final[minute] = _finalize_minute(minute, held)
+            del held
+        acc.stored_bytes = 0
+        deferred = [minute for minute in acc.order if minute not in acc.final]
+        pos = 0
+        while pos < len(deferred):
+            batch: list[str] = []
+            projected = 0
+            while pos < len(deferred):
+                need = acc.counts[deferred[pos]] * 8 + _MINUTE_SAMPLE_OVERHEAD_BYTES
+                if batch and projected + need > budget:
+                    break
+                batch.append(deferred[pos])
+                projected += need
+                pos += 1
+            wanted = set(batch)
+            collected: dict[str, array[float]] = {}
+            batch_bytes = 0
             for path in files:
-                for blob in _iter_line_batches(path, _BATCH_BYTES, [False]):
+                self.check_budget()
+                truncated = [False]
+                self._file_passes += 1
+                for blob in _iter_line_batches(path, _BATCH_BYTES, truncated):
                     for line in blob.splitlines():
                         record = _decode_envelope(line)
-                        if record is not None:
-                            self.replay_sample(stream, record, minute, samples)
+                        if record is None:
+                            continue
+                        item = _latency_sample(stream, self._vendor, self._day, record)
+                        if item is None:
+                            continue
+                        minute, value = item
+                        if minute in wanted:
+                            arr: array[float] | None = collected.get(minute)
+                            if arr is None:
+                                arr = array("d")
+                                collected[minute] = arr
+                                batch_bytes += _MINUTE_SAMPLE_OVERHEAD_BYTES
+                            arr.append(value)
+                            batch_bytes += 8
+                            self._sample_bytes_peak = max(self._sample_bytes_peak, batch_bytes)
+                            del arr
                     self.ping()
                     self.check_budget()
-            acc.finished = [entry for entry in acc.finished if entry.minute_kst != minute]
-            if samples:
-                acc.finished.append(_finalize_minute(minute, samples))
+            for minute in batch:
+                held = collected.pop(minute, array("d"))
+                if len(held) != acc.counts[minute]:
+                    raise ValueError("journal sample count changed during latency collection")
+                acc.final[minute] = _finalize_minute(minute, held)
+                del held
         if acc.rows == 0:
             return self._finish_stream(acc, AuditStatus.UNAVAILABLE, "io_error" if acc.failed else "no_decodable_records")
         if acc.failed:
@@ -553,19 +656,17 @@ class _Derivation:
     def process_file(self, stream: str, acc: _StreamAccumulator, path: pathlib.Path) -> None:
         truncated: list[bool] = [False]
         file_rows = 0
-        self._current_path = path
-        self._current_line = 0
         try:
             size = path.stat().st_size
         except OSError:
             size = 0
             truncated[0] = True
         else:
+            self._file_passes += 1
             for blob in _iter_line_batches(path, _BATCH_BYTES, truncated):
                 for line in blob.split(b"\n"):
                     if not line.strip():
                         continue
-                    self._current_line += 1
                     record = _decode_envelope(line)
                     if record is None:
                         truncated[0] = True
@@ -576,6 +677,12 @@ class _Derivation:
                     except (ValueError, OverflowError, OSError):
                         file_rows -= 1
                         truncated[0] = True
+                    finally:
+                        if stream == _TICK_STREAM and record.conn_id and record.conn_seq is not None:
+                            seen = self._seen.get(record.conn_id)
+                            if seen is None:
+                                seen = self._seen[record.conn_id] = _SeenSequences()
+                            seen.add(record.conn_seq)
                 self.ping()
                 self.check_budget()
         rel = path.relative_to(self._journal_root).as_posix()
@@ -608,38 +715,40 @@ class _Derivation:
             self.accept_tick(record, body)
 
     def add_sample(self, acc: _StreamAccumulator, minute: str, latency: float) -> None:
-        if minute != acc.current_minute:
-            self.flush_minute(acc)
-            if minute in acc.seen_minutes:
-                acc.dirty_minutes.add(minute)
-            acc.seen_minutes.add(minute)
-            acc.current_minute = minute
-        acc.current.append(latency)
-
-    def flush_minute(self, acc: _StreamAccumulator) -> None:
-        if acc.current_minute is not None and acc.current:
-            acc.finished = [entry for entry in acc.finished if entry.minute_kst != acc.current_minute]
-            acc.finished.append(_finalize_minute(acc.current_minute, acc.current))
-        acc.current_minute = None
-        acc.current = []
-
-    def replay_sample(self, stream: str, record: _Envelope, minute: str, samples: list[float]) -> None:
-        try:
-            recv_minute = dt.datetime.fromtimestamp(record.recv_ns // 1_000_000_000, tz=_KST).strftime("%H:%M")
-            if recv_minute != minute:
+        budget = self._settings.latency_sample_budget_bytes
+        known = acc.counts.get(minute)
+        if known is None:
+            acc.order.append(minute)
+            acc.counts[minute] = 1
+            cost = 8 + _MINUTE_SAMPLE_OVERHEAD_BYTES
+            if acc.stored_bytes + cost > budget:
+                acc.evicted.add(minute)
                 return
-            moment = _valid_hhmmss(record.exchange_event_time)
-            if moment is None:
-                if stream == _TICK_STREAM:
-                    moment = _valid_hhmmss(_tick_body(self._vendor, record.raw).get("chetime"))
-                else:
-                    match = _HOTIME_RE.search(record.raw)
-                    moment = _valid_hhmmss(match.group(1) if match is not None else None)
-            if moment is not None:
-                event_ns = int(dt.datetime.combine(self._day, moment, tzinfo=_KST).timestamp()) * 1_000_000_000
-                samples.append((record.recv_ns - event_ns) / 1_000_000_000)
-        except (ValueError, OverflowError, OSError):
+            acc.samples[minute] = array("d", [latency])
+            acc.stored_bytes += cost
+            if acc.stored_bytes > self._sample_bytes_peak:
+                self._sample_bytes_peak = acc.stored_bytes
             return
+        acc.counts[minute] = known + 1
+        if minute in acc.evicted:
+            return
+        if acc.stored_bytes + 8 <= budget:
+            acc.samples[minute].append(latency)
+            acc.stored_bytes += 8
+            if acc.stored_bytes > self._sample_bytes_peak:
+                self._sample_bytes_peak = acc.stored_bytes
+            return
+        for candidate in reversed(acc.order):
+            if candidate in acc.samples:
+                acc.stored_bytes -= len(acc.samples[candidate]) * 8 + _MINUTE_SAMPLE_OVERHEAD_BYTES
+                del acc.samples[candidate]
+                acc.evicted.add(candidate)
+                if acc.stored_bytes + 8 <= budget:
+                    break
+        if minute in acc.evicted:
+            return
+        acc.samples[minute].append(latency)
+        acc.stored_bytes += 8
 
     def accept_tick(self, record: _Envelope, body: dict[str, object]) -> None:
         raw_symbol = body.get("shcode")
@@ -687,32 +796,13 @@ class _Derivation:
     def sequence_duplicate(self, record: _Envelope) -> bool:
         if not record.conn_id or record.conn_seq is None:
             return False
-        previous_max = self._sequence_max.get(record.conn_id)
-        if previous_max is None or record.conn_seq <= previous_max:
-            duplicate = self.find_prior_sequence(record)
-        else:
-            duplicate = False
-        if record.conn_id not in self._sequence_max and len(self._sequence_max) >= _SEQUENCE_CACHE_SIZE:
-            del self._sequence_max[next(iter(self._sequence_max))]
-        self._sequence_max[record.conn_id] = max(record.conn_seq, previous_max if previous_max is not None else record.conn_seq)
-        return duplicate
-
-    def find_prior_sequence(self, record: _Envelope) -> bool:
-        for path in self._tick_files:
-            line_number = 0
-            for blob in _iter_line_batches(path, _BATCH_BYTES, [False]):
-                self.ping()
-                self.check_budget()
-                for line in blob.split(b"\n"):
-                    if not line.strip():
-                        continue
-                    line_number += 1
-                    if path == self._current_path and line_number >= self._current_line:
-                        return False
-                    prior = _decode_envelope(line)
-                    if prior is not None and (prior.conn_id, prior.conn_seq) == (record.conn_id, record.conn_seq):
-                        return True
-        raise _JournalChangedError
+        seen = self._seen.get(record.conn_id)
+        if seen is None:
+            seen = self._seen[record.conn_id] = _SeenSequences()
+        if record.conn_seq in seen:
+            return True
+        seen.add(record.conn_seq)
+        return False
 
     def advance_segment(self, symbol: str, state: _SymbolState, segment: _Segment, frame: _TickFrame) -> None:
         prev = segment.last
@@ -827,8 +917,7 @@ class _Derivation:
         segment.accepted += 1
 
     def _finish_stream(self, acc: _StreamAccumulator, status: AuditStatus, reason: str) -> StreamLatency:
-        self.flush_minute(acc)
-        acc.finished.sort(key=lambda entry: entry.minute_kst)
+        minutes = [acc.final[minute] for minute in sorted(acc.final)]
         open_t, auction_t = self._anchors.regular_open, self._anchors.closing_auction_start
         holes, hole_seconds = _event_holes(
             acc.event_seconds,
@@ -843,7 +932,7 @@ class _Derivation:
             reason=reason,
             rows=acc.rows,
             event_time_missing=acc.missing,
-            minutes=tuple(acc.finished),
+            minutes=tuple(minutes),
             event_holes=holes,
             event_hole_seconds=hole_seconds,
         )
@@ -983,6 +1072,27 @@ def derive_session_audit(
 ) -> SessionAudit:
     """Derive per-minute stream latency and the per-symbol missing-trade ledger for one routed L0 session; read-only, never raises on bad input (returns `UNAVAILABLE` with a reason)."""
     latency: tuple[StreamLatency, ...] = ()
+    started = monotonic()
+    run: _Derivation | None = None
+
+    def _emit(audit: SessionAudit) -> SessionAudit:
+        passes = run._file_passes if run is not None else 0
+        peak = run._sample_bytes_peak if run is not None else 0
+        elapsed = monotonic() - started
+        if audit.status is AuditStatus.OK:
+            logger.info(
+                "[DATA] stage=session_audit_timing vendor=%s session=%s date=%s status=%s reason=%s elapsed_s=%.1f file_passes=%d sample_bytes_peak=%d",
+                vendor, session, day.isoformat(), audit.status.value, audit.reason,
+                elapsed, passes, peak,
+            )
+        else:
+            logger.warning(
+                "[DATA] stage=session_audit_timing vendor=%s session=%s date=%s status=%s reason=%s elapsed_s=%.1f file_passes=%d sample_bytes_peak=%d",
+                vendor, session, day.isoformat(), audit.status.value, audit.reason,
+                elapsed, passes, peak,
+            )
+        return audit
+
     try:
         generated_at_ns = wall_ns()
         run = _Derivation(
@@ -1006,7 +1116,7 @@ def derive_session_audit(
             run.ping()
         run.check_budget()
         if all(entry.status is AuditStatus.UNAVAILABLE for entry in results):
-            return SessionAudit(
+            return _emit(SessionAudit(
                 schema_version=_SCHEMA_VERSION,
                 session_date=day,
                 vendor=vendor,
@@ -1021,9 +1131,9 @@ def derive_session_audit(
                 totals=_zero_totals(),
                 tail_silence_s=None,
                 last_regular_tick_recv_ns=None,
-            )
+            ))
         if vendor not in _LEDGER_VENDORS:
-            return SessionAudit(
+            return _emit(SessionAudit(
                 schema_version=_SCHEMA_VERSION,
                 session_date=day,
                 vendor=vendor,
@@ -1038,12 +1148,12 @@ def derive_session_audit(
                 totals=_zero_totals(),
                 tail_silence_s=None,
                 last_regular_tick_recv_ns=None,
-            )
+            ))
         symbols, totals = run.finalize_ledger()
         run.check_budget()
         tail_silence_s, last_regular_tick_recv_ns = run.tail_silence()
         if last_regular_tick_recv_ns is None:
-            return SessionAudit(
+            return _emit(SessionAudit(
                 schema_version=_SCHEMA_VERSION,
                 session_date=day,
                 vendor=vendor,
@@ -1058,13 +1168,13 @@ def derive_session_audit(
                 totals=totals,
                 tail_silence_s=None,
                 last_regular_tick_recv_ns=None,
-            )
+            ))
         if all(entry.status is AuditStatus.OK for entry in results):
             status, reason = AuditStatus.OK, _OK_REASON
         else:
             status = AuditStatus.PARTIAL
             reason = next(entry.reason for entry in results if entry.status is not AuditStatus.OK)
-        return SessionAudit(
+        return _emit(SessionAudit(
             schema_version=_SCHEMA_VERSION,
             session_date=day,
             vendor=vendor,
@@ -1079,9 +1189,9 @@ def derive_session_audit(
             totals=totals,
             tail_silence_s=tail_silence_s,
             last_regular_tick_recv_ns=last_regular_tick_recv_ns,
-        )
+        ))
     except _BudgetExceededError:
-        return SessionAudit(
+        return _emit(SessionAudit(
             schema_version=_SCHEMA_VERSION,
             session_date=day,
             vendor=vendor,
@@ -1096,9 +1206,9 @@ def derive_session_audit(
             totals=_zero_totals(),
             tail_silence_s=None,
             last_regular_tick_recv_ns=None,
-        )
-    except (OSError, ValueError, zstd.ZstdError, _JournalChangedError):
-        return SessionAudit(
+        ))
+    except (OSError, ValueError, zstd.ZstdError):
+        return _emit(SessionAudit(
             schema_version=_SCHEMA_VERSION,
             session_date=day,
             vendor=vendor,
@@ -1113,7 +1223,7 @@ def derive_session_audit(
             totals=_zero_totals(),
             tail_silence_s=None,
             last_regular_tick_recv_ns=None,
-        )
+        ))
 
 
 def _audit_to_jsonable(audit: SessionAudit) -> dict[str, object]:

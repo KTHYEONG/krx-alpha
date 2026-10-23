@@ -702,7 +702,7 @@ class AuditSettings(BaseSettings):
     symbol_min_trades: int = Field(default=100, ge=1)
     tail_silence_max_s: float = Field(default=600.0, gt=0)
     time_budget_s: float = Field(default=1800.0, gt=0)
-    kis_time_budget_s: float = Field(default=300.0, gt=0)
+    latency_sample_budget_bytes: int = Field(default=402_653_184, ge=1_048_576)
     counter_reset_confirm_frames: int = Field(default=3, ge=2)
     max_intervals_per_symbol: int = Field(default=500, ge=1)
     event_hole_min_s: int = Field(default=10, ge=1)
