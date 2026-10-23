@@ -70,6 +70,7 @@ class TickTapeRunSummary:
     pages: int
     edge_partial: int
     failed: int
+    oversize: int = 0
 
 
 def tape_calendar_sessions(paths: DataPaths, through: dt.date) -> tuple[dt.date, ...]:
@@ -320,6 +321,7 @@ def run_tick_tape_backfill(
     session: Any,
     now: Callable[[], dt.datetime],
     run_id: str,
+    should_stop: Callable[[], bool] = lambda: False,
 ) -> TickTapeRunSummary:
     """Fetch targets under the host-shared pacer, page budget and deadline; persist partitions then ledger lines at durable checkpoints; never raises for per-symbol failures."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
@@ -341,6 +343,8 @@ def run_tick_tape_backfill(
     committed_days = 0
     edge_days = 0
     failed = 0
+    oversize = 0
+    stop_requested = False
     ledger_queue: list[dict[str, Any]] = []
     staged: dict[dt.date, list[pathlib.Path]] = {}
     staged_rows = 0
@@ -351,6 +355,10 @@ def run_tick_tape_backfill(
         return run_id if checkpoint_no == 0 else f"{run_id}-{checkpoint_no}"
 
     def _boundary() -> None:
+        nonlocal stop_requested
+        if should_stop():
+            stop_requested = True
+            raise TapeBoundaryError("tick-tape stop requested")
         current = now()
         wall_time = current.astimezone(dt.timezone(dt.timedelta(hours=9))).time()
         start, end = settings.window_start_kst, settings.window_end_kst
@@ -380,6 +388,15 @@ def run_tick_tape_backfill(
             limiter.acquire()
             _boundary()
             pages_used += 1
+            if pages_used % settings.progress_every_pages == 0:
+                logger.info(
+                    "[DATA] stage=tick_tape_progress run_id=%s symbol=%s run_pages=%d staged_rows=%d committed_days=%d",
+                    run_id,
+                    symbol,
+                    pages_used,
+                    staged_rows,
+                    committed_days,
+                )
             try:
                 return fetch_tick_page(
                     symbol,
@@ -461,6 +478,7 @@ def run_tick_tape_backfill(
                 fetch_page=_fetch_page,
                 max_pages=remaining,
                 on_day_complete=_stage_day,
+                max_ticks_per_day=settings.max_ticks_per_day,
             )
         except _RunAuthError:
             _discard_symbol()
@@ -507,6 +525,14 @@ def run_tick_tape_backfill(
             walk.pages,
             walk.termination,
         )
+        if walk.termination == "oversize":
+            oversize += 1
+            logger.warning(
+                "[DATA] stage=tick_tape symbol=%s status=OVERSIZE day=%s cap=%d",
+                target.symbol,
+                walk.oversize_day.isoformat() if walk.oversize_day is not None else "?",
+                settings.max_ticks_per_day,
+            )
         if staged_rows > _FLUSH_ROW_LIMIT:
             try:
                 _checkpoint()
@@ -524,8 +550,10 @@ def run_tick_tape_backfill(
             if status == "OK":
                 status = "FAIL"
                 reason = type(exc).__name__
+    if status == "OK" and stop_requested:
+        reason = "stop_requested"
     logger.info(
-        "[DATA] stage=tick_tape_backfill status=%s run_id=%s symbols=%d symbol_days=%d pages=%d edge_partial=%d failed=%d",
+        "[DATA] stage=tick_tape_backfill status=%s run_id=%s symbols=%d symbol_days=%d pages=%d edge_partial=%d failed=%d oversize=%d",
         status,
         run_id,
         started,
@@ -533,6 +561,7 @@ def run_tick_tape_backfill(
         pages_used,
         edge_days,
         failed,
+        oversize,
     )
     return TickTapeRunSummary(
         status=status,
@@ -543,4 +572,5 @@ def run_tick_tape_backfill(
         pages=pages_used,
         edge_partial=edge_days,
         failed=failed,
+        oversize=oversize,
     )

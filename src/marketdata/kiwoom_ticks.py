@@ -56,8 +56,9 @@ class TapeWalk:
     vendor_empty: frozenset[dt.date]
     edge_partial: frozenset[dt.date]
     pages: int
-    termination: Literal["crossed", "tape_end", "page_budget"]
+    termination: Literal["crossed", "tape_end", "page_budget", "oversize"]
     emitted: frozenset[dt.date] = frozenset()
+    oversize_day: dt.date | None = None
 
 
 class TapeBoundaryError(KiwoomTickTapeError):
@@ -209,6 +210,7 @@ def walk_symbol_tape(
     fetch_page: Callable[[str | None], TickPage],
     max_pages: int,
     on_day_complete: Callable[[dt.date, tuple[TapeTick, ...]], None] | None = None,
+    max_ticks_per_day: int | None = None,
 ) -> TapeWalk:
     """Walk one symbol's tape newest-first until older than min(wanted_days), the tape ends, or max_pages; return certified days.
 
@@ -229,7 +231,8 @@ def walk_symbol_tape(
     emitted: set[dt.date] = set()
     pages = 0
     next_key: str | None = None
-    termination: Literal["crossed", "tape_end", "page_budget"] = "page_budget"
+    termination: Literal["crossed", "tape_end", "page_budget", "oversize"] = "page_budget"
+    oversize_day: dt.date | None = None
     while pages < max_pages:
         try:
             page = fetch_page(next_key)
@@ -250,6 +253,12 @@ def walk_symbol_tape(
                 on_day_complete(day, tuple(reversed(per_day[day])))
                 per_day[day] = []
                 emitted.add(day)
+        if max_ticks_per_day is not None:
+            breached = [day for day in wanted_days if len(per_day[day]) > max_ticks_per_day]
+            if breached:
+                oversize_day = max(breached)
+                termination = "oversize"
+                break
         if oldest is not None and oldest < floor:
             termination = "crossed"
             break
@@ -264,7 +273,8 @@ def walk_symbol_tape(
         termination = "page_budget"
     complete: dict[dt.date, tuple[TapeTick, ...]] = {}
     vendor_empty: set[dt.date] = set()
-    for day in wanted_days - emitted:
+    eligible = {day for day in wanted_days - emitted if oversize_day is None or day > oversize_day}
+    for day in eligible:
         rows = per_day[day]
         older = oldest is not None and oldest < day
         newer = newest is not None and newest > day
@@ -288,4 +298,5 @@ def walk_symbol_tape(
         pages=pages,
         termination=termination,
         emitted=frozenset(emitted),
+        oversize_day=oversize_day,
     )

@@ -300,3 +300,156 @@ def test_walk_emits_certified_days_and_frees_them():
     assert DAY not in walk.complete
     assert walk.edge_partial == frozenset({OLDER})
     assert DAY not in walk.vendor_empty
+
+
+def _big_rows(day: dt.date, count: int) -> list[dict]:
+    return [
+        {"cntr_tm": f"{day:%Y%m%d}{90000 + count - 1 - idx:06d}", "cur_prc": "100", "trde_qty": "2"}
+        for idx in range(count)
+    ]
+
+
+def test_oversize_day_is_retried_not_settled(tmp_path, monkeypatch, caplog):
+    _mute_sleep(monkeypatch)
+    paths = DataPaths(tmp_path)
+    older = DAY - dt.timedelta(days=1)
+    floor = older - dt.timedelta(days=1)
+    session = _Session(pages={
+        "A": [
+            _ChartResp(_rows(DAY, 2), cont="Y", next_key="k1"),
+            _ChartResp(_rows(older, 2), cont="Y", next_key="k2"),
+            _ChartResp(_big_rows(older, 1), cont="Y", next_key="k3"),
+            _ChartResp(_rows(floor, 1), cont="N"),
+        ],
+        "B": _walk_day_pages(DAY, older),
+    })
+    settings = _settings(max_ticks_per_day=2)
+    with caplog.at_level("WARNING"):
+        result = _run(paths, session, settings=settings,
+                      targets=[module.TickTapeTarget("A", (floor, older, DAY), 1.0),
+                               module.TickTapeTarget("B", (DAY,), 1.0)])
+    assert result.oversize == 1
+    assert result.failed == 0
+    assert module.read_ledger_done(paths.tick_tape_ledger) == frozenset({("A", DAY), ("B", DAY)})
+    records = [json.loads(line) for line in paths.tick_tape_ledger.read_text().splitlines()]
+    assert all(row["date"] == DAY.isoformat() for row in records)
+    assert pl.read_parquet(paths.tick_tape_partition(DAY, "regression")).height == 4
+    assert session.chart_calls == [("A", None), ("A", "k1"), ("A", "k2"), ("B", None), ("B", "k1")]
+    assert any("status=OVERSIZE" in r.getMessage() for r in caplog.records)
+
+
+def test_stop_request_ends_through_final_checkpoint(tmp_path, monkeypatch):
+    _mute_sleep(monkeypatch)
+    paths = DataPaths(tmp_path)
+    session = _Session(pages={"A": _walk_day_pages(DAY, OLDER), "B": _walk_day_pages(DAY, OLDER)})
+    stop_after_a = lambda: len(session.chart_calls) >= 2  # noqa: E731
+    result = _run(paths, session, should_stop=stop_after_a,
+                  targets=[module.TickTapeTarget(s, (DAY,), 1.0) for s in ("A", "B")])
+    assert result.status == "OK"
+    assert result.reason == "stop_requested"
+    assert module.read_ledger_done(paths.tick_tape_ledger) == frozenset({("A", DAY)})
+    assert paths.tick_tape_partition(DAY, "regression").exists()
+    assert [call[0] for call in session.chart_calls] == ["A", "A"]
+
+
+def test_stop_before_first_request(tmp_path, monkeypatch):
+    _mute_sleep(monkeypatch)
+    paths = DataPaths(tmp_path)
+    session = _Session(pages={"A": _walk_day_pages(DAY, OLDER)})
+    result = _run(paths, session, should_stop=lambda: True)
+    assert result.status == "OK"
+    assert result.reason == "stop_requested"
+    assert session.chart_calls == []
+    assert session.token_calls == 0
+    assert not paths.tick_tape_ledger.exists()
+
+
+def test_heartbeat_cadence(tmp_path, monkeypatch, caplog):
+    _mute_sleep(monkeypatch)
+    paths = DataPaths(tmp_path)
+    pages = [
+        _ChartResp(
+            [{"cntr_tm": f"{DAY:%Y%m%d}{90003 - idx:06d}", "cur_prc": "712345", "trde_qty": "654321"}],
+            cont="Y", next_key=f"k{idx}")
+        for idx in range(4)
+    ]
+    pages.append(_ChartResp(_rows(OLDER, 1), cont="N"))
+    session = _Session(pages={"A": pages})
+    settings = _settings(progress_every_pages=2)
+    with caplog.at_level("INFO"):
+        _run(paths, session, settings=settings)
+    progress = [r for r in caplog.records if "stage=tick_tape_progress" in r.getMessage()]
+    assert len(progress) == 2
+    for record in progress:
+        message = record.getMessage()
+        assert "712345" not in message
+        assert "654321" not in message
+
+
+def test_default_stop_is_inert(tmp_path, monkeypatch):
+    _mute_sleep(monkeypatch)
+    paths = DataPaths(tmp_path)
+    session = _Session(pages={"A": _walk_day_pages(DAY, OLDER)})
+    result = _run(paths, session)
+    assert result.reason is None
+    assert result.status == "OK"
+    assert module.read_ledger_done(paths.tick_tape_ledger) == frozenset({("A", DAY)})
+
+
+def test_inflight_stop_is_latched_and_preserves_certified_days(tmp_path, monkeypatch):
+    _mute_sleep(monkeypatch)
+    paths = DataPaths(tmp_path)
+    floor = OLDER - dt.timedelta(days=1)
+    session = _Session(pages={"A": [
+        _ChartResp(_rows(DAY, 2), cont="Y", next_key="1"),
+        _ChartResp(_rows(OLDER, 1), cont="Y", next_key="2"),
+        _ChartResp(_rows(floor, 1), cont="N"),
+    ]})
+    observed = False
+
+    def should_stop():
+        nonlocal observed
+        if len(session.chart_calls) == 2 and not observed:
+            observed = True
+            return True
+        return False
+
+    result = _run(paths, session, should_stop=should_stop,
+                  targets=[module.TickTapeTarget("A", (floor, OLDER, DAY), 1.0)])
+    assert (result.status, result.reason, result.failed) == ("OK", "stop_requested", 0)
+    assert len(session.chart_calls) == 2
+    ledger = [json.loads(line) for line in paths.tick_tape_ledger.read_text().splitlines()]
+    assert [(row["symbol"], row["date"], row["rows"]) for row in ledger] == [("A", DAY.isoformat(), 2)]
+    assert pl.read_parquet(paths.tick_tape_partition(DAY, "regression")).height == 2
+
+
+def test_stop_is_not_polled_during_or_after_final_checkpoint(tmp_path, monkeypatch):
+    _mute_sleep(monkeypatch)
+    paths = DataPaths(tmp_path)
+    session = _Session(pages={"A": _walk_day_pages(DAY, OLDER)})
+    checkpoint_started = False
+    original = module._publish_partition
+
+    def publish(tmp, target):
+        nonlocal checkpoint_started
+        checkpoint_started = True
+        original(tmp, target)
+
+    def should_stop():
+        assert not checkpoint_started
+        return False
+
+    monkeypatch.setattr(module, "_publish_partition", publish)
+    result = _run(paths, session, should_stop=should_stop)
+    assert checkpoint_started
+    assert (result.status, result.reason, result.symbol_days) == ("OK", None, 1)
+
+
+@pytest.mark.parametrize("field", ["max_ticks_per_day", "progress_every_pages"])
+def test_hardening_settings_are_env_overridable_and_positive(monkeypatch, field):
+    from pydantic import ValidationError
+
+    monkeypatch.setenv(f"KRX_ALPHA_TICK_TAPE_{field.upper()}", "7")
+    assert getattr(_settings(), field) == 7
+    with pytest.raises(ValidationError):
+        _settings(**{field: 0})
