@@ -137,6 +137,31 @@ def test_disabled_spawns_nothing(monkeypatch, tmp_path) -> None:
     assert runner.state.regular_kis_plan == ()
 
 
+def test_daemon_assigns_ls_omissions_before_priority_overlap(monkeypatch, tmp_path, caplog) -> None:
+    from src.core.config import CollectorSettings, resolve_collector_runtime
+    from src.universe.ipc import write_candidates
+
+    runner = _runner(monkeypatch, tmp_path)
+    collector = CollectorSettings(data_root=tmp_path / "data", ls_max_subscriptions_per_session=4)
+    runner._runtime = resolve_collector_runtime(collector=collector, regular_kis=runner._runtime.regular_kis)
+    rows = [
+        {"symbol": "000005", "tier": "follow"},
+        {"symbol": "000004", "tier": "event"},
+        {"symbol": "000003", "tier": "core"},
+        {"symbol": "000002", "tier": "core"},
+        {"symbol": "000001", "tier": "core"},
+    ]
+    runner._paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+    write_candidates(runner._paths.candidates, rows, rev=20260915)
+    runner.state.orchestrated_for = DAY
+    with caplog.at_level(logging.INFO):
+        runner._ensure_regular_kis_plan(DAY)
+    assert tuple(s for shard in runner.state.regular_kis_plan for s in shard.symbols) == (
+        "000001", "000004", "000005",
+    )
+    assert "ls_covered=2 kis_planned=3 kis_exclusive=3 uncovered=0" in caplog.text
+
+
 def test_window_start_and_stop(monkeypatch, tmp_path) -> None:
     runner = _runner(monkeypatch, tmp_path)
     _ready_plan(runner)

@@ -18,6 +18,7 @@ from src.core.config import DataPaths
 from src.core.session_anchors import STANDARD_NXT_PREMARKET_END, resolve_session_anchors
 from src.realtime.clock import ClockUnsyncedError, measure_ntp_offset_ns
 from src.realtime.contracts import MarketSession, MarketVenue
+from src.realtime.ls_limits import LsGuardConfig, apply_ls_subscription_guard
 from src.realtime.kis_sharding import AftermarketShard
 from src.universe.ipc import read_candidates
 from src.storage.journal import L0JournalWriter
@@ -73,6 +74,7 @@ class SessionConfig:
     journal_retain_days: int = 3
     # Reason recorded on the restart gap when this boot follows a previous boot; None means the default `restart`.
     restart_reason: str | None = None
+    ls_guard: LsGuardConfig | None = None
 
 
 @dataclass
@@ -84,6 +86,7 @@ class CollectorSession:
     schedule: SessionSchedule = field(default_factory=SessionSchedule)
     route: StreamRoute | None = None
     min_free_disk_gb: float = 3.0
+    guarded_pairs: list[tuple[str, str]] | None = None
 
     def current_state(self, now_dt: dt.datetime | None = None) -> SessionState:
         current = now_dt or dt.datetime.now(dt.UTC)
@@ -144,7 +147,7 @@ class CollectorSession:
         self.manifest.record_gap(symbol=symbol, gap_start_ns=gap_start_ns, gap_end_ns=gap_end_ns, reason=reason)
 
     def replay_pairs(self) -> list[tuple[str, str]]:
-        return self.registry.replay_pairs()
+        return self.guarded_pairs if self.guarded_pairs is not None else self.registry.replay_pairs()
 
     def persist(self) -> None:
         self.manifest.save(self.manifest_path)
@@ -244,6 +247,14 @@ def bootstrap_session(
         if cfg.symbol_limit is not None:
             rows = rows[: cfg.symbol_limit]
         desired = {str(row["symbol"]): tuple(cfg.desired_streams) for row in rows}
+    guarded_pairs: list[tuple[str, str]] | None = None
+    if cfg.ls_guard is not None and cfg.vendor == "ls" and cfg.route is None:
+        planned = sorted((symbol, stream) for symbol, streams in desired.items() for stream in streams)
+        guarded_pairs = apply_ls_subscription_guard(planned, session=manifest, guard=cfg.ls_guard)
+        desired = {
+            symbol: tuple(stream for sym, stream in guarded_pairs if sym == symbol)
+            for symbol in dict.fromkeys(sym for sym, _ in guarded_pairs)
+        }
     registry = SubscriptionRegistry(slot_budget=cfg.slot_budget)
     diff: SubscriptionDiff = registry.plan(desired)
     registry.apply(diff)
@@ -288,6 +299,7 @@ def bootstrap_session(
         schedule=cfg.schedule,
         route=cfg.route,
         min_free_disk_gb=cfg.min_free_disk_gb,
+        guarded_pairs=guarded_pairs,
     )
     if stored is not None and "rev" in stored:
         manifest.candidates_rev = int(cast(Any, stored["rev"]))

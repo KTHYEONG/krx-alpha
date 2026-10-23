@@ -63,6 +63,7 @@ def _build_ls(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAdapte
         http=ctx.http,
         market_of=ctx.market_of,
         token_store=store,
+        capacity_pairs=ctx.settings.ls_max_subscriptions_per_session,
     )
 
 

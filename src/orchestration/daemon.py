@@ -118,6 +118,7 @@ from src.realtime.kis_sharding import (
     plan_premarket_shard,
     plan_regular_kis_shards,
 )
+from src.realtime.ls_limits import prioritize_ls_pairs, split_ls_pairs
 from src.realtime.manifest import SessionManifest
 from src.realtime.streamer import aftermarket_open_time
 from src.storage.l0_audit import AuditStatus, SessionAudit, derive_session_audit, write_session_audit
@@ -2643,7 +2644,7 @@ class DaemonRunner:
             logger.warning("[DATA] stage=premarket_supervise status=FAIL reason=%s", str(exc))
 
     def _ensure_regular_kis_plan(self, today: dt.date) -> None:
-        """Plan today's ready candidate prefix once, containing file and credential failures."""
+        """Plan KIS coverage of LS omissions before overlapping the priority universe."""
         st = self._state
         if st.regular_kis_plan_day == today:
             return
@@ -2671,13 +2672,23 @@ class DaemonRunner:
             ):
                 raise KrxAlphaError(f"invalid candidates file: {self._paths.candidates}")
             symbols = tuple(str(row["symbol"]) for row in rows if isinstance(row, dict))
+            tiers = {str(row["symbol"]): str(row.get("tier", "event")) for row in rows}
+            collector = self._runtime.collector
+            pairs = [(symbol, stream) for symbol in symbols for stream in collector.streams]
+            priority_pairs = prioritize_ls_pairs(pairs, tier_of=tiers, order=symbols)
+            priority_symbols = tuple(dict.fromkeys(s for s, _ in priority_pairs))
+            ls_pairs, _ = split_ls_pairs(
+                pairs, collector.ls_max_subscriptions_per_session, tier_of=tiers, order=symbols
+            )
+            ls_covered = frozenset(s for s, _ in ls_pairs) if collector.vendor == "ls" else frozenset()
             cfg = getattr(self._runtime, "regular_kis", None) or RegularKisSettings()
             st.regular_kis_plan = plan_regular_kis_shards(
-                symbols=symbols,
+                symbols=priority_symbols,
                 credentials=load_kis_data_credentials(),
                 credential_slots=tuple(cfg.credential_slots),
                 pair_capacity_per_connection=int(cfg.pair_capacity_per_connection or 0),
                 streams=cfg.streams,
+                ls_covered_symbols=ls_covered,
             )
         except (KrxAlphaError, OSError, ValueError) as exc:
             st.regular_kis_plan = ()

@@ -6,6 +6,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+from src.core.config import LS_MAX_SUBSCRIPTIONS_PER_SESSION
 from src.marketdata.toss_token_store import TossTokenStore
 from src.realtime.adapters.json_ws import JsonWsOAuthAdapter
 from src.realtime.contracts import L0Frame, VendorAck, VendorAuthRejected, VendorDisconnected
@@ -49,7 +50,7 @@ class LsRealtimeAdapter(JsonWsOAuthAdapter):
         market_of: Mapping[str, str],
         token_store: TossTokenStore,
         streams: tuple[str, ...] = ("H0STCNT0", "H0STASP0"),
-        capacity_pairs: int = 200,
+        capacity_pairs: int = LS_MAX_SUBSCRIPTIONS_PER_SESSION,
         token_url: str = LS_TOKEN_URL,
         ws_url: str = LS_WS_URL,
         heartbeat_s: float = 10.0,

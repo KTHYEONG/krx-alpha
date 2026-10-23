@@ -23,6 +23,7 @@ class SessionManifest:
     gaps: list[dict[str, object]] = field(default_factory=list)
     candidates_rev: int | None = None
     degraded_reason: str | None = None
+    note: str | None = None
     clock_status: str = "measured"
     boots: list[dict[str, object]] = field(default_factory=list)
     venue: str = "krx"
@@ -90,6 +91,7 @@ class SessionManifest:
             "gaps": self.gaps,
             "candidates_rev": self.candidates_rev,
             "degraded_reason": self.degraded_reason,
+            "note": self.note,
             "clock_status": self.clock_status,
             "boots": self.boots,
             "venue": self.venue,
@@ -132,6 +134,7 @@ class SessionManifest:
             gaps=list(raw.get("gaps", [])),
             candidates_rev=int(rev_raw) if rev_raw is not None else None,
             degraded_reason=raw.get("degraded_reason"),
+            note=raw.get("note"),
             clock_status=str(raw.get("clock_status", "measured")),
             boots=list(raw.get("boots", [])),
             venue=str(raw.get("venue", "krx")),

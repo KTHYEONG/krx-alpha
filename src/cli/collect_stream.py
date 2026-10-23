@@ -18,12 +18,41 @@ from src.core.session_anchors import resolve_session_anchors
 from src.realtime.adapters.registry import RegularAdapterContext, regular_vendor
 from src.realtime.connection_handover import SwapRequest
 from src.realtime.lag_monitor import LagMonitor
+from src.realtime.ls_limits import LsGuardConfig
 from src.realtime.regular_open_watch import RegularOpenWatch
 from src.realtime.session import CollectorSession, SessionConfig, StreamRoute, bootstrap_session
 from src.realtime.streamer import SILENCE_LIMIT_S, RealtimeStreamer
 from src.realtime.streaming_child import HandoverSettings, resolve_clock_overrides, run_streaming_child
+from src.universe.ipc import CandidateFileError, read_candidates
 
 logger = logging.getLogger(__name__)
+
+
+def ls_guard_config(settings: CollectorSettings, candidates_path: pathlib.Path) -> LsGuardConfig:
+    """Build the LS limit guard from settings, keeping candidate priority order for truncation."""
+    tiers: dict[str, str] | None = None
+    order: tuple[str, ...] | None = None
+    try:
+        stored = read_candidates(candidates_path)
+    except (OSError, CandidateFileError, ValueError, KeyError, TypeError, AttributeError):
+        stored = None
+    rows = stored.get("candidates") if isinstance(stored, dict) else None
+    if isinstance(rows, list) and rows:
+        symbols = [str(row["symbol"]) for row in rows if isinstance(row, dict) and "symbol" in row]
+        if symbols:
+            order = tuple(symbols)
+            mapped = {
+                str(row["symbol"]): str(row["tier"])
+                for row in rows
+                if isinstance(row, dict) and "symbol" in row and "tier" in row
+            }
+            tiers = mapped or None
+    return LsGuardConfig(
+        max_subscriptions=settings.ls_max_subscriptions_per_session,
+        max_sessions=settings.ls_max_sessions,
+        tiers=tiers,
+        order=order,
+    )
 
 
 @dataclass(frozen=True)
@@ -101,6 +130,7 @@ async def run_regular_stream(
         ntp_fallback_hosts=settings.ntp_fallback_hosts,
         min_free_disk_gb=settings.min_free_disk_gb,
         journal_retain_days=settings.journal_retain_days,
+        ls_guard=ls_guard_config(settings, pathlib.Path(str(args.candidates_path))) if profile.vendor == "ls" else None,
         **kwargs,  # type: ignore[arg-type]
     )
     session = bootstrap(cfg)
@@ -136,7 +166,11 @@ async def run_regular_stream(
         frame_observers=(open_watch,),
         handover=(
             HandoverSettings(
-                swap_request, settings.lag_handover_max_s, settings.lag_handover_cooldown_s, open_watch.standby_window
+                swap_request,
+                settings.lag_handover_max_s,
+                settings.lag_handover_cooldown_s,
+                open_watch.standby_window,
+                max_sessions=settings.ls_max_sessions,
             )
             if profile.proactive_handover
             else None

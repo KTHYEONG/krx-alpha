@@ -13,6 +13,7 @@ from typing import Any
 
 from src.realtime.contracts import L0Frame, VendorAdapter
 from src.realtime.lag_monitor import event_second_of
+from src.realtime.ls_limits import classify_ls_close_reason
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,7 @@ class Handover:
         cooldown_s: float,
         window: Callable[[], bool] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        max_sessions: int | None = None,
     ) -> None:
         if max_s <= 0 or cooldown_s < 0:
             raise ValueError("max_s must be positive and cooldown_s non-negative")
@@ -80,6 +82,7 @@ class Handover:
         self._cooldown_s = cooldown_s
         self._window = window
         self._monotonic = monotonic
+        self._max_sessions = max_sessions
         self._opening: asyncio.Task[VendorAdapter | None] | None = None
         self._standby: _Standby | None = None
         self._last_start: float | None = None
@@ -100,13 +103,21 @@ class Handover:
             found.add(self._standby.recv_task)
         return found
 
-    def maybe_start(self, *, eligible: bool) -> None:
+    def maybe_start(self, *, eligible: bool, live_connections: int = 1) -> None:
         """Start a standby when the monitor asked for one or the hot-standby window is open, `eligible`, and the cooldown has passed."""
         requested = self._request.take()
         if not (requested or (self._window is not None and self._window())) or not eligible or self.active:
             return
         now = self._monotonic()
         if self._last_start is not None and now - self._last_start < self._cooldown_s:
+            return
+        if self._max_sessions is not None and live_connections >= self._max_sessions:
+            self._last_start = now
+            logger.warning(
+                "[DATA] stage=stream_handover status=OPEN_SKIPPED reason=session_cap live=%d cap=%d",
+                live_connections,
+                self._max_sessions,
+            )
             return
         self._last_start = now
         self._opening = asyncio.ensure_future(self._open())
@@ -125,7 +136,11 @@ class Handover:
                 await self._close(adapter)
             raise
         except Exception as exc:  # noqa: BLE001 - a standby failure must never touch the live connection
-            logger.warning("[DATA] stage=stream_handover status=OPEN_FAILED error_type=%s", type(exc).__name__)
+            logger.warning(
+                "[DATA] stage=stream_handover status=OPEN_FAILED error_type=%s reason=%s",
+                type(exc).__name__,
+                classify_ls_close_reason(str(exc)),
+            )
             if adapter is not None:
                 await self._close(adapter)
             return None
@@ -171,7 +186,10 @@ class Handover:
         if standby is None:
             return None
         if standby.recv_task.done() and standby.recv_task in done and standby.recv_task.exception() is not None:
-            logger.warning("[DATA] stage=stream_handover status=STANDBY_LOST")
+            logger.warning(
+                "[DATA] stage=stream_handover status=STANDBY_LOST reason=%s",
+                classify_ls_close_reason(str(standby.recv_task.exception())),
+            )
             await self._drop_standby()
             return None
         if self._window is not None and self._window():
