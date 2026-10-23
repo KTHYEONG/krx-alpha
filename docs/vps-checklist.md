@@ -102,7 +102,7 @@ Neighbors sharing `~/.cache/kis`, the LS key, DB금융투자 key, Toss key, KIS 
 | 08:28–15:32 | krx `regular_kis` WS shards (enabled 2026-10-23) | KIS slots 1–4 WS (krx; aftermarket WS takes the same slots 15:40–20:00) |
 | 08:39:55–09:01 | `kca-auction-open`, `kca-order-exit`, `kca-order-reconcile-exit`, `kca-paper-exit` | KIS main account |
 | 23:30–05:30 | krx nightly backfill (`backfill-tick-tape`, then `backfill-minute-bars`) | Kiwoom `ka10079` (host pacer, shared with kca) |
-| 23:30–05:30 | krx nightly backfill (`backfill-minute-bars`) | Toss `MARKET_DATA_CHART` (shared with kca) |
+| 23:30–05:30 | krx nightly backfill (`backfill-minute-bars`, disabled until G-MINUTE) | KIS slot 5 REST `FHKST03010230` (kca slot 5 uses 15:20–15:29 only) |
 | 15:20–15:45 | `kca-collect/predict/auction-close/order-entry/finalize-close/aftermarket-book/archive-intraday-regular/auction-path` | KIS slots 1·5, Toss `STOCK_TRADING_TREND` (shared with krx snapshots), Kiwoom, DB금융투자 |
 | 18:30–19:40 | `kse-collect-eve` | LS REST (`admission_ls_*`), KIS slot 5 |
 | 20:05 / 20:35 / 20:40 | `kca-archive-intraday` / `kca-tape-sweep` / `kse-collect-dbsec` | LS, DB금융투자 (1 token/min/key), Kiwoom |
@@ -117,7 +117,7 @@ Commands run on the host after `cd ~/krx-alpha/data` unless the probe says conta
 | ID | Modes | Check | How | PASS | WARN / FAIL |
 |---|---|---|---|---|---|
 | H1 | M0 M3 M4 | Container | P-CTX | `krx-collector` Up, `restarts=0`, `oom=false`, `rev` = `origin/main`, start outside business-day 08:10–22:00; latest `gh run list --limit 3` (local) deploy job `success` | restart/OOM = SEV2; unexplained in-freeze start = SEV2; deploy job not `success` = SEV2 (pushes can succeed while deploy fails). Other containers (`mhs-live-daemon`, `market-normalizer`, `market-capture-blue`) INFO |
-| H2 | M0 M1 M3 | Memory | `docker stats --no-stream --format '{{.MemUsage}}' krx-collector` | ≤ section 9 phase band; limit 1 GiB | >800 MiB WARN; OOM SEV2 |
+| H2 | M0 M1 M3 | Memory | `docker stats --no-stream --format '{{.MemUsage}}' krx-collector` | ≤ section 9 phase band; limit 3 GiB (since 2026-10-23: daemon + 6x EOD child + KIS shards) | >2.4 GiB WARN; OOM SEV2 |
 | H3 | M0 M3 W | Disk | `df -h /`; `du -sh l0 l1` | <70% | 70–85% WARN; >85% FAIL (SEV1 >90%); W: 30-day growth |
 | H4 | M0 M3 | Clock | `chronyc tracking \| grep -E 'System time\|Leap'` | \|offset\| <0.5 s, Leap Normal | >0.5 s WARN; >2.0 s SEV1 |
 | H5 | M0 M4 | Failed units + alert path | `systemctl --user --failed --no-legend; systemctl --failed --no-legend; systemctl --user cat kca-alert@.service >/dev/null && echo alert_ok` | no `krx-*`/`vps-image-gc` failed; `alert_ok` (krx units' `OnFailure=` uses kca's template) | krx unit failed = SEV2; template missing = SEV2 (krx unit failures silent); other project = SEV3 |
@@ -126,7 +126,7 @@ Commands run on the host after `cd ~/krx-alpha/data` unless the probe says conta
 | H8 | M3 W | Offload completeness | P-STORE `offload l1` and `offload manifest` | every local L1 partition (ticks and snapshots) and manifest present remotely with identical size: only `=` lines, `rc=0` (2026-10-18: 247 L1 `=`, 103 manifests `=`) | `+` or `*` = SEV2 (SEV1 if its L0 is already deleted); `!`/rc≠0 = UNKNOWN then SEV2 (`auth_expired`) |
 | H10 | M0 M1 | LS token age | P-HEALTH `ls_token_age_h`, `ls_token_owner_bad` | M1 (08:21–09:20): age <1 (reissued ~08:20); later on business days <23. Before 08:20 and on closed days informational (2026-10-18: 57 h over the weekend) | no reissue by M1 or ≥23 h in session = SEV2 (LS drops the socket at subscribe; 2026-10-06 crash loop). `ls_token_owner_bad>0` = SEV2 (only possible if the container stops running as uid 0) |
 | H11 | 5-min in session | Live L0 freshness | P-HEALTH `l0 <stream> newest_age_s` | `ls/krx/regular` ≤180 s during 09:05–15:20 and 16:05–20:00 (exempt 15:20–16:05: closing auction and post-close quiet, max gap ~570 s); `kis/krx/krx_after` ≤120 s 16:05–20:00; `kis/nxt/nxt_after` ≤120 s 15:45–20:00; `kis/nxt/nxt_pre` ≤120 s 08:02–08:50. Observed max inter-arrival 2026-10-15/16: regular 17 s (session), 33 s (16–20h); KIS after ≤3.4 s | stale in window = SEV1 unless a market-wide halt (section 11) |
-| H12 | M0 M4 W | Shared broker dir (contract v1) | P-BROKER | `marker=present`; `unexpected=` only `token_ls_<sha>.json.stale-20261006` (awaits user deletion); `canonical_sha` krx = kca = kse; `contract_errors_24h` 0/0 | marker missing = SEV1; SHA mismatch = SEV2; contract errors = SEV2; new unexpected file = SEV3 |
+| H12 | M0 M4 W | Shared broker dir (contract v1) | P-BROKER | `marker=present`; `unexpected=` only `token_ls_<sha>.json.stale-20261006` and the krx leftover `token_db_<sha>.json{,.lock}` written before krx's DB token path joined the contract vendor `dbsec` on 2026-10-23 (both await user deletion; a new `token_db_*` mtime after that deploy = SEV3); `canonical_sha` krx = kca = kse; `contract_errors_24h` 0/0 | marker missing = SEV1; SHA mismatch = SEV2; contract errors = SEV2; new unexpected file = SEV3 |
 | H13 | M4 | Stop grace | P-BROKER `stop_timeout` | 95 | lower = SEV3 |
 | H14 | M0 (Tue–Sat) M4 | Deferred recreate verified | `journalctl --user -u krx-deferred-recreate --since "26 hours ago" --no-pager \| grep -E 'deferred_verify\|Recreate\|Failed'`; `systemctl --user show krx-deferred-recreate.service -p Result` | `Result=success`; if a recreate happened: `deferred_verify status=ok check=stable` (its `sha` is the image pending at 22:00; a later CI deploy may supersede it, H1 judges the final `rev`) | `Result≠success` or `running_revision_mismatch` = SEV2 |
 | H15 | M0 W | Image GC | `journalctl --user -u vps-image-gc --since "26 hours ago" --no-pager \| grep stage=image_gc` | `status=OK` (2026-10-16/17: removed 1/6, kept 13, protected 4) | missing/FAIL = SEV3 (disk creep) |
@@ -643,7 +643,7 @@ One stream-child spec row (`role=crosscheck`) gated by `KRX_ALPHA_DB_CROSSCHECK_
 |---|---|---|---|---|
 | DB1 | M0 | Stays dormant | P-BROKER `db_crosscheck_env`; `docker logs --since 14h krx-collector 2>&1 \| grep -c db_crosscheck`; `ls -d l0/db manifest/*.db.json 2>/dev/null` | `0`, `0`, nothing listed; any DB activity = SEV2 (config drift) |
 
-## RK. Module: KIS regular shards (lifecycle: disabled since 2026-10-22; enable only after G-MEM)
+## RK. Module: KIS regular shards (lifecycle: enabled since 2026-10-23 after G-MEM PASS; G-KIS-HEAVY/G-KIS-LOSS/G-SLOT-COEXIST observation through 2026-10-27)
 
 Co-primary dual feed for the candidate prefix (`KRX_ALPHA_REGULAR_KIS_ENABLED`, slots 1–4 WS 08:28–15:32 per `deploy/shared/kis_slot_assignments.toml`, `docker-compose.yml`). The LS regular stream stays the EOD primary for reconciliation and status; KIS outcomes are reported and never flip `eod_maintenance` status until a user G-PROMOTE decision.
 
@@ -655,17 +655,17 @@ Co-primary dual feed for the candidate prefix (`KRX_ALPHA_REGULAR_KIS_ENABLED`, 
 | RK4 | M2 M3 | Lease/slot conflicts | `docker logs --since 14h krx-collector 2>&1 \| grep -E "key_lease_busy\|slot_busy_regular_kis"` | no `key_lease_busy` on slots 1–4; `slot_busy_regular_kis` DEFERRED only while a regular shard overruns 15:32, and the aftermarket shard starts on the next cycle |
 | RK5 | M3 W | Content and lifecycle | P-L0C with D; P-DQ / P-L1C on expired `kis/krx/regular/*`; H8 verified remote L1 | planned/acked symbols have data, Q9/Q10 invariants hold, no confirmed loss interval inside 09:00–09:05; expired partitions normalized and offloaded before L0 deletion. Baseline not yet measured; collect five comparable enabled days, then use per-symbol medians (section 9) |
 
-Rollout: leave `KRX_ALPHA_REGULAR_KIS_ENABLED=false` until G-MEM passes. Enable only outside the freeze; then H1 and the CI deploy job. Disabling does not require a gate. RK rows are NOT APPLICABLE while disabled; new KIS regular activity then indicates config drift.
+Rollout: enabled with the 2-tier universe (`KRX_ALPHA_UNIVERSE_CORE_ENABLED=true`; candidates prefix = core by trade value, so shard 0 holds the 20 largest names). `regular_kis_plan status=TRUNCATED kept=80` is expected (4 slots x 20 symbols). Disabling does not require a gate. G-PROMOTE (using KIS gap spans for LS holes) stays a user decision after three clean days.
 
-## HB. Module: history backfill nightly (lifecycle: disabled; enable only after Part 1 gates pass)
+## HB. Module: history backfill nightly (lifecycle: tick tape enabled 2026-10-22 after G-TAPE-RUN PASS; minute bars built on KIS `FHKST03010230`, disabled until G-MINUTE)
 
-Nightly window 23:30–05:30 KST. `TICK_TAPE` first (Kiwoom `ka10079` vendor window expires daily), then `MINUTE_BARS` (Toss `MARKET_DATA_CHART`); one child at a time, one attempt per window per job, `--deadline` = window end (daemon termination after an additional 120 s grace). Enabled by `KRX_ALPHA_TICK_TAPE_ENABLED=true` (`docker-compose.yml`); minute bars join the same slot when Part 4 lands.
+Nightly window 23:30–05:30 KST. `TICK_TAPE` first (Kiwoom `ka10079` vendor window expires daily), then `MINUTE_BARS` (KIS slot 5 REST, KRX-only; Toss minute candles are an integrated KRX+NXT tape and must never be used); one child at a time, one attempt per window per job, `--deadline` = window end (daemon termination after an additional 120 s grace). Enabled by `KRX_ALPHA_TICK_TAPE_ENABLED=true` (`docker-compose.yml`). The planner targets symbol-days of the live universe union the replayed 2-tier universe (`universe_replay/`) that the LS feed did not capture, oldest session first (the vendor drops one session per day). The run stages every certified day to disk as it completes and publishes `run-<id>[-n].parquet` plus ledger lines at checkpoints (each 2M rows and at the end), so a kill loses at most one checkpoint. Peak RSS for a 19-day, 4.75M-tick symbol is ~200 MiB; before 2026-10-23 a heavy name was held in memory and the run was OOM-killed with nothing committed.
 
 | ID | Modes | Check | How | PASS |
 |---|---|---|---|---|
 | HB1 | M4 | Nightly children ran | `docker logs --since 14h krx-collector 2>&1 \| grep -E 'stage=nightly_'` | `STARTED` then `OK` (or `NOOP` when nothing to do) per enabled job; `FAIL` = SEV3 |
 | HB2 | M4 | Tick-tape summary | `docker logs --since 14h krx-collector 2>&1 \| grep stage=tick_tape_backfill` | last-night summary `symbol_days`, `edge_partial=0`, `failed=0` |
-| HB3 | M4 | Ledger growth | `manifest/tick_tape/kiwoom_ledger.jsonl` | new `complete` lines for the night's symbol-days; no duplicate Settled pairs re-planned |
+| HB3 | M4 | Ledger growth | `manifest/tick_tape/kiwoom_ledger.jsonl` | new `complete` lines for the night's symbol-days; no duplicate settled pairs re-planned; every `complete` line's `run_id` names an existing `l1/history/tick_tape/kiwoom/dt=<day>/run-<run_id>.parquet`; no `OOM-kill` of the nightly child in `journalctl -k` (a `python` kill with the 3 GiB cgroup of `krx-collector` = SEV2) |
 | HB4 | W | Drive presence | P-STORE `l1/history/tick_tape` | new `dt=<day>` partitions present remotely (`=` only) |
 
-Rollout: keep `KRX_ALPHA_TICK_TAPE_ENABLED=false` until Part 1 gates pass. Enable only outside the freeze; then H1 and the CI deploy job. HB rows are NOT APPLICABLE while disabled.
+Ad-hoc runs on the host use a detached container (`docker run -d --rm --name krx-tick-tape-manual -m 1g ...`), never a foreground ssh session, and honour the 23:30-05:30 window. Minute bars: keep `KRX_ALPHA_MINUTE_BACKFILL_ENABLED` unset until G-MINUTE (1m volume sum within +-1% of the KRX daily volume on >=95% of sampled symbol-days) passes on KIS data.
