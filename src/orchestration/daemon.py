@@ -1483,6 +1483,10 @@ class DaemonRunner:
         else:
             logger.warning("[DAEMON] stage=%s status=FAIL exit_code=%s", stage, code)
 
+    def _eod_done_for(self, day: dt.date) -> bool:
+        """True when this process attempted EOD for `day` or an earlier process archived its digest (EOD state is in-memory, a restart must not skip the night)."""
+        return self._state.eod_attempted_for == day or self._paths.eod_digest_path(day).exists()
+
     def _maybe_launch_nightly(self, now: dt.datetime) -> None:
         """Launch at most one backfill child at a time, each job at most once per window."""
         st = self._state
@@ -1504,7 +1508,7 @@ class DaemonRunner:
         view = self._gate.view(identity, now)
         if view.status is TradingDayStatus.UNKNOWN:
             return
-        if view.status is TradingDayStatus.BUSINESS and st.eod_attempted_for != identity:
+        if view.status is TradingDayStatus.BUSINESS and not self._eod_done_for(identity):
             return
         for job in _NIGHTLY_JOB_ORDER:
             if st.nightly_done.get(job) == identity:
