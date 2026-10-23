@@ -629,3 +629,27 @@ def test_comparison_persists_kis_audit_and_limits_open_latency(monkeypatch, tmp_
     comparison = next(r.message for r in caplog.records if "regular_kis_compare" in r.message)
     assert "kis_open_max_lag_s=4.0" in comparison
     assert "ls_open_max_lag_s=4.0" in comparison
+
+
+def test_kis_audit_uses_its_own_time_budget(monkeypatch, tmp_path) -> None:
+    from src.core.config import AuditSettings, CollectorSettings, RegularKisSettings, resolve_collector_runtime
+
+    rk = RegularKisSettings(enabled=True, credential_slots=("1",), pair_capacity_per_connection=2)
+    runtime = resolve_collector_runtime(
+        collector=CollectorSettings(data_root=tmp_path / "data"),
+        regular_kis=rk,
+        audit=AuditSettings(time_budget_s=1800.0, kis_time_budget_s=123.0),
+    )
+    runner = daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda s: None)
+    day = TradingDayView(date=DAY, status=TradingDayStatus.BUSINESS, trading_day=None)
+    seen: list[float] = []
+
+    def _capture(*args, **kwargs):
+        seen.append(kwargs["settings"].time_budget_s)
+        return _ok_audit(DAY)
+
+    monkeypatch.setattr(daemon_mod, "derive_session_audit", _capture)
+    monkeypatch.setattr(daemon_mod, "write_session_audit", lambda *a, **k: None)
+    runner._derive_kis_regular_audit(DAY, day, _anchors(DAY), ls_audit=_ok_audit(DAY))
+    assert seen == [123.0]
+    assert runtime.audit.time_budget_s == 1800.0
