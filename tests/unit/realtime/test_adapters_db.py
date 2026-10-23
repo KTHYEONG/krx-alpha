@@ -495,3 +495,14 @@ def test_db_aclose_is_idempotent_and_suppresses_errors(tmp_path) -> None:
     asyncio.run(adapter.aclose())
     asyncio.run(adapter.aclose())
     assert ws.closed == 1
+
+
+def test_db_token_store_uses_the_host_contract_vendor_name(tmp_path) -> None:
+    import hashlib
+
+    from deploy.shared.host_broker_contract import VENDOR_IDS
+
+    path = db_token_path(tmp_path, "k")
+    digest = hashlib.sha256(b"k").hexdigest()[:12]
+    assert path == tmp_path / f"token_dbsec_{digest}.json"
+    assert path.name.split("_")[1] in VENDOR_IDS

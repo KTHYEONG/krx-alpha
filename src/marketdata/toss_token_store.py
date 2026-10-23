@@ -64,8 +64,8 @@ def ls_token_path(cache_dir: pathlib.Path, app_key: str) -> pathlib.Path:
 
 
 def db_token_path(cache_dir: pathlib.Path, app_key: str) -> pathlib.Path:
-    """Return the shared DB token store path for one client credential."""
-    return token_store_path(cache_dir, "db", app_key)
+    """Return the shared DB금융투자 token store path (host-contract vendor ``dbsec``, the file k-stock-engine also issues into)."""
+    return token_store_path(cache_dir, "dbsec", app_key)
 
 
 def _lock_path_for(path: pathlib.Path) -> pathlib.Path:
