@@ -163,6 +163,18 @@ class DataPaths:
         base = self.root / "gapfill" / vendor / "regular"
         return base / f"{day.isoformat()}.parquet", base / f"{day.isoformat()}.report.json"
 
+    def repaired_ticks_path(self, day: dt.date, vendor: str) -> pathlib.Path:
+        """Return `<archive_root>/derived/ticks_repaired/<vendor>/regular/dt=<day>.parquet`; pure path algebra, no I/O."""
+        if not vendor:
+            raise ValueError(f"vendor must be a non-empty journal vendor id: {vendor!r}")
+        return self.archive_root / "derived" / "ticks_repaired" / vendor / "regular" / f"dt={day.isoformat()}.parquet"
+
+    def repair_summary_path(self, day: dt.date, vendor: str) -> pathlib.Path:
+        """Return `<manifest_dir>/repair/<day>.<vendor>.summary.json`; pure path algebra, no I/O."""
+        if not vendor:
+            raise ValueError(f"vendor must be a non-empty journal vendor id: {vendor!r}")
+        return self.manifest_dir / "repair" / f"{day.isoformat()}.{vendor}.summary.json"
+
     def db_crosscheck_manifest_path(self, day: dt.date) -> pathlib.Path:
         return self.manifest_dir / f"{day.isoformat()}.db.json"
 

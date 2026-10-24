@@ -50,9 +50,7 @@ class L0PartitionRoute:
     stream: str
 
 
-def l0_partition_key(
-    vendor: str, venue: str, session: str, stream: str, day: dt.date
-) -> L0PartitionKey | None:
+def l0_partition_key(vendor: str, venue: str, session: str, stream: str, day: dt.date) -> L0PartitionKey | None:
     """Build a key from untyped route strings, failing closed.
 
     Returns:
@@ -168,12 +166,15 @@ def l0_partition_for_l1(repo_path: str) -> str | None:
 
     Returns:
         "l0/<parent>/dt=YYYY-MM-DD" for journal-backed L1 objects; None for snapshot
-        datasets ("l1/snapshot/..."), non-"l1/" paths, or names not matching "dt=YYYY-MM-DD.parquet".
+        datasets ("l1/snapshot/..."), derived tables ("l1/derived/..."), non-"l1/" paths,
+        or names not matching "dt=YYYY-MM-DD.parquet".
     """
     if not repo_path.startswith(L1_REPO_PREFIX):
         return None
     rest = repo_path[len(L1_REPO_PREFIX) :]
     if rest == "snapshot" or rest.startswith("snapshot/"):
+        return None
+    if rest == "derived" or rest.startswith("derived/"):
         return None
     if "/" not in rest:
         return None

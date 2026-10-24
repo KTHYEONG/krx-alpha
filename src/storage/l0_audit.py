@@ -159,6 +159,7 @@ class LedgerTotals:
     net_missing_positive: int
     volume_deficit: int
     loss_ratio: float
+    trades_received: int | None = None
 
 
 @dataclass(frozen=True)
@@ -565,6 +566,7 @@ class _Derivation:
         self._seen: dict[str, _SeenSequences] = {}
         self._file_passes = 0
         self._sample_bytes_peak = 0
+        self._trades_received = 0
 
     def ping(self) -> None:
         if self._progress is not None:
@@ -712,6 +714,8 @@ class _Derivation:
         if stream == _TICK_STREAM and self._vendor in _LEDGER_VENDORS:
             if body is None or self._vendor != "ls":
                 body = _tick_body(self._vendor, record.raw)
+            if _decode_received_tick(body) is not None:
+                self._trades_received += 1
             self.accept_tick(record, body)
 
     def add_sample(self, acc: _StreamAccumulator, minute: str, latency: float) -> None:
@@ -991,6 +995,7 @@ class _Derivation:
             net_missing_positive=sum(max(0, entry.net_missing) for entry in ok_ledgers),
             volume_deficit=sum(entry.volume_deficit for entry in ok_ledgers),
             loss_ratio=(confirmed_total / trades_total) if trades_total else 0.0,
+            trades_received=self._trades_received,
         )
         return tuple(ledgers), totals
 
@@ -1018,6 +1023,15 @@ class ReceivedTick(NamedTuple):
     volume: int
 
 
+def _decode_received_tick(body: dict[str, object]) -> ReceivedTick | None:
+    symbol = body.get("shcode")
+    moment = _valid_hhmmss(body.get("chetime"))
+    cum, price, volume = _tick_cum(body), _parse_int(body.get("price")), _parse_int(body.get("cvolume"))
+    if not isinstance(symbol, str) or moment is None or cum is None or price is None or volume is None:
+        return None
+    return ReceivedTick(symbol, moment.hour * 10000 + moment.minute * 100 + moment.second, cum, price, volume)
+
+
 def iter_received_ticks(
     journal_root: pathlib.Path, *, vendor: str, venue: str, session: str, day: dt.date
 ) -> Iterator[ReceivedTick]:
@@ -1032,13 +1046,9 @@ def iter_received_ticks(
                 record = _decode_envelope(line)
                 if record is None:
                     continue
-                body = _tick_body(vendor, record.raw)
-                symbol = body.get("shcode")
-                moment = _valid_hhmmss(body.get("chetime"))
-                cum, price, volume = _tick_cum(body), _parse_int(body.get("price")), _parse_int(body.get("cvolume"))
-                if not isinstance(symbol, str) or moment is None or cum is None or price is None or volume is None:
-                    continue
-                yield ReceivedTick(symbol, moment.hour * 10000 + moment.minute * 100 + moment.second, cum, price, volume)
+                tick = _decode_received_tick(_tick_body(vendor, record.raw))
+                if tick is not None:
+                    yield tick
 
 
 def _tick_cum(body: dict[str, object]) -> int | None:
@@ -1311,6 +1321,7 @@ def _audit_to_jsonable(audit: SessionAudit) -> dict[str, object]:
             "symbols_with_loss": audit.totals.symbols_with_loss,
             "symbols_without_counter": audit.totals.symbols_without_counter,
             "trades_observed": audit.totals.trades_observed,
+            "trades_received": audit.totals.trades_received,
             "confirmed_missing": audit.totals.confirmed_missing,
             "count_only_missing": audit.totals.count_only_missing,
             "net_missing_positive": audit.totals.net_missing_positive,
