@@ -360,6 +360,45 @@ def test_filled_rows_skip_late_arriving_live_counter(tmp_path) -> None:
     assert filled == [11, 13]
 
 
+def test_filled_rows_duplicating_late_live_trade_are_dropped(tmp_path) -> None:
+    from src.storage.l0_repair_merge import build_repaired_ticks, repaired_ticks_valid
+
+    paths = DataPaths(tmp_path)
+    _write_journal(
+        paths, DAY, "ls", [("000001", "090000", 10), ("000001", "090002", 14), ("000001", "090001", 12)]
+    )
+    audit_path = _write_audit(paths, DAY, "ls", observed=3, confirmed=3, symbols=(_gap_symbol(3),))
+    _write_gapfill(
+        paths,
+        DAY,
+        "ls",
+        audit_path,
+        [
+            {
+                "symbol": "000001",
+                "chetime": "090001",
+                "price": 100,
+                "volume": 1,
+                "tape_seq": i,
+                "interval_id": 0,
+                "cum_prev": 10,
+                "cum_next": 14,
+                "vendor": "kiwoom",
+                "provenance": "gapfill:kiwoom_tape",
+            }
+            for i in range(3)
+        ],
+        residual=0,
+        recovered=3,
+    )
+    summary = build_repaired_ticks(paths=paths, journal_root=paths.journal_root, day=DAY, vendor="ls")
+    assert summary.status == "OK"
+    assert (summary.filled_rows, summary.deduped_late_live) == (2, 1)
+    frame = pl.read_parquet(paths.repaired_ticks_path(DAY, "ls"))
+    assert frame.filter(pl.col("source") != "live")["cum"].to_list() == [11, 13]
+    assert repaired_ticks_valid(paths, DAY, "ls")
+
+
 def test_filled_cum_never_collides_with_live(tmp_path) -> None:
     from src.storage.l0_repair_merge import build_repaired_ticks
 

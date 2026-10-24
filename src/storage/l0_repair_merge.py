@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import bisect
+import collections
 import contextlib
 import datetime as dt
 import hashlib
@@ -59,6 +61,7 @@ class RepairedTicksSummary:
     gapfill_report_sha256: str | None = None
     count_note: str | None = None
     audit_trades_received: int | None = None
+    deduped_late_live: int = 0
 
 
 @dataclass(frozen=True)
@@ -280,6 +283,8 @@ def build_repaired_ticks(
         db.execute("PRAGMA cache_size = -2048")
         db.execute("PRAGMA temp_store = FILE")
         db.execute("CREATE TABLE counters (symbol TEXT, cum INTEGER, PRIMARY KEY (symbol, cum)) WITHOUT ROWID")
+        db.execute("CREATE TABLE late (symbol TEXT, cum INTEGER, chetime INTEGER, price INTEGER, volume INTEGER)")
+        db.execute("CREATE INDEX late_symbol_cum ON late (symbol, cum)")
         return _build_repaired_ticks(
             paths=paths, journal_root=journal_root, day=day, vendor=vendor, batch_rows=batch_rows, db=db,
         )
@@ -344,13 +349,32 @@ def _build_repaired_ticks(
         columns["interval_id"].append(interval_id)
         columns["recv_wall_ns"].append(recv_ns)
 
+    gap_ranges: dict[str, list[tuple[int, int]]] = {}
+    for symbol, lo, hi in db.execute("SELECT DISTINCT symbol, cum_prev, cum_next FROM fills "
+        "WHERE cum_prev IS NOT NULL AND cum_next IS NOT NULL ORDER BY symbol, cum_prev"):
+        gap_ranges.setdefault(symbol, []).append((lo, hi))
+    gap_starts = {symbol: [lo for lo, _ in spans] for symbol, spans in gap_ranges.items()}
+
+    def inside_gap(symbol: str, cum: int) -> bool:
+        spans = gap_ranges.get(symbol)
+        if spans is None:
+            return False
+        index = bisect.bisect_left(gap_starts[symbol], cum) - 1
+        return index >= 0 and spans[index][0] < cum < spans[index][1]
+
     writer: pq.ParquetWriter | None = None
     outcome: RepairedTicksSummary | None = None
+    deduped = 0
     try:
         try:
             writer = pq.ParquetWriter(tmp, _OUTPUT_SCHEMA, compression="zstd")
             for tick in _iter_live_ticks(pathlib.Path(journal_root), vendor, day):
-                db.execute("INSERT OR IGNORE INTO counters VALUES (?, ?)", (tick.symbol, tick.cum))
+                inserted_live = db.execute("INSERT OR IGNORE INTO counters VALUES (?, ?)", (tick.symbol, tick.cum))
+                if inserted_live.rowcount and inside_gap(tick.symbol, tick.cum):
+                    db.execute(
+                        "INSERT INTO late VALUES (?, ?, ?, ?, ?)",
+                        (tick.symbol, tick.cum, int(tick.chetime), tick.price, tick.volume),
+                    )
                 emit(tick.symbol, tick.chetime, tick.price, tick.volume, tick.cum, "live", None, tick.recv_ns)
                 live_rows += 1
                 if len(columns["symbol"]) >= batch_rows:
@@ -360,6 +384,7 @@ def _build_repaired_ticks(
             else:
                 filled_rows = 0
                 next_slot: dict[tuple[str, int], int] = {}
+                late_pool: dict[tuple[str, int], collections.Counter[tuple[int, int, int]]] = {}
                 for row in filled.iter_rows():
                     try:
                         interval_id = int(row["interval_id"])
@@ -373,6 +398,20 @@ def _build_repaired_ticks(
                     except (TypeError, ValueError, KeyError) as exc:
                         raise ValueError(f"gap-fill rows unusable for {day.isoformat()} {vendor}") from exc
                     key = (symbol, interval_id)
+                    pool = late_pool.get(key)
+                    if pool is None:
+                        pool = collections.Counter(
+                            db.execute(
+                                "SELECT chetime, price, volume FROM late WHERE symbol = ? AND cum > ? AND cum < ?",
+                                (symbol, cum_prev, cum_next),
+                            ).fetchall()
+                        )
+                        late_pool[key] = pool
+                    twin = (int(chetime), price, volume)
+                    if pool[twin] > 0:
+                        pool[twin] -= 1
+                        deduped += 1
+                        continue
                     slot = next_slot.get(key, cum_prev + 1)
                     while slot < cum_next:
                         inserted = db.execute("INSERT OR IGNORE INTO counters VALUES (?, ?)", (symbol, slot))
@@ -423,6 +462,7 @@ def _build_repaired_ticks(
         "gapfill_report_sha256": report_sha,
         "status": "OK",
         "count_note": count_note,
+        "deduped_late_live": deduped,
         "generated_at": time.time_ns(),
     }
     summary_tmp = summary_path.parent / f".{summary_path.name}.{os.getpid()}.tmp"
@@ -435,11 +475,12 @@ def _build_repaired_ticks(
             target.unlink(missing_ok=True)
         raise
     logger.info(
-        "[DATA] stage=repair_merge day=%s vendor=%s live=%d filled=%d residual=%d status=OK",
+        "[DATA] stage=repair_merge day=%s vendor=%s live=%d filled=%d deduped=%d residual=%d status=OK",
         day.isoformat(),
         vendor,
         live_rows,
         filled_rows,
+        deduped,
         residual,
     )
     return RepairedTicksSummary(
@@ -454,6 +495,7 @@ def _build_repaired_ticks(
         report_sha,
         count_note,
         received,
+        deduped,
     )
 
 
