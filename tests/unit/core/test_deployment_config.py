@@ -383,6 +383,7 @@ def _accepted_typed_env_names() -> set[str]:
         config_module.RegularKisSettings,
         config_module.UniverseTierSettings,
         config_module.TickTapeBackfillSettings,
+        config_module.RepairSettings,
         config_module.MinuteBackfillSettings,
         config_module.SnapshotSettings,
         config_module.ExecutionSettings,
