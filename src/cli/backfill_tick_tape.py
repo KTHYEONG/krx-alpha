@@ -17,12 +17,14 @@ import requests
 from src.core.config import (
     CollectorSettings,
     KiwoomCredentials,
+    RepairSettings,
     TickTapeBackfillSettings,
     load_credentials,
 )
 from src.core.errors import KrxAlphaError, MissingCredentialsError
 from src.core.paths import DataPaths
 from src.marketdata.tick_tape_backfill import (
+    pending_repair_symbol_days,
     plan_tick_tape_targets,
     read_ledger_done,
     run_tick_tape_backfill,
@@ -121,7 +123,18 @@ def run(args: argparse.Namespace) -> int:
     try:
         sessions = resolve_backfill_sessions(paths, settings.vendor_window_sessions, now.date())
         ledger_done = read_ledger_done(paths.tick_tape_ledger)
-        targets = plan_tick_tape_targets(sessions=sessions, paths=paths, ledger_done=ledger_done)
+        try:
+            repair_cfg = RepairSettings()
+            horizon = int(CollectorSettings().journal_retain_days) + int(repair_cfg.hold_max_extra_days) + 1
+            repair_days = pending_repair_symbol_days(
+                paths, sessions[-horizon:], settings=repair_cfg, tape_done=ledger_done
+            )
+        except Exception as exc:  # noqa: BLE001 - order degrades, never aborts
+            logger.warning("[DATA] stage=tick_tape_plan status=DEGRADED reason=repair_order error=%s", type(exc).__name__)
+            repair_days = frozenset()
+        targets = plan_tick_tape_targets(
+            sessions=sessions, paths=paths, ledger_done=ledger_done, repair_symbol_days=repair_days
+        )
     except (OSError, ValueError) as exc:
         logger.error("[DATA] stage=tick_tape_backfill status=FAIL reason=calendar_or_ledger error=%s", type(exc).__name__)
         return 4

@@ -10,14 +10,15 @@ import os
 import pathlib
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Any
 
 import polars as pl
 
 from src.brokers.kis.rate import HostPacedRateLimiter, host_state_path
-from src.core.config import KisTokenSettings, KiwoomCredentials, TickTapeBackfillSettings
+from src.core.config import KisTokenSettings, KiwoomCredentials, RepairSettings, TickTapeBackfillSettings
 from src.core.paths import DataPaths
 from src.marketdata.kiwoom_ticks import (
     KiwoomAuthRejected,
@@ -166,8 +167,9 @@ def plan_tick_tape_targets(
     sessions: Sequence[dt.date],
     paths: DataPaths,
     ledger_done: frozenset[tuple[str, dt.date]],
+    repair_symbol_days: AbstractSet[tuple[str, dt.date]] = frozenset(),
 ) -> tuple[TickTapeTarget, ...]:
-    """Return per-symbol targets for symbol-days inside the vendor window that the live LS feed did not fully capture and the ledger has not settled."""
+    """Per-symbol targets; symbols with a pending repair symbol-day are ordered first, oldest repair day first."""
     ordered = sorted(set(sessions))
     if not ordered:
         return ()
@@ -200,9 +202,42 @@ def plan_tick_tape_targets(
         ascending = tuple(sorted(days))
         hint = _bars_value_sum(paths.bars_daily_dir, symbol, ascending[0], last_session)
         targets.append(TickTapeTarget(symbol=symbol, days=ascending, cost_hint=hint))
-    # The vendor drops the oldest session every day, so expiry outranks cost; cost then maximizes days per page.
-    targets.sort(key=lambda item: (item.days[0], item.cost_hint, item.symbol))
+    session_set = set(ordered)
+    repair_earliest: dict[str, dt.date] = {}
+    for repair_symbol, repair_day in repair_symbol_days:
+        if repair_day not in session_set:
+            continue
+        prev = repair_earliest.get(repair_symbol)
+        if prev is None or repair_day < prev:
+            repair_earliest[repair_symbol] = repair_day
+    targets.sort(
+        key=lambda item: (
+            0 if item.symbol in repair_earliest else 1,
+            repair_earliest.get(item.symbol, item.days[0]),
+            item.cost_hint,
+            item.symbol,
+        )
+    )
     return tuple(targets)
+
+
+def pending_repair_symbol_days(
+    paths: DataPaths,
+    days: Iterable[dt.date],
+    *,
+    settings: RepairSettings,
+    tape_done: AbstractSet[tuple[str, dt.date]],
+) -> frozenset[tuple[str, dt.date]]:
+    """(symbol, day) pairs whose LS audit confirmed missing trades and whose tape is not yet in the ledger."""
+    out: set[tuple[str, dt.date]] = set()
+    if "ls" not in settings.repair_vendors:
+        return frozenset()
+    for day in days:
+        gaps = _read_audit_gap_symbols(paths.session_audit_path(day, "ls"))
+        for symbol in gaps:
+            if (symbol, day) not in tape_done:
+                out.add((symbol, day))
+    return frozenset(out)
 
 
 def read_ledger_done(path: pathlib.Path) -> frozenset[tuple[str, dt.date]]:

@@ -1043,10 +1043,11 @@ def _stop_sync_child(
 
 class NightlyJob(StrEnum):
     TICK_TAPE = "tick_tape"
+    REPAIR = "repair"
     MINUTE_BARS = "minute_bars"
 
 
-_NIGHTLY_JOB_ORDER: tuple[NightlyJob, ...] = (NightlyJob.TICK_TAPE, NightlyJob.MINUTE_BARS)
+_NIGHTLY_JOB_ORDER: tuple[NightlyJob, ...] = (NightlyJob.TICK_TAPE, NightlyJob.REPAIR, NightlyJob.MINUTE_BARS)
 _NIGHTLY_BLOCKED_STATES: tuple[SessionState, ...] = (
     SessionState.STREAMER_ACTIVE,
     SessionState.FULL_ACTIVE,
@@ -1079,7 +1080,15 @@ def _nightly_window_end(identity: dt.date, *, start: dt.time, end: dt.time) -> d
 
 def _nightly_job_cmd(job: NightlyJob, *, deadline: dt.datetime) -> list[str]:
     """Argv for the one-shot backfill child (backfill-tick-tape / backfill-minute-bars) with --deadline."""
-    module = "backfill-tick-tape" if job is NightlyJob.TICK_TAPE else "backfill-minute-bars"
+    modules = {
+        NightlyJob.TICK_TAPE: "backfill-tick-tape",
+        NightlyJob.REPAIR: "repair-ticks",
+        NightlyJob.MINUTE_BARS: "backfill-minute-bars",
+    }
+    try:
+        module = modules[job]
+    except KeyError:
+        raise ValueError(f"unknown nightly job: {job!r}") from None
     return [
         sys.executable,
         "-m",
@@ -1311,6 +1320,7 @@ class DaemonRunner:
         program_sync_settings: TossProgramTradesSettings | None = None,
         tick_tape_settings: TickTapeBackfillSettings | None = None,
         minute_backfill_settings: Any | None = None,
+        repair_settings: RepairSettings | None = None,
     ) -> None:
         self._runtime = runtime
         self._shutdown = shutdown
@@ -1342,6 +1352,11 @@ class DaemonRunner:
         )
         self._tick_tape_cfg = tick_tape_settings if tick_tape_settings is not None else TickTapeBackfillSettings()
         self._minute_cfg = _minute_backfill_settings(minute_backfill_settings)
+        if repair_settings is not None:
+            self._repair_cfg = repair_settings
+        else:
+            runtime_repair = getattr(runtime, "repair", None)
+            self._repair_cfg = runtime_repair if runtime_repair is not None else RepairSettings()
         self._sched = replace(
             runtime.collector.schedule,
             after_market_enabled=runtime.collector.after_market_enabled,
@@ -1501,6 +1516,8 @@ class DaemonRunner:
         """Per-job enable gate; minute bars stay inert until the Part 4 settings land."""
         if job is NightlyJob.TICK_TAPE:
             return bool(self._tick_tape_cfg.enabled)
+        if job is NightlyJob.REPAIR:
+            return bool(self._repair_cfg.job_enabled)
         return self._minute_cfg is not None and bool(self._minute_cfg.enabled)
 
     def _nightly_session_live(self) -> bool:
