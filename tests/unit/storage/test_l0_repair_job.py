@@ -53,7 +53,7 @@ def audit(paths: DataPaths, day: dt.date = DAY, vendor: str = "ls", *, missing: 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
         "session_date": day.isoformat(), "vendor": vendor, "venue": "krx", "session": "regular", "status": status,
-        "totals": {"confirmed_missing": missing},
+        "totals": {"confirmed_missing": missing, "trades_observed": 2, "trades_received": 2},
         "symbols": [{"symbol": "000001", "confirmed_missing": missing, "intervals": [{
             "missing_trades": missing, "chetime_prev": "090000", "chetime_next": "090002",
             "cum_prev": 1, "cum_next": missing + 2,
@@ -92,6 +92,8 @@ def test_unaudited_day_rederived_and_advanced_in_same_run(tmp_path, has_tape) ->
     before = source.read_bytes()
     summary = run(paths)
     assert summary.status == "OK"
+    assert summary.failed == 0
+    assert summary.merged == int(has_tape)
     assert summary.audited == 1
     assert summary.gapfilled == int(has_tape)
     assert summary.waiting_tape == int(not has_tape)

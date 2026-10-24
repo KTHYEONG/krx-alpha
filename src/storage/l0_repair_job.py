@@ -26,6 +26,7 @@ from src.storage.l0_gapfill import (
     write_gapfill,
 )
 from src.storage.l0_repair import RepairState, derive_day_repair
+from src.storage.l0_repair_merge import build_repaired_ticks, repaired_ticks_valid
 
 logger = logging.getLogger(__name__)
 _HEARTBEAT_S = 60.0
@@ -40,6 +41,7 @@ class RepairRunSummary:
     waiting_tape: int
     failed: int
     run_id: str
+    merged: int = 0
 
 
 def repair_candidate_units(
@@ -90,7 +92,9 @@ def _heartbeat(day: dt.date, vendor: str, run_id: str) -> Iterator[None]:
         while not stopped.wait(_HEARTBEAT_S):
             logger.info(
                 "[DATA] stage=repair_ticks progress=heartbeat day=%s vendor=%s run_id=%s",
-                day, vendor, run_id,
+                day,
+                vendor,
+                run_id,
             )
 
     worker = threading.Thread(target=emit, daemon=True)
@@ -103,19 +107,30 @@ def _heartbeat(day: dt.date, vendor: str, run_id: str) -> Iterator[None]:
 
 
 def _run_locked(
-    *, paths: DataPaths, journal_root: pathlib.Path, audit_settings: AuditSettings,
-    repair_settings: RepairSettings, retain_days: int, window_date: dt.date,
-    deadline: dt.datetime, now: Callable[[], dt.datetime], run_id: str,
-    only_day: dt.date | None, should_stop: Callable[[], bool],
+    *,
+    paths: DataPaths,
+    journal_root: pathlib.Path,
+    audit_settings: AuditSettings,
+    repair_settings: RepairSettings,
+    retain_days: int,
+    window_date: dt.date,
+    deadline: dt.datetime,
+    now: Callable[[], dt.datetime],
+    run_id: str,
+    only_day: dt.date | None,
+    should_stop: Callable[[], bool],
 ) -> RepairRunSummary:
     units = repair_candidate_units(
-        journal_root, repair_settings=repair_settings, window_date=window_date,
-        retain_days=retain_days, only_day=only_day,
+        journal_root,
+        repair_settings=repair_settings,
+        window_date=window_date,
+        retain_days=retain_days,
+        only_day=only_day,
     )
     if not units:
         return RepairRunSummary("SKIP", 0, 0, 0, 0, 0, run_id)
     tape_done = read_ledger_done(paths.tick_tape_ledger)
-    audited = gapfilled = waiting = failed = attempted = 0
+    audited = gapfilled = waiting = failed = attempted = merged = 0
     pending_unaudited = False
 
     def stopped() -> bool:
@@ -133,8 +148,13 @@ def _run_locked(
             with _heartbeat(day, vendor, run_id):
                 if repair.state is RepairState.UNAUDITED and not _existing_audit_ok(paths, day, vendor):
                     audit = derive_session_audit(
-                        journal_root, vendor=vendor, venue="krx", session="regular", day=day,
-                        anchors=standard_session_anchors(day), settings=audit_settings,
+                        journal_root,
+                        vendor=vendor,
+                        venue="krx",
+                        session="regular",
+                        day=day,
+                        anchors=standard_session_anchors(day),
+                        settings=audit_settings,
                         manifest_frame_counts=None,
                     )
                     write_session_audit(audit, paths.session_audit_path(day, vendor))
@@ -149,13 +169,22 @@ def _run_locked(
                     tape = load_tape_for_symbols(paths, day, symbols)
                     received = received_trades_for_gaps(audit_doc, journal_root, vendor=vendor, day=day)
                     rows, outcomes = derive_gapfill(
-                        audit_doc, [GapfillSource("kiwoom", "gapfill:kiwoom_tape", tape)], received,
+                        audit_doc,
+                        [GapfillSource("kiwoom", "gapfill:kiwoom_tape", tape)],
+                        received,
                     )
                     rows_path, report_path = paths.gapfill_paths(day, vendor)
                     write_gapfill(
-                        rows, outcomes, rows_path=rows_path, report_path=report_path,
-                        notes={"anchored_on_journal": True, "audit_sha256": hashlib.sha256(audit_bytes).hexdigest(),
-                               "generated_by": "repair-ticks", "run_id": run_id},
+                        rows,
+                        outcomes,
+                        rows_path=rows_path,
+                        report_path=report_path,
+                        notes={
+                            "anchored_on_journal": True,
+                            "audit_sha256": hashlib.sha256(audit_bytes).hexdigest(),
+                            "generated_by": "repair-ticks",
+                            "run_id": run_id,
+                        },
                     )
                     gapfilled += 1
                     repair = derive_day_repair(paths, day, vendor, settings=repair_settings, tape_done=tape_done)
@@ -163,36 +192,84 @@ def _run_locked(
                     waiting += 1
                     logger.info(
                         "[DATA] stage=repair_ticks pending_tape day=%s vendor=%s symbol_days=%d",
-                        day, vendor, repair.gap_symbol_days_pending,
+                        day,
+                        vendor,
+                        repair.gap_symbol_days_pending,
                     )
+                elif (
+                    repair.state in (RepairState.MERGE_PENDING, RepairState.REPAIRED, RepairState.CLEAN)
+                    and vendor == "ls" and vendor in repair_settings.repair_vendors
+                    and not repaired_ticks_valid(paths, day, vendor)
+                    and not stopped()
+                ):
+                    try:
+                        merge = build_repaired_ticks(paths=paths, journal_root=journal_root, day=day, vendor=vendor)
+                    except Exception as exc:  # noqa: BLE001 - isolate all per-day failures, not KeyboardInterrupt
+                        failed += 1
+                        logger.error(
+                            "[DATA] stage=repair_ticks status=FAIL day=%s vendor=%s error=%s",
+                            day,
+                            vendor,
+                            type(exc).__name__,
+                        )
+                    else:
+                        if merge.status != "OK":
+                            failed += 1
+                            logger.error("[DATA] stage=repair_ticks status=MISMATCH day=%s vendor=%s", day, vendor)
+                        else:
+                            merged += 1
+                            repair = derive_day_repair(
+                                paths, day, vendor, settings=repair_settings, tape_done=tape_done
+                            )
                 after_state = repair.state.value
         except Exception as exc:  # noqa: BLE001 - isolate all per-day failures, not KeyboardInterrupt
             failed += 1
             logger.error(
                 "[DATA] stage=repair_ticks status=FAIL day=%s vendor=%s error=%s",
-                day, vendor, type(exc).__name__,
+                day,
+                vendor,
+                type(exc).__name__,
             )
         finally:
             logger.info(
                 "[DATA] stage=repair_ticks day=%s vendor=%s state=%s->%s run_id=%s",
-                day, vendor, before_state, after_state, run_id,
+                day,
+                vendor,
+                before_state,
+                after_state,
+                run_id,
             )
     for day, vendor in units:
         try:
-            pending_unaudited |= derive_day_repair(
-                paths, day, vendor, settings=repair_settings, tape_done=tape_done,
-            ).state is RepairState.UNAUDITED
+            pending_unaudited |= (
+                derive_day_repair(
+                    paths,
+                    day,
+                    vendor,
+                    settings=repair_settings,
+                    tape_done=tape_done,
+                ).state
+                is RepairState.UNAUDITED
+            )
         except Exception:  # noqa: BLE001 - unreadable state cannot certify a clean summary
             pending_unaudited = True
     status = "FAIL" if attempted and failed == attempted else "DEGRADED" if failed or pending_unaudited else "OK"
-    return RepairRunSummary(status, len({day for day, _ in units}), audited, gapfilled, waiting, failed, run_id)
+    return RepairRunSummary(status, len({day for day, _ in units}), audited, gapfilled, waiting, failed, run_id, merged)
 
 
 def run_repair(
-    *, paths: DataPaths, journal_root: pathlib.Path, audit_settings: AuditSettings,
-    repair_settings: RepairSettings, retain_days: int, window_date: dt.date,
-    deadline: dt.datetime, now: Callable[[], dt.datetime], run_id: str,
-    only_day: dt.date | None = None, should_stop: Callable[[], bool] = lambda: False,
+    *,
+    paths: DataPaths,
+    journal_root: pathlib.Path,
+    audit_settings: AuditSettings,
+    repair_settings: RepairSettings,
+    retain_days: int,
+    window_date: dt.date,
+    deadline: dt.datetime,
+    now: Callable[[], dt.datetime],
+    run_id: str,
+    only_day: dt.date | None = None,
+    should_stop: Callable[[], bool] = lambda: False,
 ) -> RepairRunSummary:
     """Audit and gap-fill retained gate-vendor L0, oldest first, under a non-blocking lock."""
     try:
@@ -206,15 +283,30 @@ def run_repair(
                 summary = RepairRunSummary("SKIP", 0, 0, 0, 0, 0, run_id)
             else:
                 summary = _run_locked(
-                    paths=paths, journal_root=journal_root, audit_settings=audit_settings,
-                    repair_settings=repair_settings, retain_days=retain_days, window_date=window_date,
-                    deadline=deadline, now=now, run_id=run_id, only_day=only_day, should_stop=should_stop,
+                    paths=paths,
+                    journal_root=journal_root,
+                    audit_settings=audit_settings,
+                    repair_settings=repair_settings,
+                    retain_days=retain_days,
+                    window_date=window_date,
+                    deadline=deadline,
+                    now=now,
+                    run_id=run_id,
+                    only_day=only_day,
+                    should_stop=should_stop,
                 )
     except Exception as exc:  # noqa: BLE001 - setup failures fail closed; KeyboardInterrupt propagates
         logger.error("[DATA] stage=repair_ticks status=FAIL reason=setup error=%s", type(exc).__name__)
         summary = RepairRunSummary("FAIL", 0, 0, 0, 0, 1, run_id)
     logger.info(
-        "[DATA] stage=repair_ticks status=%s run_id=%s days=%d audited=%d gapfilled=%d waiting_tape=%d failed=%d",
-        summary.status, run_id, summary.days, summary.audited, summary.gapfilled, summary.waiting_tape, summary.failed,
+        "[DATA] stage=repair_ticks status=%s run_id=%s days=%d audited=%d gapfilled=%d waiting_tape=%d failed=%d merged=%d",
+        summary.status,
+        run_id,
+        summary.days,
+        summary.audited,
+        summary.gapfilled,
+        summary.waiting_tape,
+        summary.failed,
+        summary.merged,
     )
     return summary

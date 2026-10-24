@@ -95,6 +95,42 @@ def _ok_quote(recv_ns=None):
     return _quote("005930", "090100", recv_ns or _ns(9, 1, 1))
 
 
+def test_received_count_preserves_counter_span_and_loss_ratio(tmp_path):
+    from src.storage.l0_audit import _audit_to_jsonable, iter_received_ticks
+
+    _write(tmp_path, TICK, [
+        _tick("005930", 1, 0, 10, 10, "090000", _ns(9, 0)),
+        _tick("005930", 3, 0, 30, 10, "090002", _ns(9, 0, 2)),
+    ])
+    audit = _derive(tmp_path)
+    assert audit.totals.trades_observed == 3
+    assert audit.totals.confirmed_missing == 1
+    assert audit.totals.loss_ratio == pytest.approx(1 / 3)
+    assert audit.totals.trades_received == 2
+    assert audit.totals.trades_received == len(list(
+        iter_received_ticks(tmp_path, vendor="ls", venue="krx", session="regular", day=DAY)
+    ))
+    assert _audit_to_jsonable(audit)["totals"]["trades_received"] == 2
+
+
+def test_received_count_matches_decoder_before_dedup_and_phase_filtering(tmp_path):
+    from src.storage.l0_audit import iter_received_ticks
+
+    first = _tick("005930", 1, 0, 10, 10, "090000", _ns(9, 0), seq=1)
+    bad_volume = _tick("000001", 7, 0, "bad", 10, "090001", _ns(9, 0, 1))
+    bad_price = _tick("005930", 2, 0, 20, 10, "090001", _ns(9, 0, 1), price="bad")
+    _write(tmp_path, TICK, [
+        first, first, bad_volume, bad_price,
+        _tick("005930", 3, 0, 30, 10, "153000", _ns(15, 30)),
+        _tick("000002", 1, 0, 10, 10, "090000", _ns(9, 0)),
+    ])
+    audit = _derive(tmp_path)
+    ticks = list(iter_received_ticks(tmp_path, vendor="ls", venue="krx", session="regular", day=DAY))
+    assert audit.totals.trades_received == len(ticks) == 5
+    assert audit.totals.symbols_without_counter > 0
+    assert sum(symbol.duplicates for symbol in audit.symbols) == 1
+
+
 def _as_kis(record):
     body = json.loads(record["raw"])["body"]
     fields = [""] * 17
