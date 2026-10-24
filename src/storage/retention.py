@@ -63,10 +63,17 @@ class PruneStats(int):
     _failed: int
     _reused: int
     _invalidated_remote_l1: frozenset[str]
+    _held: frozenset[str]
 
     def __new__(
-        cls, deleted: int, normalized: int = 0, failed: int = 0, reused: int = 0,
-        *, invalidated_remote_l1: AbstractSet[str] = frozenset(),
+        cls,
+        deleted: int,
+        normalized: int = 0,
+        failed: int = 0,
+        reused: int = 0,
+        *,
+        invalidated_remote_l1: AbstractSet[str] = frozenset(),
+        held: AbstractSet[str] = frozenset(),
     ) -> PruneStats:
         obj = int.__new__(cls, deleted)
         obj._deleted = int(deleted)
@@ -74,6 +81,7 @@ class PruneStats(int):
         obj._failed = int(failed)
         obj._reused = int(reused)
         obj._invalidated_remote_l1 = frozenset(invalidated_remote_l1)
+        obj._held = frozenset(held)
         return obj
 
     @property
@@ -96,6 +104,11 @@ class PruneStats(int):
     def invalidated_remote_l1(self) -> frozenset[str]:
         """L1 paths whose previous verification cannot justify remote L0 deletion."""
         return self._invalidated_remote_l1
+
+    @property
+    def held(self) -> frozenset[str]:
+        """L1 repo paths whose deletion was held by the repair gate."""
+        return self._held
 
 
 def _reusable_l1_rows(part: pathlib.Path, out_path: pathlib.Path) -> int | None:
@@ -131,6 +144,7 @@ def prune_old_journals(
     progress: Callable[[], None] | None = None,
     normalize: bool = True,
     reuse_fresh_l1: bool = False,
+    hold: Callable[[pathlib.Path], str | None] | None = None,
 ) -> PruneStats:
     """Normalize eligible L0 partitions and delete only remotely verified inputs.
 
@@ -166,33 +180,43 @@ def prune_old_journals(
     failed = 0
     reused = 0
     invalidated_remote_l1: set[str] = set()
+    held: set[str] = set()
+    journal_base = pathlib.Path(str(journal_root))
     archive_base = pathlib.Path(str(archive_root)) if not isinstance(archive_root, pathlib.Path) else archive_root
-    for part in [p for p in pathlib.Path(str(journal_root)).rglob("dt=*") if p.is_dir()]:
+    for part in [p for p in journal_base.rglob("dt=*") if p.is_dir()]:
         m = _DT_RE.fullmatch(part.name)
         part_date = dt.date.fromisoformat(m.group(0)[3:]) if m else None
         if part_date is None or part_date >= cutoff:
             continue
         try:
-            out_path = archive_base / l1_relpath_for_l0_partition(
-                part.relative_to(pathlib.Path(str(journal_root)))
-            )
+            out_path = archive_base / l1_relpath_for_l0_partition(part.relative_to(journal_base))
             if not normalize:
                 rel = l1_repo_path(out_path.relative_to(archive_base))
                 if out_path.exists() and verified_remote_l1 is not None and rel in verified_remote_l1:
+                    if hold is not None:
+                        reason = hold(part.relative_to(journal_base))
+                        if reason is not None:
+                            logger.critical(
+                                "[DATA] stage=repair_hold status=OVERRIDDEN reason=low_disk part=%s",
+                                str(part.relative_to(journal_base).as_posix()),
+                            )
                     deleted += sum(1 for f in part.rglob("*") if f.is_file())
                     shutil.rmtree(part)
                 continue
             if reuse_fresh_l1:
                 fresh_rows = _reusable_l1_rows(part, out_path)
                 if fresh_rows is not None:
-                    logger.info(
-                        "[DATA] stage=prune status=REUSED part=%s rows=%d", str(part), fresh_rows
-                    )
+                    logger.info("[DATA] stage=prune status=REUSED part=%s rows=%d", str(part), fresh_rows)
                     normalized += 1
                     reused += 1
                     rel = l1_repo_path(out_path.relative_to(archive_base))
                     if verified_remote_l1 is None or rel not in verified_remote_l1:
                         continue
+                    if hold is not None:
+                        reason = hold(part.relative_to(journal_base))
+                        if reason is not None:
+                            held.add(rel)
+                            continue
                     deleted += sum(1 for f in part.rglob("*") if f.is_file())
                     shutil.rmtree(part)
                     continue
@@ -201,11 +225,15 @@ def prune_old_journals(
                 normalize_fn = normalizer if normalizer is not None else normalize_l0_partition
                 rows = normalize_fn(part, out_path)
             except L1StorageIOError as exc:
-                logger.critical("[DATA] stage=prune status=FAIL reason=storage_io part=%s error=%s", str(part), str(exc))
+                logger.critical(
+                    "[DATA] stage=prune status=FAIL reason=storage_io part=%s error=%s", str(part), str(exc)
+                )
                 failed += 1
                 continue
             except L1WorkerCrashError as exc:
-                logger.critical("[DATA] stage=prune status=FAIL reason=worker_crash part=%s error=%s", str(part), str(exc))
+                logger.critical(
+                    "[DATA] stage=prune status=FAIL reason=worker_crash part=%s error=%s", str(part), str(exc)
+                )
                 failed += 1
                 continue
             except L1NormalizationError as exc:
@@ -221,9 +249,7 @@ def prune_old_journals(
                         continue
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(part), str(dest))
-                    logger.critical(
-                        "[DATA] stage=quarantine part=%s dest=%s status=MOVED", str(part), str(dest)
-                    )
+                    logger.critical("[DATA] stage=quarantine part=%s dest=%s status=MOVED", str(part), str(dest))
                 continue
             if rows <= 0 or not out_path.exists():
                 logger.critical("[DATA] stage=prune status=FAIL reason=unverified part=%s", str(part))
@@ -235,13 +261,23 @@ def prune_old_journals(
             rel = l1_repo_path(out_path.relative_to(archive_base))
             if verified_remote_l1 is None or rel not in verified_remote_l1:
                 continue
+            if hold is not None:
+                reason = hold(part.relative_to(journal_base))
+                if reason is not None:
+                    held.add(rel)
+                    continue
             deleted += sum(1 for f in part.rglob("*") if f.is_file())
             shutil.rmtree(part)
         finally:
             if progress is not None:
                 progress()
     return PruneStats(
-        deleted, normalized, failed, reused, invalidated_remote_l1=invalidated_remote_l1,
+        deleted,
+        normalized,
+        failed,
+        reused,
+        invalidated_remote_l1=invalidated_remote_l1,
+        held=held,
     )
 
 

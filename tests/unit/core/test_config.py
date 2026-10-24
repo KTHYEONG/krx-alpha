@@ -21,9 +21,7 @@ def test_data_paths_derive_from_single_root() -> None:
     assert paths.manifest_path(dt.date(2026, 9, 10)) == pathlib.Path("var/krx/manifest/2026-09-10.json")
 
 
-def test_host_backup_status_path_default_is_independent_of_data_root(
-    tmp_path, monkeypatch
-) -> None:
+def test_host_backup_status_path_default_is_independent_of_data_root(tmp_path, monkeypatch) -> None:
     import pathlib
 
     from src.core.config import CollectorSettings
@@ -169,6 +167,7 @@ def test_universe_slot_budget_explicit_non_positive_rejected() -> None:
     with pytest.raises(ValidationError):
         CollectorSettings(universe_slot_budget=-1)
 
+
 def test_execution_settings_default_paper_and_live_requires_arming(monkeypatch) -> None:
     # Given: 실행 관련 env 전부 제거
     import pathlib
@@ -177,8 +176,13 @@ def test_execution_settings_default_paper_and_live_requires_arming(monkeypatch) 
     from src.core.errors import LiveNotArmedError, MissingCredentialsError
 
     for name in (
-        "KRX_ALPHA_EXEC_MODE", "KRX_ALPHA_EXEC_LIVE_ARMED", "KRX_ALPHA_EXEC_COMMISSION_BPS",
-        "KIS_APP_KEY", "KIS_APP_SECRET", "KIS_ACCOUNT_NO", "KIS_ACCOUNT_PRODUCT_CODE",
+        "KRX_ALPHA_EXEC_MODE",
+        "KRX_ALPHA_EXEC_LIVE_ARMED",
+        "KRX_ALPHA_EXEC_COMMISSION_BPS",
+        "KIS_APP_KEY",
+        "KIS_APP_SECRET",
+        "KIS_ACCOUNT_NO",
+        "KIS_ACCOUNT_PRODUCT_CODE",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -210,6 +214,7 @@ def test_execution_settings_default_paper_and_live_requires_arming(monkeypatch) 
     with pytest.raises(MissingCredentialsError, match="kis_account_no"):
         load_credentials(KisCredentials)
 
+
 def test_load_credentials_is_fail_closed_for_toss(monkeypatch) -> None:
     # Given: 토스 자격증명 env 부재
     import pytest
@@ -231,30 +236,28 @@ def test_load_credentials_is_fail_closed_for_toss(monkeypatch) -> None:
     assert creds.toss_app_secret == "tssk_test"
 
 
-
-
 def test_data_paths_expose_quarantine_root() -> None:
     # Given: data_root 만 지정한 설정
     import pathlib
 
     from src.core.config import CollectorSettings
 
-    settings = CollectorSettings(data_root=pathlib.Path('var/krx'))
+    settings = CollectorSettings(data_root=pathlib.Path("var/krx"))
 
     # Then: 격리 경로도 단일 루트에서 파생된다
-    assert settings.paths.quarantine_root == pathlib.Path('var/krx/quarantine')
+    assert settings.paths.quarantine_root == pathlib.Path("var/krx/quarantine")
+
 
 def test_data_paths_expose_work_root_outside_journal_and_archive_roots() -> None:
     import pathlib
 
     from src.core.config import CollectorSettings
 
-    settings = CollectorSettings(data_root=pathlib.Path('var/krx'))
+    settings = CollectorSettings(data_root=pathlib.Path("var/krx"))
 
-    assert settings.paths.work_root == pathlib.Path('var/krx/work')
+    assert settings.paths.work_root == pathlib.Path("var/krx/work")
     assert not settings.paths.work_root.is_relative_to(settings.paths.archive_root)
     assert not settings.paths.work_root.is_relative_to(settings.paths.journal_root)
-
 
 
 def test_data_paths_expose_logs_dir() -> None:
@@ -345,7 +348,8 @@ def test_aftermarket_settings_require_verified_capacity_when_enabled(monkeypatch
     import pytest
     from pydantic import ValidationError
     from src.core.config import AftermarketSettings
-    monkeypatch.delenv('KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION', raising=False)
+
+    monkeypatch.delenv("KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION", raising=False)
     assert AftermarketSettings().enabled is False
     with pytest.raises(ValidationError):
         AftermarketSettings(enabled=True)
@@ -355,11 +359,12 @@ def test_aftermarket_silence_limit_default_env_override_and_bounds(monkeypatch):
     import pytest
     from pydantic import ValidationError
     from src.core.config import AftermarketSettings
-    monkeypatch.delenv('KRX_ALPHA_AFTERMARKET_SILENCE_LIMIT_S', raising=False)
+
+    monkeypatch.delenv("KRX_ALPHA_AFTERMARKET_SILENCE_LIMIT_S", raising=False)
     assert AftermarketSettings().silence_limit_s == 10.0
-    monkeypatch.setenv('KRX_ALPHA_AFTERMARKET_SILENCE_LIMIT_S', '7.5')
+    monkeypatch.setenv("KRX_ALPHA_AFTERMARKET_SILENCE_LIMIT_S", "7.5")
     assert AftermarketSettings().silence_limit_s == 7.5
-    monkeypatch.setenv('KRX_ALPHA_AFTERMARKET_SILENCE_LIMIT_S', '0')
+    monkeypatch.setenv("KRX_ALPHA_AFTERMARKET_SILENCE_LIMIT_S", "0")
     with pytest.raises(ValidationError):
         AftermarketSettings()
 
@@ -367,14 +372,14 @@ def test_aftermarket_silence_limit_default_env_override_and_bounds(monkeypatch):
 def test_aftermarket_prearm_lead_defaults_to_sixty_seconds(monkeypatch):
     from src.core.config import AftermarketSettings
 
-    monkeypatch.delenv('KRX_ALPHA_AFTERMARKET_PREARM_LEAD_S', raising=False)
+    monkeypatch.delenv("KRX_ALPHA_AFTERMARKET_PREARM_LEAD_S", raising=False)
     assert AftermarketSettings().prearm_lead_s == 60.0
 
 
 def test_aftermarket_prearm_lead_env_override(monkeypatch):
     from src.core.config import AftermarketSettings
 
-    monkeypatch.setenv('KRX_ALPHA_AFTERMARKET_PREARM_LEAD_S', '90')
+    monkeypatch.setenv("KRX_ALPHA_AFTERMARKET_PREARM_LEAD_S", "90")
     assert AftermarketSettings().prearm_lead_s == 90.0
 
 
@@ -384,7 +389,7 @@ def test_aftermarket_prearm_lead_rejects_non_positive(monkeypatch):
 
     from src.core.config import AftermarketSettings
 
-    monkeypatch.delenv('KRX_ALPHA_AFTERMARKET_PREARM_LEAD_S', raising=False)
+    monkeypatch.delenv("KRX_ALPHA_AFTERMARKET_PREARM_LEAD_S", raising=False)
     for value in (0, -1.0):
         with pytest.raises(ValidationError):
             AftermarketSettings(prearm_lead_s=value)
@@ -398,7 +403,7 @@ def test_aftermarket_prearm_lead_must_leave_arm_instant_after_selection(monkeypa
 
     from src.core.config import AftermarketSettings
 
-    monkeypatch.delenv('KRX_ALPHA_AFTERMARKET_PREARM_LEAD_S', raising=False)
+    monkeypatch.delenv("KRX_ALPHA_AFTERMARKET_PREARM_LEAD_S", raising=False)
     assert AftermarketSettings(selection_time=dt.time(15, 31), prearm_lead_s=539.0).prearm_lead_s == 539.0
     with pytest.raises(ValidationError):
         AftermarketSettings(selection_time=dt.time(15, 31), prearm_lead_s=540.0)
@@ -540,6 +545,7 @@ def test_toss_program_trades_settings_rejects_non_positive_rate() -> None:
 
     with pytest.raises(ValidationError):
         TossProgramTradesSettings(rate_per_s=0)
+
 
 def test_toss_program_trades_settings_auto_backfill_defaults(monkeypatch) -> None:
     # Given: 환경변수 없음
@@ -991,7 +997,12 @@ def test_equal_empty_cross_venue_variables_are_rejected(monkeypatch, field) -> N
 
     _clear_kis_env(monkeypatch)
     for prefix in ("KIS_", "KIS_MOCK_"):
-        for key, value in (("APP_KEY", prefix + "key"), ("APP_SECRET", "secret"), ("ACCOUNT_NO", prefix + "account"), ("ACCOUNT_PRODUCT_CODE", "01")):
+        for key, value in (
+            ("APP_KEY", prefix + "key"),
+            ("APP_SECRET", "secret"),
+            ("ACCOUNT_NO", prefix + "account"),
+            ("ACCOUNT_PRODUCT_CODE", "01"),
+        ):
             monkeypatch.setenv(prefix + key, value)
         monkeypatch.setenv(prefix + field, "")
     for venue in (KisVenue.LIVE, KisVenue.MOCK):
@@ -1061,7 +1072,7 @@ def test_audit_settings_default_shadow_and_budgets(monkeypatch) -> None:
     _clear_audit_env(monkeypatch)
     settings = AuditSettings()
 
-    assert settings.mode is AuditMode.SHADOW
+    assert settings.mode is AuditMode.ENFORCE
     assert settings.latency_alert_threshold_s == 10.0
     assert settings.latency_streams == ("H0STCNT0", "H0STASP0")
     assert settings.loss_warn_ratio < settings.loss_fail_ratio
@@ -1167,7 +1178,7 @@ def test_runtime_carries_audit_without_changing_existing_fields(monkeypatch, tmp
     _clear_audit_env(monkeypatch)
     collector = CollectorSettings(data_root=pathlib.Path(tmp_path))
 
-    shadow = resolve_collector_runtime(collector=collector)
+    shadow = resolve_collector_runtime(collector=collector, audit=AuditSettings(mode=AuditMode.SHADOW))
 
     assert shadow.audit.mode is AuditMode.SHADOW
     assert shadow.paths.root == pathlib.Path(tmp_path)
@@ -1245,5 +1256,103 @@ def test_regular_kis_capacity_branches_are_fail_closed() -> None:
         RegularKisSettings(enabled=True, credential_slots=("1",), pair_capacity_per_connection=0)
     with pytest.raises(ValueError, match="one symbol"):
         RegularKisSettings(enabled=True, credential_slots=("1",), pair_capacity_per_connection=1)
-    constructed = RegularKisSettings.model_construct(enabled=True, credential_slots=("1",), pair_capacity_per_connection=None, streams=("H0STCNT0", "H0STASP0"))
+    constructed = RegularKisSettings.model_construct(
+        enabled=True, credential_slots=("1",), pair_capacity_per_connection=None, streams=("H0STCNT0", "H0STASP0")
+    )
     assert constructed.max_symbols == 0
+
+
+def test_repair_defaults_inert(monkeypatch) -> None:
+    import os
+
+    from src.core.config import RepairSettings
+
+    for name in [n for n in os.environ if n.startswith("KRX_ALPHA_REPAIR_")]:
+        monkeypatch.delenv(name)
+    settings = RepairSettings()
+    assert settings.hold_enabled is False
+    assert settings.job_enabled is False
+    assert settings.merge_required is False
+    assert set(settings.repair_vendors) <= set(settings.gate_vendors)
+
+
+def test_repair_vendor_subset_enforced() -> None:
+    import pytest
+
+    from src.core.config import RepairSettings
+
+    with pytest.raises(ValueError, match="subset"):
+        RepairSettings(repair_vendors=("ls", "toss"), gate_vendors=("ls",))
+
+
+def test_repair_expiry_bound() -> None:
+    from pydantic import ValidationError
+
+    from src.core.config import RepairSettings
+
+    try:
+        RepairSettings(hold_max_extra_days=11)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("expected ValidationError")
+
+
+def test_repair_vendor_scope_rejects_empty_and_upper() -> None:
+    import pytest
+
+    from src.core.config import RepairSettings
+
+    with pytest.raises(ValueError, match="must be non-empty"):
+        RepairSettings(gate_vendors=())
+    with pytest.raises(ValueError, match="lowercase"):
+        RepairSettings(gate_vendors=("LS",))
+
+
+def test_audit_default_enforce(monkeypatch) -> None:
+    import os
+
+    from src.core.config import AuditMode, AuditSettings
+
+    for name in [n for n in os.environ if n.startswith("KRX_ALPHA_AUDIT_")]:
+        monkeypatch.delenv(name)
+    assert AuditSettings().mode is AuditMode.ENFORCE
+    monkeypatch.setenv("KRX_ALPHA_AUDIT_MODE", "shadow")
+    assert AuditSettings().mode is AuditMode.SHADOW
+
+
+def test_universe_tier_rank_order_rejected() -> None:
+    import pytest
+
+    from src.core.config import UniverseTierSettings
+
+    with pytest.raises(ValueError, match="core_exit_rank"):
+        UniverseTierSettings(core_enabled=True, core_enter_rank=75, core_exit_rank=60)
+
+
+def test_watchdog_stale_limits_rejected() -> None:
+    import pytest
+
+    from src.core.config import (
+        AftermarketSettings,
+        CollectorSettings,
+        ShardWatchdogSettings,
+        SnapshotSettings,
+        resolve_collector_runtime,
+    )
+
+    collector = CollectorSettings(after_market_enabled=True)
+    aftermarket = AftermarketSettings(enabled=True, pair_capacity_per_connection=4)
+    with pytest.raises(ValueError, match="aftermarket_stale_limit_s"):
+        resolve_collector_runtime(
+            collector=collector,
+            aftermarket=aftermarket,
+            snapshot=SnapshotSettings(),
+            shard_watchdog=ShardWatchdogSettings(aftermarket_stale_limit_s=1.0),
+        )
+    with pytest.raises(ValueError, match="premarket_stale_limit_s"):
+        resolve_collector_runtime(
+            collector=CollectorSettings(),
+            snapshot=SnapshotSettings(),
+            shard_watchdog=ShardWatchdogSettings(premarket_stale_limit_s=1.0),
+        )
