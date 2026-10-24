@@ -211,8 +211,7 @@ class _FilledRows:
 
     def iter_rows(self) -> Iterator[dict[str, Any]]:
         cursor = self.db.execute(
-            "SELECT *, row_number() OVER (PARTITION BY symbol, interval_id ORDER BY tape_seq, seq) - 1 AS ordinal "
-            "FROM fills ORDER BY symbol, chetime, tape_seq, seq"
+            "SELECT * FROM fills ORDER BY symbol, chetime, tape_seq, seq"
         )
         names = [column[0] for column in cursor.description]
         for row in cursor:
@@ -360,6 +359,7 @@ def _build_repaired_ticks(
                 outcome = _mismatch(day, vendor, live_rows, filled.height, residual, observed, audit_sha256, report_sha)
             else:
                 filled_rows = 0
+                next_slot: dict[tuple[str, int], int] = {}
                 for row in filled.iter_rows():
                     try:
                         interval_id = int(row["interval_id"])
@@ -372,18 +372,19 @@ def _build_repaired_ticks(
                         chetime = str(row["chetime"])
                     except (TypeError, ValueError, KeyError) as exc:
                         raise ValueError(f"gap-fill rows unusable for {day.isoformat()} {vendor}") from exc
-                    slot = cum_prev + 1 + int(row["ordinal"])
+                    key = (symbol, interval_id)
+                    slot = next_slot.get(key, cum_prev + 1)
+                    while slot < cum_next:
+                        inserted = db.execute("INSERT OR IGNORE INTO counters VALUES (?, ?)", (symbol, slot))
+                        if inserted.rowcount:
+                            break
+                        slot += 1
                     if not cum_prev < slot < cum_next:
                         outcome = _mismatch(
                             day, vendor, live_rows, filled.height, residual, observed, audit_sha256, report_sha
                         )
                         break
-                    inserted = db.execute("INSERT OR IGNORE INTO counters VALUES (?, ?)", (symbol, slot))
-                    if inserted.rowcount == 0:
-                        outcome = _mismatch(
-                            day, vendor, live_rows, filled.height, residual, observed, audit_sha256, report_sha
-                        )
-                        break
+                    next_slot[key] = slot + 1
                     emit(symbol, chetime, price, volume, slot, provenance, interval_id, None)
                     filled_rows += 1
                     if len(columns["symbol"]) >= batch_rows:
