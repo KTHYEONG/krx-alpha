@@ -688,12 +688,40 @@ class AuditMode(StrEnum):
     ENFORCE = "enforce"
 
 
+class RepairSettings(BaseSettings):
+    """Hold, vendor scope and expiry of the L0 repair gate; inert while hold_enabled is false."""
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_REPAIR_", extra="ignore")
+
+    hold_enabled: bool = False
+    job_enabled: bool = False
+    merge_required: bool = False
+    hold_max_extra_days: int = Field(default=7, ge=0, le=10)
+    gate_vendors: tuple[str, ...] = ("ls", "kis")
+    repair_vendors: tuple[str, ...] = ("ls",)
+
+    @model_validator(mode="after")
+    def check_repair_vendor_scope(self) -> RepairSettings:
+        for name in ("gate_vendors", "repair_vendors"):
+            vendors = getattr(self, name)
+            if not vendors:
+                raise ValueError(f"{name} must be non-empty")
+            for vendor in vendors:
+                if not vendor.strip() or vendor != vendor.strip() or vendor != vendor.lower():
+                    raise ValueError(f"{name} entries must be non-empty lowercase: {vendor!r}")
+        if set(self.repair_vendors) - set(self.gate_vendors):
+            raise ValueError(
+                f"repair_vendors {self.repair_vendors!r} must be a subset of gate_vendors {self.gate_vendors!r}"
+            )
+        return self
+
+
 class AuditSettings(BaseSettings):
     """Open-latency alert threshold, trade-loss budget and derivation bounds for the EOD session audit; every threshold is configuration, never a literal in business logic."""
 
     model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_AUDIT_", extra="ignore")
 
-    mode: AuditMode = AuditMode.SHADOW
+    mode: AuditMode = AuditMode.ENFORCE
     latency_alert_threshold_s: float = Field(default=10.0, gt=0)
     latency_streams: tuple[str, ...] = ("H0STCNT0", "H0STASP0")
     loss_warn_ratio: float = Field(default=1e-4, gt=0, lt=1)
@@ -711,9 +739,7 @@ class AuditSettings(BaseSettings):
     @model_validator(mode="after")
     def check_audit_budget_order(self) -> AuditSettings:
         if not self.loss_warn_ratio < self.loss_fail_ratio:
-            raise ValueError(
-                f"loss_warn_ratio {self.loss_warn_ratio} must be < loss_fail_ratio {self.loss_fail_ratio}"
-            )
+            raise ValueError(f"loss_warn_ratio {self.loss_warn_ratio} must be < loss_fail_ratio {self.loss_fail_ratio}")
         allowed = ("H0STCNT0", "H0STASP0")
         if not self.latency_streams or any(stream not in allowed for stream in self.latency_streams):
             raise ValueError(f"latency_streams {self.latency_streams!r} must be a non-empty subset of {allowed!r}")
@@ -734,9 +760,7 @@ class UniverseTierSettings(BaseSettings):
     @model_validator(mode="after")
     def check_core_rank_order(self) -> UniverseTierSettings:
         if self.core_exit_rank < self.core_enter_rank:
-            raise ValueError(
-                f"core_exit_rank {self.core_exit_rank} must be >= core_enter_rank {self.core_enter_rank}"
-            )
+            raise ValueError(f"core_exit_rank {self.core_exit_rank} must be >= core_enter_rank {self.core_enter_rank}")
         return self
 
 
@@ -751,6 +775,7 @@ class CollectorRuntime:
     audit: AuditSettings = field(default_factory=lambda: AuditSettings())
     regular_kis: RegularKisSettings = field(default_factory=lambda: RegularKisSettings())
     universe_tiers: UniverseTierSettings = field(default_factory=lambda: UniverseTierSettings())
+    repair: RepairSettings = field(default_factory=lambda: RepairSettings())
 
 
 def resolve_collector_runtime(
@@ -763,6 +788,7 @@ def resolve_collector_runtime(
     audit: AuditSettings | None = None,
     regular_kis: RegularKisSettings | None = None,
     universe_tiers: UniverseTierSettings | None = None,
+    repair: RepairSettings | None = None,
 ) -> CollectorRuntime:
     """Resolve one coherent collector configuration before child processes start.
 
@@ -800,13 +826,9 @@ def resolve_collector_runtime(
         raise ValueError("premarket credential_slot must not equal snapshot kis_data_slot")
     if resolved_watchdog.enabled:
         if resolved_watchdog.aftermarket_stale_limit_s <= resolved_aftermarket.silence_limit_s:
-            raise ValueError(
-                "aftermarket_stale_limit_s must exceed aftermarket silence_limit_s"
-            )
+            raise ValueError("aftermarket_stale_limit_s must exceed aftermarket silence_limit_s")
         if resolved_watchdog.premarket_stale_limit_s <= resolved_premarket.silence_limit_s:
-            raise ValueError(
-                "premarket_stale_limit_s must exceed premarket silence_limit_s"
-            )
+            raise ValueError("premarket_stale_limit_s must exceed premarket silence_limit_s")
     if resolved_regular_kis.enabled:
         if resolved_premarket.enabled and resolved_premarket.credential_slot in resolved_regular_kis.credential_slots:
             raise ValueError("regular_kis credential_slots must not overlap the premarket credential slot")
@@ -821,6 +843,7 @@ def resolve_collector_runtime(
             if not regular_end < prearm:
                 raise ValueError("regular_kis window must end strictly before the aftermarket prearm moment")
     resolved_tiers = universe_tiers if universe_tiers is not None else UniverseTierSettings()
+    resolved_repair = repair if repair is not None else RepairSettings()
     if resolved_tiers.core_enabled and resolved_tiers.core_exit_rank > resolved_collector.universe_slot_budget:
         raise SlotBudgetExceededError(
             f"core_exit_rank {resolved_tiers.core_exit_rank} exceeds "
@@ -836,6 +859,7 @@ def resolve_collector_runtime(
         audit=resolved_audit,
         regular_kis=resolved_regular_kis,
         universe_tiers=resolved_tiers,
+        repair=resolved_repair,
     )
 
 

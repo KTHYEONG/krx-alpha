@@ -321,6 +321,8 @@ def test_digest_body_unchanged_without_crosscheck(tmp_path, monkeypatch) -> None
         "aftermarket_restarts=0",
         "shard_stale_restarts=0",
         "orchestration_attempts=0",
+        "repair_held=0",
+        "repair_days=2026-09-14:ls:unaudited",
         "degraded_reasons=none",
         f"digest_path={tmp_path / 'data' / 'logs' / 'eod_digests' / '2026-09-14.txt'}",
     ]

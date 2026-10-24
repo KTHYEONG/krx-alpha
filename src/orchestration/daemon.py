@@ -6,6 +6,7 @@ import datetime as dt
 import importlib
 import logging
 import pathlib
+import re
 import signal
 import subprocess
 import sys
@@ -37,6 +38,7 @@ from src.core.config import (
     LivenessSettings,
     ObservabilitySettings,
     RegularKisSettings,
+    RepairSettings,
     ShardWatchdogSettings,
     SnapshotSettings,
     TickTapeBackfillSettings,
@@ -70,6 +72,7 @@ from src.marketdata.service import BarsRefreshResult as BarsRefreshResult
 from src.marketdata.service import KisFallbackError as KisFallbackError
 from src.marketdata.service import refresh_bars, refresh_bars_via_kis_fallback
 from src.marketdata.snapshot_plan import shift_snapshot_settings
+from src.marketdata.tick_tape_backfill import read_ledger_done
 from src.marketdata.toss_calendar import (
     TossCalendarError,
     TradingDay,
@@ -122,6 +125,7 @@ from src.realtime.ls_limits import prioritize_ls_pairs, split_ls_pairs
 from src.realtime.manifest import SessionManifest
 from src.realtime.streamer import aftermarket_open_time
 from src.storage.l0_audit import AuditStatus, SessionAudit, derive_session_audit, write_session_audit
+from src.storage.l0_repair import RepairState, derive_day_repair, l0_hold_reason
 from src.storage.layout import L0_VENDOR_DB, l0_day_journal_glob
 from src.storage.remote import RemoteArchiveError
 from src.storage.retention import check_disk_watermark
@@ -442,6 +446,7 @@ class _EodHousekeeping:
     purged: int
     maintenance_ok: bool
     offload_ok: bool
+    held: int = 0
 
 
 def _tick_open_max_latency_s(audit: SessionAudit, anchors: SessionAnchors) -> str:
@@ -457,8 +462,62 @@ def _tick_open_max_latency_s(audit: SessionAudit, anchors: SessionAnchors) -> st
     return f"{peak:.1f}" if peak is not None else "-"
 
 
+def _repair_hold_for(
+    paths: DataPaths, cutoff: dt.date, settings: RepairSettings, tape_done: frozenset[tuple[str, dt.date]]
+) -> Callable[[pathlib.Path], str | None]:
+    dt_re = re.compile(r"dt=(\d{4})-(\d{2})-(\d{2})")
+
+    def _hold(part_relpath: pathlib.Path) -> str | None:
+        match = dt_re.fullmatch(part_relpath.name)
+        if match is None:
+            return None
+        try:
+            part_date = dt.date.fromisoformat(match.group(0)[3:])
+        except ValueError:
+            return None
+        return l0_hold_reason(
+            pathlib.PurePath(part_relpath),
+            part_date,
+            paths=paths,
+            settings=settings,
+            tape_done=tape_done,
+            cutoff=cutoff,
+        )
+
+    return _hold
+
+
+def _repair_days_summary(
+    paths: DataPaths, ref_day: dt.date, cfg: CollectorSettings, repair_settings: RepairSettings | None
+) -> str:
+    """CSV of `day:vendor:state` for horizon days not CLEAN/REPAIRED, else `none`."""
+    if repair_settings is None:
+        return "none"
+    try:
+        tape_done = read_ledger_done(paths.tick_tape_ledger)
+    except Exception:  # noqa: BLE001 - torn ledger degrades to pending, never fails EOD
+        tape_done = frozenset()
+    span = int(cfg.journal_retain_days) + int(repair_settings.hold_max_extra_days) + 1
+    pending: list[str] = []
+    for offset in range(span, -1, -1):
+        day = ref_day - dt.timedelta(days=offset)
+        for vendor in repair_settings.gate_vendors:
+            partition = paths.journal_root / vendor / "krx" / "regular" / "H0STCNT0" / f"dt={day.isoformat()}"
+            if not partition.is_dir() and not paths.session_audit_path(day, vendor).exists():
+                continue
+            repair = derive_day_repair(paths, day, vendor, settings=repair_settings, tape_done=tape_done)
+            if repair.state is not RepairState.CLEAN and repair.state is not RepairState.REPAIRED:
+                pending.append(f"{day.isoformat()}:{vendor}:{repair.state.value}")
+    return ",".join(pending) if pending else "none"
+
+
 def _run_eod_housekeeping(
-    cfg: CollectorSettings, paths: DataPaths, ref_day: dt.date, *, progress: Callable[[], None]
+    cfg: CollectorSettings,
+    paths: DataPaths,
+    ref_day: dt.date,
+    *,
+    progress: Callable[[], None],
+    repair_settings: RepairSettings | None = None,
 ) -> _EodHousekeeping:
     """Run the date-agnostic EOD storage sequence shared by business days and holidays.
 
@@ -466,7 +525,16 @@ def _run_eod_housekeeping(
     remotely, so maintenance runs once unverified (normalize only), then again
     with the verified set, followed by the remote L0 purge.
     """
-    deleted = 0
+    hold: Callable[[pathlib.Path], str | None] | None = None
+    if repair_settings is not None and repair_settings.hold_enabled:
+        try:
+            tape_done = read_ledger_done(paths.tick_tape_ledger)
+        except Exception:  # noqa: BLE001 - torn ledger degrades to pending, never fails EOD
+            tape_done = frozenset()
+        cutoff = ref_day - dt.timedelta(days=cfg.journal_retain_days)
+        hold = _repair_hold_for(paths, cutoff, repair_settings, tape_done)
+    deleted: Any = 0
+    held_paths: set[str] = set()
     maintenance_ok = True
     disk_ok = check_disk_watermark(paths.root, min_free_gb=cfg.min_free_disk_gb)
     if not disk_ok:
@@ -474,6 +542,7 @@ def _run_eod_housekeeping(
         maintenance_ok = False
     try:
         if disk_ok:
+            _kw: dict[str, object] = {"hold": hold} if hold is not None else {}
             deleted = run_eod_maintenance(
                 paths.journal_root,
                 retain_days=cfg.journal_retain_days,
@@ -483,9 +552,11 @@ def _run_eod_housekeeping(
                 work_root=paths.work_root,
                 verified_remote_l1=None,
                 progress=progress,
+                **_kw,  # type: ignore[arg-type]
             )
             if getattr(deleted, "failed", 0) > 0:
                 maintenance_ok = False
+            held_paths.update(getattr(deleted, "held", frozenset()))
     except (KrxAlphaError, OSError) as e:
         maintenance_ok = False
         logger.critical("[DAEMON] stage=eod_maintenance status=FAIL reason=maintenance_error error=%s", str(e))
@@ -516,6 +587,7 @@ def _run_eod_housekeeping(
         try:
             verified = offload.verified_remote_l1 if hasattr(offload, "verified_remote_l1") else frozenset()
             # 디스크 부족 시에도 원격 검증된 L0 는 정규화 없이 지워야 교착(수집 중단 + 공간 미확보)에서 스스로 회복한다.
+            _kw2: dict[str, object] = {"hold": hold} if hold is not None else {}
             post_deleted = run_eod_maintenance(
                 paths.journal_root,
                 retain_days=cfg.journal_retain_days,
@@ -527,11 +599,14 @@ def _run_eod_housekeeping(
                 progress=progress,
                 normalize=disk_ok,
                 reuse_fresh_l1=True,
+                **_kw2,  # type: ignore[arg-type]
             )
             if getattr(post_deleted, "failed", 0) > 0:
                 maintenance_ok = False
             deleted = int(deleted) + int(post_deleted)
+            held_paths.update(getattr(post_deleted, "held", frozenset()))
             verified = verified - getattr(post_deleted, "invalidated_remote_l1", frozenset())
+            verified = verified - getattr(post_deleted, "held", frozenset())
             try:
                 run_eod_remote_l0_purge(
                     paths.journal_root,
@@ -552,6 +627,7 @@ def _run_eod_housekeeping(
         purged=int(purged),
         maintenance_ok=maintenance_ok,
         offload_ok=offload_ok,
+        held=len(held_paths),
     )
 
 
@@ -948,7 +1024,9 @@ def _program_sync_cmd(session_date: dt.date, complete_through: dt.date) -> list[
     ]
 
 
-def _stop_sync_child(proc: Any, *, grace_s: float, already_signalled: bool = False, stage: str = "program_trades_sync") -> None:
+def _stop_sync_child(
+    proc: Any, *, grace_s: float, already_signalled: bool = False, stage: str = "program_trades_sync"
+) -> None:
     """Terminate a nightly sync child and SIGKILL it when the grace window expires."""
     if not already_signalled:
         proc.terminate()
@@ -1262,9 +1340,7 @@ class DaemonRunner:
         self._program_sync_cfg = (
             program_sync_settings if program_sync_settings is not None else TossProgramTradesSettings()
         )
-        self._tick_tape_cfg = (
-            tick_tape_settings if tick_tape_settings is not None else TickTapeBackfillSettings()
-        )
+        self._tick_tape_cfg = tick_tape_settings if tick_tape_settings is not None else TickTapeBackfillSettings()
         self._minute_cfg = _minute_backfill_settings(minute_backfill_settings)
         self._sched = replace(
             runtime.collector.schedule,
@@ -1532,9 +1608,7 @@ class DaemonRunner:
             ch.nightly_job = job
             ch.nightly_started_at = self._now()
             st.nightly_done[job] = identity
-            logger.info(
-                "[DAEMON] stage=nightly_%s status=STARTED deadline=%s", job.value, deadline.isoformat()
-            )
+            logger.info("[DAEMON] stage=nightly_%s status=STARTED deadline=%s", job.value, deadline.isoformat())
             return
 
     def step(self, now: dt.datetime) -> float:
@@ -2668,7 +2742,9 @@ class DaemonRunner:
             if (
                 not isinstance(rows, list)
                 or not rows
-                or not all(isinstance(row, dict) and isinstance(row.get("symbol"), str) and row["symbol"] for row in rows)
+                or not all(
+                    isinstance(row, dict) and isinstance(row.get("symbol"), str) and row["symbol"] for row in rows
+                )
             ):
                 raise KrxAlphaError(f"invalid candidates file: {self._paths.candidates}")
             symbols = tuple(str(row["symbol"]) for row in rows if isinstance(row, dict))
@@ -2756,9 +2832,7 @@ class DaemonRunner:
         except (OSError, ValueError) as exc:
             logger.warning("[DATA] stage=shard_watchdog status=ERROR reason=%s", type(exc).__name__)
 
-    def _watch_regular_kis_shards_guarded(
-        self, now: dt.datetime, today: dt.date, anchors: SessionAnchors
-    ) -> None:
+    def _watch_regular_kis_shards_guarded(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
         wd = getattr(self._runtime, "shard_watchdog", None)
         if wd is None or not wd.enabled:
             return
@@ -2941,7 +3015,13 @@ class DaemonRunner:
     def _run_holiday_eod(self, now: dt.datetime, ref_day: dt.date) -> None:
         cfg = self._cfg
         paths = self._paths
-        housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=self._eod_progress)
+        repair_settings = getattr(self._runtime, "repair", None)
+        if repair_settings is not None and getattr(repair_settings, "hold_enabled", False):
+            housekeeping = _run_eod_housekeeping(
+                cfg, paths, ref_day, progress=self._eod_progress, repair_settings=repair_settings
+            )
+        else:
+            housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=self._eod_progress)
         _check_backup(
             cfg.host_backup_status_path,
             paths,
@@ -2976,7 +3056,13 @@ class DaemonRunner:
         self._log_premarket_eod(ref_day)
         audit = self._derive_session_audit(ref_day, day, anchors)
         self._derive_kis_regular_audit(ref_day, day, anchors, ls_audit=audit)
-        housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=self._eod_progress)
+        repair_settings = getattr(self._runtime, "repair", None)
+        if repair_settings is not None and getattr(repair_settings, "hold_enabled", False):
+            housekeeping = _run_eod_housekeeping(
+                cfg, paths, ref_day, progress=self._eod_progress, repair_settings=repair_settings
+            )
+        else:
+            housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=self._eod_progress)
         reconcile_ok, reconciled = self._reconcile_regular_session(ref_day, day, anchors, audit=audit)
         crosscheck = self._reconcile_crosscheck_sessions(ref_day, day, anchors)
         backup_missing, backup_ok, host_backup = _check_backup(
@@ -2986,6 +3072,7 @@ class DaemonRunner:
             now=now,
             max_age=dt.timedelta(hours=cfg.host_backup_max_age_h),
         )
+        repair_days = _repair_days_summary(paths, ref_day, cfg, repair_settings)
         degraded_reasons = [
             name
             for name, failed in (
@@ -2994,6 +3081,7 @@ class DaemonRunner:
                 ("reconcile", not reconcile_ok),
                 ("backup", not backup_ok),
                 ("aftermarket_not_ready", aftermarket_blocked),
+                ("repair_hold", getattr(housekeeping, "held", 0) > 0),
             )
             if failed
         ]
@@ -3015,7 +3103,8 @@ class DaemonRunner:
             audit_status = audit.status.value
             trade_loss = (
                 f"{audit.totals.confirmed_missing}/{audit.totals.trades_observed}"
-                if audit.status is not AuditStatus.UNAVAILABLE else "-"
+                if audit.status is not AuditStatus.UNAVAILABLE
+                else "-"
             )
             open_latency = (
                 _tick_open_max_latency_s(audit, anchors) if audit.status is not AuditStatus.UNAVAILABLE else "-"
@@ -3041,6 +3130,8 @@ class DaemonRunner:
                 f"shard_stale_restarts={st.shard_stale_restarts}",
                 f"orchestration_attempts={st.orchestration_attempts}",
                 *[f"crosscheck_{k.value}={v}" for k, v in crosscheck.items()],
+                f"repair_held={getattr(housekeeping, 'held', 0)}",
+                f"repair_days={repair_days}",
                 f"degraded_reasons={','.join(degraded_reasons) or 'none'}",
             ]
         )
@@ -3086,7 +3177,9 @@ class DaemonRunner:
                     aftermarket_blocked = True
         return aftermarket_blocked
 
-    def _derive_session_audit(self, ref_day: dt.date, day: TradingDayView, anchors: SessionAnchors) -> SessionAudit | None:
+    def _derive_session_audit(
+        self, ref_day: dt.date, day: TradingDayView, anchors: SessionAnchors
+    ) -> SessionAudit | None:
         """Derive, persist and log the regular-session audit before EOD housekeeping; returns None when disabled, not a business day, or on any contained failure (EOD never aborts)."""
         runtime_audit = getattr(self._runtime, "audit", None) or AuditSettings()
         if runtime_audit.mode is AuditMode.OFF or day.status is not TradingDayStatus.BUSINESS:

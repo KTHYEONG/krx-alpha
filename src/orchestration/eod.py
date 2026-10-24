@@ -60,7 +60,11 @@ def run_eod_maintenance(
     progress: Callable[[], None] | None = None,
     normalize: bool = True,
     reuse_fresh_l1: bool = False,
+    hold: Callable[[pathlib.Path], str | None] | None = None,
 ) -> int:
+    kwargs: dict[str, object] = {}
+    if hold is not None:
+        kwargs["hold"] = hold
     return prune_old_journals(
         journal_root,
         archive_root=archive_root,
@@ -73,6 +77,7 @@ def run_eod_maintenance(
         reuse_fresh_l1=reuse_fresh_l1,
         # 데몬 OOM crash loop를 막기 위해 정규화는 자식 프로세스로 격리한다
         normalizer=functools.partial(run_isolated_normalize, work_root=work_root),
+        **kwargs,  # type: ignore[arg-type]
     )
 
 
@@ -211,15 +216,15 @@ def _clip_merge_spans(
     return tuple((s, e) for s, e in merged), total_ns / 1e9
 
 
-def _split_silent_loss_spans(
-    merged: tuple[tuple[int, int], ...], audit: SessionAudit
-) -> tuple[float, float, int]:
+def _split_silent_loss_spans(merged: tuple[tuple[int, int], ...], audit: SessionAudit) -> tuple[float, float, int]:
     windows: list[tuple[int, int]] = []
     for symbol in audit.symbols:
         for interval in symbol.intervals:
             if interval.phase != MarketPhase.REGULAR.value:
                 continue
-            windows.append((min(interval.recv_prev_ns, interval.recv_next_ns), max(interval.recv_prev_ns, interval.recv_next_ns)))
+            windows.append(
+                (min(interval.recv_prev_ns, interval.recv_next_ns), max(interval.recv_prev_ns, interval.recv_next_ns))
+            )
     silent_s = 0.0
     loss_s = 0.0
     silent_count = 0
@@ -260,19 +265,34 @@ def evaluate_session_gap_budget(
         silent_span_s = 0.0
         loss_span_s = legacy_gap_s
         silent_spans = 0
-    ledger_active = (
-        settings is not None and settings.mode is AuditMode.ENFORCE and matched and trades > 0
-    )
+    ledger_active = settings is not None and settings.mode is AuditMode.ENFORCE and matched and trades > 0
     if not ledger_active:
         if legacy_gap_s > max_gap_s:
             return GapBudgetVerdict(
-                GapBudgetStatus.FAIL, "legacy", (f"gap_exceeded:{int(legacy_gap_s)}s",),
-                confirmed, trades, loss_ratio, loss_span_s, silent_span_s, silent_spans,
-                tail_silence_s, legacy_gap_s,
+                GapBudgetStatus.FAIL,
+                "legacy",
+                (f"gap_exceeded:{int(legacy_gap_s)}s",),
+                confirmed,
+                trades,
+                loss_ratio,
+                loss_span_s,
+                silent_span_s,
+                silent_spans,
+                tail_silence_s,
+                legacy_gap_s,
             )
         return GapBudgetVerdict(
-            GapBudgetStatus.PASS, "legacy", (), confirmed, trades, loss_ratio,
-            loss_span_s, silent_span_s, silent_spans, tail_silence_s, legacy_gap_s,
+            GapBudgetStatus.PASS,
+            "legacy",
+            (),
+            confirmed,
+            trades,
+            loss_ratio,
+            loss_span_s,
+            silent_span_s,
+            silent_spans,
+            tail_silence_s,
+            legacy_gap_s,
         )
     assert audit is not None
     assert settings is not None
@@ -282,7 +302,8 @@ def evaluate_session_gap_budget(
         failed = True
         reasons.append(f"trade_loss_exceeded:{confirmed}/{trades}")
     breaching = [
-        symbol for symbol in audit.symbols
+        symbol
+        for symbol in audit.symbols
         if symbol.status == "OK"
         and symbol.trades_observed >= settings.symbol_min_trades
         and symbol.trades_observed > 0
@@ -290,7 +311,9 @@ def evaluate_session_gap_budget(
     ]
     if breaching:
         failed = True
-        ordered = sorted(breaching, key=lambda s: (s.confirmed_missing / s.trades_observed, s.confirmed_missing), reverse=True)
+        ordered = sorted(
+            breaching, key=lambda s: (s.confirmed_missing / s.trades_observed, s.confirmed_missing), reverse=True
+        )
         worst = ordered[0]
         extra = f"+{len(ordered) - 1}" if len(ordered) > 1 else ""
         reasons.append(f"symbol_loss_exceeded:{worst.symbol}:{worst.confirmed_missing}/{worst.trades_observed}{extra}")
@@ -306,9 +329,17 @@ def evaluate_session_gap_budget(
         status = GapBudgetStatus.WARN
         reasons.append(f"trade_loss_warn:{confirmed}/{trades}")
     return GapBudgetVerdict(
-        status, "ledger+legacy" if partial else "ledger", tuple(reasons),
-        confirmed, trades, loss_ratio, loss_span_s, silent_span_s, silent_spans,
-        tail_silence_s, legacy_gap_s,
+        status,
+        "ledger+legacy" if partial else "ledger",
+        tuple(reasons),
+        confirmed,
+        trades,
+        loss_ratio,
+        loss_span_s,
+        silent_span_s,
+        silent_spans,
+        tail_silence_s,
+        legacy_gap_s,
     )
 
 
@@ -342,7 +373,9 @@ def _log_event_holes(entry: StreamLatency, *, date: dt.date) -> None:
     )
 
 
-def log_session_audit(audit: SessionAudit | None, *, settings: AuditSettings, anchors: SessionAnchors, date: dt.date) -> None:
+def log_session_audit(
+    audit: SessionAudit | None, *, settings: AuditSettings, anchors: SessionAnchors, date: dt.date
+) -> None:
     """Emit the audit summary and per-stream latency lines; CRITICAL once per stream whose regular-window minutes exceed the latency threshold."""
     if audit is None or settings.mode is AuditMode.OFF:
         return
@@ -621,7 +654,9 @@ def check_aftermarket_prearm(
                     times = [
                         a.get("acked_at_ns")
                         for a in manifest.subscription_acks
-                        if a.get("accepted") is True and str(a.get("symbol")) == symbol and str(a.get("tr_id")) == stream
+                        if a.get("accepted") is True
+                        and str(a.get("symbol")) == symbol
+                        and str(a.get("tr_id")) == stream
                     ]
                     if not times:
                         unverifiable = "pair_unacked"
@@ -690,42 +725,34 @@ def check_aftermarket_symbol_coverage(
         venue = shard.venue.value
         try:
             if not pathlib.Path(path).exists():
-                findings.append(
-                    AftermarketCoverageFinding(venue, shard.shard_index, 0, None, "manifest_missing")
-                )
+                findings.append(AftermarketCoverageFinding(venue, shard.shard_index, 0, None, "manifest_missing"))
                 continue
             manifest = SessionManifest.load(pathlib.Path(path))
-            accepted = {
-                str(ack.get("symbol")) for ack in manifest.subscription_acks if ack.get("accepted") is True
-            }
+            accepted = {str(ack.get("symbol")) for ack in manifest.subscription_acks if ack.get("accepted") is True}
             accepted_symbols = tuple(symbol for symbol in shard.symbols if symbol in accepted)
         except (ValueError, KeyError, TypeError, OSError, AttributeError, OverflowError):
-            logger.debug("[DATA] stage=aftermarket_coverage status=UNVERIFIABLE venue=%s shard=%d", venue, shard.shard_index)
-            findings.append(
-                AftermarketCoverageFinding(venue, shard.shard_index, 0, None, "manifest_unreadable")
+            logger.debug(
+                "[DATA] stage=aftermarket_coverage status=UNVERIFIABLE venue=%s shard=%d", venue, shard.shard_index
             )
+            findings.append(AftermarketCoverageFinding(venue, shard.shard_index, 0, None, "manifest_unreadable"))
             continue
         if manifest.session_date != date:
-            logger.debug("[DATA] stage=aftermarket_coverage status=UNVERIFIABLE venue=%s shard=%d", venue, shard.shard_index)
-            findings.append(
-                AftermarketCoverageFinding(venue, shard.shard_index, 0, None, "date_mismatch")
+            logger.debug(
+                "[DATA] stage=aftermarket_coverage status=UNVERIFIABLE venue=%s shard=%d", venue, shard.shard_index
             )
+            findings.append(AftermarketCoverageFinding(venue, shard.shard_index, 0, None, "date_mismatch"))
             continue
         if manifest.frame_counts is None:
-            logger.debug("[DATA] stage=aftermarket_coverage status=UNVERIFIABLE venue=%s shard=%d", venue, shard.shard_index)
+            logger.debug(
+                "[DATA] stage=aftermarket_coverage status=UNVERIFIABLE venue=%s shard=%d", venue, shard.shard_index
+            )
             findings.append(
                 AftermarketCoverageFinding(venue, shard.shard_index, len(accepted_symbols), None, "untracked")
             )
             continue
-        zero = tuple(
-            symbol
-            for symbol in accepted_symbols
-            if manifest.symbol_frame_total(symbol) == 0
-        )
+        zero = tuple(symbol for symbol in accepted_symbols if manifest.symbol_frame_total(symbol) == 0)
         logger.debug("[DATA] stage=aftermarket_coverage status=CHECKED venue=%s shard=%d", venue, shard.shard_index)
-        findings.append(
-            AftermarketCoverageFinding(venue, shard.shard_index, len(accepted_symbols), zero, "-")
-        )
+        findings.append(AftermarketCoverageFinding(venue, shard.shard_index, len(accepted_symbols), zero, "-"))
     return tuple(findings)
 
 
@@ -879,8 +906,13 @@ def check_session_reconciliation(
             structural.append("manifest_unreadable")
     if audit is None or audit_settings is None or audit_settings.mode is AuditMode.OFF:
         legacy = evaluate_session_gap_budget(
-            gaps=gaps, date=date, regular_open=regular_open, regular_close=regular_close,
-            audit=None, settings=None, max_gap_s=max_gap_s,
+            gaps=gaps,
+            date=date,
+            regular_open=regular_open,
+            regular_close=regular_close,
+            audit=None,
+            settings=None,
+            max_gap_s=max_gap_s,
         )
         issues = structural + list(legacy.reasons)
         if issues:
@@ -901,8 +933,13 @@ def check_session_reconciliation(
             date.isoformat(),
         )
         legacy = evaluate_session_gap_budget(
-            gaps=gaps, date=date, regular_open=regular_open, regular_close=regular_close,
-            audit=None, settings=None, max_gap_s=max_gap_s,
+            gaps=gaps,
+            date=date,
+            regular_open=regular_open,
+            regular_close=regular_close,
+            audit=None,
+            settings=None,
+            max_gap_s=max_gap_s,
         )
         issues = structural + list(legacy.reasons)
         if issues:
@@ -917,12 +954,22 @@ def check_session_reconciliation(
     if audit_settings.mode is AuditMode.SHADOW:
         enforce_view = audit_settings.model_copy(update={"mode": AuditMode.ENFORCE})
         would = evaluate_session_gap_budget(
-            gaps=gaps, date=date, regular_open=regular_open, regular_close=regular_close,
-            audit=audit, settings=enforce_view, max_gap_s=max_gap_s,
+            gaps=gaps,
+            date=date,
+            regular_open=regular_open,
+            regular_close=regular_close,
+            audit=audit,
+            settings=enforce_view,
+            max_gap_s=max_gap_s,
         )
         legacy = evaluate_session_gap_budget(
-            gaps=gaps, date=date, regular_open=regular_open, regular_close=regular_close,
-            audit=None, settings=None, max_gap_s=max_gap_s,
+            gaps=gaps,
+            date=date,
+            regular_open=regular_open,
+            regular_close=regular_close,
+            audit=None,
+            settings=None,
+            max_gap_s=max_gap_s,
         )
         would_label = would.status.value
         legacy_label = "FAIL" if legacy.status is GapBudgetStatus.FAIL else "PASS"
@@ -954,8 +1001,13 @@ def check_session_reconciliation(
             return False
         return True
     verdict = evaluate_session_gap_budget(
-        gaps=gaps, date=date, regular_open=regular_open, regular_close=regular_close,
-        audit=audit, settings=audit_settings, max_gap_s=max_gap_s,
+        gaps=gaps,
+        date=date,
+        regular_open=regular_open,
+        regular_close=regular_close,
+        audit=audit,
+        settings=audit_settings,
+        max_gap_s=max_gap_s,
     )
     partial = " partial=1" if audit.status is AuditStatus.PARTIAL else ""
     logger.info(
