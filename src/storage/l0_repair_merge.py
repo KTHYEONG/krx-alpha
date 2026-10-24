@@ -34,6 +34,8 @@ from src.storage.layout import L0_JOURNAL_GLOB, l0_partition_key, l0_partition_r
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_OVERFILL_TOLERANCE_RATIO = 0.02
+
 _OUTPUT_SCHEMA = pa.schema(
     [
         pa.field("symbol", pa.string(), nullable=False),
@@ -62,6 +64,7 @@ class RepairedTicksSummary:
     count_note: str | None = None
     audit_trades_received: int | None = None
     deduped_late_live: int = 0
+    overfill_dropped: int = 0
 
 
 @dataclass(frozen=True)
@@ -271,6 +274,7 @@ def build_repaired_ticks(
     day: dt.date,
     vendor: str,
     batch_rows: int = 250_000,
+    overfill_tolerance_ratio: float = DEFAULT_OVERFILL_TOLERANCE_RATIO,
 ) -> RepairedTicksSummary:
     """Write the repaired-ticks parquet and its summary for one repaired or clean day."""
     if vendor != "ls":
@@ -286,13 +290,14 @@ def build_repaired_ticks(
         db.execute("CREATE TABLE late (symbol TEXT, cum INTEGER, chetime INTEGER, price INTEGER, volume INTEGER)")
         db.execute("CREATE INDEX late_symbol_cum ON late (symbol, cum)")
         return _build_repaired_ticks(
-            paths=paths, journal_root=journal_root, day=day, vendor=vendor, batch_rows=batch_rows, db=db,
+            paths=paths, journal_root=journal_root, day=day, vendor=vendor, batch_rows=batch_rows,
+            overfill_tolerance_ratio=overfill_tolerance_ratio, db=db,
         )
 
 
 def _build_repaired_ticks(
     *, paths: DataPaths, journal_root: pathlib.Path, day: dt.date, vendor: str, batch_rows: int,
-    db: sqlite3.Connection,
+    overfill_tolerance_ratio: float, db: sqlite3.Connection,
 ) -> RepairedTicksSummary:
     if isinstance(batch_rows, bool) or not isinstance(batch_rows, int) or batch_rows <= 0:
         raise ValueError(f"batch_rows must be a positive int: {batch_rows!r}")
@@ -365,6 +370,7 @@ def _build_repaired_ticks(
     writer: pq.ParquetWriter | None = None
     outcome: RepairedTicksSummary | None = None
     deduped = 0
+    overfill_dropped = 0
     try:
         try:
             writer = pq.ParquetWriter(tmp, _OUTPUT_SCHEMA, compression="zstd")
@@ -419,15 +425,17 @@ def _build_repaired_ticks(
                             break
                         slot += 1
                     if not cum_prev < slot < cum_next:
-                        outcome = _mismatch(
-                            day, vendor, live_rows, filled.height, residual, observed, audit_sha256, report_sha
-                        )
-                        break
+                        overfill_dropped += 1
+                        continue
                     next_slot[key] = slot + 1
                     emit(symbol, chetime, price, volume, slot, provenance, interval_id, None)
                     filled_rows += 1
                     if len(columns["symbol"]) >= batch_rows:
                         flush(writer)
+                if outcome is None and overfill_dropped > overfill_tolerance_ratio * filled.height:
+                    outcome = _mismatch(
+                        day, vendor, live_rows, filled.height, residual, observed, audit_sha256, report_sha
+                    )
                 if outcome is None and columns["symbol"]:
                     flush(writer)
         finally:
@@ -463,6 +471,7 @@ def _build_repaired_ticks(
         "status": "OK",
         "count_note": count_note,
         "deduped_late_live": deduped,
+        "overfill_dropped": overfill_dropped,
         "generated_at": time.time_ns(),
     }
     summary_tmp = summary_path.parent / f".{summary_path.name}.{os.getpid()}.tmp"
@@ -475,12 +484,13 @@ def _build_repaired_ticks(
             target.unlink(missing_ok=True)
         raise
     logger.info(
-        "[DATA] stage=repair_merge day=%s vendor=%s live=%d filled=%d deduped=%d residual=%d status=OK",
+        "[DATA] stage=repair_merge day=%s vendor=%s live=%d filled=%d deduped=%d overfill_dropped=%d residual=%d status=OK",
         day.isoformat(),
         vendor,
         live_rows,
         filled_rows,
         deduped,
+        overfill_dropped,
         residual,
     )
     return RepairedTicksSummary(
@@ -496,6 +506,7 @@ def _build_repaired_ticks(
         count_note,
         received,
         deduped,
+        overfill_dropped,
     )
 
 

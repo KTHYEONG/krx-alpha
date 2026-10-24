@@ -399,6 +399,37 @@ def test_filled_rows_duplicating_late_live_trade_are_dropped(tmp_path) -> None:
     assert repaired_ticks_valid(paths, DAY, "ls")
 
 
+def test_overfill_within_tolerance_is_dropped_and_recorded(tmp_path) -> None:
+    from src.storage.l0_repair_merge import build_repaired_ticks
+
+    paths = DataPaths(tmp_path)
+    _write_journal(paths, DAY, "ls", [("000001", "090000", 10), ("000001", "090002", 14)])
+    audit_path = _write_audit(paths, DAY, "ls", observed=2, confirmed=3, symbols=(_gap_symbol(3),))
+    rows = [
+        {
+            "symbol": "000001",
+            "chetime": "090001",
+            "price": 100,
+            "volume": 1,
+            "tape_seq": i,
+            "interval_id": 0,
+            "cum_prev": 10,
+            "cum_next": 13,
+            "vendor": "kiwoom",
+            "provenance": "gapfill:kiwoom_tape",
+        }
+        for i in range(3)
+    ]
+    _write_gapfill(paths, DAY, "ls", audit_path, rows, residual=0, recovered=3)
+    strict = build_repaired_ticks(paths=paths, journal_root=paths.journal_root, day=DAY, vendor="ls")
+    assert strict.status == "MISMATCH"
+    tolerant = build_repaired_ticks(
+        paths=paths, journal_root=paths.journal_root, day=DAY, vendor="ls", overfill_tolerance_ratio=0.5
+    )
+    assert tolerant.status == "OK"
+    assert (tolerant.filled_rows, tolerant.overfill_dropped) == (2, 1)
+
+
 def test_filled_cum_never_collides_with_live(tmp_path) -> None:
     from src.storage.l0_repair_merge import build_repaired_ticks
 
