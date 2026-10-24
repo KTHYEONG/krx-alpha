@@ -40,8 +40,10 @@ services:
       # History backfill 야간 슬롯 23:30-05:30 (Part 2). 2026-10-22 G-TAPE-RUN PASS: 47 종목일 틱 거래량 합이 KRX 일봉과 ±0.5% 이내 전수 일치.
       # 키움 ka10079는 kca와 호스트 공유 페이서(~/.cache/kis admission_kiwoom_*_ka10079.state)로 예산을 나눈다.
       - KRX_ALPHA_TICK_TAPE_ENABLED=true
-      # L0 복구 야간 job (감사 재계산·갭필·병합). HOLD/MERGE_REQUIRED는 G-REPAIR-RUN 통과 후 별도 활성.
+      # L0 복구 게이트 (2026-10-24 G-REPAIR-RUN 통과: 최대 544MiB, 10-20~23 병합 OK). 복구·병합 전 L0 삭제 보류, 최대 7일 후 CRITICAL 로그와 함께 만료.
       - KRX_ALPHA_REPAIR_JOB_ENABLED=true
+      - KRX_ALPHA_REPAIR_HOLD_ENABLED=true
+      - KRX_ALPHA_REPAIR_MERGE_REQUIRED=true
       # 분봉 백필은 Toss가 KRX+NXT 통합 테이프라 G-MINUTE FAIL; KIS 소스 전환(Part 5) 전까지 비활성.
     volumes:
       - ./data:/app/data
