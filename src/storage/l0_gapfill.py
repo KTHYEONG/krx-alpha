@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import bisect
+import datetime as dt
 import json
 import os
 import pathlib
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any
 
 import polars as pl
+
+from src.core.paths import DataPaths
 
 _TAPE_COLUMNS = ("symbol", "ts_hms", "price", "volume")
 _ROW_SCHEMA: dict[str, Any] = {
@@ -54,7 +59,7 @@ class GapfillInterval:
 
 def _audit_intervals(audit: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
     return [
-        (str(ledger["symbol"]), interval)
+        (str(ledger["symbol"]).zfill(6), interval)
         for ledger in audit.get("symbols", ())
         for interval in ledger.get("intervals", ())
         if int(interval.get("missing_trades", 0)) > 0 and interval.get("chetime_prev") and interval.get("chetime_next")
@@ -283,3 +288,83 @@ def write_gapfill(
         except OSError:
             tmp.unlink(missing_ok=True)
             raise
+
+
+def received_trades_for_gaps(
+    audit: Mapping[str, Any], journal_root: pathlib.Path, *, vendor: str, day: dt.date
+) -> dict[tuple[str, int], list[tuple[int, int, int]]]:
+    """Live (cum, price, volume) per (symbol, chetime) for every second touched by an audited gap; read-only."""
+    from src.storage.l0_audit import iter_received_ticks
+
+    ranges: dict[str, list[tuple[int, int]]] = {}
+    for ledger in audit.get("symbols", ()):
+        if not isinstance(ledger, Mapping):
+            continue
+        symbol = ledger.get("symbol")
+        intervals = ledger.get("intervals", ())
+        if not isinstance(symbol, str) or not isinstance(intervals, Sequence):
+            continue
+        for interval in intervals:
+            if not isinstance(interval, Mapping):
+                continue
+            prev = interval.get("chetime_prev")
+            nxt = interval.get("chetime_next")
+            if prev is None or nxt is None:
+                continue
+            try:
+                lo, hi = int(prev), int(nxt)
+            except (TypeError, ValueError):
+                continue
+            if lo <= hi:
+                ranges.setdefault(symbol.zfill(6), []).append((lo, hi))
+    wanted: dict[str, list[tuple[int, int]]] = {}
+    for symbol, intervals in ranges.items():
+        merged: list[tuple[int, int]] = []
+        for lo, hi in sorted(intervals):
+            if merged and lo <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(hi, merged[-1][1]))
+            else:
+                merged.append((lo, hi))
+        wanted[symbol] = merged
+    found: dict[tuple[str, int], list[tuple[int, int, int]]] = {}
+    for tick in iter_received_ticks(journal_root, vendor=vendor, venue="krx", session="regular", day=day):
+        symbol = tick.symbol.zfill(6)
+        spans = wanted.get(symbol, [])
+        index = bisect.bisect_right(spans, (tick.chetime, float("inf"))) - 1
+        if index >= 0 and tick.chetime <= spans[index][1]:
+            found.setdefault((symbol, tick.chetime), []).append((tick.cum, tick.price, tick.volume))
+    return found
+
+
+def load_tape_for_symbols(
+    paths: DataPaths, day: dt.date, symbols: AbstractSet[str]
+) -> pl.DataFrame:
+    """Kiwoom tape rows (`symbol`, `ts_hms`, `price`, `volume`) of `day` restricted to `symbols`; empty frame with that schema when no partition exists."""
+    schema: dict[str, Any] = {
+        "symbol": pl.String,
+        "ts_hms": pl.Int64,
+        "price": pl.Int64,
+        "volume": pl.Int64,
+    }
+    wanted = {str(symbol).zfill(6) for symbol in symbols if str(symbol)}
+    if not wanted:
+        return pl.DataFrame(schema=schema)
+    partition = paths.tick_tape_root / f"dt={day.isoformat()}"
+    try:
+        files = sorted(partition.glob("*.parquet")) if partition.is_dir() else []
+    except OSError:
+        files = []
+    if not files:
+        return pl.DataFrame(schema=schema)
+    frame = (
+        pl.scan_parquet(list(files))
+        .select(
+            pl.col("symbol").cast(pl.String).str.zfill(6).alias("symbol"),
+            pl.col("ts_hms").cast(pl.Int64),
+            pl.col("price").cast(pl.Int64),
+            pl.col("volume").cast(pl.Int64),
+        )
+        .filter(pl.col("symbol").is_in(wanted))
+        .collect(engine="streaming")
+    )
+    return frame.select(list(schema)).cast(schema)  # type: ignore[arg-type]

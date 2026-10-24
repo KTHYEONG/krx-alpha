@@ -30,6 +30,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
         gapfill_ticks,
         order,
         probe_db_stream,
+        repair_ticks,
         toss_program_trades_backfill,
         universe_plan,
         universe_replay,
@@ -45,6 +46,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
     gapfill_ticks.add_parser(subparsers)
     backfill_tick_tape.add_parser(subparsers)
     backfill_minute_bars.add_parser(subparsers)
+    repair_ticks.add_parser(subparsers)
     collect_aftermarket.add_parser(subparsers)
     collect_premarket.add_parser(subparsers)
     collect_regular_kis.add_parser(subparsers)
@@ -67,9 +69,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI 실행 진입점."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    repair_preview = args.command == "repair-ticks" and args.dry_run
     configure_logging(
         f"cli-{args.command}",
-        log_dir=CollectorSettings().paths.logs_dir if ObservabilitySettings().persistent_logs else None,
+        log_dir=CollectorSettings().paths.logs_dir if ObservabilitySettings().persistent_logs and not repair_preview else None,
         level=str(args.log_level).upper(),
         alert_ledger_path=CollectorSettings().paths.alert_ledger_file,
     )
