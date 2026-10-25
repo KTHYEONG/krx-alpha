@@ -62,12 +62,21 @@ def _last_completed_session(today: dt.date, paths: DataPaths) -> dt.date:
     raise ValueError("tick-tape current calendar unavailable")
 
 
+_CALENDAR_LOOKBACK_DAYS = 10
+
+
 def _calendar_previous(day: dt.date, paths: DataPaths) -> dt.date | None:
     from src.marketdata.toss_calendar import load_trading_day_cache, trading_day_from_cache
 
     cached = load_trading_day_cache(paths.calendar_cache)
     derived = trading_day_from_cache(cached, day) if cached is not None else None
-    return derived.previous_business_day if derived is not None else None
+    if derived is not None:
+        return derived.previous_business_day
+    for offset in range(1, _CALENDAR_LOOKBACK_DAYS + 1):
+        candidate = day - dt.timedelta(days=offset)
+        if (paths.session_calendar_dir / f"dt={candidate.isoformat()}.json").is_file():
+            return candidate
+    return None
 
 
 def resolve_backfill_sessions(paths: DataPaths, window_sessions: int, today: dt.date) -> tuple[dt.date, ...]:

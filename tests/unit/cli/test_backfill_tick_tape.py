@@ -8,6 +8,7 @@ import pathlib
 from zoneinfo import ZoneInfo
 
 import polars as pl
+import pytest
 
 from src.cli import backfill_tick_tape as cli
 from src.cli.main import build_parser
@@ -121,6 +122,51 @@ def test_sessions_honor_calendar_cache(tmp_path: pathlib.Path) -> None:
         ),
     )
     assert cli.resolve_backfill_sessions(paths, 1, dt.date(2026, 10, 19)) == (dt.date(2026, 10, 16),)
+
+
+def test_sessions_lag_one_session_when_cache_rolled_past_upper(tmp_path: pathlib.Path) -> None:
+    from src.core.paths import DataPaths
+    from src.marketdata.toss_calendar import TradingDay, save_trading_day_cache
+
+    paths = DataPaths(tmp_path)
+    _history(paths, dt.date(2026, 10, 23))
+    paths.session_calendar_dir.mkdir(parents=True)
+    for day in (dt.date(2026, 10, 22), dt.date(2026, 10, 23), dt.date(2026, 10, 26)):
+        (paths.session_calendar_dir / f"dt={day.isoformat()}.json").write_text("{}", encoding="utf-8")
+    save_trading_day_cache(
+        paths.calendar_cache,
+        TradingDay(
+            date=dt.date(2026, 10, 24),
+            is_business_day=False,
+            previous_business_day=dt.date(2026, 10, 23),
+            next_business_day=dt.date(2026, 10, 26),
+        ),
+    )
+    sessions = cli.resolve_backfill_sessions(paths, 5, dt.date(2026, 10, 25))
+    assert sessions[-1] == dt.date(2026, 10, 23)
+    assert len(sessions) == 5
+
+
+def test_sessions_stay_incomplete_when_a_session_is_missing_before_upper(tmp_path: pathlib.Path) -> None:
+    from src.core.paths import DataPaths
+    from src.marketdata.toss_calendar import TradingDay, save_trading_day_cache
+
+    paths = DataPaths(tmp_path)
+    _history(paths, dt.date(2026, 10, 22))
+    paths.session_calendar_dir.mkdir(parents=True)
+    for day in (dt.date(2026, 10, 22), dt.date(2026, 10, 23)):
+        (paths.session_calendar_dir / f"dt={day.isoformat()}.json").write_text("{}", encoding="utf-8")
+    save_trading_day_cache(
+        paths.calendar_cache,
+        TradingDay(
+            date=dt.date(2026, 10, 24),
+            is_business_day=False,
+            previous_business_day=dt.date(2026, 10, 23),
+            next_business_day=dt.date(2026, 10, 26),
+        ),
+    )
+    with pytest.raises(ValueError, match="calendar incomplete"):
+        cli.resolve_backfill_sessions(paths, 5, dt.date(2026, 10, 25))
 
 
 def test_parse_deadline_variants() -> None:
