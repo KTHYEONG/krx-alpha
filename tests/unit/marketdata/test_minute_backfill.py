@@ -498,6 +498,18 @@ def test_market_freeze_admits_no_requests(tmp_path: pathlib.Path, monkeypatch) -
     assert fake.calls == []
 
 
+def test_configured_freeze_window_admits_requests_outside_it(tmp_path: pathlib.Path, monkeypatch) -> None:
+    fake = _FakeKisData({("A", _D): [[]]})
+    _isolate(monkeypatch, fake)
+    moved = _settings().model_copy(update={"freeze_start_kst": dt.time(23, 0), "freeze_end_kst": dt.time(23, 30)})
+    run_minute_backfill(
+        targets=[MinuteTarget("A", (_D,), {_D: "live"})],
+        paths=DataPaths(tmp_path), settings=moved, credentials=_creds(),
+        deadline=_deadline(), session=fake, now=lambda: _EVENING.replace(hour=10), run_id="moved-freeze",
+    )
+    assert fake.calls != []
+
+
 def test_successful_chunk_flush_preserves_all_symbols(tmp_path: pathlib.Path, monkeypatch) -> None:
     monkeypatch.setattr(backfill_mod, "_FLUSH_ROW_LIMIT", 1)
     paths = DataPaths(tmp_path)

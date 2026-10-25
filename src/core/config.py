@@ -350,6 +350,8 @@ class MinuteBackfillSettings(BaseSettings):
     max_calls_per_run: int = Field(default=60000, ge=1)
     history_start: dt.date = dt.date(2025, 10, 27)
     request_timeout_s: float = Field(default=10.0, gt=0)
+    freeze_start_kst: dt.time = dt.time(8, 10)
+    freeze_end_kst: dt.time = dt.time(22, 0)
 
 
 class DbCredentials(BaseSettings):

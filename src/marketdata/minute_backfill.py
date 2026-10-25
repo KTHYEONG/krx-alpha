@@ -292,7 +292,7 @@ def run_minute_backfill(
     def _boundary() -> dt.datetime:
         nonlocal boundary_stopped
         current = now().astimezone(_KST)
-        if calls_used >= settings.max_calls_per_run or current >= deadline or dt.time(8, 10) <= current.time() < dt.time(22):
+        if calls_used >= settings.max_calls_per_run or current >= deadline or settings.freeze_start_kst <= current.time() < settings.freeze_end_kst:
             boundary_stopped = True
             raise MinuteBackfillBoundaryError("EXHAUSTED", "minute-history request boundary")
         return current
