@@ -40,7 +40,10 @@ def walk_kis_minute_day(
     fetch: Callable[[int], tuple[KisMinuteBar, ...]],
     max_calls: int,
 ) -> KisMinuteDay:
-    """Page one symbol-day backward from 153000 until 090000 is covered or the vendor returns no bars; return status and bars ascending."""
+    """Page one symbol-day backward from 153000 until 090000 is covered or the vendor returns no bars; return status and bars ascending.
+
+    A vendor that repeats its already-seen earliest page below the first traded minute marks the day floor (``vendor_floor``).
+    """
     if max_calls < 1:
         raise ValueError("max_calls must be >= 1")
     cursor = _SESSION_HI
@@ -62,7 +65,10 @@ def walk_kis_minute_day(
                 return KisMinuteDay("complete", "", tuple(kept[k] for k in sorted(kept)), calls, discarded)
             return KisMinuteDay(status="incomplete", reason="exhausted", bars=(), calls=calls)
         earliest_raw = min(bar.ts_hms for bar in page)
-        if earliest_raw >= cursor:
+        if earliest_raw > cursor:
+            if kept and all(bar.ts_hms in seen for bar in page):
+                ordered = tuple(kept[key] for key in sorted(kept))
+                return KisMinuteDay("complete", "vendor_floor", ordered, calls, discarded)
             raise KisApiError("PAGINATION", f"minute page made no progress for {symbol}")
         for bar in page:
             if bar.day != day:

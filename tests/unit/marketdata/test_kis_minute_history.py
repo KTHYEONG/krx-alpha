@@ -50,7 +50,38 @@ def test_full_day_in_four_calls() -> None:
 
 def test_non_progress_guard() -> None:
     def _fetch(before_hms: int) -> tuple[KisMinuteBar, ...]:
-        return (_bar(before_hms),)
+        return (_bar(150000),) if before_hms >= 150000 else (_bar(150500),)
+
+    with pytest.raises(KisApiError):
+        walk_kis_minute_day("A", _DAY, fetch=_fetch, max_calls=4)
+
+
+def test_bar_at_session_high_on_first_page_is_progress() -> None:
+    def _fetch(before_hms: int) -> tuple[KisMinuteBar, ...]:
+        return (_bar(153000),) if before_hms >= 153000 else ()
+
+    walked = walk_kis_minute_day("A", _DAY, fetch=_fetch, max_calls=4)
+    assert walked.status == "incomplete"
+    assert walked.calls == 2
+
+
+def test_repeated_floor_page_completes_thin_symbol_day() -> None:
+    thin = [_bar(_hms(m)) for m in range(2, 391, 7)]
+    ordered = sorted(thin, key=lambda b: b.ts_hms, reverse=True)
+    floor = ordered[-1]
+
+    def _fetch(before_hms: int) -> tuple[KisMinuteBar, ...]:
+        page = tuple(bar for bar in ordered if bar.ts_hms <= before_hms)[:120]
+        return page if page else (floor,)
+
+    walked = walk_kis_minute_day("A", _DAY, fetch=_fetch, max_calls=10)
+    assert (walked.status, walked.reason) == ("complete", "vendor_floor")
+    assert [bar.ts_hms for bar in walked.bars] == sorted(bar.ts_hms for bar in thin)
+
+
+def test_repeated_page_without_any_kept_bar_is_still_a_guard() -> None:
+    def _fetch(before_hms: int) -> tuple[KisMinuteBar, ...]:
+        return (_bar(155000),)
 
     with pytest.raises(KisApiError):
         walk_kis_minute_day("A", _DAY, fetch=_fetch, max_calls=4)

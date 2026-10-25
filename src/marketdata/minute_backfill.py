@@ -388,7 +388,11 @@ def run_minute_backfill(
                 break
             except Exception as exc:
                 logger.warning(
-                    "[DATA] stage=minute_history symbol=%s status=FAIL reason=%s", target.symbol, type(exc).__name__
+                    "[DATA] stage=minute_history symbol=%s day=%s status=FAIL reason=%s msg_cd=%s",
+                    target.symbol,
+                    day.isoformat(),
+                    type(exc).__name__,
+                    getattr(exc, "msg_cd", ""),
                 )
                 failed += 1
                 continue
