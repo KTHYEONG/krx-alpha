@@ -267,7 +267,7 @@ def test_streamed_days_survive_a_later_symbol_crash_via_checkpoint(tmp_path, mon
     assert pl.read_parquet(paths.tick_tape_partition(DAY, "regression"))["symbol"].unique().to_list() == ["A"]
 
 
-def test_symbol_failure_discards_its_staged_days(tmp_path, monkeypatch):
+def test_symbol_failure_discards_its_staged_days(tmp_path, monkeypatch, caplog):
     _mute_sleep(monkeypatch)
     paths = DataPaths(tmp_path)
 
@@ -279,6 +279,7 @@ def test_symbol_failure_discards_its_staged_days(tmp_path, monkeypatch):
     result = _run(paths, _Session(), targets=[module.TickTapeTarget("A", (DAY,), 1.0)])
     assert result.failed == 1
     assert result.symbol_days == 0
+    assert "symbol=A status=FAIL reason=KiwoomTickTapeError msg=tape is not newest-first" in caplog.text
     assert not paths.tick_tape_ledger.exists()
     assert list((paths.work_root / "tick_tape").rglob("*.parquet")) == []
 

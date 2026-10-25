@@ -531,7 +531,10 @@ def run_tick_tape_backfill(
         except Exception as exc:
             _discard_symbol()
             logger.warning(
-                "[DATA] stage=tick_tape symbol=%s status=FAIL reason=%s", target.symbol, type(exc).__name__
+                "[DATA] stage=tick_tape symbol=%s status=FAIL reason=%s msg=%s",
+                target.symbol,
+                type(exc).__name__,
+                exc,
             )
             failed += 1
             continue
