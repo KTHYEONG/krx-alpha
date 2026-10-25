@@ -18,6 +18,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Literal
 
+import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -65,6 +66,8 @@ class RepairedTicksSummary:
     audit_trades_received: int | None = None
     deduped_late_live: int = 0
     overfill_dropped: int = 0
+    tape_topup_rows: int = 0
+    tape_topup_unplaced: int = 0
 
 
 @dataclass(frozen=True)
@@ -249,6 +252,132 @@ def _read_gapfill_rows(
     except (OSError, ValueError, pa.ArrowException, sqlite3.Error) as exc:
         raise ValueError(f"gap-fill rows unreadable for {day.isoformat()} {vendor}") from exc
     return _FilledRows(db, height)
+
+
+def _load_tape_rows(paths: DataPaths, day: dt.date, symbols: set[str]) -> pl.DataFrame:
+    """Kiwoom tape rows (`symbol`, `s`, `price`, `volume`, `tape_seq`) for `symbols`, one run per symbol."""
+    schema: dict[str, Any] = {
+        "symbol": pl.String, "s": pl.Int64, "price": pl.Int64, "volume": pl.Int64, "tape_seq": pl.Int64
+    }
+    partition = paths.tick_tape_root / f"dt={day.isoformat()}"
+    try:
+        files = sorted(partition.glob("*.parquet")) if partition.is_dir() else []
+    except OSError:
+        files = []
+    if not files or not symbols:
+        return pl.DataFrame(schema=schema)
+    lazy = pl.scan_parquet([str(path) for path in files])
+    present = set(lazy.collect_schema().names())
+    frame = (
+        lazy.select(
+            pl.col("symbol").cast(pl.String).str.zfill(6),
+            pl.col("ts_hms").cast(pl.Int64).alias("s"),
+            pl.col("price").cast(pl.Int64),
+            pl.col("volume").cast(pl.Int64),
+            (pl.col("tape_seq").cast(pl.Int64) if "tape_seq" in present else pl.int_range(pl.len()).cast(pl.Int64)).alias("tape_seq"),
+            (pl.col("run_id").cast(pl.String) if "run_id" in present else pl.lit("")).alias("run_id"),
+        )
+        .filter(pl.col("symbol").is_in(list(symbols)))
+        .collect(engine="streaming")
+    )
+    frame = frame.with_columns(pl.len().over(["symbol", "run_id"]).alias("_n"))
+    frame = frame.filter(pl.col("_n") == pl.col("_n").max().over("symbol"))
+    frame = frame.filter(pl.col("run_id") == pl.col("run_id").min().over("symbol"))
+    return frame.select(list(schema)).cast(schema)  # type: ignore[arg-type]
+
+
+def _apply_tape_topup(paths: DataPaths, day: dt.date, merged_path: pathlib.Path) -> tuple[int, int]:
+    """Place tape trades absent from the merged table into its free counter slots, rewriting `merged_path`.
+
+    A trade is absent when the tape holds more (symbol, second, price, volume) trades than the table. It takes
+    the earliest free cum slot whose neighbouring rows bracket its second; unmatched trades are counted and skipped.
+    Returns (rows added, trades left unplaced).
+    """
+    merged = pl.scan_parquet(str(merged_path))
+    covered = set(merged.select("symbol").unique().collect()["symbol"].to_list())
+    tape = _load_tape_rows(paths, day, covered)
+    if tape.is_empty():
+        return 0, 0
+    live = (
+        merged.filter(pl.col("symbol").is_in(tape["symbol"].unique().to_list()))
+        .select("symbol", pl.col("chetime").cast(pl.Int64).alias("s"), "price", "volume", "cum")
+        .collect(engine="streaming")
+    )
+    keys = ["symbol", "s", "price", "volume"]
+    have = live.group_by(keys).len().rename({"len": "have"})
+    need = (
+        tape.group_by(keys)
+        .agg(pl.len().alias("want"), pl.col("tape_seq").sort().alias("seqs"))
+        .join(have, on=keys, how="left")
+        .with_columns(pl.col("have").fill_null(0))
+        .filter(pl.col("want") > pl.col("have"))
+    )
+    if need.is_empty():
+        return 0, 0
+    missing: dict[str, list[tuple[int, int, int, int]]] = {}
+    for symbol, second, price, volume, want, have_n, seqs in need.select(
+        *keys, "want", "have", "seqs"
+    ).iter_rows():
+        for seq in seqs[: want - have_n]:
+            missing.setdefault(symbol, []).append((second, seq, price, volume))
+    ordered = live.sort("cum").unique(subset=["symbol", "cum"], keep="first", maintain_order=True)
+    gaps = (
+        ordered.with_columns(
+            pl.col("cum").shift(1).over("symbol").fill_null(0).alias("lo"),
+            pl.col("s").shift(1).over("symbol").fill_null(0).alias("t_prev"),
+        )
+        .filter(pl.col("cum") - pl.col("lo") > 1)
+        .select("symbol", "lo", pl.col("cum").alias("hi"), "t_prev", pl.col("s").alias("t_next"))
+        .sort(["symbol", "lo"])
+    )
+    gap_by_symbol: dict[str, list[tuple[int, int, int, int]]] = {}
+    for symbol, lo, hi, t_prev, t_next in gaps.iter_rows():
+        gap_by_symbol.setdefault(symbol, []).append((lo, hi, t_prev, t_next))
+    placed: list[tuple[str, str, int, int, int]] = []
+    unplaced = 0
+    for symbol, trades in missing.items():
+        trades.sort()
+        used = [False] * len(trades)
+        pointer = 0
+        for lo, hi, t_prev, t_next in gap_by_symbol.get(symbol, ()):
+            slot = lo + 1
+            while pointer < len(trades) and (used[pointer] or trades[pointer][0] < t_prev):
+                pointer += 1
+            index = pointer
+            while index < len(trades) and slot < hi and trades[index][0] <= t_next:
+                if not used[index]:
+                    second, _, price, volume = trades[index]
+                    placed.append((symbol, f"{second:06d}", price, volume, slot))
+                    used[index] = True
+                    slot += 1
+                index += 1
+        unplaced += used.count(False)
+    if not placed:
+        return 0, unplaced
+    extra = pa.table(
+        {
+            "symbol": pa.array([row[0] for row in placed], pa.string()),
+            "chetime": pa.array([row[1] for row in placed], pa.string()),
+            "price": pa.array([row[2] for row in placed], pa.int64()),
+            "volume": pa.array([row[3] for row in placed], pa.int64()),
+            "cum": pa.array([row[4] for row in placed], pa.int64()),
+            "source": pa.array(["tape_topup"] * len(placed), pa.string()),
+            "interval_id": pa.array([None] * len(placed), pa.int64()),
+            "recv_wall_ns": pa.array([None] * len(placed), pa.int64()),
+        },
+        schema=_OUTPUT_SCHEMA,
+    )
+    rewritten = merged_path.parent / f".{merged_path.name}.{os.getpid()}.topup"
+    try:
+        with pq.ParquetFile(merged_path) as source, pq.ParquetWriter(rewritten, _OUTPUT_SCHEMA, compression="zstd") as out:
+            for batch in source.iter_batches(batch_size=250_000):
+                out.write_table(pa.Table.from_batches([batch], schema=_OUTPUT_SCHEMA))
+            out.write_table(extra)
+        os.replace(rewritten, merged_path)
+    except BaseException:
+        rewritten.unlink(missing_ok=True)
+        raise
+    return len(placed), unplaced
 
 
 def _mismatch(
@@ -451,6 +580,14 @@ def _build_repaired_ticks(
     if confirmed != filled_rows + residual:
         count_note = "gapfill_counts_intervals"
     try:
+        topup_rows, topup_unplaced = _apply_tape_topup(paths, day, tmp)
+    except (OSError, pl.exceptions.PolarsError, pa.ArrowException) as exc:
+        logger.warning("[DATA] stage=repair_merge day=%s vendor=%s tape_topup=SKIPPED reason=%s", day.isoformat(), vendor, type(exc).__name__)
+        topup_rows = topup_unplaced = 0
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    try:
         os.replace(tmp, target)
     except OSError:
         tmp.unlink(missing_ok=True)
@@ -472,6 +609,8 @@ def _build_repaired_ticks(
         "count_note": count_note,
         "deduped_late_live": deduped,
         "overfill_dropped": overfill_dropped,
+        "tape_topup_rows": topup_rows,
+        "tape_topup_unplaced": topup_unplaced,
         "generated_at": time.time_ns(),
     }
     summary_tmp = summary_path.parent / f".{summary_path.name}.{os.getpid()}.tmp"
@@ -484,13 +623,16 @@ def _build_repaired_ticks(
             target.unlink(missing_ok=True)
         raise
     logger.info(
-        "[DATA] stage=repair_merge day=%s vendor=%s live=%d filled=%d deduped=%d overfill_dropped=%d residual=%d status=OK",
+        "[DATA] stage=repair_merge day=%s vendor=%s live=%d filled=%d deduped=%d overfill_dropped=%d "
+        "topup=%d topup_unplaced=%d residual=%d status=OK",
         day.isoformat(),
         vendor,
         live_rows,
         filled_rows,
         deduped,
         overfill_dropped,
+        topup_rows,
+        topup_unplaced,
         residual,
     )
     return RepairedTicksSummary(
@@ -507,6 +649,8 @@ def _build_repaired_ticks(
         received,
         deduped,
         overfill_dropped,
+        topup_rows,
+        topup_unplaced,
     )
 
 
@@ -524,7 +668,8 @@ def repaired_ticks_valid(paths: DataPaths, day: dt.date, vendor: str) -> bool:
         if any(type(value) is not int or value < 0 for value in counts) or counts[0] != counts[2]:
             return False
         metadata = pq.read_metadata(paths.repaired_ticks_path(day, vendor))
-        if metadata.num_rows != counts[0] + counts[1]:
+        topup = doc.get("tape_topup_rows", 0)
+        if type(topup) is not int or topup < 0 or metadata.num_rows != counts[0] + counts[1] + topup:
             return False
         audit_raw = paths.session_audit_path(day, vendor).read_bytes()
     except (OSError, ValueError, pa.ArrowException):

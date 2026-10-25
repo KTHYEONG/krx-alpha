@@ -1439,3 +1439,58 @@ def test_legacy_receipt_count_includes_duplicates_and_no_counter_symbols(tmp_pat
     summary = json.loads(paths.repair_summary_path(DAY, "ls").read_bytes())
     assert summary["live_rows"] == summary["audit_trades_received"] == 4
     assert summary["audit_trades_observed"] == 1
+
+
+def _write_tape(paths: DataPaths, rows: list[tuple[str, int, int, int, int]]) -> None:
+    """rows: (symbol, tape_seq, ts_hms, price, volume)."""
+    target = paths.tick_tape_partition(DAY, "r1")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "symbol": [row[0] for row in rows],
+            "tape_seq": [row[1] for row in rows],
+            "ts_hms": [row[2] for row in rows],
+            "price": [row[3] for row in rows],
+            "volume": [row[4] for row in rows],
+            "run_id": ["r1"] * len(rows),
+        }
+    ).write_parquet(target)
+
+
+def _topup_day(paths: DataPaths, tape: list[tuple[str, int, int, int, int]]):
+    from src.storage.l0_repair_merge import build_repaired_ticks
+
+    _write_journal(paths, DAY, "ls", [("000001", "090000", 10), ("000001", "090002", 14)])
+    _write_audit(paths, DAY, "ls", observed=2, confirmed=0)
+    _write_tape(paths, tape)
+    return build_repaired_ticks(paths=paths, journal_root=paths.journal_root, day=DAY, vendor="ls")
+
+
+def test_tape_trades_absent_from_table_take_free_slots(tmp_path) -> None:
+    from src.storage.l0_repair_merge import repaired_ticks_valid
+
+    paths = DataPaths(tmp_path)
+    tape = [("000001", 0, 90000, 100, 1), *[("000001", i, 90001, 100, 1) for i in (1, 2, 3)], ("000001", 4, 90002, 100, 1)]
+    summary = _topup_day(paths, tape)
+    assert (summary.status, summary.tape_topup_rows, summary.tape_topup_unplaced) == ("OK", 3, 0)
+    frame = pl.read_parquet(paths.repaired_ticks_path(DAY, "ls")).filter(pl.col("source") == "tape_topup")
+    assert sorted(frame["cum"].to_list()) == [11, 12, 13]
+    assert set(frame["chetime"].to_list()) == {"090001"}
+    assert repaired_ticks_valid(paths, DAY, "ls")
+
+
+def test_tape_topup_leaves_unplaceable_trades_and_never_collides(tmp_path) -> None:
+    paths = DataPaths(tmp_path)
+    tape = [("000001", 0, 90001, 100, 1), ("000001", 1, 90001, 100, 1), ("000001", 2, 90001, 100, 1),
+            ("000001", 3, 90001, 100, 1), ("000001", 4, 90001, 100, 1), ("000001", 5, 93000, 100, 1)]
+    summary = _topup_day(paths, tape)
+    assert (summary.tape_topup_rows, summary.tape_topup_unplaced) == (3, 3)
+    cums = pl.read_parquet(paths.repaired_ticks_path(DAY, "ls"))["cum"].to_list()
+    assert len(cums) == len(set(cums)) == 5
+
+
+def test_tape_topup_is_noop_without_tape_or_when_complete(tmp_path) -> None:
+    paths = DataPaths(tmp_path)
+    summary = _topup_day(paths, [("000001", 0, 90000, 100, 1), ("000001", 1, 90002, 100, 1)])
+    assert (summary.tape_topup_rows, summary.tape_topup_unplaced) == (0, 0)
+    assert pl.read_parquet(paths.repaired_ticks_path(DAY, "ls")).height == 2
