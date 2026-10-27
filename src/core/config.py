@@ -371,6 +371,8 @@ class RcloneArchiveSettings(BaseSettings):
     remote_name: str = "gdrive"
     remote_path: str = "quant-lake/live/krx-alpha/data"
     rclone_timeout_s: float = 600.0
+    # Kept well under rclone_timeout_s so a stalled transfer is retried by rclone itself before the call is killed.
+    rclone_io_idle_timeout_s: float = Field(default=60.0, gt=0)
 
 
 class KisCredentials(BaseSettings):

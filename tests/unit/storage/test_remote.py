@@ -967,3 +967,27 @@ def test_every_rclone_call_reports_progress(tmp_path) -> None:
 
     # 타임아웃으로 끝난 호출을 포함해 rclone 호출마다 정확히 한 번씩 진행 신호가 나간다.
     assert len(progress) == len(calls) >= 2
+
+
+def test_io_idle_timeout_is_passed_to_every_rclone_call(tmp_path, monkeypatch) -> None:
+    import json
+    from types import SimpleNamespace
+
+    from src.storage import remote
+    from src.storage.remote import GDriveArchiver
+
+    calls: list[list[str]] = []
+
+    def _runner(args, **kwargs):
+        calls.append(list(args))
+        return SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr="")
+
+    monkeypatch.setattr(remote.shutil, "which", lambda name: "/usr/bin/rclone")
+    monkeypatch.setenv("KRX_ALPHA_BACKUP_RCLONE_IO_IDLE_TIMEOUT_S", "45")
+    archiver = GDriveArchiver.try_from_env()
+    assert archiver is not None
+    archiver._runner = _runner  # noqa: SLF001 - capture the argv without a real rclone
+    archiver.remote_files("l1/")
+
+    assert calls == [[*calls[0][:-2], "--timeout", "45s"]]
+    assert GDriveArchiver(runner=_runner)._idle_flags == []  # noqa: SLF001 - explicit construction stays flag-free

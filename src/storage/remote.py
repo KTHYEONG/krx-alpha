@@ -62,6 +62,7 @@ class GDriveArchiver:
         remote_path: str | None = None,
         runner: Callable[..., Any] | None = None,
         timeout_s: float = 600.0,
+        io_idle_timeout_s: float | None = None,
     ) -> None:
         cfg_name = getattr(config, "remote_name", None) if config is not None else None
         cfg_path = getattr(config, "remote_path", None) if config is not None else None
@@ -72,6 +73,7 @@ class GDriveArchiver:
         )
         self._runner = runner if runner is not None else (cfg_runner or subprocess.run)
         self._timeout_s = timeout_s
+        self._idle_flags = [] if io_idle_timeout_s is None else ["--timeout", f"{io_idle_timeout_s:g}s"]
         self._progress: Callable[[], None] | None = None
 
     def bind_progress(self, progress: Callable[[], None] | None) -> None:
@@ -87,10 +89,12 @@ class GDriveArchiver:
             remote_name=settings.remote_name,
             remote_path=settings.remote_path,
             timeout_s=settings.rclone_timeout_s,
+            io_idle_timeout_s=settings.rclone_io_idle_timeout_s,
         )
 
     def _run(self, cmd: list[str]) -> Any:
         """Run one rclone call; a timeout surfaces as a non-zero result."""
+        cmd = [*cmd, *self._idle_flags]
         try:
             return self._runner(cmd, capture_output=True, text=True, check=False, timeout=self._timeout_s)
         except subprocess.TimeoutExpired as exc:
