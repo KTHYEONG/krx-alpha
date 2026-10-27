@@ -522,7 +522,7 @@ def test_sync_manifest_tree_raises_on_unverified_upload(tmp_path):
     manifest = tmp_path / 'a.json'
     manifest.write_text('{}', encoding='utf-8')
 
-    for mode, message in (('copy_failure', 'upload failed'), ('stale_size', 'verify failed')):
+    for mode, message in (('copy_failure', 'upload_failed rc=1 detail=network down'), ('stale_size', 'size_mismatch')):
         def _runner(args, _mode=mode, **kwargs):
             if 'copyto' in args:
                 if _mode == 'copy_failure':
@@ -602,6 +602,29 @@ def test_sync_l1_tree_lists_l1_prefix_once_with_fast_list(tmp_path) -> None:
     assert len(recursive) == 1
     assert stats.uploaded == 3
     assert len(singles) == 3
+
+
+def test_sync_manifest_tree_retries_transient_failure_once(tmp_path) -> None:
+    import json
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    (tmp_path / "a.json").write_text("{}", encoding="utf-8")
+    copies: list[int] = []
+
+    def _runner(args, **kwargs):
+        if "--recursive" in args:
+            return SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr="")
+        if args[1] == "copyto":
+            copies.append(1)
+            return SimpleNamespace(returncode=1 if len(copies) == 1 else 0, stdout="", stderr="network down")
+        return SimpleNamespace(returncode=0, stdout=json.dumps([{"Path": "x", "Size": 2, "IsDir": False}]), stderr="")
+
+    stats = GDriveArchiver(remote_name="gdrive", remote_path="q", runner=_runner).sync_manifest_tree(tmp_path)
+
+    assert stats.uploaded == 1
+    assert len(copies) == 2
 
 
 def test_sync_manifest_tree_lists_manifests_prefix_once_sorted(tmp_path) -> None:

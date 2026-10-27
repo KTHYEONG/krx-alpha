@@ -177,8 +177,8 @@ class GDriveArchiver:
             sizes[path] = size
         return sizes
 
-    def _upload_l1(self, local: pathlib.Path, repo_path: str, local_size: int) -> str | None:
-        """Upload one L1 object and verify its remote size; return a failure reason or None when verified."""
+    def _upload_verified(self, local: pathlib.Path, repo_path: str, local_size: int) -> str | None:
+        """Upload one object and verify its remote size; return a failure reason or None when verified."""
         dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
         result = self._run(["rclone", "copyto", str(local), dest])
         if result.returncode != 0:
@@ -204,7 +204,7 @@ class GDriveArchiver:
                 if sizes.get(repo_path) == local_size:
                     stats.skipped_verified += 1
                     continue
-                reason = self._upload_l1(pq, repo_path, local_size)
+                reason = self._upload_verified(pq, repo_path, local_size)
                 if reason is None:
                     stats.uploaded += 1
                     sizes[repo_path] = local_size
@@ -217,7 +217,7 @@ class GDriveArchiver:
                     progress()
         for pq, repo_path, local_size in retry:
             try:
-                reason = self._upload_l1(pq, repo_path, local_size)
+                reason = self._upload_verified(pq, repo_path, local_size)
                 if reason is None:
                     stats.uploaded += 1
                     sizes[repo_path] = local_size
@@ -231,21 +231,28 @@ class GDriveArchiver:
         return stats
 
     def sync_manifest_tree(self, manifest_root: pathlib.Path) -> SyncStats:
+        """Upload manifests whose remote size differs; a failed one is retried once after the pass, then raises."""
         root = pathlib.Path(manifest_root)
         sizes = self.remote_file_sizes("manifests/")
         stats = SyncStats()
+        retry: list[tuple[pathlib.Path, str, int]] = []
         for jf in sorted(path for path in root.rglob("*") if path.is_file() and path.suffix in {".json", ".jsonl"}):
             repo_path = self.manifest_repo_path_for(root, jf)
             local_size = jf.stat().st_size
             if sizes.get(repo_path) == local_size:
                 stats.skipped_verified += 1
                 continue
-            dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
-            result = self._run(["rclone", "copyto", str(jf), dest])
-            if result.returncode != 0:
-                raise RemoteArchiveError(f"upload failed: {repo_path} {result.stderr}")
-            if self._remote_size(repo_path) != local_size:
-                raise RemoteArchiveError(f"verify failed: {repo_path}")
+            reason = self._upload_verified(jf, repo_path, local_size)
+            if reason is None:
+                stats.uploaded += 1
+                sizes[repo_path] = local_size
+                continue
+            logger.warning("[DATA] stage=manifest_offload status=RETRY path=%s reason=%s", repo_path, reason)
+            retry.append((jf, repo_path, local_size))
+        for jf, repo_path, local_size in retry:
+            reason = self._upload_verified(jf, repo_path, local_size)
+            if reason is not None:
+                raise RemoteArchiveError(f"manifest offload failed: {repo_path} {reason}")
             stats.uploaded += 1
             sizes[repo_path] = local_size
         return stats
