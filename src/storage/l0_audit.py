@@ -44,6 +44,7 @@ _TICK_STREAM: Final = "H0STCNT0"
 _LEDGER_VENDORS: Final[frozenset[str]] = frozenset({"ls", "kis"})
 _BATCH_BYTES: Final = 32 * 1024 * 1024
 _MINUTE_SAMPLE_OVERHEAD_BYTES: Final = 80
+_KEY_SEP: Final = "|"
 _SCHEMA_VERSION: Final = 1
 _SEQUENCE_CACHE_SIZE: Final = 1024
 _OK_REASON: Final = "ok"
@@ -75,13 +76,20 @@ class SourceFile:
 
 @dataclass(frozen=True)
 class LatencyMinute:
-    """Delivery-latency distribution of one KST receive minute."""
+    """Delivery-latency distribution of one KST receive minute.
+
+    Frames of a minority connection that overlaps a larger one in time (a hot-standby carrying only what the
+    primary lacked) are excluded from `count`/`max_s`/`min_s` and reported as `secondary_*`; `p50_s` is the
+    dominant connection's median.
+    """
 
     minute_kst: str
     count: int
     p50_s: float
     max_s: float
     min_s: float
+    secondary_count: int = 0
+    secondary_max_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -260,6 +268,7 @@ class _StreamAccumulator:
     stored_bytes: int = 0
     event_seconds: set[int] = field(default_factory=set)
     final: dict[str, LatencyMinute] = field(default_factory=dict)
+    spans: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 class _BudgetExceededError(Exception):
@@ -473,12 +482,17 @@ def _finalize_minute(minute: str, samples: Sequence[float]) -> LatencyMinute:
     minimum, maximum = float(ordered.min()), float(ordered.max())
     ordered.partition(median_index)
     return LatencyMinute(
-        minute_kst=minute,
+        minute_kst=minute.partition(_KEY_SEP)[0],
         count=len(ordered),
         p50_s=float(ordered[median_index]),
         max_s=maximum,
         min_s=minimum,
     )
+
+
+def _latency_key(recv_ns: int, conn_id: str) -> str:
+    minute = dt.datetime.fromtimestamp(recv_ns // 1_000_000_000, tz=_KST).strftime("%H:%M")
+    return f"{minute}{_KEY_SEP}{conn_id}"
 
 
 def _latency_sample(stream: str, vendor: str, day: dt.date, record: _Envelope) -> tuple[str, float] | None:
@@ -495,10 +509,34 @@ def _latency_sample(stream: str, vendor: str, day: dt.date, record: _Envelope) -
         event_epoch = dt.datetime(
             day.year, day.month, day.day, moment.hour, moment.minute, moment.second, tzinfo=_KST
         ).timestamp()
-        minute = dt.datetime.fromtimestamp(record.recv_ns // 1_000_000_000, tz=_KST).strftime("%H:%M")
-        return minute, (record.recv_ns - int(event_epoch) * 1_000_000_000) / 1_000_000_000
+        key = _latency_key(record.recv_ns, record.conn_id)
+        return key, (record.recv_ns - int(event_epoch) * 1_000_000_000) / 1_000_000_000
     except (ValueError, OverflowError, OSError):
         return None
+
+
+def _merge_connections(minute: str, parts: list[tuple[str, LatencyMinute, tuple[int, int]]]) -> LatencyMinute:
+    """Fold per-connection minutes into one; a minority connection overlapping the dominant one in time is secondary."""
+    dominant_conn, dominant, (low, high) = max(parts, key=lambda part: (part[1].count, part[0]))
+    judged = [dominant]
+    secondary_count, secondary_max = 0, 0.0
+    for conn, entry, (start, end) in parts:
+        if conn == dominant_conn:
+            continue
+        if start <= high and end >= low:
+            secondary_count += entry.count
+            secondary_max = max(secondary_max, entry.max_s)
+        else:
+            judged.append(entry)
+    return LatencyMinute(
+        minute_kst=minute,
+        count=sum(entry.count for entry in judged),
+        p50_s=dominant.p50_s,
+        max_s=max(entry.max_s for entry in judged),
+        min_s=min(entry.min_s for entry in judged),
+        secondary_count=secondary_count,
+        secondary_max_s=secondary_max,
+    )
 
 
 def _zero_totals() -> LedgerTotals:
@@ -709,8 +747,14 @@ class _Derivation:
                 self._day.year, self._day.month, self._day.day, moment.hour, moment.minute, moment.second, tzinfo=_KST
             ).timestamp()
             acc.event_seconds.add(moment.hour * 3600 + moment.minute * 60 + moment.second)
-            minute = dt.datetime.fromtimestamp(record.recv_ns // 1_000_000_000, tz=_KST).strftime("%H:%M")
-            self.add_sample(acc, minute, (record.recv_ns - int(event_epoch) * 1_000_000_000) / 1_000_000_000)
+            key = _latency_key(record.recv_ns, record.conn_id)
+            span = acc.spans.get(key)
+            acc.spans[key] = (
+                (record.recv_ns, record.recv_ns)
+                if span is None
+                else (min(span[0], record.recv_ns), max(span[1], record.recv_ns))
+            )
+            self.add_sample(acc, key, (record.recv_ns - int(event_epoch) * 1_000_000_000) / 1_000_000_000)
         if stream == _TICK_STREAM and self._vendor in _LEDGER_VENDORS:
             if body is None or self._vendor != "ls":
                 body = _tick_body(self._vendor, record.raw)
@@ -921,7 +965,11 @@ class _Derivation:
         segment.accepted += 1
 
     def _finish_stream(self, acc: _StreamAccumulator, status: AuditStatus, reason: str) -> StreamLatency:
-        minutes = [acc.final[minute] for minute in sorted(acc.final)]
+        by_minute: dict[str, list[tuple[str, LatencyMinute, tuple[int, int]]]] = {}
+        for key in sorted(acc.final):
+            minute, _, conn = key.partition(_KEY_SEP)
+            by_minute.setdefault(minute, []).append((conn, acc.final[key], acc.spans[key]))
+        minutes = [_merge_connections(minute, parts) for minute, parts in by_minute.items()]
         open_t, auction_t = self._anchors.regular_open, self._anchors.closing_auction_start
         holes, hole_seconds = _event_holes(
             acc.event_seconds,
@@ -1274,6 +1322,8 @@ def _audit_to_jsonable(audit: SessionAudit) -> dict[str, object]:
                         "p50_s": minute.p50_s,
                         "max_s": minute.max_s,
                         "min_s": minute.min_s,
+                        "secondary_count": minute.secondary_count,
+                        "secondary_max_s": minute.secondary_max_s,
                     }
                     for minute in entry.minutes
                 ],

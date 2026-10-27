@@ -326,3 +326,34 @@ def test_runner_builds_a_handover_whose_standby_comes_from_the_adapter_factory(m
     assert isinstance(handover, Handover)
     assert len(built) == 1
     assert handover._factory() is built[1]  # noqa: SLF001 - the standby adapter must come from the same factory
+
+
+def test_runner_keeps_standby_frames_out_of_the_lag_monitor(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from src.realtime.lag_monitor import LagMonitor
+
+    _make_http(monkeypatch)
+    captured: dict[str, object] = {}
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        async def run_forever(self, stop, *, max_cycles=None) -> None:
+            return None
+
+    session = SimpleNamespace(record_frame=lambda *a, **k: None)
+    monitor = LagMonitor(threshold_s=10.0, sample_every=1, min_samples=1)
+    asyncio.run(run_streaming_child(
+        session=session,
+        adapter_factory=lambda http: SimpleNamespace(capacity_pairs=10),
+        replay_pairs=[("005930", "trade")],
+        silence_limit=lambda: None,
+        max_cycles=1,
+        streamer_factory=_FakeStreamer,
+        lag_monitor=monitor,
+    ))
+
+    sink = captured["sink"]
+    assert sink._observe_standby is False  # noqa: SLF001 - wiring guard: a warming standby must not alert the live monitor

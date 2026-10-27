@@ -347,7 +347,7 @@ def _log_stream_latency(entry: StreamLatency, *, threshold_s: float, date: dt.da
     minutes = entry.minutes
     worst = max(minutes, key=lambda m: (m.max_s, m.minute_kst)) if minutes else None
     logger.info(
-        "[DATA] stage=ingest_latency status=OK date=%s stream=%s minutes=%d worst_minute=%s max_s=%.1f p50_s=%.1f threshold_s=%.1f",
+        "[DATA] stage=ingest_latency status=OK date=%s stream=%s minutes=%d worst_minute=%s max_s=%.1f p50_s=%.1f threshold_s=%.1f secondary_frames=%d secondary_max_s=%.1f",
         date.isoformat(),
         entry.stream,
         len(minutes),
@@ -355,6 +355,8 @@ def _log_stream_latency(entry: StreamLatency, *, threshold_s: float, date: dt.da
         worst.max_s if worst is not None else 0.0,
         worst.p50_s if worst is not None else 0.0,
         threshold_s,
+        sum(m.secondary_count for m in minutes),
+        max((m.secondary_max_s for m in minutes), default=0.0),
     )
 
 

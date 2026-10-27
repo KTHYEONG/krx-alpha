@@ -100,6 +100,8 @@ def regular_kis_silence_limit_s(
 
 
 class FrameSink(Protocol):
+    """Frame destination; a sink may also define `record_standby(frame)` to tell hot-standby frames from primary ones."""
+
     def record(self, frame: L0Frame) -> None: ...
     def note_ack(self, vendor: str, ack: VendorAck) -> None: ...
     def note_gap(self, symbol: str, start_ns: int, end_ns: int, reason: str) -> None: ...
@@ -335,7 +337,7 @@ class RealtimeStreamer:
                         if standby_frame is not None:
                             handover.restart_standby_recv()
                             if handover.admit(standby_frame, from_standby=True):
-                                self._sink.record(standby_frame)
+                                getattr(self._sink, "record_standby", self._sink.record)(standby_frame)
                                 self._last_frame_wall_ns = standby_frame.recv_wall_ns
                                 frames += 1
                                 silent_since = self._monotonic()

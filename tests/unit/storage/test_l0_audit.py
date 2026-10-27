@@ -267,6 +267,65 @@ def test_open_backlog_is_visible_and_breaches(tmp_path) -> None:
     assert [(b.stream, b.minute_kst) for b in breaches] == [(TICK, "09:01")]
 
 
+def _minute_ticks(conn, first_second, count, event_hms):
+    return [
+        _tick(f"00{n:04d}", 100, 0, 1000, 7, event_hms, _ns(9, 1, first_second + n), conn=conn)
+        for n in range(count)
+    ]
+
+
+def test_concurrent_minority_connection_is_secondary_not_a_breach(tmp_path) -> None:
+    import datetime as dt
+
+    from src.storage.l0_audit import latency_breaches
+
+    standby = [_tick("009999", 100, 0, 1000, 7, "090010", _ns(9, 1, 12), conn="standby")]
+    _write(tmp_path / "l0", TICK, _minute_ticks("primary", 10, 5, "090109") + standby)
+    _write(tmp_path / "l0", QUOTE, [_ok_quote()], name="09.jsonl.zst")
+
+    audit = _derive(tmp_path / "l0")
+
+    (entry,) = [item for item in audit.latency if item.stream == TICK]
+    (minute,) = [m for m in entry.minutes if m.minute_kst == "09:01"]
+    assert (minute.count, minute.secondary_count) == (5, 1)
+    assert minute.max_s < 10.0
+    assert minute.secondary_max_s >= 60.0
+    assert latency_breaches(audit, threshold_s=10.0, window_start=dt.time(9, 0), window_end=dt.time(15, 30)) == ()
+
+
+def test_dominant_connection_lag_still_breaches(tmp_path) -> None:
+    import datetime as dt
+
+    from src.storage.l0_audit import latency_breaches
+
+    fast = [_tick("009999", 100, 0, 1000, 7, "090109", _ns(9, 1, 12), conn="standby")]
+    _write(tmp_path / "l0", TICK, _minute_ticks("primary", 10, 5, "090020") + fast)
+    _write(tmp_path / "l0", QUOTE, [_ok_quote()], name="09.jsonl.zst")
+
+    audit = _derive(tmp_path / "l0")
+
+    breaches = latency_breaches(audit, threshold_s=10.0, window_start=dt.time(9, 0), window_end=dt.time(15, 30))
+    assert [(b.stream, b.minute_kst) for b in breaches] == [(TICK, "09:01")]
+
+
+def test_sequential_reconnect_in_one_minute_is_still_judged(tmp_path) -> None:
+    import datetime as dt
+
+    from src.storage.l0_audit import latency_breaches
+
+    late = [_tick("009999", 100, 0, 1000, 7, "090105", _ns(9, 1, 40), conn="reconnected")]
+    _write(tmp_path / "l0", TICK, _minute_ticks("first", 1, 5, "090101") + late)
+    _write(tmp_path / "l0", QUOTE, [_ok_quote()], name="09.jsonl.zst")
+
+    audit = _derive(tmp_path / "l0")
+
+    (entry,) = [item for item in audit.latency if item.stream == TICK]
+    (minute,) = [m for m in entry.minutes if m.minute_kst == "09:01"]
+    assert (minute.count, minute.secondary_count) == (6, 0)
+    breaches = latency_breaches(audit, threshold_s=10.0, window_start=dt.time(9, 0), window_end=dt.time(15, 30))
+    assert [(b.stream, b.minute_kst) for b in breaches] == [(TICK, "09:01")]
+
+
 def test_median_is_lower_sample_and_deterministic(tmp_path) -> None:
     _write(tmp_path / "l0", TICK, [
         _tick("005930", 1, 0, 100, 10, "090109", _ns(9, 1, 10)),
