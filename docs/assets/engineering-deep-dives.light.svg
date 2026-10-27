@@ -1,0 +1,168 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 700" width="1200" height="700" role="img" style="font-family:Pretendard, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title>KRX-Alpha 핵심 엔지니어링 문제 해결 3선</title>
+  <desc>개장 틱 결손 복원(99.5%), 스토리지 바이트 대사(100%), 10호가 섀도 OMS 및 AST 가드(0 Violations) 요약</desc>
+  <defs>
+    <filter id="card-shadow" x="-8%" y="-8%" width="116%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.06" data-paint-static="true"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="700" fill="#F7F7F5" data-fill-role="canvas"/>
+
+  <!-- Header -->
+  <g>
+    <rect data-fill-role="focus" x="48" y="41" width="6" height="42" rx="3" fill="#2E6DA4"/>
+    <text data-fill-role="muted" x="70" y="32" font-size="13.5" font-weight="700" letter-spacing="0.08em" fill="#4A5568" dominant-baseline="central">ENGINEERING DEEP DIVES · PROBLEM SOLVING</text>
+    <text data-fill-role="ink" x="70" y="62" font-size="26" font-weight="700" fill="#252B35" dominant-baseline="central">실제 운영 장애와 리소스 한계를 돌파한 3대 엔지니어링 해법</text>
+    <text data-fill-role="ink" x="70" y="94" font-size="14.5" font-weight="600" fill="#252B35" dominant-baseline="central">데이터 결손 복원, 스토리지 고갈 방어, 오주문 원천 차단을 코드와 실측 수치로 증명합니다</text>
+  </g>
+
+  <!-- CASE 01: Horizontal Card -->
+  <g>
+    <rect x="48" y="124" width="1104" height="162" rx="14" fill="#FFFFFF" stroke="#2E6DA4" stroke-width="1.5" data-fill-role="surface" data-stroke-role="edge-line" filter="url(#card-shadow)"/>
+    
+    <!-- Left Section: Case Title & Problem -->
+    <rect x="68" y="142" width="190" height="26" rx="13" fill="#EAF0F6" stroke="#2E6DA4" stroke-width="1" data-fill-role="edge-fill" data-stroke-role="edge-line"/>
+    <text x="163" y="155" font-size="11.5" font-weight="700" letter-spacing="0.06em" fill="#193C5A" data-fill-role="edge-ink" text-anchor="middle" dominant-baseline="central">CASE 01 · DATA REPAIR</text>
+    <text x="68" y="190" font-size="20" font-weight="700" fill="#252B35" data-fill-role="ink" dominant-baseline="central">09:00 개장 틱 누락 복구</text>
+    
+    <!-- Problem Pill -->
+    <rect x="68" y="214" width="296" height="52" rx="8" fill="#F9F9F9" stroke="#B45A50" stroke-width="1" data-fill-role="external-fill" data-stroke-role="danger"/>
+    <text x="80" y="231" font-size="12" font-weight="700" fill="#B45A50" data-fill-role="danger" dominant-baseline="central">문제: 개장 트래픽 폭주로 소켓 55초 단절</text>
+    <text x="80" y="251" font-size="12" font-weight="600" fill="#252B35" data-fill-role="ink" dominant-baseline="central">42개 종목 15,873건 체결 틱 실시간 유실</text>
+
+    <!-- Middle Flow: 3 Steps -->
+    <g>
+      <!-- Step 1 -->
+      <rect x="382" y="144" width="158" height="122" rx="10" fill="#EAF0F6" stroke="#2E6DA4" stroke-width="1" data-fill-role="edge-fill" data-stroke-role="edge-line"/>
+      <text x="396" y="172" font-size="14.5" font-weight="700" fill="#193C5A" data-fill-role="edge-ink" dominant-baseline="central">① 누락 구간 탐지</text>
+      <text x="396" y="202" font-size="12.5" font-weight="600" fill="#193C5A" data-fill-role="edge-ink" dominant-baseline="central">체결 누적 번호 대조</text>
+      <text x="396" y="226" font-size="12.5" font-weight="600" fill="#193C5A" data-fill-role="edge-ink" dominant-baseline="central">결손 구간 정밀 계산</text>
+
+      <!-- Arrow 1 -> 2 -->
+      <path d="M548 205 L558 205" fill="none" stroke="#2E6DA4" stroke-width="2" stroke-linecap="round" data-stroke-role="edge-line"/>
+      <path d="M554 201 L558 205 L554 209" fill="none" stroke="#2E6DA4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" data-stroke-role="edge-line"/>
+
+      <!-- Step 2 -->
+      <rect x="566" y="144" width="158" height="122" rx="10" fill="#EAF0F6" stroke="#2E6DA4" stroke-width="1" data-fill-role="edge-fill" data-stroke-role="edge-line"/>
+      <text x="580" y="172" font-size="14.5" font-weight="700" fill="#193C5A" data-fill-role="edge-ink" dominant-baseline="central">② 타 증권사 백필</text>
+      <text x="580" y="202" font-size="12.5" font-weight="600" fill="#193C5A" data-fill-role="edge-ink" dominant-baseline="central">키움·한투 체결 API</text>
+      <text x="580" y="226" font-size="12.5" font-weight="600" fill="#193C5A" data-fill-role="edge-ink" dominant-baseline="central">누락 시간대 틱 확보</text>
+
+      <!-- Arrow 2 -> 3 -->
+      <path d="M732 205 L742 205" fill="none" stroke="#2E6DA4" stroke-width="2" stroke-linecap="round" data-stroke-role="edge-line"/>
+      <path d="M738 201 L742 205 L738 209" fill="none" stroke="#2E6DA4" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" data-stroke-role="edge-line"/>
+
+      <!-- Step 3 -->
+      <rect x="750" y="144" width="158" height="122" rx="10" fill="#EAF0F6" stroke="#2E6DA4" stroke-width="1" data-fill-role="edge-fill" data-stroke-role="edge-line"/>
+      <text x="764" y="172" font-size="14.5" font-weight="700" fill="#193C5A" data-fill-role="edge-ink" dominant-baseline="central">③ 무손실 병합</text>
+      <text x="764" y="202" font-size="12.5" font-weight="600" fill="#193C5A" data-fill-role="edge-ink" dominant-baseline="central">SQLite 외부 정렬로</text>
+      <text x="764" y="226" font-size="12.5" font-weight="600" fill="#193C5A" data-fill-role="edge-ink" dominant-baseline="central">중복 제거 후 결합</text>
+    </g>
+
+    <!-- Right KPI Badge -->
+    <rect x="926" y="144" width="206" height="122" rx="12" fill="#ECF4F1" stroke="#3F8F72" stroke-width="1.5" data-fill-role="compute-fill" data-stroke-role="compute-line"/>
+    <text x="1029" y="186" font-size="32" font-weight="700" fill="#3F8F72" data-fill-role="compute-line" text-anchor="middle" dominant-baseline="central">99.5%</text>
+    <text x="1029" y="220" font-size="15" font-weight="700" fill="#252B35" data-fill-role="ink" text-anchor="middle" dominant-baseline="central">복원 성공</text>
+    <text x="1029" y="244" font-size="12.5" font-weight="600" fill="#234F3F" data-fill-role="compute-ink" text-anchor="middle" dominant-baseline="central">15,713건 복구 · 결손 0건</text>
+  </g>
+
+  <!-- CASE 02: Horizontal Card -->
+  <g>
+    <rect x="48" y="304" width="1104" height="162" rx="14" fill="#FFFFFF" stroke="#3F8F72" stroke-width="1.5" data-fill-role="surface" data-stroke-role="compute-line" filter="url(#card-shadow)"/>
+    
+    <!-- Left Section: Case Title & Problem -->
+    <rect x="68" y="322" width="216" height="26" rx="13" fill="#ECF4F1" stroke="#3F8F72" stroke-width="1" data-fill-role="compute-fill" data-stroke-role="compute-line"/>
+    <text x="176" y="335" font-size="11.5" font-weight="700" letter-spacing="0.06em" fill="#234F3F" data-fill-role="compute-ink" text-anchor="middle" dominant-baseline="central">CASE 02 · STORAGE BACKUP</text>
+    <text x="68" y="370" font-size="20" font-weight="700" fill="#252B35" data-fill-role="ink" dominant-baseline="central">서버 디스크 고갈 방어 &amp; 백업</text>
+    
+    <!-- Problem Pill -->
+    <rect x="68" y="394" width="296" height="52" rx="8" fill="#F9F9F9" stroke="#B45A50" stroke-width="1" data-fill-role="external-fill" data-stroke-role="danger"/>
+    <text x="80" y="411" font-size="12" font-weight="700" fill="#B45A50" data-fill-role="danger" dominant-baseline="central">문제: 저사양 VPS 디스크 부족 위험</text>
+    <text x="80" y="431" font-size="12" font-weight="600" fill="#252B35" data-fill-role="ink" dominant-baseline="central">섣부른 삭제 시 백업 미완료 데이터 유실</text>
+
+    <!-- Middle Flow: 3 Steps -->
+    <g>
+      <!-- Step 1 -->
+      <rect x="382" y="324" width="158" height="122" rx="10" fill="#ECF4F1" stroke="#3F8F72" stroke-width="1" data-fill-role="compute-fill" data-stroke-role="compute-line"/>
+      <text x="396" y="352" font-size="14.5" font-weight="700" fill="#234F3F" data-fill-role="compute-ink" dominant-baseline="central">① 초고속 크기 대사</text>
+      <text x="396" y="382" font-size="12.5" font-weight="600" fill="#234F3F" data-fill-role="compute-ink" dominant-baseline="central">1초 만에 원격 크기 확인</text>
+      <text x="396" y="406" font-size="12.5" font-weight="600" fill="#234F3F" data-fill-role="compute-ink" dominant-baseline="central">O(1) 단건 메타 조회</text>
+
+      <!-- Arrow 1 -> 2 -->
+      <path d="M548 385 L558 385" fill="none" stroke="#3F8F72" stroke-width="2" stroke-linecap="round" data-stroke-role="compute-line"/>
+      <path d="M554 381 L558 385 L554 389" fill="none" stroke="#3F8F72" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" data-stroke-role="compute-line"/>
+
+      <!-- Step 2 -->
+      <rect x="566" y="324" width="158" height="122" rx="10" fill="#ECF4F1" stroke="#3F8F72" stroke-width="1" data-fill-role="compute-fill" data-stroke-role="compute-line"/>
+      <text x="580" y="352" font-size="14.5" font-weight="700" fill="#234F3F" data-fill-role="compute-ink" dominant-baseline="central">② 장애 유형 격리</text>
+      <text x="580" y="382" font-size="12.5" font-weight="600" fill="#234F3F" data-fill-role="compute-ink" dominant-baseline="central">메모리 초과는 재시도</text>
+      <text x="580" y="406" font-size="12.5" font-weight="600" fill="#234F3F" data-fill-role="compute-ink" dominant-baseline="central">데이터 결함은 격리 보관</text>
+
+      <!-- Arrow 2 -> 3 -->
+      <path d="M732 385 L742 385" fill="none" stroke="#3F8F72" stroke-width="2" stroke-linecap="round" data-stroke-role="compute-line"/>
+      <path d="M738 381 L742 385 L738 389" fill="none" stroke="#3F8F72" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" data-stroke-role="compute-line"/>
+
+      <!-- Step 3 -->
+      <rect x="750" y="324" width="158" height="122" rx="10" fill="#ECF4F1" stroke="#3F8F72" stroke-width="1" data-fill-role="compute-fill" data-stroke-role="compute-line"/>
+      <text x="764" y="352" font-size="14.5" font-weight="700" fill="#234F3F" data-fill-role="compute-ink" dominant-baseline="central">③ 안전한 순환</text>
+      <text x="764" y="382" font-size="12.5" font-weight="600" fill="#234F3F" data-fill-role="compute-ink" dominant-baseline="central">원격 바이트 100% 일치</text>
+      <text x="764" y="406" font-size="12.5" font-weight="600" fill="#234F3F" data-fill-role="compute-ink" dominant-baseline="central">확인된 원본만 로컬 삭제</text>
+    </g>
+
+    <!-- Right KPI Badge -->
+    <rect x="926" y="324" width="206" height="122" rx="12" fill="#ECF4F1" stroke="#3F8F72" stroke-width="1.5" data-fill-role="compute-fill" data-stroke-role="compute-line"/>
+    <text x="1029" y="366" font-size="32" font-weight="700" fill="#3F8F72" data-fill-role="compute-line" text-anchor="middle" dominant-baseline="central">100%</text>
+    <text x="1029" y="400" font-size="15" font-weight="700" fill="#252B35" data-fill-role="ink" text-anchor="middle" dominant-baseline="central">바이트 대사 일치</text>
+    <text x="1029" y="424" font-size="12.5" font-weight="600" fill="#234F3F" data-fill-role="compute-ink" text-anchor="middle" dominant-baseline="central">247개 파티션 · 3.0GB 방어</text>
+  </g>
+
+  <!-- CASE 03: Horizontal Card -->
+  <g>
+    <rect x="48" y="484" width="1104" height="162" rx="14" fill="#FFFFFF" stroke="#5B54A8" stroke-width="1.5" data-fill-role="surface" data-stroke-role="api-line" filter="url(#card-shadow)"/>
+    
+    <!-- Left Section: Case Title & Problem -->
+    <rect x="68" y="502" width="216" height="26" rx="13" fill="#EFEEF6" stroke="#5B54A8" stroke-width="1" data-fill-role="api-fill" data-stroke-role="api-line"/>
+    <text x="176" y="515" font-size="11.5" font-weight="700" letter-spacing="0.06em" fill="#322E5C" data-fill-role="api-ink" text-anchor="middle" dominant-baseline="central">CASE 03 · GUARD &amp; EXECUTION</text>
+    <text x="68" y="550" font-size="20" font-weight="700" fill="#252B35" data-fill-role="ink" dominant-baseline="central">실전 매매 괴리 방지 &amp; 코드 가드</text>
+    
+    <!-- Problem Pill -->
+    <rect x="68" y="574" width="296" height="52" rx="8" fill="#F9F9F9" stroke="#B45A50" stroke-width="1" data-fill-role="external-fill" data-stroke-role="danger"/>
+    <text x="80" y="591" font-size="12" font-weight="700" fill="#B45A50" data-fill-role="danger" dominant-baseline="central">문제: 단순 모의 체결의 왜곡(잔량 무시)</text>
+    <text x="80" y="611" font-size="12" font-weight="600" fill="#252B35" data-fill-role="ink" dominant-baseline="central">기능 확장 시 아키텍처 역참조 오염 위험</text>
+
+    <!-- Middle Flow: 3 Steps -->
+    <g>
+      <!-- Step 1 -->
+      <rect x="382" y="504" width="158" height="122" rx="10" fill="#EFEEF6" stroke="#5B54A8" stroke-width="1" data-fill-role="api-fill" data-stroke-role="api-line"/>
+      <text x="396" y="532" font-size="14.5" font-weight="700" fill="#322E5C" data-fill-role="api-ink" dominant-baseline="central">① 10호가 잔량 체결</text>
+      <text x="396" y="562" font-size="12.5" font-weight="600" fill="#322E5C" data-fill-role="api-ink" dominant-baseline="central">실시간 10단계 잔량을</text>
+      <text x="396" y="586" font-size="12.5" font-weight="600" fill="#322E5C" data-fill-role="api-ink" dominant-baseline="central">직접 소진하며 체결</text>
+
+      <!-- Arrow 1 -> 2 -->
+      <path d="M548 565 L558 565" fill="none" stroke="#5B54A8" stroke-width="2" stroke-linecap="round" data-stroke-role="api-line"/>
+      <path d="M554 561 L558 565 L554 569" fill="none" stroke="#5B54A8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" data-stroke-role="api-line"/>
+
+      <!-- Step 2 -->
+      <rect x="566" y="504" width="158" height="122" rx="10" fill="#EFEEF6" stroke="#5B54A8" stroke-width="1" data-fill-role="api-fill" data-stroke-role="api-line"/>
+      <text x="580" y="532" font-size="14.5" font-weight="700" fill="#322E5C" data-fill-role="api-ink" dominant-baseline="central">② 실계좌 이중 차단</text>
+      <text x="580" y="562" font-size="12.5" font-weight="600" fill="#322E5C" data-fill-role="api-ink" dominant-baseline="central">실전 주문 패킷 검증 후</text>
+      <text x="580" y="586" font-size="12.5" font-weight="600" fill="#322E5C" data-fill-role="api-ink" dominant-baseline="central">실제 브로커 소켓만 차단</text>
+
+      <!-- Arrow 2 -> 3 -->
+      <path d="M732 565 L742 565" fill="none" stroke="#5B54A8" stroke-width="2" stroke-linecap="round" data-stroke-role="api-line"/>
+      <path d="M738 561 L742 565 L738 569" fill="none" stroke="#5B54A8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" data-stroke-role="api-line"/>
+
+      <!-- Step 3 -->
+      <rect x="750" y="504" width="158" height="122" rx="10" fill="#EFEEF6" stroke="#5B54A8" stroke-width="1" data-fill-role="api-fill" data-stroke-role="api-line"/>
+      <text x="764" y="532" font-size="14.5" font-weight="700" fill="#322E5C" data-fill-role="api-ink" dominant-baseline="central">③ AST 계층 검증</text>
+      <text x="764" y="562" font-size="12.5" font-weight="600" fill="#322E5C" data-fill-role="api-ink" dominant-baseline="central">Python AST 분석기로</text>
+      <text x="764" y="586" font-size="12.5" font-weight="600" fill="#322E5C" data-fill-role="api-ink" dominant-baseline="central">8개 계층 단방향 강제</text>
+    </g>
+
+    <!-- Right KPI Badge -->
+    <rect x="926" y="504" width="206" height="122" rx="12" fill="#ECF4F1" stroke="#3F8F72" stroke-width="1.5" data-fill-role="compute-fill" data-stroke-role="compute-line"/>
+    <text x="1029" y="546" font-size="30" font-weight="700" fill="#3F8F72" data-fill-role="compute-line" text-anchor="middle" dominant-baseline="central">0 Violations</text>
+    <text x="1029" y="580" font-size="15" font-weight="700" fill="#252B35" data-fill-role="ink" text-anchor="middle" dominant-baseline="central">계층 역참조 차단</text>
+    <text x="1029" y="604" font-size="12.5" font-weight="600" fill="#234F3F" data-fill-role="compute-ink" text-anchor="middle" dominant-baseline="central">110개 모듈 통과 · 가드 완료</text>
+  </g>
+</svg>
