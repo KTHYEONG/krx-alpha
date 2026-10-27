@@ -205,6 +205,64 @@ def test_sync_l1_tree_counts_failed_upload(tmp_path) -> None:
     assert stats.failed_verification == 1
 
 
+def test_sync_l1_tree_retries_transient_failure_once(tmp_path, caplog) -> None:
+    import json
+    import logging
+    from types import SimpleNamespace
+
+    from src.storage.remote import RcloneArchiver
+
+    root = tmp_path / "l1" / "ls" / "H0STASP0"
+    root.mkdir(parents=True)
+    (root / "dt=2026-10-23.parquet").write_bytes(b"a" * 50)
+    copies: list[int] = []
+
+    def _runner(args, **kwargs):
+        if "--recursive" in args:
+            return SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr="")
+        if args[1] == "copyto":
+            copies.append(1)
+            if len(copies) == 1:
+                return SimpleNamespace(returncode=124, stdout="", stderr="rclone timed out after 600.0s")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout=json.dumps([{"Path": "x", "Size": 50, "IsDir": False}]), stderr="")
+
+    arc = RcloneArchiver(remote_name="gdrive", remote_path="q", runner=_runner)
+    with caplog.at_level(logging.WARNING):
+        stats = arc.sync_l1_tree(tmp_path / "l1")
+
+    assert (stats.uploaded, stats.failed_verification) == (1, 0)
+    assert len(copies) == 2
+    assert "status=RETRY" in caplog.text
+    assert "timed out after 600.0s" in caplog.text
+    assert "status=FAIL" not in caplog.text
+
+
+def test_sync_l1_tree_fail_log_carries_rclone_reason(tmp_path, caplog) -> None:
+    import json
+    import logging
+    from types import SimpleNamespace
+
+    from src.storage.remote import RcloneArchiver
+
+    root = tmp_path / "l1" / "ls" / "H0STASP0"
+    root.mkdir(parents=True)
+    (root / "dt=2026-10-23.parquet").write_bytes(b"a" * 50)
+
+    def _runner(args, **kwargs):
+        if "--recursive" in args:
+            return SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="ERROR : googleapi: Error 403:\n  userRateLimitExceeded")
+
+    arc = RcloneArchiver(remote_name="gdrive", remote_path="q", runner=_runner)
+    with caplog.at_level(logging.CRITICAL):
+        stats = arc.sync_l1_tree(tmp_path / "l1")
+
+    assert stats.failed_verification == 1
+    (record,) = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert "reason=upload_failed rc=1 detail=ERROR : googleapi: Error 403: userRateLimitExceeded" in record.getMessage()
+
+
 def test_remote_files_raises_on_invalid_json() -> None:
     from types import SimpleNamespace
 
@@ -814,7 +872,7 @@ def test_purge_superseded_l0_runner_exception_counts_failed(tmp_path) -> None:
     assert stats.failed == 1
 
 
-def test_sync_l1_tree_calls_progress_per_file(tmp_path) -> None:
+def test_sync_l1_tree_calls_progress_per_upload_attempt(tmp_path) -> None:
     from types import SimpleNamespace
 
     from src.storage.remote import RcloneArchiver
@@ -833,7 +891,7 @@ def test_sync_l1_tree_calls_progress_per_file(tmp_path) -> None:
     stats = arc.sync_l1_tree(tmp_path / "l1", progress=lambda: progress_calls.append(None))
 
     assert stats.failed_verification == 2
-    assert len(progress_calls) == 2
+    assert len(progress_calls) == 4
 
 
 def test_purge_superseded_l0_calls_progress_per_dir(tmp_path) -> None:

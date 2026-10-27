@@ -42,6 +42,15 @@ class PurgeStats:
     failed: int = 0
 
 
+_STDERR_BRIEF_CHARS = 300
+
+
+def _brief(stderr: str | None) -> str:
+    """Single-line tail of rclone stderr, enough to tell a timeout, quota or auth fault apart."""
+    text = " ".join((stderr or "").split())
+    return text[-_STDERR_BRIEF_CHARS:] if text else "-"
+
+
 class GDriveArchiver:
     """L1 파티션을 rclone CLI 서브프로세스로 원격에 업로드하고 원격 크기로 검증한다."""
 
@@ -168,10 +177,26 @@ class GDriveArchiver:
             sizes[path] = size
         return sizes
 
+    def _upload_l1(self, local: pathlib.Path, repo_path: str, local_size: int) -> str | None:
+        """Upload one L1 object and verify its remote size; return a failure reason or None when verified."""
+        dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
+        result = self._run(["rclone", "copyto", str(local), dest])
+        if result.returncode != 0:
+            return f"upload_failed rc={result.returncode} detail={_brief(result.stderr)}"
+        try:
+            remote_size = self._remote_size(repo_path)
+        except RemoteArchiveError:
+            return "verify_missing"
+        if remote_size != local_size:
+            return f"size_mismatch remote={remote_size} local={local_size}"
+        return None
+
     def sync_l1_tree(self, local_root: pathlib.Path, *, progress: Callable[[], None] | None = None) -> SyncStats:
+        """Upload L1 objects whose remote size differs; a failed object is retried once after the pass."""
         root = pathlib.Path(local_root)
         sizes = self.remote_file_sizes(L1_REPO_PREFIX)
         stats = SyncStats()
+        retry: list[tuple[pathlib.Path, str, int]] = []
         for pq in sorted(root.rglob("*.parquet")):
             try:
                 repo_path = self.repo_path_for(root, pq)
@@ -179,24 +204,27 @@ class GDriveArchiver:
                 if sizes.get(repo_path) == local_size:
                     stats.skipped_verified += 1
                     continue
-                try:
-                    dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
-                    result = self._run(["rclone", "copyto", str(pq), dest])
-                    if result.returncode != 0:
-                        raise RemoteArchiveError(f"upload failed: {repo_path} {result.stderr}")
-                    remote_size = self._remote_size(repo_path)
-                    if remote_size != local_size:
-                        logger.critical(
-                            "[DATA] stage=rclone_offload status=FAIL reason=size_mismatch path=%s", repo_path
-                        )
-                        stats.failed_verification += 1
-                        continue
+                reason = self._upload_l1(pq, repo_path, local_size)
+                if reason is None:
                     stats.uploaded += 1
                     sizes[repo_path] = local_size
-                except RemoteArchiveError:
-                    logger.critical("[DATA] stage=rclone_offload status=FAIL path=%s", repo_path)
-                    stats.failed_verification += 1
                     continue
+                # Drive and network faults are often transient; retrying after the pass spaces the attempts apart.
+                logger.warning("[DATA] stage=rclone_offload status=RETRY path=%s reason=%s", repo_path, reason)
+                retry.append((pq, repo_path, local_size))
+            finally:
+                if progress is not None:
+                    progress()
+        for pq, repo_path, local_size in retry:
+            try:
+                reason = self._upload_l1(pq, repo_path, local_size)
+                if reason is None:
+                    stats.uploaded += 1
+                    sizes[repo_path] = local_size
+                    logger.info("[DATA] stage=rclone_offload status=RECOVERED path=%s", repo_path)
+                    continue
+                logger.critical("[DATA] stage=rclone_offload status=FAIL path=%s reason=%s", repo_path, reason)
+                stats.failed_verification += 1
             finally:
                 if progress is not None:
                     progress()
