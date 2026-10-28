@@ -23,10 +23,10 @@ def _hms(second_of_day: int) -> str:
     return f"{second_of_day // 3600:02d}{second_of_day % 3600 // 60:02d}{second_of_day % 60:02d}"
 
 
-def _frame(recv_s: float, event_s: int, *, field: bool = False, conn: str = "c") -> L0Frame:
+def _frame(recv_s: float, event_s: int, *, field: bool = False, conn: str = "c", symbol: str = "005930") -> L0Frame:
     raw = f'{{"body":{{"chetime":"{_hms(event_s)}"}}}}'
     return L0Frame(
-        "ls", "H0STCNT0", "005930", raw, 1, _ns(recv_s), 1, conn,
+        "ls", "H0STCNT0", symbol, raw, 1, _ns(recv_s), 1, conn,
         exchange_event_time=_hms(event_s) if field else "",
     )
 
@@ -108,6 +108,17 @@ def test_dominant_connection_lag_still_alerts() -> None:
             monitor.observe(_frame(sec + 0.5, sec, conn="standby"))
     assert monitor.alerted
     assert calls == [1]
+
+
+def test_lagging_disjoint_symbol_shards_still_alert() -> None:
+    monitor = LagMonitor(threshold_s=10.0, sample_every=1)
+    for sec in range(32400, 32420):
+        for _ in range(4):
+            monitor.observe(_frame(sec + 0.5, sec, conn="shard-a", symbol="005930"))
+        for conn, symbol in (("shard-b", "000660"), ("shard-c", "035420")):
+            for _ in range(3):
+                monitor.observe(_frame(sec + 0.5, sec - 30, conn=conn, symbol=symbol))
+    assert monitor.alerted
 
 
 def test_sink_decorator_delegates_and_observes() -> None:

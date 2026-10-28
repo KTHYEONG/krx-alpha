@@ -269,6 +269,7 @@ class _StreamAccumulator:
     event_seconds: set[int] = field(default_factory=set)
     final: dict[str, LatencyMinute] = field(default_factory=dict)
     spans: dict[str, tuple[int, int]] = field(default_factory=dict)
+    symbols: dict[str, set[str]] = field(default_factory=dict)
 
 
 class _BudgetExceededError(Exception):
@@ -515,15 +516,21 @@ def _latency_sample(stream: str, vendor: str, day: dt.date, record: _Envelope) -
         return None
 
 
-def _merge_connections(minute: str, parts: list[tuple[str, LatencyMinute, tuple[int, int]]]) -> LatencyMinute:
-    """Fold per-connection minutes into one; a minority connection overlapping the dominant one in time is secondary."""
-    dominant_conn, dominant, (low, high) = max(parts, key=lambda part: (part[1].count, part[0]))
+def _merge_connections(
+    minute: str, parts: list[tuple[str, LatencyMinute, tuple[int, int], set[str]]]
+) -> LatencyMinute:
+    """Fold per-connection minutes into one.
+
+    A minority connection is secondary only when it duplicates the dominant one (overlapping in time and
+    carrying shared symbols, as a hot standby does); disjoint symbol shards are each judged.
+    """
+    dominant_conn, dominant, (low, high), dominant_symbols = max(parts, key=lambda part: (part[1].count, part[0]))
     judged = [dominant]
     secondary_count, secondary_max = 0, 0.0
-    for conn, entry, (start, end) in parts:
+    for conn, entry, (start, end), symbols in parts:
         if conn == dominant_conn:
             continue
-        if start <= high and end >= low:
+        if start <= high and end >= low and not symbols.isdisjoint(dominant_symbols):
             secondary_count += entry.count
             secondary_max = max(secondary_max, entry.max_s)
         else:
@@ -754,6 +761,7 @@ class _Derivation:
                 if span is None
                 else (min(span[0], record.recv_ns), max(span[1], record.recv_ns))
             )
+            acc.symbols.setdefault(key, set()).add(record.symbol)
             self.add_sample(acc, key, (record.recv_ns - int(event_epoch) * 1_000_000_000) / 1_000_000_000)
         if stream == _TICK_STREAM and self._vendor in _LEDGER_VENDORS:
             if body is None or self._vendor != "ls":
@@ -965,10 +973,10 @@ class _Derivation:
         segment.accepted += 1
 
     def _finish_stream(self, acc: _StreamAccumulator, status: AuditStatus, reason: str) -> StreamLatency:
-        by_minute: dict[str, list[tuple[str, LatencyMinute, tuple[int, int]]]] = {}
+        by_minute: dict[str, list[tuple[str, LatencyMinute, tuple[int, int], set[str]]]] = {}
         for key in sorted(acc.final):
             minute, _, conn = key.partition(_KEY_SEP)
-            by_minute.setdefault(minute, []).append((conn, acc.final[key], acc.spans[key]))
+            by_minute.setdefault(minute, []).append((conn, acc.final[key], acc.spans[key], acc.symbols[key]))
         minutes = [_merge_connections(minute, parts) for minute, parts in by_minute.items()]
         open_t, auction_t = self._anchors.regular_open, self._anchors.closing_auction_start
         holes, hole_seconds = _event_holes(

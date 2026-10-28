@@ -45,7 +45,7 @@ def _env(raw, recv_ns, conn="c1", seq=None, stream=TICK, exch="", symbol="", ven
 
 def _tick(sym, md, ms, volume, cvolume, chetime, recv_ns, conn="c1", seq=None, price="70000", exch=""):
     raw = json.dumps({"header": {"tr_cd": "S3_", "tr_key": sym}, "body": _tick_body(sym, md, ms, volume, cvolume, chetime, price)})
-    return _env(raw, recv_ns, conn=conn, seq=seq, exch=exch)
+    return _env(raw, recv_ns, conn=conn, seq=seq, exch=exch, symbol=sym)
 
 
 def _quote(sym, hotime, recv_ns, exch="", seq=None):
@@ -279,7 +279,7 @@ def test_concurrent_minority_connection_is_secondary_not_a_breach(tmp_path) -> N
 
     from src.storage.l0_audit import latency_breaches
 
-    standby = [_tick("009999", 100, 0, 1000, 7, "090010", _ns(9, 1, 12), conn="standby")]
+    standby = [_tick("000000", 100, 0, 1000, 7, "090010", _ns(9, 1, 12), conn="standby")]
     _write(tmp_path / "l0", TICK, _minute_ticks("primary", 10, 5, "090109") + standby)
     _write(tmp_path / "l0", QUOTE, [_ok_quote()], name="09.jsonl.zst")
 
@@ -291,6 +291,24 @@ def test_concurrent_minority_connection_is_secondary_not_a_breach(tmp_path) -> N
     assert minute.max_s < 10.0
     assert minute.secondary_max_s >= 60.0
     assert latency_breaches(audit, threshold_s=10.0, window_start=dt.time(9, 0), window_end=dt.time(15, 30)) == ()
+
+
+def test_lagging_disjoint_symbol_shard_still_breaches(tmp_path) -> None:
+    import datetime as dt
+
+    from src.storage.l0_audit import latency_breaches
+
+    lagging_shard = [_tick("009999", 100, 0, 1000, 7, "090010", _ns(9, 1, 12), conn="shard-1")]
+    _write(tmp_path / "l0", TICK, _minute_ticks("shard-0", 10, 5, "090109") + lagging_shard)
+    _write(tmp_path / "l0", QUOTE, [_ok_quote()], name="09.jsonl.zst")
+
+    audit = _derive(tmp_path / "l0")
+
+    (entry,) = [item for item in audit.latency if item.stream == TICK]
+    (minute,) = [m for m in entry.minutes if m.minute_kst == "09:01"]
+    assert (minute.count, minute.secondary_count) == (6, 0)
+    breaches = latency_breaches(audit, threshold_s=10.0, window_start=dt.time(9, 0), window_end=dt.time(15, 30))
+    assert [(b.stream, b.minute_kst) for b in breaches] == [(TICK, "09:01")]
 
 
 def test_dominant_connection_lag_still_breaches(tmp_path) -> None:
