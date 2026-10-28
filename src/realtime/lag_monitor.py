@@ -38,6 +38,9 @@ class LagMonitor:
 
     Event times carry one-second resolution, so lag is accurate to about one second. Only every
     `sample_every`-th frame is parsed to keep the receive loop cheap. `observe` never raises.
+    Each window is judged on the connection that delivered most of its samples: during a hot-standby
+    overlap the vendor may deliver a minority of frames late on either connection, which says nothing
+    about the delivery the session actually relies on.
     """
 
     def __init__(
@@ -63,6 +66,7 @@ class LagMonitor:
         self._seen = 0
         self._window_id: int | None = None
         self._lags: list[float] = []
+        self._lag_conns: list[str] = []
         self._alerted = False
 
     @property
@@ -83,6 +87,7 @@ class LagMonitor:
                 self._close_window(frame.stream)
             self._window_id = window_id
             self._lags.append(lag_s)
+            self._lag_conns.append(frame.conn_id)
         except Exception:  # noqa: BLE001 - monitoring must never break the receive loop
             logger.debug("[DATA] stage=ingest_lag status=SKIP", exc_info=True)
 
@@ -100,7 +105,10 @@ class LagMonitor:
         return None if lag < -60.0 else max(0.0, lag)
 
     def _close_window(self, stream: str) -> None:
-        lags, self._lags = self._lags, []
+        all_lags, self._lags = self._lags, []
+        conns, self._lag_conns = self._lag_conns, []
+        dominant = max(set(conns), key=lambda conn: (conns.count(conn), conn))
+        lags = [lag for lag, conn in zip(all_lags, conns, strict=True) if conn == dominant]
         if len(lags) < self._min_samples:
             return
         p50 = statistics.median(lags)

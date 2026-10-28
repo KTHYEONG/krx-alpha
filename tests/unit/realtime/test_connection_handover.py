@@ -323,29 +323,6 @@ async def test_window_starts_a_standby_ahead_of_time_and_holds_both_connections(
 
 
 @_sync
-async def test_standby_frames_reach_a_standby_aware_sink_separately() -> None:
-    class _AwareSink(_Sink):
-        def __init__(self) -> None:
-            super().__init__()
-            self.standby_raws: list[str] = []
-
-        def record_standby(self, frame: L0Frame) -> None:
-            self.standby_raws.append(frame.raw)
-            super().record(frame)
-
-    rig = _Rig(new=_Adapter(), window=lambda: True)
-    rig.sink = _AwareSink()
-    rig.streamer._sink = rig.sink  # noqa: SLF001
-    rig.start()
-    await rig.first_frame()
-    await _until(lambda: rig.new.subscribed)
-    rig.new.q.put_nowait(_frame("s1", "090002", "new"))
-    await _until(lambda: "s1" in rig.sink.raws)
-    assert await rig.finish() == "stopped"
-    assert rig.sink.standby_raws == ["s1"]
-
-
-@_sync
 async def test_primary_failure_inside_the_window_promotes_the_ready_standby() -> None:
     rig = _Rig(new=_Adapter(), window=lambda: True)
     rig.start()

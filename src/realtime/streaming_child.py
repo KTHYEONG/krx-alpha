@@ -52,25 +52,15 @@ class FrameObserver(Protocol):
 
 
 class LagMonitoringSink:
-    """FrameSink decorator feeding recorded frames to a `FrameObserver` (e.g. `LagMonitor`).
+    """FrameSink decorator feeding every recorded frame to a `FrameObserver` (e.g. `LagMonitor`)."""
 
-    With `observe_standby=False` hot-standby frames are recorded but not observed: a warming-up standby
-    delivers late and says nothing about the live connection's delivery lag.
-    """
-
-    def __init__(self, inner: FrameSink, monitor: FrameObserver, *, observe_standby: bool = True) -> None:
+    def __init__(self, inner: FrameSink, monitor: FrameObserver) -> None:
         self._inner = inner
         self._monitor = monitor
-        self._observe_standby = observe_standby
 
     def record(self, frame: L0Frame) -> None:
         self._inner.record(frame)
         self._monitor.observe(frame)
-
-    def record_standby(self, frame: L0Frame) -> None:
-        getattr(self._inner, "record_standby", self._inner.record)(frame)
-        if self._observe_standby:
-            self._monitor.observe(frame)
 
     def note_ack(self, vendor: str, ack: VendorAck) -> None:
         self._inner.note_ack(vendor, ack)
@@ -119,7 +109,7 @@ async def run_streaming_child(
             raise SlotBudgetExceededError(f"planned pairs {len(pairs)} exceed capacity {capacity}")
         sink: FrameSink = SessionFrameSink(session=session)
         if lag_monitor is not None:
-            sink = LagMonitoringSink(sink, lag_monitor, observe_standby=False)
+            sink = LagMonitoringSink(sink, lag_monitor)
         for observer in frame_observers:
             sink = LagMonitoringSink(sink, observer)
         extra: dict[str, Any] = {}

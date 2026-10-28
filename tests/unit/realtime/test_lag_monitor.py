@@ -23,10 +23,10 @@ def _hms(second_of_day: int) -> str:
     return f"{second_of_day // 3600:02d}{second_of_day % 3600 // 60:02d}{second_of_day % 60:02d}"
 
 
-def _frame(recv_s: float, event_s: int, *, field: bool = False) -> L0Frame:
+def _frame(recv_s: float, event_s: int, *, field: bool = False, conn: str = "c") -> L0Frame:
     raw = f'{{"body":{{"chetime":"{_hms(event_s)}"}}}}'
     return L0Frame(
-        "ls", "H0STCNT0", "005930", raw, 1, _ns(recv_s), 1, "c",
+        "ls", "H0STCNT0", "005930", raw, 1, _ns(recv_s), 1, conn,
         exchange_event_time=_hms(event_s) if field else "",
     )
 
@@ -86,6 +86,30 @@ def test_sampling_skips_frames_and_invalid_arguments_raise() -> None:
         LagMonitor(threshold_s=1.0, sample_every=0)
 
 
+def test_late_minority_connection_does_not_alert(caplog: pytest.LogCaptureFixture) -> None:
+    monitor = LagMonitor(threshold_s=10.0, sample_every=1)
+    with caplog.at_level(logging.INFO):
+        for sec in range(32400, 32420):
+            for _ in range(8):
+                monitor.observe(_frame(sec + 0.5, sec, conn="fresh"))
+            for _ in range(2):
+                monitor.observe(_frame(sec + 0.5, sec - 30, conn="lagging"))
+    assert not monitor.alerted
+    assert "status=CRITICAL" not in caplog.text
+
+
+def test_dominant_connection_lag_still_alerts() -> None:
+    calls: list[int] = []
+    monitor = LagMonitor(threshold_s=10.0, sample_every=1, on_exceeded=lambda: calls.append(1))
+    for sec in range(32400, 32420):
+        for _ in range(8):
+            monitor.observe(_frame(sec + 0.5, sec - 30, conn="primary"))
+        for _ in range(2):
+            monitor.observe(_frame(sec + 0.5, sec, conn="standby"))
+    assert monitor.alerted
+    assert calls == [1]
+
+
 def test_sink_decorator_delegates_and_observes() -> None:
     calls: list[tuple[str, object]] = []
 
@@ -110,59 +134,6 @@ def test_sink_decorator_delegates_and_observes() -> None:
     assert sink.flush() == 7
     assert calls == [("record", "005930"), ("ack", "ls"), ("gap", "disconnect")]
     assert monitor._lags == [0.5]
-
-
-def test_standby_frames_are_recorded_but_not_observed_when_excluded() -> None:
-    calls: list[str] = []
-
-    class _Inner:
-        def record(self, frame: L0Frame) -> None:
-            calls.append("record")
-
-        def record_standby(self, frame: L0Frame) -> None:
-            calls.append("standby")
-
-        def note_ack(self, vendor: str, ack: object) -> None:
-            return None
-
-        def note_gap(self, symbol: str, start_ns: int, end_ns: int, reason: str) -> None:
-            return None
-
-        def flush(self) -> int:
-            return 0
-
-    monitor = LagMonitor(threshold_s=10.0, sample_every=1, min_samples=1)
-    sink = LagMonitoringSink(_Inner(), monitor, observe_standby=False)
-    sink.record_standby(_frame(32400.5, 32350))
-    assert calls == ["standby"]
-    assert monitor._lags == []
-    sink.record(_frame(32400.5, 32400))
-    assert monitor._lags == [0.5]
-
-    observing = LagMonitoringSink(_Inner(), monitor)
-    observing.record_standby(_frame(32400.5, 32400))
-    assert monitor._lags == [0.5, 0.5]
-
-
-def test_standby_recorded_through_plain_sink_without_record_standby() -> None:
-    calls: list[str] = []
-
-    class _Plain:
-        def record(self, frame: L0Frame) -> None:
-            calls.append("record")
-
-        def note_ack(self, vendor: str, ack: object) -> None:
-            return None
-
-        def note_gap(self, symbol: str, start_ns: int, end_ns: int, reason: str) -> None:
-            return None
-
-        def flush(self) -> int:
-            return 0
-
-    sink = LagMonitoringSink(_Plain(), LagMonitor(threshold_s=10.0), observe_standby=False)
-    sink.record_standby(_frame(32400.5, 32400))
-    assert calls == ["record"]
 
 
 def test_observe_swallows_unexpected_errors() -> None:

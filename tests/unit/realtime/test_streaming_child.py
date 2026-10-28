@@ -328,10 +328,11 @@ def test_runner_builds_a_handover_whose_standby_comes_from_the_adapter_factory(m
     assert handover._factory() is built[1]  # noqa: SLF001 - the standby adapter must come from the same factory
 
 
-def test_runner_keeps_standby_frames_out_of_the_lag_monitor(monkeypatch) -> None:
+def test_runner_feeds_recorded_frames_to_the_lag_monitor(monkeypatch) -> None:
     from types import SimpleNamespace
 
     from src.realtime.lag_monitor import LagMonitor
+    from src.realtime.streaming_child import LagMonitoringSink
 
     _make_http(monkeypatch)
     captured: dict[str, object] = {}
@@ -343,10 +344,9 @@ def test_runner_keeps_standby_frames_out_of_the_lag_monitor(monkeypatch) -> None
         async def run_forever(self, stop, *, max_cycles=None) -> None:
             return None
 
-    session = SimpleNamespace(record_frame=lambda *a, **k: None)
-    monitor = LagMonitor(threshold_s=10.0, sample_every=1, min_samples=1)
+    monitor = LagMonitor(threshold_s=10.0)
     asyncio.run(run_streaming_child(
-        session=session,
+        session=SimpleNamespace(),
         adapter_factory=lambda http: SimpleNamespace(capacity_pairs=10),
         replay_pairs=[("005930", "trade")],
         silence_limit=lambda: None,
@@ -356,4 +356,5 @@ def test_runner_keeps_standby_frames_out_of_the_lag_monitor(monkeypatch) -> None
     ))
 
     sink = captured["sink"]
-    assert sink._observe_standby is False  # noqa: SLF001 - wiring guard: a warming standby must not alert the live monitor
+    assert isinstance(sink, LagMonitoringSink)
+    assert sink._monitor is monitor  # noqa: SLF001 - wiring guard: every recorded frame reaches the monitor
