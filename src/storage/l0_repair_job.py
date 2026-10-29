@@ -13,17 +13,26 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+import polars as pl
+
 from src.core.config import AuditSettings, RepairSettings
 from src.core.paths import DataPaths
 from src.core.session_anchors import standard_session_anchors
 from src.marketdata.tick_tape_backfill import read_ledger_done
 from src.storage.l0_audit import AuditStatus, derive_session_audit, write_session_audit
 from src.storage.l0_gapfill import (
+    GapfillInterval,
     GapfillSource,
+    GapfillStatus,
+    derive_cross_vendor_fill,
     derive_gapfill,
     load_tape_for_symbols,
+    peer_trades_for_gaps,
     received_trades_for_gaps,
     write_gapfill,
+)
+from src.storage.l0_gapfill import (
+    _audit_intervals as _gapfill_audit_intervals,
 )
 from src.storage.l0_repair import RepairState, derive_day_repair
 from src.storage.l0_repair_merge import build_repaired_ticks, repaired_ticks_valid
@@ -168,14 +177,45 @@ def _run_locked(
                     symbols = {entry["symbol"] for entry in audit_doc["symbols"] if entry["confirmed_missing"] > 0}
                     tape = load_tape_for_symbols(paths, day, symbols)
                     received = received_trades_for_gaps(audit_doc, journal_root, vendor=vendor, day=day)
+                    peers = [peer for peer in repair_settings.xvendor_peers if peer != vendor]
+                    peers_data = [
+                        (peer, peer_trades_for_gaps(audit_doc, journal_root, peer=peer, day=day)) for peer in peers
+                    ]
+                    xv_rows, xv_recovered, residual_doc = derive_cross_vendor_fill(audit_doc, peers_data)
+                    rejected = int(residual_doc.pop("xvendor_rejected_intervals", 0))
+                    for symbol, chetime, price, volume, _tape_seq in xv_rows.select(
+                        "symbol", "chetime", "price", "volume", "tape_seq"
+                    ).iter_rows():
+                        received.setdefault((str(symbol), int(str(chetime))), []).append((-1, int(price), int(volume)))
+                    original = _gapfill_audit_intervals(audit_doc)
+                    remaining_ids = [
+                        interval_id for interval_id, (_, interval) in enumerate(original)
+                        if int(interval["missing_trades"]) > xv_recovered.get(interval_id, 0)
+                    ]
                     rows, outcomes = derive_gapfill(
-                        audit_doc,
+                        residual_doc,
                         [GapfillSource("kiwoom", "gapfill:kiwoom_tape", tape)],
                         received,
+                        interval_ids=remaining_ids,
+                        prior_recovered=xv_recovered,
                     )
+                    completed = [
+                        GapfillInterval(
+                            interval_id=interval_id, symbol=symbol,
+                            chetime_prev=str(interval["chetime_prev"]), chetime_next=str(interval["chetime_next"]),
+                            cum_prev=int(interval["cum_prev"]), cum_next=int(interval["cum_next"]),
+                            missing_trades=int(interval["missing_trades"]), recovered=count, residual=0,
+                            status=GapfillStatus.FULL, recovered_xvendor=count,
+                        )
+                        for interval_id, (symbol, interval) in enumerate(original)
+                        if (count := xv_recovered.get(interval_id, 0)) == int(interval["missing_trades"])
+                    ]
+                    outcomes = tuple(sorted((*outcomes, *completed), key=lambda outcome: outcome.interval_id))
+                    combined = pl.concat([xv_rows, rows]).sort(["symbol", "chetime", "tape_seq"])
                     rows_path, report_path = paths.gapfill_paths(day, vendor)
+                    recovered_total = sum(xv_recovered.values())
                     write_gapfill(
-                        rows,
+                        combined,
                         outcomes,
                         rows_path=rows_path,
                         report_path=report_path,
@@ -184,7 +224,19 @@ def _run_locked(
                             "audit_sha256": hashlib.sha256(audit_bytes).hexdigest(),
                             "generated_by": "repair-ticks",
                             "run_id": run_id,
+                            "xvendor_peers": list(peers),
+                            "xvendor_recovered": recovered_total,
+                            "xvendor_rejected_intervals": rejected,
                         },
+                    )
+                    logger.info(
+                        "[DATA] stage=xvendor_fill day=%s vendor=%s peers=%s intervals=%d recovered=%d rejected=%d",
+                        day.isoformat(),
+                        vendor,
+                        ",".join(peers),
+                        len(original),
+                        recovered_total,
+                        rejected,
                     )
                     gapfilled += 1
                     repair = derive_day_repair(paths, day, vendor, settings=repair_settings, tape_done=tape_done)

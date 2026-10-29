@@ -703,6 +703,7 @@ class RepairSettings(BaseSettings):
     hold_max_extra_days: int = Field(default=7, ge=0, le=10)
     gate_vendors: tuple[str, ...] = ("ls", "kis")
     repair_vendors: tuple[str, ...] = ("ls",)
+    xvendor_peers: tuple[str, ...] = ("kis",)
 
     @model_validator(mode="after")
     def check_repair_vendor_scope(self) -> RepairSettings:
@@ -717,6 +718,11 @@ class RepairSettings(BaseSettings):
             raise ValueError(
                 f"repair_vendors {self.repair_vendors!r} must be a subset of gate_vendors {self.gate_vendors!r}"
             )
+        peers = self.xvendor_peers
+        if any(not entry.strip() or entry != entry.strip() or entry != entry.lower() for entry in peers):
+            raise ValueError(f"xvendor_peers entries must be non-empty lowercase: {peers!r}")
+        if len(set(peers)) != len(peers):
+            raise ValueError(f"xvendor_peers must not contain duplicates: {peers!r}")
         return self
 
 

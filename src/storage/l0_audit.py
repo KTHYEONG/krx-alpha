@@ -131,6 +131,8 @@ class LossInterval:
     recv_prev_ns: int
     recv_next_ns: int
     conn_changed: bool
+    acml_prev: int | None = None
+    acml_next_before: int | None = None
 
 
 @dataclass(frozen=True)
@@ -958,6 +960,8 @@ class _Derivation:
                         recv_prev_ns=prev.recv_ns,
                         recv_next_ns=frame.recv_ns,
                         conn_changed=frame.conn_id != prev.conn_id,
+                        acml_prev=prev.volume,
+                        acml_next_before=frame.volume - frame.cvolume,
                     )
                 )
                 segment.interval_count += 1
@@ -1366,6 +1370,8 @@ def _audit_to_jsonable(audit: SessionAudit) -> dict[str, object]:
                         "recv_prev_ns": interval.recv_prev_ns,
                         "recv_next_ns": interval.recv_next_ns,
                         "conn_changed": interval.conn_changed,
+                        "acml_prev": interval.acml_prev,
+                        "acml_next_before": interval.acml_next_before,
                     }
                     for interval in entry.intervals
                 ],
