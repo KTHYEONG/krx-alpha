@@ -112,7 +112,10 @@ class Handover:
         self._last_refresh: float | None = None
         self._refresh_pending = False
         self._refresh_overlap = False
-        self._seen: dict[int, bool] = {}
+        # Owner per payload: 0 for the primary, a fresh token per adopted standby, so keys a dropped standby
+        # recorded stay foreign to both the primary and its replacement.
+        self._seen: dict[int, int] = {}
+        self._standby_owner = 0
         self._primary_event_s = -1
         self._dropped = 0
 
@@ -226,8 +229,9 @@ class Handover:
         if len(self._seen) > _SEEN_CAP:
             for stale in list(itertools.islice(self._seen, _SEEN_CAP // 4)):
                 del self._seen[stale]
-        owner = self._seen.setdefault(key, from_standby)
-        if owner != from_standby:
+        token = self._standby_owner if from_standby else 0
+        owner = self._seen.setdefault(key, token)
+        if owner != token:
             self._dropped += 1
             return False
         return True
@@ -237,7 +241,7 @@ class Handover:
         if self._refresh_pending:
             self._refresh_pending = False
             if self._standby is not None:
-                # Preserve ownership until the fresh connection is adopted.
+                # Keep the dropped standby's keys so the primary does not record its payloads again.
                 primary_seen = self._seen.copy()
                 await self._drop_standby()
                 self._seen = primary_seen
@@ -250,10 +254,9 @@ class Handover:
             self._opening = None
             if adapter is not None:
                 self._standby = _Standby(adapter, asyncio.ensure_future(adapter.recv()), self._monotonic())
+                self._standby_owner += 1
                 if not self._refresh_overlap:
                     self._seen.clear()
-                else:
-                    self._seen = dict.fromkeys(self._seen, False)
                 self._primary_event_s = -1
                 self._dropped = 0
             else:

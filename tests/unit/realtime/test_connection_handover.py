@@ -656,3 +656,27 @@ async def test_cut_over_discards_pending_request() -> None:
         primary.cancel()
         await asyncio.gather(primary, return_exceptions=True)
         await handover.aclose()
+
+
+@_sync
+async def test_primary_does_not_rerecord_dropped_standby_payloads_after_refresh() -> None:
+    handover, request, made = _refresh_handover(window=lambda: True)
+    primary: asyncio.Task[Any] = asyncio.ensure_future(asyncio.Event().wait())
+    try:
+        await _adopt_standby(handover, made, primary)
+        assert handover.admit(_frame("standby", "090000", "standby"), from_standby=True)
+        request.request()
+        handover.maybe_start(eligible=True, live_connections=2)
+        await handover.step(set(), primary)
+        opening = handover._opening  # noqa: SLF001
+        assert opening is not None
+        await asyncio.wait({opening})
+        await handover.step({opening}, primary)
+        assert not handover.admit(_frame("standby", "090000", "old"), from_standby=False)
+        assert not handover.admit(_frame("standby", "090000", "fresh"), from_standby=True)
+        assert handover.admit(_frame("fresh-only", "090001", "fresh"), from_standby=True)
+        assert not handover.admit(_frame("fresh-only", "090001", "old"), from_standby=False)
+    finally:
+        primary.cancel()
+        await asyncio.gather(primary, return_exceptions=True)
+        await handover.aclose()
