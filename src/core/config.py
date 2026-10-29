@@ -704,6 +704,7 @@ class RepairSettings(BaseSettings):
     gate_vendors: tuple[str, ...] = ("ls", "kis")
     repair_vendors: tuple[str, ...] = ("ls",)
     xvendor_peers: tuple[str, ...] = ("kis",)
+    overdue_days: int = Field(default=2, ge=1, le=7)
 
     @model_validator(mode="after")
     def check_repair_vendor_scope(self) -> RepairSettings:

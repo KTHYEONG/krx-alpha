@@ -840,6 +840,7 @@ def check_session_reconciliation(
     failure_level: int = logging.CRITICAL,
     audit: SessionAudit | None = None,
     audit_settings: AuditSettings | None = None,
+    repair_pending: bool = False,
 ) -> bool:
     """Verify that a business-day regular session left a complete collection trail.
 
@@ -1022,6 +1023,16 @@ def check_session_reconciliation(
         partial,
     )
     issues = structural + list(verdict.reasons)
+    if repair_pending and not structural and verdict.status is GapBudgetStatus.FAIL and verdict.reasons and all(
+        reason.startswith("trade_loss_exceeded:") or reason.startswith("symbol_loss_exceeded:")
+        for reason in verdict.reasons
+    ):
+        logger.warning(
+            "[DATA] stage=session_reconciliation status=PENDING_REPAIR date=%s reasons=%s",
+            date.isoformat(),
+            ",".join(verdict.reasons),
+        )
+        return True
     if structural or verdict.status is GapBudgetStatus.FAIL:
         logger.log(
             failure_level,

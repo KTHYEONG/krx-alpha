@@ -1888,6 +1888,7 @@
     "[DATA] stage=regular_kis_stream status=FAIL reason=circuit_open shard=%s date=%s",
     "[DATA] stage=regular_kis_stream status=RESTARTED shard=%s exit_code=%s",
     "[DATA] stage=regular_kis_supervise status=FAIL reason=%s",
+    "[DATA] stage=repair_overdue status=FAIL days=%s",
     "[DATA] stage=session_audit status=ERROR date=%s error=%s",
     "[DATA] stage=session_audit status=ERROR date=%s error=%s",
     "[DATA] stage=session_audit status=WRITE_FAIL date=%s error=%s",

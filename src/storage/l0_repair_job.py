@@ -34,7 +34,7 @@ from src.storage.l0_gapfill import (
 from src.storage.l0_gapfill import (
     _audit_intervals as _gapfill_audit_intervals,
 )
-from src.storage.l0_repair import RepairState, derive_day_repair
+from src.storage.l0_repair import RepairState, derive_day_repair, evaluate_repaired_loss
 from src.storage.l0_repair_merge import build_repaired_ticks, repaired_ticks_valid
 
 logger = logging.getLogger(__name__)
@@ -214,6 +214,7 @@ def _run_locked(
                     combined = pl.concat([xv_rows, rows]).sort(["symbol", "chetime", "tape_seq"])
                     rows_path, report_path = paths.gapfill_paths(day, vendor)
                     recovered_total = sum(xv_recovered.values())
+                    verdict = evaluate_repaired_loss(audit_doc, outcomes, audit_settings)
                     write_gapfill(
                         combined,
                         outcomes,
@@ -227,7 +228,30 @@ def _run_locked(
                             "xvendor_peers": list(peers),
                             "xvendor_recovered": recovered_total,
                             "xvendor_rejected_intervals": rejected,
+                            "verdict": {
+                                "status": verdict.status,
+                                "residual_confirmed": verdict.residual_confirmed,
+                                "trades_observed": verdict.trades_observed,
+                                "ratio": verdict.ratio,
+                                "reasons": list(verdict.reasons),
+                            },
                         },
+                    )
+                    log_level = {
+                        "FAIL": logging.CRITICAL,
+                        "WARN": logging.WARNING,
+                        "PASS": logging.INFO,
+                    }[verdict.status]
+                    logger.log(
+                        log_level,
+                        "[DATA] stage=repaired_reconciliation status=%s day=%s vendor=%s residual=%d/%d ratio=%.6f reasons=%s",
+                        verdict.status,
+                        day.isoformat(),
+                        vendor,
+                        verdict.residual_confirmed,
+                        verdict.trades_observed,
+                        verdict.ratio,
+                        ",".join(verdict.reasons) if verdict.reasons else "-",
                     )
                     logger.info(
                         "[DATA] stage=xvendor_fill day=%s vendor=%s peers=%s intervals=%d recovered=%d rejected=%d",

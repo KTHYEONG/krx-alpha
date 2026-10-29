@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import logging
 import pathlib
+from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from enum import StrEnum
@@ -13,7 +14,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
-from src.core.config import RepairSettings
+from src.core.config import AuditSettings, RepairSettings
 from src.core.paths import DataPaths
 from src.storage.layout import l0_partition_key, l0_partition_relpath
 
@@ -40,6 +41,116 @@ class DayRepair:
 
 
 _Count = Annotated[int, Field(strict=True, ge=0)]
+
+
+@dataclass(frozen=True)
+class RepairedLossVerdict:
+    status: Literal["PASS", "WARN", "FAIL"]
+    residual_confirmed: int
+    trades_observed: int
+    ratio: float
+    reasons: tuple[str, ...]
+
+
+def evaluate_repaired_loss(
+    audit: Mapping[str, Any], outcomes: Sequence[Any], settings: AuditSettings
+) -> RepairedLossVerdict:
+    """Judge the post-repair residual of a session audit with the EOD loss thresholds; pure."""
+    from src.storage.l0_gapfill import _indexed_audit_intervals
+
+    totals = audit.get("totals", {})
+    if not isinstance(totals, Mapping):
+        totals = {}
+    try:
+        trades = int(totals.get("trades_observed", 0) or 0)
+    except (TypeError, ValueError):
+        trades = 0
+    if trades < 0:
+        trades = 0
+    ledgers = audit.get("symbols", ())
+    if not isinstance(ledgers, Sequence) or isinstance(ledgers, (str, bytes)):
+        ledgers = ()
+    info: dict[str, dict[str, Any]] = {}
+    for ledger in ledgers:
+        if not isinstance(ledger, Mapping):
+            continue
+        raw_symbol = ledger.get("symbol")
+        if not isinstance(raw_symbol, str) or not raw_symbol:
+            continue
+        norm = raw_symbol.zfill(6)
+        try:
+            ledger_trades = int(ledger.get("trades_observed", 0) or 0)
+        except (TypeError, ValueError):
+            ledger_trades = 0
+        try:
+            confirmed = int(ledger.get("confirmed_missing", 0) or 0)
+        except (TypeError, ValueError):
+            confirmed = 0
+        info[norm] = {
+            "display": norm,
+            "status": ledger.get("status", ""),
+            "trades": max(0, ledger_trades),
+            "confirmed": max(0, confirmed),
+        }
+    by_id: dict[int, Any] = {}
+    for outcome in outcomes:
+        try:
+            by_id[int(outcome.interval_id)] = outcome
+        except (TypeError, ValueError, AttributeError):
+            continue
+    recovered_by_symbol: dict[str, int] = dict.fromkeys(info, 0)
+    try:
+        indexed = _indexed_audit_intervals(audit)
+    except Exception:  # noqa: BLE001 - torn audit degrades to no recovery
+        indexed = []
+    for interval_id, symbol, interval in indexed:
+        if not isinstance(interval, Mapping) or interval.get("kind") != "confirmed":
+            continue
+        outcome = by_id.get(int(interval_id))
+        if outcome is None:
+            continue
+        if str(outcome.symbol).zfill(6) != symbol:
+            continue
+        try:
+            recovered = int(outcome.recovered or 0)
+        except (TypeError, ValueError):
+            continue
+        if recovered <= 0:
+            continue
+        recovered_by_symbol[symbol] = recovered_by_symbol.get(symbol, 0) + min(
+            recovered, int(interval["missing_trades"])
+        )
+    residual_by_symbol: dict[str, int] = {}
+    for norm, entry in info.items():
+        residual_by_symbol[norm] = max(0, int(entry["confirmed"]) - recovered_by_symbol.get(norm, 0))
+    residual = sum(residual_by_symbol.values())
+    if trades == 0:
+        return RepairedLossVerdict("PASS", residual, 0, 0.0, ())
+    ratio = residual / trades
+    reasons: list[str] = []
+    failed = False
+    if ratio > settings.loss_fail_ratio:
+        failed = True
+        reasons.append(f"residual_loss_exceeded:{residual}/{trades}")
+    breaching = [
+        (norm, residual_by_symbol[norm], int(entry["trades"]))
+        for norm, entry in info.items()
+        if entry["status"] == "OK"
+        and int(entry["trades"]) >= settings.symbol_min_trades
+        and int(entry["trades"]) > 0
+        and residual_by_symbol.get(norm, 0) / int(entry["trades"]) > settings.symbol_loss_fail_ratio
+    ]
+    if breaching:
+        failed = True
+        ordered = sorted(breaching, key=lambda item: (item[1] / item[2], item[1]), reverse=True)
+        worst, worst_r, worst_t = ordered[0]
+        extra = f"+{len(ordered) - 1}" if len(ordered) > 1 else ""
+        reasons.append(f"residual_symbol_loss_exceeded:{worst}:{worst_r}/{worst_t}{extra}")
+    if failed:
+        return RepairedLossVerdict("FAIL", residual, trades, ratio, tuple(reasons))
+    if ratio > settings.loss_warn_ratio:
+        return RepairedLossVerdict("WARN", residual, trades, ratio, (f"residual_loss_warn:{residual}/{trades}",))
+    return RepairedLossVerdict("PASS", residual, trades, ratio, ())
 
 
 class _AuditTotals(BaseModel):

@@ -511,6 +511,32 @@ def _repair_days_summary(
     return ",".join(pending) if pending else "none"
 
 
+def _repair_overdue(
+    paths: DataPaths, ref_day: dt.date, cfg: CollectorSettings, repair_settings: RepairSettings | None
+) -> list[str]:
+    """Days in `repair_vendors` at least `overdue_days` old whose state is not CLEAN/REPAIRED."""
+    if repair_settings is None:
+        return []
+    try:
+        tape_done = read_ledger_done(paths.tick_tape_ledger)
+    except Exception:  # noqa: BLE001 - torn ledger degrades to pending, never fails EOD
+        tape_done = frozenset()
+    span = int(cfg.journal_retain_days) + int(repair_settings.hold_max_extra_days) + 1
+    overdue: list[str] = []
+    for offset in range(span, -1, -1):
+        day = ref_day - dt.timedelta(days=offset)
+        if (ref_day - day).days < int(repair_settings.overdue_days):
+            continue
+        for vendor in repair_settings.repair_vendors:
+            partition = paths.journal_root / vendor / "krx" / "regular" / "H0STCNT0" / f"dt={day.isoformat()}"
+            if not partition.is_dir() and not paths.session_audit_path(day, vendor).exists():
+                continue
+            repair = derive_day_repair(paths, day, vendor, settings=repair_settings, tape_done=tape_done)
+            if repair.state is not RepairState.CLEAN and repair.state is not RepairState.REPAIRED:
+                overdue.append(f"{day.isoformat()}:{vendor}:{repair.state.value}")
+    return overdue
+
+
 def _run_eod_housekeeping(
     cfg: CollectorSettings,
     paths: DataPaths,
@@ -3032,7 +3058,7 @@ class DaemonRunner:
     def _run_holiday_eod(self, now: dt.datetime, ref_day: dt.date) -> None:
         cfg = self._cfg
         paths = self._paths
-        repair_settings = getattr(self._runtime, "repair", None)
+        repair_settings = getattr(self, "_repair_cfg", getattr(self._runtime, "repair", None))
         if repair_settings is not None and getattr(repair_settings, "hold_enabled", False):
             housekeeping = _run_eod_housekeeping(
                 cfg, paths, ref_day, progress=self._eod_progress, repair_settings=repair_settings
@@ -3073,7 +3099,7 @@ class DaemonRunner:
         self._log_premarket_eod(ref_day)
         audit = self._derive_session_audit(ref_day, day, anchors)
         self._derive_kis_regular_audit(ref_day, day, anchors, ls_audit=audit)
-        repair_settings = getattr(self._runtime, "repair", None)
+        repair_settings = getattr(self, "_repair_cfg", getattr(self._runtime, "repair", None))
         if repair_settings is not None and getattr(repair_settings, "hold_enabled", False):
             housekeeping = _run_eod_housekeeping(
                 cfg, paths, ref_day, progress=self._eod_progress, repair_settings=repair_settings
@@ -3090,6 +3116,9 @@ class DaemonRunner:
             max_age=dt.timedelta(hours=cfg.host_backup_max_age_h),
         )
         repair_days = _repair_days_summary(paths, ref_day, cfg, repair_settings)
+        overdue_days = _repair_overdue(paths, ref_day, cfg, repair_settings)
+        if overdue_days:
+            logger.critical("[DATA] stage=repair_overdue status=FAIL days=%s", ",".join(overdue_days))
         degraded_reasons = [
             name
             for name, failed in (
@@ -3317,6 +3346,12 @@ class DaemonRunner:
         paths = self._paths
         if day.status is TradingDayStatus.BUSINESS:
             try:
+                repair_settings = getattr(self, "_repair_cfg", getattr(self._runtime, "repair", None))
+                repair_pending = (
+                    repair_settings is not None
+                    and bool(getattr(repair_settings, "job_enabled", False))
+                    and cfg.vendor in tuple(getattr(repair_settings, "repair_vendors", ()))
+                )
                 reconciled = check_session_reconciliation(
                     manifest_path=paths.manifest_path(ref_day),
                     date=ref_day,
@@ -3329,6 +3364,7 @@ class DaemonRunner:
                     regular_close=anchors.regular_close,
                     audit=audit,
                     audit_settings=getattr(self._runtime, "audit", None) or AuditSettings(),
+                    repair_pending=repair_pending,
                 )
                 if not reconciled:
                     logger.critical(
