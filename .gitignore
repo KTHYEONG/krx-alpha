@@ -226,3 +226,7 @@ tmp/
 
 # Serena AI Assistant
 .serena/
+
+# 서버 점검표·운영 에이전트 지침(로컬 운영 문서)
+docs/vps-checklist.md
+docs/vps-ops-agent.md
