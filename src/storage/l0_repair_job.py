@@ -178,8 +178,10 @@ def _run_locked(
                     tape = load_tape_for_symbols(paths, day, symbols)
                     received = received_trades_for_gaps(audit_doc, journal_root, vendor=vendor, day=day)
                     peers = [peer for peer in repair_settings.xvendor_peers if peer != vendor]
+                    conflating = set(repair_settings.xvendor_conflating_peers)
                     peers_data = [
-                        (peer, peer_trades_for_gaps(audit_doc, journal_root, peer=peer, day=day)) for peer in peers
+                        (peer, peer in conflating, peer_trades_for_gaps(audit_doc, journal_root, peer=peer, day=day))
+                        for peer in peers
                     ]
                     xv_rows, xv_recovered, residual_doc = derive_cross_vendor_fill(audit_doc, peers_data)
                     rejected = int(residual_doc.pop("xvendor_rejected_intervals", 0))

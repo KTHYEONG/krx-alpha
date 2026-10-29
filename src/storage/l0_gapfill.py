@@ -178,11 +178,24 @@ def peer_trades_for_gaps(
 
 
 def derive_cross_vendor_fill(
-    audit: Mapping[str, Any], peers: Sequence[tuple[str, Mapping[str, Sequence[PeerTrade]]]]
+    audit: Mapping[str, Any], peers: Sequence[tuple[str, Mapping[str, Sequence[PeerTrade]]]] | Sequence[tuple[str, bool, Mapping[str, Sequence[PeerTrade]]]]
 ) -> tuple[pl.DataFrame, dict[int, int], dict[str, Any]]:
-    """Exact fill rows for audited intervals from peer trades keyed by cumulative volume; returns (rows, recovered_by_interval_id, residual_audit)."""
+    """Exact fill rows for audited intervals from peer trades keyed by cumulative volume; returns (rows, recovered_by_interval_id, residual_audit).
+
+    Each peer entry is `(peer_id, per_symbol)` or `(peer_id, conflating, per_symbol)`; a
+    conflating peer fills an interval only when its own trades exactly match the missing
+    count and the cum-volume span, and only when no plain peer touched that interval.
+    """
     items = _indexed_audit_intervals(audit)
     by_id = {interval_id: (symbol, interval) for interval_id, symbol, interval in items}
+    normalized: list[tuple[str, bool, Mapping[str, Sequence[PeerTrade]]]] = []
+    for entry in peers:
+        if len(entry) == 3:
+            peer_id, conflating, per_symbol = entry
+            normalized.append((peer_id, conflating, per_symbol))
+        else:
+            peer_id, per_symbol = entry
+            normalized.append((peer_id, False, per_symbol))
     picked: dict[int, list[tuple[PeerTrade, str]]] = {}
     rejected = 0
     for interval_id, symbol, interval in items:
@@ -192,18 +205,25 @@ def derive_cross_vendor_fill(
             continue
         if hi <= lo:
             continue
+        plain = [(peer_id, per_symbol) for peer_id, conflating, per_symbol in normalized if not conflating]
+        conflating_peers = [(peer_id, per_symbol) for peer_id, conflating, per_symbol in normalized if conflating]
         seen: dict[int, tuple[PeerTrade, str]] = {}
-        for peer_id, per_symbol in peers:
+        for peer_id, per_symbol in plain:
             for trade in per_symbol.get(symbol, ()):
                 if lo < trade.acml <= hi and trade.acml not in seen:
                     seen[trade.acml] = (trade, peer_id)
-        if not seen:
+        if seen:
+            ordered = [seen[acml] for acml in sorted(seen)]
+            if sum(trade.qty for trade, _ in ordered) > hi - lo or len(ordered) > missing:
+                rejected += 1
+                continue
+            picked[interval_id] = ordered
             continue
-        ordered = [seen[acml] for acml in sorted(seen)]
-        if sum(trade.qty for trade, _ in ordered) > hi - lo or len(ordered) > missing:
-            rejected += 1
-            continue
-        picked[interval_id] = ordered
+        for peer_id, per_symbol in conflating_peers:
+            candidate = sorted((trade for trade in per_symbol.get(symbol, ()) if lo < trade.acml <= hi), key=lambda trade: trade.acml)
+            if len(candidate) == missing and sum(trade.qty for trade in candidate) == hi - lo:
+                picked[interval_id] = [(trade, peer_id) for trade in candidate]
+                break
     entries: list[dict[str, Any]] = []
     recovered: dict[int, int] = {}
     recovered_qty: dict[int, int] = {}

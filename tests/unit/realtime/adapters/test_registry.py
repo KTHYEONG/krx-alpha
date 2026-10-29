@@ -16,7 +16,7 @@ from src.realtime.adapters.registry import (
 
 
 def test_registry_keys_exact() -> None:
-    assert set(ADAPTERS.keys()) == {"ls", "db"}
+    assert set(ADAPTERS.keys()) == {"ls", "db", "kiwoom"}
     with pytest.raises(TypeError):
         ADAPTERS["xx"] = None  # type: ignore[index]
 
@@ -45,7 +45,7 @@ def test_credentials_repr_redacted() -> None:
     assert "k" in repr(AppCredentials("k", "s3cret"))
 
 
-@pytest.mark.parametrize("vendor", ["ls", "db"])
+@pytest.mark.parametrize("vendor", ["ls", "db", "kiwoom"])
 def test_registry_patch_points_are_module_globals(monkeypatch, tmp_path, vendor) -> None:
     from src.marketdata.toss_token_store import db_token_path, ls_token_path
 
@@ -71,13 +71,31 @@ def test_registry_patch_points_are_module_globals(monkeypatch, tmp_path, vendor)
         return adapter
 
     monkeypatch.setattr(registry, "TossTokenStore", _store)
-    monkeypatch.setattr(registry, "LsRealtimeAdapter" if vendor == "ls" else "DbRealtimeAdapter", _adapter)
-    monkeypatch.setenv(f"{vendor.upper()}_APP_KEY", "key")
-    monkeypatch.setenv(f"{vendor.upper()}_APP_SECRET", "secret")
+    if vendor == "ls":
+        monkeypatch.setattr(registry, "LsRealtimeAdapter", _adapter)
+    elif vendor == "db":
+        monkeypatch.setattr(registry, "DbRealtimeAdapter", _adapter)
+    else:
+        monkeypatch.setattr(registry, "KiwoomRealtimeAdapter", _adapter)
+    if vendor == "ls":
+        monkeypatch.setenv("LS_APP_KEY", "key")
+        monkeypatch.setenv("LS_APP_SECRET", "secret")
+    elif vendor == "db":
+        monkeypatch.setenv("DB_APP_KEY", "key")
+        monkeypatch.setenv("DB_APP_SECRET", "secret")
+    else:
+        monkeypatch.setenv("KIWOOM_APP_KEY", "key")
+        monkeypatch.setenv("KIWOOM_SECRET_KEY", "secret")
     entry = regular_vendor(vendor)
     creds = entry.load_credentials()
     assert creds == AppCredentials("key", "secret")
     assert entry.build(creds, RegularAdapterContext(http, settings, tmp_path, market_of)) is adapter
+    if vendor == "kiwoom":
+        assert entry.requires_market_map is False
+        assert seen["adapter"]["capacity_pairs"] == settings.kiwoom_capacity_pairs
+        assert seen["adapter"]["ack_timeout_s"] == settings.kiwoom_ack_timeout_s
+        assert seen["adapter"]["user_agent"] == settings.kiwoom_user_agent
+        return
     assert seen["store"] == (
         (ls_token_path if vendor == "ls" else db_token_path)(tmp_path, "key"),
         {"rotation_cooldown_s": 123 if vendor == "ls" else 456},

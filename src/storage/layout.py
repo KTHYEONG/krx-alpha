@@ -22,6 +22,7 @@ QUARANTINE_REPO_PREFIX: Final[str] = "quarantine/"
 L0_JOURNAL_GLOB: Final[str] = "*.jsonl.zst"
 # L0 vendor directory label of the DB crosscheck stream (not a host-broker vendor id).
 L0_VENDOR_DB: Final[str] = "db"
+L0_VENDOR_KIWOOM: Final[str] = "kiwoom"
 
 _L1_DT_RE = re.compile(r"^dt=(\d{4}-\d{2}-\d{2})\.parquet$")
 

@@ -60,6 +60,7 @@ def test_spec_table_order_and_roles() -> None:
         daemon_mod.StreamChildKey.REGULAR,
         daemon_mod.StreamChildKey.SNAPSHOT,
         daemon_mod.StreamChildKey.DB_CROSSCHECK,
+        daemon_mod.StreamChildKey.KIWOOM_CROSSCHECK,
         daemon_mod.StreamChildKey.AFTERMARKET,
         daemon_mod.StreamChildKey.PREMARKET,
         daemon_mod.StreamChildKey.REGULAR_KIS,
@@ -73,6 +74,7 @@ def test_spec_table_order_and_roles() -> None:
         daemon_mod.StreamChildKey.REGULAR,
         daemon_mod.StreamChildKey.SNAPSHOT,
         daemon_mod.StreamChildKey.DB_CROSSCHECK,
+        daemon_mod.StreamChildKey.KIWOOM_CROSSCHECK,
     ]
 
 

@@ -150,7 +150,8 @@
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
         "streamer_restarts": 0,
-        "nightly_done": {}
+        "nightly_done": {},
+        "last_kiwoom_crosscheck_result": null
       },
       "instant": "2026-09-16T08:25:00+09:00"
     },
@@ -224,7 +225,8 @@
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
         "streamer_restarts": 0,
-        "nightly_done": {}
+        "nightly_done": {},
+        "last_kiwoom_crosscheck_result": null
       },
       "instant": "2026-09-16T08:26:00+09:00"
     },
@@ -355,7 +357,8 @@
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
         "streamer_restarts": 0,
-        "nightly_done": {}
+        "nightly_done": {},
+        "last_kiwoom_crosscheck_result": null
       },
       "instant": "2026-09-16T08:31:00+09:00"
     },
@@ -459,7 +462,8 @@
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
         "streamer_restarts": 0,
-        "nightly_done": {}
+        "nightly_done": {},
+        "last_kiwoom_crosscheck_result": null
       },
       "instant": "2026-09-16T09:10:00+09:00"
     },
@@ -580,7 +584,8 @@
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
         "streamer_restarts": 0,
-        "nightly_done": {}
+        "nightly_done": {},
+        "last_kiwoom_crosscheck_result": null
       },
       "instant": "2026-09-16T15:32:00+09:00"
     },
@@ -753,7 +758,8 @@
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
         "streamer_restarts": 0,
-        "nightly_done": {}
+        "nightly_done": {},
+        "last_kiwoom_crosscheck_result": null
       },
       "instant": "2026-09-16T15:45:00+09:00"
     },
@@ -930,7 +936,8 @@
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
         "streamer_restarts": 0,
-        "nightly_done": {}
+        "nightly_done": {},
+        "last_kiwoom_crosscheck_result": null
       },
       "instant": "2026-09-16T16:05:00+09:00"
     },
@@ -1167,7 +1174,8 @@
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
         "streamer_restarts": 0,
-        "nightly_done": {}
+        "nightly_done": {},
+        "last_kiwoom_crosscheck_result": null
       },
       "instant": "2026-09-16T20:05:00+09:00"
     },
@@ -1257,7 +1265,8 @@
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
         "streamer_restarts": 0,
-        "nightly_done": {}
+        "nightly_done": {},
+        "last_kiwoom_crosscheck_result": null
       },
       "instant": "2026-09-16T20:06:00+09:00"
     },
@@ -1368,7 +1377,8 @@
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
         "streamer_restarts": 0,
-        "nightly_done": {}
+        "nightly_done": {},
+        "last_kiwoom_crosscheck_result": null
       },
       "instant": "2026-09-16T22:00:00+09:00"
     },
@@ -1505,7 +1515,8 @@
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
         "streamer_restarts": 0,
-        "nightly_done": {}
+        "nightly_done": {},
+        "last_kiwoom_crosscheck_result": null
       },
       "instant": "2026-09-17T09:00:00+09:00"
     },
@@ -1632,7 +1643,8 @@
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
         "streamer_restarts": 0,
-        "nightly_done": {}
+        "nightly_done": {},
+        "last_kiwoom_crosscheck_result": null
       },
       "instant": "2026-09-17T20:05:00+09:00"
     },
@@ -1806,7 +1818,8 @@
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
         "streamer_restarts": 0,
-        "nightly_done": {}
+        "nightly_done": {},
+        "last_kiwoom_crosscheck_result": null
       },
       "instant": "2026-09-18T08:25:00+09:00"
     }
@@ -1841,6 +1854,8 @@
     "[DAEMON] stage=ingest_watchdog status=POSSIBLE_HOLIDAY date=%s",
     "[DAEMON] stage=ingest_watchdog status=RECOVERED date=%s age_s=%d",
     "[DAEMON] stage=ingest_watchdog status=STALE date=%s age_s=%s",
+    "[DAEMON] stage=kiwoom_crosscheck status=FAIL reason=circuit_open",
+    "[DAEMON] stage=kiwoom_crosscheck status=RESTARTED exit_code=%s",
     "[DAEMON] stage=nightly_%s status=FAIL exit_code=launch reason=%s",
     "[DAEMON] stage=nightly_%s status=STARTED deadline=%s",
     "[DAEMON] stage=program_trades_sync status=FAIL exit_code=%s",

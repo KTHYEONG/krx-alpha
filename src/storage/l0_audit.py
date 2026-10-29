@@ -41,7 +41,7 @@ from src.storage.quality_kis import (
 
 _KST: Final = ZoneInfo("Asia/Seoul")
 _TICK_STREAM: Final = "H0STCNT0"
-_LEDGER_VENDORS: Final[frozenset[str]] = frozenset({"ls", "kis"})
+_LEDGER_VENDORS: Final[frozenset[str]] = frozenset({"ls", "kis", "kiwoom"})
 _BATCH_BYTES: Final = 32 * 1024 * 1024
 _MINUTE_SAMPLE_OVERHEAD_BYTES: Final = 80
 _KEY_SEP: Final = "|"
@@ -462,6 +462,27 @@ def _parse_body(raw: str) -> dict[str, object]:
 
 def _tick_body(vendor: str, raw: str) -> dict[str, object]:
     """Return the normalized tick body of one L0 record; empty dict when undecodable."""
+    if vendor == "kiwoom":
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            return {}
+        if not isinstance(entry, dict):
+            return {}
+        item = entry.get("item")
+        values = entry.get("values")
+        if not isinstance(item, str) or not item or not isinstance(values, dict):
+            return {}
+        try:
+            price = str(abs(int(str(values.get("10")).strip())))
+            cvolume = str(abs(int(str(values.get("15")).strip())))
+        except (TypeError, ValueError, AttributeError):
+            return {}
+        chetime = values.get("20")
+        volume = values.get("13")
+        if not isinstance(chetime, str) or not chetime or not isinstance(volume, str) or not volume:
+            return {}
+        return {"shcode": item, "chetime": chetime, "price": price, "cvolume": cvolume, "volume": volume}
     if vendor != "kis":
         return _parse_body(raw)
     parts = raw.split("^")
@@ -816,6 +837,14 @@ class _Derivation:
         cum = _tick_cum(body)
         volume = _parse_int(body.get("volume"))
         cvolume = _parse_int(body.get("cvolume"))
+        if self._vendor == "kiwoom" and isinstance(raw_symbol, str) and raw_symbol and moment is not None and volume is not None and cvolume is not None:
+            self.symbol_state(raw_symbol).frames += 1
+            if (
+                classify_market_phase(self._venue_enum or MarketVenue.KRX, str(che_raw), EventKind.TRADE, windows=self._windows).value == _REGULAR_PHASE
+                and (self._last_regular_tick_ns is None or record.recv_ns > self._last_regular_tick_ns)
+            ):
+                self._last_regular_tick_ns = record.recv_ns
+            return
         if symbol is None or not isinstance(raw_symbol, str) or not raw_symbol or moment is None or cum is None or volume is None or cvolume is None:
             if symbol is not None:
                 self.symbol_state(symbol).decode_fail += 1

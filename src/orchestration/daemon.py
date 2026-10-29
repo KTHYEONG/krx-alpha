@@ -126,7 +126,7 @@ from src.realtime.manifest import SessionManifest
 from src.realtime.streamer import aftermarket_open_time
 from src.storage.l0_audit import AuditStatus, SessionAudit, derive_session_audit, write_session_audit
 from src.storage.l0_repair import RepairState, derive_day_repair, l0_hold_reason
-from src.storage.layout import L0_VENDOR_DB, l0_day_journal_glob
+from src.storage.layout import L0_VENDOR_DB, L0_VENDOR_KIWOOM, l0_day_journal_glob
 from src.storage.remote import RemoteArchiveError
 from src.storage.retention import check_disk_watermark
 from src.storage.snapshot_store import SnapshotStore
@@ -752,6 +752,23 @@ def _db_crosscheck_cmd(today: dt.date, paths: DataPaths) -> list[str]:
     ]
 
 
+def _kiwoom_crosscheck_cmd(today: dt.date, paths: DataPaths) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "src.cli.main",
+        "collect-stream-kiwoom",
+        "--session-date",
+        today.isoformat(),
+        "--journal-root",
+        str(paths.journal_root),
+        "--manifest-path",
+        str(paths.kiwoom_crosscheck_manifest_path(today)),
+        "--candidates-path",
+        str(paths.candidates),
+    ]
+
+
 def _aftermarket_stream_cmd(today: dt.date, paths: DataPaths, *, shard: AftermarketShard) -> list[str]:
     return [
         sys.executable,
@@ -840,6 +857,7 @@ class StreamChildKey(StrEnum):
     REGULAR = "regular"
     SNAPSHOT = "snapshot"
     DB_CROSSCHECK = "db_crosscheck"
+    KIWOOM_CROSSCHECK = "kiwoom_crosscheck"
     AFTERMARKET = "aftermarket"
     PREMARKET = "premarket"
     REGULAR_KIS = "regular_kis"
@@ -928,6 +946,7 @@ class DaemonState:
     last_supervisor_result: str | None = None
     last_snapshot_result: str | None = None
     last_db_crosscheck_result: str | None = None
+    last_kiwoom_crosscheck_result: str | None = None
     aftermarket_plan: tuple[AftermarketShard, ...] = ()
     aftermarket_plan_day: dt.date | None = None
     aftermarket_refresh_day: dt.date | None = None
@@ -957,6 +976,7 @@ class DaemonState:
         StreamChildKey.REGULAR: "last_supervisor_result",
         StreamChildKey.SNAPSHOT: "last_snapshot_result",
         StreamChildKey.DB_CROSSCHECK: "last_db_crosscheck_result",
+        StreamChildKey.KIWOOM_CROSSCHECK: "last_kiwoom_crosscheck_result",
     }
 
     def child_result(self, key: StreamChildKey) -> str | None:
@@ -1019,6 +1039,14 @@ class DaemonChildren:
     @db_crosscheck.setter
     def db_crosscheck(self, supervisor: ProcessSupervisor | None) -> None:
         self.set(StreamChildKey.DB_CROSSCHECK, supervisor)
+
+    @property
+    def kiwoom_crosscheck(self) -> ProcessSupervisor | None:
+        return self.get(StreamChildKey.KIWOOM_CROSSCHECK)
+
+    @kiwoom_crosscheck.setter
+    def kiwoom_crosscheck(self, supervisor: ProcessSupervisor | None) -> None:
+        self.set(StreamChildKey.KIWOOM_CROSSCHECK, supervisor)
 
     @property
     def premarket(self) -> ProcessSupervisor | None:
@@ -1301,6 +1329,22 @@ class DaemonRunner:
             manifest_path=lambda paths, day: paths.db_crosscheck_manifest_path(day),
         ),
         StreamChildSpec(
+            key=StreamChildKey.KIWOOM_CROSSCHECK,
+            role=StreamRole.CROSSCHECK,
+            lifecycle=ChildLifecycle.SESSION,
+            enabled=lambda runtime: runtime.collector.kiwoom_crosscheck_enabled,
+            cmd=lambda today, paths, reason: _kiwoom_crosscheck_cmd(today, paths),
+            active=lambda runtime, now, anchors: now.astimezone(_KST).time() < anchors.regular_close,
+            logs=SupervisionLogs(
+                restarted="[DAEMON] stage=kiwoom_crosscheck status=RESTARTED exit_code=%s",
+                circuit_open="[DAEMON] stage=kiwoom_crosscheck status=FAIL reason=circuit_open",
+                circuit_level=logging.WARNING,
+            ),
+            requires_primary=True,
+            journal_vendor=lambda cfg: L0_VENDOR_KIWOOM,
+            manifest_path=lambda paths, day: paths.kiwoom_crosscheck_manifest_path(day),
+        ),
+        StreamChildSpec(
             key=StreamChildKey.AFTERMARKET,
             role=StreamRole.AFTERMARKET,
             lifecycle=ChildLifecycle.SHARDED,
@@ -1551,7 +1595,7 @@ class DaemonRunner:
         if self._state.prev_state in _NIGHTLY_BLOCKED_STATES:
             return True
         ch = self._children
-        singles: list[Any | None] = [ch.regular, ch.snapshot, ch.db_crosscheck, ch.premarket]
+        singles: list[Any | None] = [ch.regular, ch.snapshot, ch.db_crosscheck, ch.kiwoom_crosscheck, ch.premarket]
         if any(sup is not None and _child_alive(sup) for sup in singles):
             return True
         return any(any(_child_alive(sup) for sup in mapping.values()) for mapping in (ch.aftermarket, ch.regular_kis))

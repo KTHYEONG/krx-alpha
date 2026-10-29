@@ -88,6 +88,11 @@ class CollectorSettings(BaseSettings):
     db_token_rotation_cooldown_s: float = Field(default=300.0, ge=0)
     db_subscribe_spacing_s: float = Field(default=0.12, ge=0.1)
     db_ack_timeout_s: float = Field(default=10.0, gt=0)
+    # Kiwoom REST WebSocket crosscheck (conflated, volume-lossless 0B stream).
+    kiwoom_crosscheck_enabled: bool = False
+    kiwoom_capacity_pairs: int = Field(default=200, ge=1)
+    kiwoom_ack_timeout_s: float = Field(default=10.0, gt=0)
+    kiwoom_user_agent: str = "krx-alpha"
     # Per-subscribe-ack deadline (seconds) of the KIS adapter; mirrors `db_ack_timeout_s`.
     kis_ack_timeout_s: float = Field(default=10.0, gt=0)
     db_crosscheck_enabled: bool = False
@@ -128,6 +133,10 @@ class CollectorSettings(BaseSettings):
     @property
     def db_crosscheck_symbol_budget(self) -> int:
         return self.db_capacity_pairs // len(self.streams)
+
+    @property
+    def kiwoom_crosscheck_symbol_budget(self) -> int:
+        return self.kiwoom_capacity_pairs // len(self.streams)
 
     @model_validator(mode="after")
     def check_universe_budget_within_technical_capacity(self) -> CollectorSettings:
@@ -706,6 +715,7 @@ class RepairSettings(BaseSettings):
     gate_vendors: tuple[str, ...] = ("ls", "kis")
     repair_vendors: tuple[str, ...] = ("ls",)
     xvendor_peers: tuple[str, ...] = ("kis",)
+    xvendor_conflating_peers: tuple[str, ...] = ("kiwoom",)
     overdue_days: int = Field(default=2, ge=1, le=7)
 
     @model_validator(mode="after")
@@ -726,6 +736,11 @@ class RepairSettings(BaseSettings):
             raise ValueError(f"xvendor_peers entries must be non-empty lowercase: {peers!r}")
         if len(set(peers)) != len(peers):
             raise ValueError(f"xvendor_peers must not contain duplicates: {peers!r}")
+        conflating = self.xvendor_conflating_peers
+        if any(not entry.strip() or entry != entry.strip() or entry != entry.lower() for entry in conflating):
+            raise ValueError(f"xvendor_conflating_peers entries must be non-empty lowercase: {conflating!r}")
+        if len(set(conflating)) != len(conflating):
+            raise ValueError(f"xvendor_conflating_peers must not contain duplicates: {conflating!r}")
         return self
 
 
