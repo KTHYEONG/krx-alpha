@@ -144,12 +144,8 @@ class Handover:
         """Start a standby when the monitor asked for one or the hot-standby window is open, `eligible`, and the cooldown has passed."""
         if self._opening is not None:
             return
-        requested = self._request.take()
-        if (
-            requested
-            and self._stall_lag_s is not None
-            and self._standby is not None
-        ):
+        if self._stall_lag_s is not None and self._standby is not None and self._request.peek():
+            # The lag monitor requests once per episode, so a request the standby cannot act on yet stays pending.
             lag = self.standby_lag_s()
             now = self._monotonic()
             if (
@@ -157,13 +153,15 @@ class Handover:
                 and lag >= self._stall_lag_s
                 and (self._last_refresh is None or now - self._last_refresh >= self._refresh_cooldown_s)
             ):
+                self._request.take()
                 logger.warning(
                     "[DATA] stage=stream_handover status=STANDBY_REFRESH reason=standby_stalled standby_lag_s=%.1f",
                     lag,
                 )
                 self._last_refresh = now
                 self._refresh_pending = True
-                return
+            return
+        requested = self._request.take()
         if not (requested or (self._window is not None and self._window())) or not eligible or self.active:
             return
         now = self._monotonic()
@@ -307,6 +305,8 @@ class Handover:
         )
         self._standby = None
         self._seen.clear()
+        # The swap a pending request asked for has just happened; keeping it would open a spurious standby.
+        self._request.take()
         return CutOver(standby.adapter, standby.recv_task)
 
     async def _drop_standby(self) -> None:

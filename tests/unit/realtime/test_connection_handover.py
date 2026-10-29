@@ -584,3 +584,75 @@ async def test_refresh_preserves_deduplication_through_opening() -> None:
         primary.cancel()
         await asyncio.gather(primary, return_exceptions=True)
         await handover.aclose()
+
+
+@_sync
+async def test_request_below_stall_threshold_is_retained_until_standby_stalls() -> None:
+    wall = {"now": _kst_at("090005")}
+    handover, request, made = _refresh_handover(wall_clock=lambda: wall["now"])
+    primary: asyncio.Task[Any] = asyncio.ensure_future(asyncio.Event().wait())
+    try:
+        await _adopt_standby(handover, made, primary)
+        handover.admit(_frame("s1", "090000", "new"), from_standby=True)
+        assert handover.standby_lag_s() == 5.0
+        request.request()
+        handover.maybe_start(eligible=True)
+        assert not handover._refresh_pending  # noqa: SLF001
+        assert request.peek() is True
+        wall["now"] = _kst_at("090012")
+        handover.maybe_start(eligible=True)
+        assert handover._refresh_pending  # noqa: SLF001
+        assert request.peek() is False
+    finally:
+        primary.cancel()
+        await asyncio.gather(primary, return_exceptions=True)
+        await handover.aclose()
+
+
+@_sync
+async def test_request_during_refresh_cooldown_fires_after_cooldown() -> None:
+    handover, request, made = _refresh_handover()
+    primary: asyncio.Task[Any] = asyncio.ensure_future(asyncio.Event().wait())
+    try:
+        await _adopt_standby(handover, made, primary)
+        handover.admit(_frame("s1", "090000", "new"), from_standby=True)
+        request.request()
+        handover.maybe_start(eligible=True)
+        await handover.step(set(), primary)
+        opening = handover._opening  # noqa: SLF001
+        assert opening is not None
+        await asyncio.wait({opening})
+        await handover.step({opening}, primary)
+        handover.admit(_frame("f1", "090000", "fresh"), from_standby=True)
+        request.request()
+        handover.maybe_start(eligible=True)
+        assert not handover._refresh_pending  # noqa: SLF001
+        assert request.peek() is True
+        handover._monotonic_advance["t"] += 30.0  # type: ignore[attr-defined]
+        handover.maybe_start(eligible=True)
+        assert handover._refresh_pending  # noqa: SLF001
+    finally:
+        primary.cancel()
+        await asyncio.gather(primary, return_exceptions=True)
+        await handover.aclose()
+
+
+@_sync
+async def test_cut_over_discards_pending_request() -> None:
+    handover, request, made = _refresh_handover()
+    primary: asyncio.Task[Any] = asyncio.ensure_future(asyncio.Event().wait())
+    try:
+        await _adopt_standby(handover, made, primary)
+        handover.admit(_frame("s1", "090059", "new"), from_standby=True)
+        request.request()
+        handover.maybe_start(eligible=True)
+        assert request.peek() is True
+        assert await handover.on_primary_failure() is not None
+        assert request.peek() is False
+        handover._monotonic_advance["t"] += 600.0  # type: ignore[attr-defined]
+        handover.maybe_start(eligible=True)
+        assert handover._opening is None  # noqa: SLF001
+    finally:
+        primary.cancel()
+        await asyncio.gather(primary, return_exceptions=True)
+        await handover.aclose()
