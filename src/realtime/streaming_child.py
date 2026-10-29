@@ -27,6 +27,8 @@ class HandoverSettings:
     cooldown_s: float
     window: Callable[[], bool] | None = None
     max_sessions: int | None = None
+    stall_lag_s: float | None = None
+    refresh_cooldown_s: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,8 @@ async def run_streaming_child(
                 cooldown_s=handover.cooldown_s,
                 window=handover.window,
                 max_sessions=handover.max_sessions,
+                stall_lag_s=handover.stall_lag_s,
+                refresh_cooldown_s=handover.refresh_cooldown_s,
             )
         streamer = streamer_factory(
             adapter=adapter,

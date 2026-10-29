@@ -82,6 +82,8 @@ class CollectorSettings(BaseSettings):
     lag_handover_enabled: bool = True
     lag_handover_max_s: float = Field(default=120.0, gt=0)
     lag_handover_cooldown_s: float = Field(default=300.0, ge=0)
+    lag_handover_standby_refresh_enabled: bool = True
+    lag_handover_refresh_cooldown_s: float = Field(default=30.0, ge=0)
     db_capacity_pairs: int = Field(default=50, ge=1)
     db_token_rotation_cooldown_s: float = Field(default=300.0, ge=0)
     db_subscribe_spacing_s: float = Field(default=0.12, ge=0.1)

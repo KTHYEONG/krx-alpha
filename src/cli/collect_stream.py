@@ -171,6 +171,10 @@ async def run_regular_stream(
                 settings.lag_handover_cooldown_s,
                 open_watch.standby_window,
                 max_sessions=settings.ls_max_sessions,
+                stall_lag_s=AuditSettings().latency_alert_threshold_s
+                if settings.lag_handover_standby_refresh_enabled
+                else None,
+                refresh_cooldown_s=settings.lag_handover_refresh_cooldown_s,
             )
             if profile.proactive_handover
             else None

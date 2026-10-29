@@ -4,18 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime as dt
 import itertools
 import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from src.realtime.contracts import L0Frame, VendorAdapter
 from src.realtime.lag_monitor import event_second_of
 from src.realtime.ls_limits import classify_ls_close_reason
 
 logger = logging.getLogger(__name__)
+
+_KST = ZoneInfo("Asia/Seoul")
+
+
+def _now_kst() -> dt.datetime:
+    return dt.datetime.now(_KST)
+
 
 # Duplicate-suppression memory: only payloads still in flight on the lagging connection matter, so the oldest quarter is dropped beyond this.
 _SEEN_CAP = 400_000
@@ -34,6 +43,9 @@ class SwapRequest:
         requested, self._requested = self._requested, False
         return requested
 
+    def peek(self) -> bool:
+        return self._requested
+
 
 @dataclass(frozen=True)
 class CutOver:
@@ -47,6 +59,7 @@ class _Standby:
     recv_task: asyncio.Task[L0Frame]
     started: float
     first_event_s: int | None = None
+    newest_event_s: int | None = None
 
 
 class Handover:
@@ -72,9 +85,16 @@ class Handover:
         window: Callable[[], bool] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         max_sessions: int | None = None,
+        stall_lag_s: float | None = None,
+        refresh_cooldown_s: float = 30.0,
+        wall_clock: Callable[[], dt.datetime] = _now_kst,
     ) -> None:
         if max_s <= 0 or cooldown_s < 0:
             raise ValueError("max_s must be positive and cooldown_s non-negative")
+        if stall_lag_s is not None and stall_lag_s <= 0:
+            raise ValueError("stall_lag_s must be positive")
+        if refresh_cooldown_s < 0:
+            raise ValueError("refresh_cooldown_s must be non-negative")
         self._factory = adapter_factory
         self._pairs = pairs
         self._request = request
@@ -83,9 +103,15 @@ class Handover:
         self._window = window
         self._monotonic = monotonic
         self._max_sessions = max_sessions
+        self._stall_lag_s = stall_lag_s
+        self._refresh_cooldown_s = refresh_cooldown_s
+        self._wall_clock = wall_clock
         self._opening: asyncio.Task[VendorAdapter | None] | None = None
         self._standby: _Standby | None = None
         self._last_start: float | None = None
+        self._last_refresh: float | None = None
+        self._refresh_pending = False
+        self._refresh_overlap = False
         self._seen: dict[int, bool] = {}
         self._primary_event_s = -1
         self._dropped = 0
@@ -103,9 +129,41 @@ class Handover:
             found.add(self._standby.recv_task)
         return found
 
+    def standby_lag_s(self) -> float | None:
+        """Seconds the standby's newest event trails the KST wall clock; None without an active standby."""
+        standby = self._standby
+        if standby is None:
+            return None
+        if standby.newest_event_s is None:
+            return max(0.0, self._monotonic() - standby.started)
+        now = self._wall_clock()
+        wall_sod = now.hour * 3600 + now.minute * 60 + now.second
+        return max(0.0, float(wall_sod - standby.newest_event_s))
+
     def maybe_start(self, *, eligible: bool, live_connections: int = 1) -> None:
         """Start a standby when the monitor asked for one or the hot-standby window is open, `eligible`, and the cooldown has passed."""
+        if self._opening is not None:
+            return
         requested = self._request.take()
+        if (
+            requested
+            and self._stall_lag_s is not None
+            and self._standby is not None
+        ):
+            lag = self.standby_lag_s()
+            now = self._monotonic()
+            if (
+                lag is not None
+                and lag >= self._stall_lag_s
+                and (self._last_refresh is None or now - self._last_refresh >= self._refresh_cooldown_s)
+            ):
+                logger.warning(
+                    "[DATA] stage=stream_handover status=STANDBY_REFRESH reason=standby_stalled standby_lag_s=%.1f",
+                    lag,
+                )
+                self._last_refresh = now
+                self._refresh_pending = True
+                return
         if not (requested or (self._window is not None and self._window())) or not eligible or self.active:
             return
         now = self._monotonic()
@@ -153,13 +211,17 @@ class Handover:
 
     def admit(self, frame: L0Frame, *, from_standby: bool) -> bool:
         """Account `frame` and return False when the other connection already recorded the same payload."""
-        if self._standby is None:
+        if self._standby is None and not self._refresh_overlap:
             return True
         event_s = event_second_of(frame)
         if event_s is not None:
-            if from_standby:
+            if from_standby and self._standby is not None:
                 if self._standby.first_event_s is None:
                     self._standby.first_event_s = event_s
+                if self._standby.newest_event_s is None:
+                    self._standby.newest_event_s = event_s
+                else:
+                    self._standby.newest_event_s = max(self._standby.newest_event_s, event_s)
             else:
                 self._primary_event_s = max(self._primary_event_s, event_s)
         key = hash((frame.stream, frame.symbol, frame.raw))
@@ -174,14 +236,31 @@ class Handover:
 
     async def step(self, done: set[asyncio.Future[Any]], primary_recv: asyncio.Task[L0Frame]) -> CutOver | None:
         """Advance after a wait: adopt a finished standby, drop a failed one, and cut over when due."""
+        if self._refresh_pending:
+            self._refresh_pending = False
+            if self._standby is not None:
+                # Preserve ownership until the fresh connection is adopted.
+                primary_seen = self._seen.copy()
+                await self._drop_standby()
+                self._seen = primary_seen
+            self._refresh_overlap = True
+            self._opening = asyncio.ensure_future(self._open())
+            logger.warning("[DATA] stage=stream_handover status=STARTED")
+            return None
         if self._opening is not None and self._opening in done:
             adapter = self._opening.result()
             self._opening = None
             if adapter is not None:
                 self._standby = _Standby(adapter, asyncio.ensure_future(adapter.recv()), self._monotonic())
-                self._seen.clear()
+                if not self._refresh_overlap:
+                    self._seen.clear()
+                else:
+                    self._seen = dict.fromkeys(self._seen, False)
                 self._primary_event_s = -1
                 self._dropped = 0
+            else:
+                self._seen.clear()
+            self._refresh_overlap = False
         standby = self._standby
         if standby is None:
             return None
@@ -240,6 +319,7 @@ class Handover:
 
     async def aclose(self) -> None:
         """Cancel any bring-up in flight and close the standby; safe to call repeatedly."""
+        self._refresh_overlap = False
         if self._opening is not None:
             opening, self._opening = self._opening, None
             opening.cancel()

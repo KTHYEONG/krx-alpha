@@ -355,3 +355,232 @@ async def test_duplicate_memory_is_bounded() -> None:
     finally:
         connection_handover._SEEN_CAP = original  # noqa: SLF001
     assert await rig.finish() == "stopped"
+
+
+def _kst_at(hms: str) -> Any:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    return dt.datetime.strptime(hms, "%H%M%S").replace(tzinfo=ZoneInfo("Asia/Seoul"))  # noqa: DTZ007
+
+
+def _refresh_handover(**kwargs: Any) -> tuple[Handover, SwapRequest, list[_Adapter]]:
+    request = SwapRequest()
+    made: list[_Adapter] = []
+    now = {"t": 1000.0}
+
+    def _factory() -> _Adapter:
+        adapter = _Adapter()
+        made.append(adapter)
+        return adapter
+
+    wall = kwargs.pop("wall_clock", lambda: _kst_at("090100"))
+    handover = Handover(
+        adapter_factory=_factory,
+        pairs=_PAIRS,
+        request=request,
+        max_s=120.0,
+        cooldown_s=300.0,
+        monotonic=lambda: now["t"],
+        stall_lag_s=10.0,
+        refresh_cooldown_s=30.0,
+        wall_clock=wall,
+        **kwargs,
+    )
+    handover._monotonic_advance = now  # type: ignore[attr-defined]
+    return handover, request, made
+
+
+async def _adopt_standby(handover: Handover, made: list[_Adapter], primary: asyncio.Task[Any]) -> _Adapter:
+    handover._request.request()  # noqa: SLF001
+    handover.maybe_start(eligible=True)
+    assert handover._opening is not None  # noqa: SLF001
+    done = {handover._opening}  # noqa: SLF001
+    await asyncio.wait(done)
+    await handover.step(done, primary)
+    assert handover._standby is not None  # noqa: SLF001
+    return handover._standby.adapter  # noqa: SLF001
+
+
+@_sync
+async def test_stalled_standby_is_refreshed_on_lag_request() -> None:
+    handover, request, made = _refresh_handover()
+    primary: asyncio.Task[Any] = asyncio.ensure_future(asyncio.Event().wait())
+    try:
+        old = await _adopt_standby(handover, made, primary)
+        handover.admit(_frame("s1", "090000", "new"), from_standby=True)
+        assert handover.standby_lag_s() == 60.0
+        request.request()
+        handover.maybe_start(eligible=True)
+        assert handover._refresh_pending  # noqa: SLF001
+        await handover.step(set(), primary)
+        assert old.closed
+        assert handover._opening is not None  # noqa: SLF001
+        assert handover._standby is None  # noqa: SLF001
+        assert not primary.done()
+    finally:
+        primary.cancel()
+        await asyncio.gather(primary, return_exceptions=True)
+        await handover.aclose()
+
+
+@_sync
+async def test_healthy_standby_is_kept() -> None:
+    handover, request, made = _refresh_handover()
+    primary: asyncio.Task[Any] = asyncio.ensure_future(asyncio.Event().wait())
+    try:
+        await _adopt_standby(handover, made, primary)
+        handover.admit(_frame("s1", "090059", "new"), from_standby=True)
+        assert handover.standby_lag_s() == 1.0
+        handover.admit(_frame("s0", "090058", "new"), from_standby=True)
+        assert handover.standby_lag_s() == 1.0
+        calls_before = len(made)
+        request.request()
+        handover.maybe_start(eligible=True)
+        assert not handover._refresh_pending  # noqa: SLF001
+        assert len(made) == calls_before
+        assert handover._standby is not None  # noqa: SLF001
+    finally:
+        primary.cancel()
+        await asyncio.gather(primary, return_exceptions=True)
+        await handover.aclose()
+
+
+@_sync
+async def test_silent_standby_counts_as_stalled() -> None:
+    handover, request, made = _refresh_handover()
+    primary: asyncio.Task[Any] = asyncio.ensure_future(asyncio.Event().wait())
+    try:
+        old = await _adopt_standby(handover, made, primary)
+        assert handover.standby_lag_s() == 0.0
+        handover._monotonic_advance["t"] += 15.0  # type: ignore[attr-defined]
+        assert handover.standby_lag_s() == 15.0
+        request.request()
+        handover.maybe_start(eligible=True)
+        assert handover._refresh_pending  # noqa: SLF001
+        await handover.step(set(), primary)
+        assert old.closed
+    finally:
+        primary.cancel()
+        await asyncio.gather(primary, return_exceptions=True)
+        await handover.aclose()
+
+
+@_sync
+async def test_refresh_cooldown_blocks_second_refresh() -> None:
+    handover, request, made = _refresh_handover()
+    primary: asyncio.Task[Any] = asyncio.ensure_future(asyncio.Event().wait())
+    try:
+        await _adopt_standby(handover, made, primary)
+        handover.admit(_frame("s1", "090000", "new"), from_standby=True)
+        request.request()
+        handover.maybe_start(eligible=True)
+        await handover.step(set(), primary)
+        done_opening = handover._opening  # noqa: SLF001
+        assert done_opening is not None
+        await asyncio.wait({done_opening})
+        await handover.step({done_opening}, primary)
+        handover._monotonic_advance["t"] += 10.0  # type: ignore[attr-defined]
+        request.request()
+        handover.maybe_start(eligible=True)
+        assert not handover._refresh_pending  # noqa: SLF001
+    finally:
+        primary.cancel()
+        await asyncio.gather(primary, return_exceptions=True)
+        await handover.aclose()
+
+
+def test_refresh_validation_and_disabled_behaviour() -> None:
+    import datetime as dt
+
+    request = SwapRequest()
+    with pytest.raises(ValueError, match="stall_lag_s"):
+        Handover(adapter_factory=_Adapter, pairs=_PAIRS, request=request, max_s=10, cooldown_s=0, stall_lag_s=0)
+    with pytest.raises(ValueError, match="refresh_cooldown_s"):
+        Handover(adapter_factory=_Adapter, pairs=_PAIRS, request=request, max_s=10, cooldown_s=0, refresh_cooldown_s=-1)
+    assert SwapRequest().peek() is False
+    peekable = SwapRequest()
+    peekable.request()
+    assert peekable.peek() is True
+    assert peekable.take() is True
+    plain = Handover(adapter_factory=_Adapter, pairs=_PAIRS, request=SwapRequest(), max_s=10, cooldown_s=0)
+    assert plain.standby_lag_s() is None
+    from src.realtime.connection_handover import _now_kst
+
+    assert isinstance(_now_kst(), dt.datetime)
+
+
+@_sync
+async def test_request_during_opening_is_retained() -> None:
+    handover, request, made = _refresh_handover(wall_clock=lambda: _kst_at("090100"))
+    primary: asyncio.Task[Any] = asyncio.ensure_future(asyncio.Event().wait())
+    try:
+        request.request()
+        handover.maybe_start(eligible=True)
+        assert handover._opening is not None  # noqa: SLF001
+        request.request()
+        handover.maybe_start(eligible=True)
+        assert request.peek() is True
+        opening = handover._opening  # noqa: SLF001
+        assert opening is not None
+        await asyncio.wait({opening})
+        await handover.step({opening}, primary)
+        assert request.peek() is True
+        request.request()
+        handover.maybe_start(eligible=True)
+        assert not handover._refresh_pending  # noqa: SLF001
+    finally:
+        primary.cancel()
+        await asyncio.gather(primary, return_exceptions=True)
+        await handover.aclose()
+
+
+@_sync
+async def test_primary_failure_promotes_fresh_standby_after_refresh() -> None:
+    handover, request, made = _refresh_handover()
+    primary: asyncio.Task[Any] = asyncio.ensure_future(asyncio.Event().wait())
+    try:
+        old_standby = await _adopt_standby(handover, made, primary)
+        handover.admit(_frame("s1", "090000", "new"), from_standby=True)
+        request.request()
+        handover.maybe_start(eligible=True)
+        await handover.step(set(), primary)
+        assert old_standby.closed
+        opening = handover._opening  # noqa: SLF001
+        assert opening is not None
+        await asyncio.wait({opening})
+        await handover.step({opening}, primary)
+        fresh = handover._standby.adapter  # noqa: SLF001
+        assert fresh is not old_standby
+        cut = await handover.on_primary_failure()
+        assert cut is not None
+        assert cut.adapter is fresh
+    finally:
+        primary.cancel()
+        await asyncio.gather(primary, return_exceptions=True)
+        await handover.aclose()
+
+
+@_sync
+async def test_refresh_preserves_deduplication_through_opening() -> None:
+    handover, request, made = _refresh_handover(window=lambda: True)
+    primary: asyncio.Task[Any] = asyncio.ensure_future(asyncio.Event().wait())
+    try:
+        await _adopt_standby(handover, made, primary)
+        assert handover.admit(_frame("before", "090000", "old"), from_standby=False)
+        assert handover.admit(_frame("standby", "090000", "standby"), from_standby=True)
+        request.request()
+        handover.maybe_start(eligible=True, live_connections=2)
+        await handover.step(set(), primary)
+        assert handover.admit(_frame("during", "090001", "old"), from_standby=False)
+        assert not handover.admit(_frame("standby", "090000", "old"), from_standby=False)
+        opening = handover._opening  # noqa: SLF001
+        assert opening is not None
+        await asyncio.wait({opening})
+        await handover.step({opening}, primary)
+        for raw in ("before", "during", "standby"):
+            assert not handover.admit(_frame(raw, "090001", "fresh"), from_standby=True)
+    finally:
+        primary.cancel()
+        await asyncio.gather(primary, return_exceptions=True)
+        await handover.aclose()
