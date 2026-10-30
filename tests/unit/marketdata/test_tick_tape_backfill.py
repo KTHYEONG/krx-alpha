@@ -345,8 +345,8 @@ def test_throttle_isolates_symbol(tmp_path: pathlib.Path, monkeypatch) -> None:
             TickTapeTarget(symbol="A", days=(day,), cost_hint=1.0),
             TickTapeTarget(symbol="B", days=(day,), cost_hint=2.0),
         ],
-        paths=paths, settings=_settings(), credentials=_creds(),
-        deadline=_deadline(), session=session, now=now, run_id="run7",
+        paths=paths, settings=_settings(retry_passes=0), credentials=_creds(),
+        deadline=_deadline(), session=session, now=now, run_id="run7", sleep=lambda s: None,
     )
     assert summary.status == "OK"
     assert summary.failed == 1

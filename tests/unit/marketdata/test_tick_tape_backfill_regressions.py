@@ -280,7 +280,8 @@ def test_symbol_failure_discards_its_staged_days(tmp_path, monkeypatch, caplog):
     assert result.failed == 1
     assert result.symbol_days == 0
     assert "symbol=A status=FAIL reason=KiwoomTickTapeError msg=tape is not newest-first" in caplog.text
-    assert not paths.tick_tape_ledger.exists()
+    records = [json.loads(line) for line in paths.tick_tape_ledger.read_text().splitlines()]
+    assert [(r["symbol"], r["status"], r["reason"]) for r in records] == [("A", "failed", "KiwoomTickTapeError")]
     assert list((paths.work_root / "tick_tape").rglob("*.parquet")) == []
 
 

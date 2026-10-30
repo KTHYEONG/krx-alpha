@@ -342,6 +342,10 @@ class TickTapeBackfillSettings(BaseSettings):
     request_timeout_s: float = Field(default=10.0, gt=0)
     max_ticks_per_day: int = Field(default=1_200_000, ge=1)
     progress_every_pages: int = Field(default=500, ge=1)
+    transient_retries: int = Field(default=3, ge=0, le=10)
+    transient_backoff_s: float = Field(default=2.0, ge=0, le=60)
+    retry_passes: int = Field(default=1, ge=0, le=3)
+    retry_pass_delay_s: float = Field(default=60.0, ge=0, le=600)
 
     @model_validator(mode="after")
     def check_window_spans(self) -> TickTapeBackfillSettings:

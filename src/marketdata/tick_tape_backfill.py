@@ -24,6 +24,7 @@ from src.marketdata.kiwoom_ticks import (
     KiwoomAuthRejected,
     KiwoomThrottled,
     KiwoomTickTapeError,
+    KiwoomTransientError,
     TapeBoundaryError,
     TapeTick,
     TapeWalk,
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 TAPE_VENDOR: str = "kiwoom"
 _LEDGER_OK_STATUSES: frozenset[str] = frozenset({"complete", "vendor_empty"})
+_LEDGER_ATTEMPT_STATUSES: frozenset[str] = frozenset({"failed", "edge_partial"})
 # Rows staged on disk between durable checkpoints: bounds the work a killed run can lose, not memory.
 _FLUSH_ROW_LIMIT: int = 2_000_000
 
@@ -72,6 +74,7 @@ class TickTapeRunSummary:
     edge_partial: int
     failed: int
     oversize: int = 0
+    retried: int = 0
 
 
 def tape_calendar_sessions(paths: DataPaths, through: dt.date) -> tuple[dt.date, ...]:
@@ -269,8 +272,44 @@ def read_ledger_done(path: pathlib.Path) -> frozenset[tuple[str, dt.date]]:
     return frozenset(done)
 
 
+def read_ledger_attempts(path: pathlib.Path) -> Mapping[tuple[str, dt.date], int]:
+    """Return per (symbol, date) the number of distinct base run ids that recorded a failed or edge_partial outcome."""
+    try:
+        contents = pathlib.Path(path).read_bytes()
+    except FileNotFoundError:
+        return {}
+    counts: dict[tuple[str, dt.date], set[str]] = {}
+    lines = contents.splitlines(keepends=True)
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            record = json.loads(stripped)
+        except (ValueError, UnicodeDecodeError):
+            if idx == len(lines) - 1 and not line.endswith(b"\n"):
+                continue
+            raise ValueError("corrupt tick-tape ledger") from None
+        if not isinstance(record, Mapping):
+            continue
+        if str(record.get("status")) not in _LEDGER_ATTEMPT_STATUSES:
+            continue
+        try:
+            key = (str(record["symbol"]), dt.date.fromisoformat(str(record["date"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+        run_id = str(record.get("run_id", ""))
+        base = re.sub(r"-\d+$", "", run_id)
+        counts.setdefault(key, set()).add(base)
+    return {key: len(bases) for key, bases in counts.items()}
+
+
 class _RunAuthError(KiwoomTickTapeError):
     """Second auth rejection inside one run; aborts the whole run."""
+
+
+class _SymbolTransientError(KiwoomTickTapeError):
+    """Transient vendor failures exhausted the same-cursor retries for one page; aborts only that symbol."""
 
 
 class _SymbolThrottleError(KiwoomTickTapeError):
@@ -357,8 +396,9 @@ def run_tick_tape_backfill(
     now: Callable[[], dt.datetime],
     run_id: str,
     should_stop: Callable[[], bool] = lambda: False,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> TickTapeRunSummary:
-    """Fetch targets under the host-shared pacer, page budget and deadline; persist partitions then ledger lines at durable checkpoints; never raises for per-symbol failures."""
+    """Fetch targets under the host-shared pacer, page budget and deadline with same-cursor transient retries and end-of-run retry passes; never raises for per-symbol failures."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
         raise ValueError("invalid tick-tape run_id")
     if deadline.tzinfo is None or now().tzinfo is None:
@@ -377,8 +417,9 @@ def run_tick_tape_backfill(
     started = 0
     committed_days = 0
     edge_days = 0
-    failed = 0
     oversize = 0
+    retried = 0
+    abort_failed = 0
     stop_requested = False
     ledger_queue: list[dict[str, Any]] = []
     staged: dict[dt.date, list[pathlib.Path]] = {}
@@ -401,6 +442,13 @@ def run_tick_tape_backfill(
         if pages_used >= settings.max_pages_per_run or current >= deadline or not in_window:
             raise TapeBoundaryError("tick-tape request boundary")
 
+    def _sleep_bounded(seconds: float) -> None:
+        _boundary()
+        remaining = (deadline - now()).total_seconds()
+        clamped = max(0.0, min(float(seconds), remaining))
+        sleep(clamped)
+        _boundary()
+
     def _issue() -> str:
         _boundary()
         try:
@@ -416,6 +464,7 @@ def run_tick_tape_backfill(
     def _fetch(symbol: str, next_key: str | None) -> TickPage:
         nonlocal token, auth_retried, pages_used
         throttles = 0
+        transients = 0
         while True:
             _boundary()
             if token is None:
@@ -445,12 +494,24 @@ def run_tick_tape_backfill(
                 throttles += 1
                 if throttles > 3:
                     raise _SymbolThrottleError(f"kiwoom tape throttled for {symbol}") from exc
-                time.sleep(1.2)
+                _sleep_bounded(1.2)
             except KiwoomAuthRejected as exc:
                 if auth_retried:
                     raise _RunAuthError("kiwoom tape auth rejected twice") from exc
                 auth_retried = True
                 token = _issue()
+            except KiwoomTransientError as exc:
+                transients += 1
+                if transients > settings.transient_retries:
+                    raise _SymbolTransientError(f"kiwoom tape transient failures for {symbol}") from exc
+                logger.warning(
+                    "[DATA] stage=tick_tape symbol=%s status=RETRY reason=transient attempt=%d/%d msg=%s",
+                    symbol,
+                    transients,
+                    settings.transient_retries,
+                    exc,
+                )
+                _sleep_bounded(settings.transient_backoff_s * transients)
 
     def _checkpoint() -> None:
         nonlocal staged, ledger_queue, staged_rows, checkpoint_no, committed_days
@@ -475,13 +536,13 @@ def run_tick_tape_backfill(
 
     status = "OK"
     reason: str | None = None
-    for target in targets:
-        try:
-            _boundary()
-        except TapeBoundaryError:
-            break
+    failures: dict[str, tuple[TickTapeTarget, BaseException]] = {}
+    pending_retry: list[str] = []
+    aborted = False
+
+    def _process_target(target: TickTapeTarget) -> TapeWalk:
+        nonlocal staged_rows
         remaining = settings.max_pages_per_run - pages_used
-        started += 1
         label = _label()
         symbol_chunks: list[tuple[dt.date, pathlib.Path, int]] = []
 
@@ -515,29 +576,12 @@ def run_tick_tape_backfill(
                 on_day_complete=_stage_day,
                 max_ticks_per_day=settings.max_ticks_per_day,
             )
-        except _RunAuthError:
+        except (_RunAuthError, _PersistenceError, TapeBoundaryError):
             _discard_symbol()
-            logger.error("[DATA] stage=tick_tape_backfill status=FAIL reason=auth run_id=%s", run_id)
-            status = "FAIL"
-            reason = "auth"
-            failed += 1
-            break
-        except _PersistenceError as exc:
+            raise
+        except Exception:
             _discard_symbol()
-            logger.warning("[DATA] stage=tick_tape status=FAIL reason=%s", exc)
-            failed += 1
-            status, reason = "FAIL", "persistence"
-            break
-        except Exception as exc:
-            _discard_symbol()
-            logger.warning(
-                "[DATA] stage=tick_tape symbol=%s status=FAIL reason=%s msg=%s",
-                target.symbol,
-                type(exc).__name__,
-                exc,
-            )
-            failed += 1
-            continue
+            raise
         for day, chunk, rows in symbol_chunks:
             staged.setdefault(day, []).append(chunk)
             staged_rows += rows
@@ -555,11 +599,18 @@ def run_tick_tape_backfill(
              "rows": 0, "run_id": label, "vendor": TAPE_VENDOR}
             for day in sorted(walk.edge_partial & frozenset(target.days))
         )
+        return walk
+
+    def _settle_success(walk: TapeWalk, target: TickTapeTarget) -> None:
+        nonlocal edge_days, oversize
         edge_days += len(walk.edge_partial)
+        complete_days = sum(
+            1 for r in ledger_queue if r.get("symbol") == target.symbol and r.get("status") == "complete"
+        )
         logger.info(
             "[DATA] stage=tick_tape symbol=%s days=%d pages=%d termination=%s",
             target.symbol,
-            len(symbol_chunks),
+            complete_days,
             walk.pages,
             walk.termination,
         )
@@ -571,14 +622,131 @@ def run_tick_tape_backfill(
                 walk.oversize_day.isoformat() if walk.oversize_day is not None else "?",
                 settings.max_ticks_per_day,
             )
-        if staged_rows > _FLUSH_ROW_LIMIT:
-            try:
-                _checkpoint()
-            except (OSError, pl.exceptions.PolarsError) as exc:
-                logger.warning("[DATA] stage=tick_tape status=FAIL reason=%s", type(exc).__name__)
-                failed += 1
-                status, reason = "FAIL", "persistence"
+
+    def _is_retryable(exc: BaseException) -> bool:
+        return isinstance(exc, (_SymbolTransientError, _SymbolThrottleError))
+
+    def _flush_if_needed() -> bool:
+        nonlocal abort_failed
+        if staged_rows <= _FLUSH_ROW_LIMIT:
+            return False
+        try:
+            _checkpoint()
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            logger.warning("[DATA] stage=tick_tape status=FAIL reason=%s", type(exc).__name__)
+            abort_failed += 1
+            return True
+        return False
+
+    for target in targets:
+        try:
+            _boundary()
+        except TapeBoundaryError:
+            break
+        started += 1
+        try:
+            walk = _process_target(target)
+        except _RunAuthError:
+            logger.error("[DATA] stage=tick_tape_backfill status=FAIL reason=auth run_id=%s", run_id)
+            status = "FAIL"
+            reason = "auth"
+            abort_failed += 1
+            aborted = True
+            break
+        except _PersistenceError as exc:
+            logger.warning("[DATA] stage=tick_tape status=FAIL reason=%s", exc)
+            abort_failed += 1
+            status, reason = "FAIL", "persistence"
+            aborted = True
+            break
+        except Exception as exc:
+            logger.warning(
+                "[DATA] stage=tick_tape symbol=%s status=FAIL reason=%s msg=%s",
+                target.symbol,
+                type(exc).__name__,
+                exc,
+            )
+            failures[target.symbol] = (target, exc)
+            if _is_retryable(exc):
+                pending_retry.append(target.symbol)
+            continue
+        _settle_success(walk, target)
+        if _flush_if_needed():
+            status, reason = "FAIL", "persistence"
+            aborted = True
+            break
+    if not aborted:
+        for pass_no in range(1, settings.retry_passes + 1):
+            if not pending_retry:
                 break
+            try:
+                _sleep_bounded(settings.retry_pass_delay_s)
+            except TapeBoundaryError:
+                break
+            logger.info(
+                "[DATA] stage=tick_tape_retry_pass run_id=%s pass=%d symbols=%d",
+                run_id,
+                pass_no,
+                len(pending_retry),
+            )
+            current = [t for t in targets if t.symbol in set(pending_retry)]
+            stop_pass = False
+            for target in current:
+                try:
+                    _boundary()
+                except TapeBoundaryError:
+                    stop_pass = True
+                    break
+                try:
+                    walk = _process_target(target)
+                except _RunAuthError:
+                    failures.pop(target.symbol, None)
+                    logger.error("[DATA] stage=tick_tape_backfill status=FAIL reason=auth run_id=%s", run_id)
+                    status, reason = "FAIL", "auth"
+                    abort_failed += 1
+                    aborted = True
+                    break
+                except _PersistenceError as exc:
+                    failures.pop(target.symbol, None)
+                    logger.warning("[DATA] stage=tick_tape status=FAIL reason=%s", exc)
+                    abort_failed += 1
+                    status, reason = "FAIL", "persistence"
+                    aborted = True
+                    break
+                except Exception as exc:
+                    logger.warning(
+                        "[DATA] stage=tick_tape symbol=%s status=FAIL reason=%s msg=%s",
+                        target.symbol,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    failures[target.symbol] = (target, exc)
+                    if not _is_retryable(exc) and target.symbol in pending_retry:
+                        pending_retry.remove(target.symbol)
+                    continue
+                _settle_success(walk, target)
+                failures.pop(target.symbol, None)
+                if target.symbol in pending_retry:
+                    pending_retry.remove(target.symbol)
+                if walk.termination != "page_budget":
+                    retried += 1
+                if _flush_if_needed():
+                    status, reason = "FAIL", "persistence"
+                    aborted = True
+                    break
+            if aborted or stop_pass:
+                break
+    if not aborted:
+        for target in targets:
+            if target.symbol in failures:
+                _, failure = failures[target.symbol]
+                ledger_queue.extend(
+                    {"date": day.isoformat(), "symbol": target.symbol, "status": "failed",
+                     "rows": 0, "run_id": run_id, "vendor": TAPE_VENDOR,
+                     "reason": type(failure).__name__}
+                    for day in target.days
+                )
+    failed = abort_failed + len(failures)
     if reason != "persistence":
         try:
             _checkpoint()
@@ -591,7 +759,7 @@ def run_tick_tape_backfill(
     if status == "OK" and stop_requested:
         reason = "stop_requested"
     logger.info(
-        "[DATA] stage=tick_tape_backfill status=%s run_id=%s symbols=%d symbol_days=%d pages=%d edge_partial=%d failed=%d oversize=%d",
+        "[DATA] stage=tick_tape_backfill status=%s run_id=%s symbols=%d symbol_days=%d pages=%d edge_partial=%d failed=%d oversize=%d retried=%d",
         status,
         run_id,
         started,
@@ -600,6 +768,7 @@ def run_tick_tape_backfill(
         edge_days,
         failed,
         oversize,
+        retried,
     )
     return TickTapeRunSummary(
         status=status,
@@ -611,4 +780,5 @@ def run_tick_tape_backfill(
         edge_partial=edge_days,
         failed=failed,
         oversize=oversize,
+        retried=retried,
     )

@@ -22,10 +22,15 @@ _KST = ZoneInfo("Asia/Seoul")
 
 _AUTH_RETURN_CODES: frozenset[int] = frozenset({3})
 _THROTTLE_RETURN_CODE: int = 5
+_TRANSIENT_RETURN_CODES: frozenset[int] = frozenset({7})  # vendor [1631] server-error fault observed 2026-10-30
 
 
 class KiwoomTickTapeError(KrxAlphaError):
     """Kiwoom tape transport, envelope or auth failure."""
+
+
+class KiwoomTransientError(KiwoomTickTapeError):  # noqa: N818 - spec-fixed vendor signal name
+    """Vendor-side transient failure; the same cursor may be retried."""
 
 
 class KiwoomAuthRejected(KiwoomTickTapeError):  # noqa: N818 - spec-fixed vendor signal name
@@ -159,7 +164,7 @@ def _parse_tick(row: Any) -> TapeTick:
 def fetch_tick_page(
     symbol: str, *, access_token: str, app_key: str, next_key: str | None, session: Any, timeout_s: float
 ) -> TickPage:
-    """POST /api/dostk/chart api-id ka10079 (tic_scope=1, upd_stkpc_tp=1) for one page; raises KiwoomTickTapeError."""
+    """POST /api/dostk/chart api-id ka10079 for one page; raises KiwoomTransientError, KiwoomThrottled, KiwoomAuthRejected or KiwoomTickTapeError."""
     if not symbol:
         raise KiwoomTickTapeError("kiwoom tick page requires a symbol")
     _ = app_key
@@ -179,7 +184,20 @@ def fetch_tick_page(
             headers=headers,
             timeout=timeout_s,
         )
-        status = int(getattr(resp, "status_code", 200) or 200)
+    except (KiwoomThrottled, KiwoomAuthRejected):
+        raise
+    except KiwoomTickTapeError:
+        raise
+    except Exception as exc:
+        import requests as _requests
+
+        if isinstance(exc, (_requests.exceptions.Timeout, _requests.exceptions.ConnectionError)):
+            raise KiwoomTransientError(f"kiwoom tick page request failed: {type(exc).__name__}") from exc
+        raise KiwoomTickTapeError(f"kiwoom tick page request failed: {type(exc).__name__}") from exc
+    status = int(getattr(resp, "status_code", 200) or 200)
+    if status >= 500:
+        raise KiwoomTransientError(f"kiwoom tick page HTTP {status}")
+    try:
         body = resp.json()
     except (KiwoomThrottled, KiwoomAuthRejected):
         raise
@@ -198,6 +216,10 @@ def fetch_tick_page(
         if code in _AUTH_RETURN_CODES:
             raise KiwoomAuthRejected(f"kiwoom tick page auth rejected: return_code={code}")
         position = "first" if next_key is None else "continued"
+        if code in _TRANSIENT_RETURN_CODES:
+            raise KiwoomTransientError(
+                f"kiwoom tick page failed: return_code={code} return_msg={_return_msg(body)} page={position}"
+            )
         raise KiwoomTickTapeError(
             f"kiwoom tick page failed: return_code={code} return_msg={_return_msg(body)} page={position}"
         )
