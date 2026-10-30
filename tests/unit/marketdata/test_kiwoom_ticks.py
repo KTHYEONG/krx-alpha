@@ -380,3 +380,26 @@ def test_cap_ignores_unwanted_days() -> None:
     )
     assert walk.termination != "oversize"
     assert walk.oversize_day is None
+
+
+@pytest.mark.parametrize(
+    ("next_key", "position"),
+    [(None, "first"), ("K1", "continued")],
+)
+def test_tick_page_failure_names_vendor_message_and_page_position(next_key, position) -> None:
+    body = {"return_code": 7, "return_msg": "  too   deep\nquery  " + "x" * 300}
+    session = _Session([_Resp(body, headers={"cont-yn": "N"})])
+    with pytest.raises(KiwoomTickTapeError) as raised:
+        fetch_tick_page("005930", access_token="t", app_key="k", next_key=next_key, session=session, timeout_s=5.0)
+    text = str(raised.value)
+    assert "return_code=7" in text
+    assert f"page={position}" in text
+    assert "return_msg=too deep query xxx" in text
+    assert "\n" not in text
+    assert len(text) < 260
+
+
+def test_tick_page_failure_without_vendor_message_marks_it_absent() -> None:
+    session = _Session([_Resp({"return_code": 7}, headers={"cont-yn": "N"})])
+    with pytest.raises(KiwoomTickTapeError, match="return_msg=- page=first"):
+        fetch_tick_page("005930", access_token="t", app_key="k", next_key=None, session=session, timeout_s=5.0)

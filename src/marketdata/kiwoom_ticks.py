@@ -76,6 +76,16 @@ def _headers_case_insensitive(headers: Mapping[str, Any] | None, name: str) -> s
     return None
 
 
+_RETURN_MSG_CHARS = 120
+
+
+def _return_msg(body: Any) -> str:
+    """Vendor `return_msg` collapsed to one bounded line for error text; "-" when absent."""
+    raw = body.get("return_msg") if isinstance(body, Mapping) else None
+    text = " ".join(str(raw).split())[:_RETURN_MSG_CHARS] if raw is not None else ""
+    return text or "-"
+
+
 def _return_code(body: Any) -> int | None:
     if not isinstance(body, Mapping):
         return None
@@ -187,7 +197,10 @@ def fetch_tick_page(
     if code != 0:
         if code in _AUTH_RETURN_CODES:
             raise KiwoomAuthRejected(f"kiwoom tick page auth rejected: return_code={code}")
-        raise KiwoomTickTapeError(f"kiwoom tick page failed: return_code={code}")
+        position = "first" if next_key is None else "continued"
+        raise KiwoomTickTapeError(
+            f"kiwoom tick page failed: return_code={code} return_msg={_return_msg(body)} page={position}"
+        )
     if status >= 400:
         raise KiwoomTickTapeError("kiwoom tick page HTTP failure")
     rows = body.get("stk_tic_chart_qry")
