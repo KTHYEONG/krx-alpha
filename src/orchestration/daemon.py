@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, ClassVar
@@ -72,7 +73,7 @@ from src.marketdata.service import BarsRefreshResult as BarsRefreshResult
 from src.marketdata.service import KisFallbackError as KisFallbackError
 from src.marketdata.service import refresh_bars, refresh_bars_via_kis_fallback
 from src.marketdata.snapshot_plan import shift_snapshot_settings
-from src.marketdata.tick_tape_backfill import read_ledger_done
+from src.marketdata.tick_tape_backfill import pending_repair_symbol_days, read_ledger_attempts, read_ledger_done
 from src.marketdata.toss_calendar import (
     TossCalendarError,
     TradingDay,
@@ -511,16 +512,69 @@ def _repair_days_summary(
     return ",".join(pending) if pending else "none"
 
 
-def _repair_overdue(
+def _day_tape_attempts(
+    paths: DataPaths, day: dt.date, *, settings: RepairSettings,
+    tape_done: AbstractSet[tuple[str, dt.date]], attempts: Mapping[tuple[str, dt.date], int],
+) -> int:
+    """Max failed tape attempts over the day's pending LS gap symbol-days; 0 when none pending or none attempted."""
+    pending = pending_repair_symbol_days(paths, [day], settings=settings, tape_done=tape_done)
+    best = 0
+    for pair in pending:
+        count = int(attempts.get(pair, 0))
+        if count > best:
+            best = count
+    return best
+
+
+def _load_repair_attempts(paths: DataPaths) -> Mapping[tuple[str, dt.date], int]:
+    try:
+        return read_ledger_attempts(paths.tick_tape_ledger)
+    except Exception:  # noqa: BLE001 - torn ledger degrades to the EOD backstop, never fails EOD
+        logger.warning("[DATA] stage=repair_overdue status=DEGRADED reason=attempts_unreadable")
+        return {}
+
+
+def _repair_exhausted(
     paths: DataPaths, ref_day: dt.date, cfg: CollectorSettings, repair_settings: RepairSettings | None
 ) -> list[str]:
-    """Days in `repair_vendors` at least `overdue_days` old whose state is not CLEAN/REPAIRED."""
+    """`<day>:<vendor>:tape_pending:attempts=<n>` for repair_vendors days still tape_pending after at least overdue_attempts failed tape attempts."""
     if repair_settings is None:
         return []
     try:
         tape_done = read_ledger_done(paths.tick_tape_ledger)
     except Exception:  # noqa: BLE001 - torn ledger degrades to pending, never fails EOD
         tape_done = frozenset()
+    attempts = _load_repair_attempts(paths)
+    threshold = int(repair_settings.overdue_attempts)
+    span = int(cfg.journal_retain_days) + int(repair_settings.hold_max_extra_days) + 1
+    exhausted: list[str] = []
+    for offset in range(span, -1, -1):
+        day = ref_day - dt.timedelta(days=offset)
+        for vendor in repair_settings.repair_vendors:
+            partition = paths.journal_root / vendor / "krx" / "regular" / "H0STCNT0" / f"dt={day.isoformat()}"
+            if not partition.is_dir() and not paths.session_audit_path(day, vendor).exists():
+                continue
+            repair = derive_day_repair(paths, day, vendor, settings=repair_settings, tape_done=tape_done)
+            if repair.state is not RepairState.TAPE_PENDING:
+                continue
+            count = _day_tape_attempts(paths, day, settings=repair_settings, tape_done=tape_done, attempts=attempts)
+            if count >= threshold:
+                exhausted.append(f"{day.isoformat()}:{vendor}:{repair.state.value}:attempts={count}")
+    return exhausted
+
+
+def _repair_overdue(
+    paths: DataPaths, ref_day: dt.date, cfg: CollectorSettings, repair_settings: RepairSettings | None
+) -> list[str]:
+    """Days in `repair_vendors` at least `overdue_days` old, not CLEAN/REPAIRED, and not already covered by the attempts-exhausted rule."""
+    if repair_settings is None:
+        return []
+    try:
+        tape_done = read_ledger_done(paths.tick_tape_ledger)
+    except Exception:  # noqa: BLE001 - torn ledger degrades to pending, never fails EOD
+        tape_done = frozenset()
+    attempts = _load_repair_attempts(paths)
+    threshold = int(repair_settings.overdue_attempts)
     span = int(cfg.journal_retain_days) + int(repair_settings.hold_max_extra_days) + 1
     overdue: list[str] = []
     for offset in range(span, -1, -1):
@@ -533,6 +587,10 @@ def _repair_overdue(
                 continue
             repair = derive_day_repair(paths, day, vendor, settings=repair_settings, tape_done=tape_done)
             if repair.state is not RepairState.CLEAN and repair.state is not RepairState.REPAIRED:
+                if repair.state is RepairState.TAPE_PENDING and _day_tape_attempts(
+                    paths, day, settings=repair_settings, tape_done=tape_done, attempts=attempts
+                ) >= threshold:
+                    continue
                 overdue.append(f"{day.isoformat()}:{vendor}:{repair.state.value}")
     return overdue
 
@@ -971,6 +1029,7 @@ class DaemonState:
     regular_kis_plan_day: dt.date | None = None
     regular_kis_circuit_alerted: set[str] = field(default_factory=set)
     aftermarket_deferred_slots: set[str] = field(default_factory=set)
+    overdue_judged_for: dt.date | None = None
 
     _CHILD_RESULT_FIELDS: ClassVar[Mapping[StreamChildKey, str]] = {
         StreamChildKey.REGULAR: "last_supervisor_result",
@@ -1615,6 +1674,38 @@ class DaemonRunner:
         ch.nightly_started_at = None
         logger.info("[DAEMON] stage=%s status=STOPPED reason=%s", stage, reason)
 
+    def _judge_repair_exhausted(self, identity: dt.date) -> None:
+        st = self._state
+        if st.overdue_judged_for == identity:
+            return
+        try:
+            repair_cfg = getattr(self, "_repair_cfg", getattr(self._runtime, "repair", None))
+            entries = _repair_exhausted(self._paths, identity, self._cfg, repair_cfg)
+        except Exception as exc:  # noqa: BLE001 - judgment never fails the nightly reap
+            st.overdue_judged_for = identity
+            logger.error(
+                "[DATA] stage=repair_overdue status=FAIL reason=judge_error error=%s",
+                type(exc).__name__,
+                exc_info=True,
+            )
+            return
+        st.overdue_judged_for = identity
+        if entries:
+            logger.critical(
+                "[DATA] stage=repair_overdue status=FAIL reason=attempts_exhausted days=%s", ",".join(entries)
+            )
+        else:
+            logger.info("[DATA] stage=repair_overdue status=OK reason=attempts_exhausted days=none")
+
+    def _is_last_repair_job(self, job: NightlyJob | None) -> bool:
+        if job is NightlyJob.REPAIR:
+            return self._nightly_job_enabled(NightlyJob.REPAIR)
+        return (
+            job is NightlyJob.TICK_TAPE
+            and not self._nightly_job_enabled(NightlyJob.REPAIR)
+            and self._nightly_job_enabled(NightlyJob.TICK_TAPE)
+        )
+
     def _poll_nightly(self, now: dt.datetime) -> None:
         """Reap the nightly backfill child without blocking; enforce window end + 120 s grace."""
         ch = self._children
@@ -1631,12 +1722,21 @@ class DaemonRunner:
             identity = _nightly_window_identity(anchor, start=window[0], end=window[1])
             window_end = _nightly_window_end(identity, start=window[0], end=window[1])
             if (now - window_end).total_seconds() > NIGHTLY_OVERRUN_GRACE_S:
+                reaped_job = job
+                reaped_identity = identity
                 _stop_sync_child(proc, grace_s=CHILD_STOP_TIMEOUT_S, stage=stage)
                 ch.nightly = None
                 ch.nightly_job = None
                 ch.nightly_started_at = None
                 logger.warning("[DAEMON] stage=%s status=FAIL reason=deadline", stage)
+                if reaped_job is not None and self._is_last_repair_job(reaped_job):
+                    self._judge_repair_exhausted(reaped_identity)
             return
+        started = ch.nightly_started_at
+        anchor = started if started is not None else now
+        window = (self._tick_tape_cfg.window_start_kst, self._tick_tape_cfg.window_end_kst)
+        reaped_job = job
+        reaped_identity = _nightly_window_identity(anchor, start=window[0], end=window[1])
         ch.nightly = None
         ch.nightly_job = None
         ch.nightly_started_at = None
@@ -1646,6 +1746,8 @@ class DaemonRunner:
             logger.info("[DAEMON] stage=%s status=NOOP", stage)
         else:
             logger.warning("[DAEMON] stage=%s status=FAIL exit_code=%s", stage, code)
+        if reaped_job is not None and self._is_last_repair_job(reaped_job):
+            self._judge_repair_exhausted(reaped_identity)
 
     def _eod_done_for(self, day: dt.date) -> bool:
         """True when this process attempted EOD for `day` or an earlier process archived its digest (EOD state is in-memory, a restart must not skip the night)."""
@@ -3162,7 +3264,7 @@ class DaemonRunner:
         repair_days = _repair_days_summary(paths, ref_day, cfg, repair_settings)
         overdue_days = _repair_overdue(paths, ref_day, cfg, repair_settings)
         if overdue_days:
-            logger.critical("[DATA] stage=repair_overdue status=FAIL days=%s", ",".join(overdue_days))
+            logger.critical("[DATA] stage=repair_overdue status=FAIL reason=stalled days=%s", ",".join(overdue_days))
         degraded_reasons = [
             name
             for name, failed in (

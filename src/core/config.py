@@ -721,6 +721,7 @@ class RepairSettings(BaseSettings):
     xvendor_peers: tuple[str, ...] = ("kis",)
     xvendor_conflating_peers: tuple[str, ...] = ("kiwoom",)
     overdue_days: int = Field(default=2, ge=1, le=7)
+    overdue_attempts: int = Field(default=2, ge=1, le=5)
 
     @model_validator(mode="after")
     def check_repair_vendor_scope(self) -> RepairSettings:
