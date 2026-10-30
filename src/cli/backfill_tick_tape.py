@@ -52,12 +52,15 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
 
 
 def _last_completed_session(today: dt.date, paths: DataPaths) -> dt.date:
+    """Return `today` when the calendar cache marks it a business day and its EOD digest exists, else its previous business day; raises ValueError when the current calendar is unavailable."""
     from src.marketdata.toss_calendar import load_trading_day_cache, trading_day_from_cache
 
     cached = load_trading_day_cache(paths.calendar_cache)
     if cached is not None:
         derived = cached if cached.date == today else trading_day_from_cache(cached, today)
         if derived is not None:
+            if derived.is_business_day and paths.eod_digest_path(today).exists():
+                return today
             return derived.previous_business_day
     raise ValueError("tick-tape current calendar unavailable")
 
@@ -80,7 +83,7 @@ def _calendar_previous(day: dt.date, paths: DataPaths) -> dt.date | None:
 
 
 def resolve_backfill_sessions(paths: DataPaths, window_sessions: int, today: dt.date) -> tuple[dt.date, ...]:
-    """Return the last ``window_sessions`` completed business sessions (ascending) at or before the previous business day."""
+    """Return the last ``window_sessions`` business sessions (ascending) through the last completed session."""
     upper = _last_completed_session(today, paths)
     sessions = tape_calendar_sessions(paths, upper)
     if sessions and sessions[-1] != upper and sessions[-1] == _calendar_previous(upper, paths):

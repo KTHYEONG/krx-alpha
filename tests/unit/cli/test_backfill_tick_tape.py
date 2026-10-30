@@ -309,6 +309,125 @@ def test_two_session_bar_lag_still_fails_closed(tmp_path):
         cli.resolve_backfill_sessions(paths, 19, dt.date(2026, 10, 23))
 
 
+def test_same_night_run_includes_finished_session(tmp_path: pathlib.Path) -> None:
+    from src.core.paths import DataPaths
+
+    paths = DataPaths(tmp_path)
+    day = dt.date(2026, 10, 21)
+    _history(paths, day)
+    digest = paths.eod_digest_path(day)
+    digest.parent.mkdir(parents=True, exist_ok=True)
+    digest.write_text("ok", encoding="utf-8")
+    sessions = cli.resolve_backfill_sessions(paths, 5, day)
+    assert sessions[-1] == day
+    assert len(sessions) == 5
+
+
+def test_same_night_run_before_eod_excludes_session(tmp_path: pathlib.Path) -> None:
+    from src.core.paths import DataPaths
+
+    paths = DataPaths(tmp_path)
+    day = dt.date(2026, 10, 21)
+    _history(paths, day)
+    sessions = cli.resolve_backfill_sessions(paths, 5, day)
+    assert sessions[-1] == dt.date(2026, 10, 20)
+    assert len(sessions) == 5
+
+
+def test_same_night_two_session_bar_lag_fails_closed(tmp_path: pathlib.Path) -> None:
+    from src.core.paths import DataPaths
+    from src.marketdata.toss_calendar import TradingDay, save_trading_day_cache
+
+    paths = DataPaths(tmp_path)
+    day = dt.date(2026, 10, 22)
+    _history(paths, dt.date(2026, 10, 21))
+    save_trading_day_cache(
+        paths.calendar_cache, TradingDay(day, True, dt.date(2026, 10, 21), dt.date(2026, 10, 23))
+    )
+    digest = paths.eod_digest_path(day)
+    digest.parent.mkdir(parents=True, exist_ok=True)
+    digest.touch()
+    with pytest.raises(ValueError, match=r"^tick-tape historical calendar incomplete$"):
+        cli.resolve_backfill_sessions(paths, 5, day)
+
+
+def test_stray_digest_on_non_business_day_is_ignored(tmp_path: pathlib.Path) -> None:
+    from src.core.paths import DataPaths
+    from src.marketdata.toss_calendar import TradingDay, save_trading_day_cache
+
+    paths = DataPaths(tmp_path)
+    saturday = dt.date(2026, 10, 24)
+    _history(paths, dt.date(2026, 10, 23))
+    save_trading_day_cache(
+        paths.calendar_cache,
+        TradingDay(
+            date=dt.date(2026, 10, 23),
+            is_business_day=True,
+            previous_business_day=dt.date(2026, 10, 22),
+            next_business_day=dt.date(2026, 10, 26),
+        ),
+    )
+    digest = paths.eod_digest_path(saturday)
+    digest.parent.mkdir(parents=True, exist_ok=True)
+    digest.write_text("stray", encoding="utf-8")
+    sessions = cli.resolve_backfill_sessions(paths, 5, saturday)
+    assert sessions[-1] == dt.date(2026, 10, 23)
+
+
+def test_planner_targets_gap_symbol_on_finished_night(tmp_path: pathlib.Path, monkeypatch, capsys) -> None:
+    from src.core.paths import DataPaths
+    from src.marketdata.tick_tape_backfill import pending_repair_symbol_days, plan_tick_tape_targets
+    from src.core.config import RepairSettings
+
+    paths = DataPaths(tmp_path)
+    day = dt.date(2026, 10, 21)
+    prev = dt.date(2026, 10, 20)
+    _history(paths, day)
+    digest = paths.eod_digest_path(day)
+    digest.parent.mkdir(parents=True, exist_ok=True)
+    digest.write_text("ok", encoding="utf-8")
+    sessions = cli.resolve_backfill_sessions(paths, 5, day)
+    assert sessions[-1] == day
+    paths.universe_out(prev).parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"symbol": ["005930", "000660"]}, schema={"symbol": pl.String}).write_parquet(
+        paths.universe_out(prev)
+    )
+    paths.manifest_path(day).parent.mkdir(parents=True, exist_ok=True)
+    paths.manifest_path(day).write_text(
+        json.dumps({"subscription_acks": [{"symbol": "005930", "accepted": True}]}), encoding="utf-8"
+    )
+    audit = paths.session_audit_path(day, "ls")
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text(
+        json.dumps({"symbols": [{"symbol": "005930", "confirmed_missing": 3}]}), encoding="utf-8"
+    )
+    repair = pending_repair_symbol_days(paths, [day], settings=RepairSettings(), tape_done=frozenset())
+    assert repair == frozenset({("005930", day)})
+    targets = plan_tick_tape_targets(
+        sessions=sessions, paths=paths, ledger_done=frozenset(), repair_symbol_days=repair
+    )
+    by_symbol = {item.symbol: item for item in targets}
+    assert day in by_symbol["005930"].days
+    assert next(iter(targets)).symbol == "005930"
+
+    observed = []
+    original_plan = cli.plan_tick_tape_targets
+
+    def capture_plan(**kwargs):
+        planned = original_plan(**kwargs)
+        observed.extend(planned)
+        return planned
+
+    _enabled(monkeypatch)
+    monkeypatch.setenv("KIWOOM_APP_KEY", "k")
+    monkeypatch.setenv("KIWOOM_SECRET_KEY", "s")
+    monkeypatch.setattr(cli, "plan_tick_tape_targets", capture_plan)
+    assert cli.run(_cli_args(tmp_path, dry_run=True)) == 0
+    assert json.loads(capsys.readouterr().out)["symbols"] == 2
+    assert observed[0].symbol == "005930"
+    assert day in observed[0].days
+
+
 def _cli_args(tmp_path, **overrides):
     base = {"dry_run": False, "data_root": tmp_path, "max_pages": None, "deadline": None, "only_symbols": None}
     base.update(overrides)
