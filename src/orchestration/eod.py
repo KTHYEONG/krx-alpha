@@ -27,7 +27,6 @@ from src.storage.layout import (
     l0_partition_for_l1,
     l0_partition_key,
     l0_partition_relpath,
-    l1_repo_path,
 )
 from src.storage.market_phase import MarketPhase
 from src.storage.normalize_worker import run_isolated_normalize
@@ -111,13 +110,8 @@ def run_eod_offload(
         raise RemoteArchiveError(
             f"offload verification failed: l1={l1_stats.failed_verification} manifests={manifests_stats.failed_verification}"
         )
-    sizes = arc.remote_file_sizes(L1_REPO_PREFIX) if hasattr(arc, "remote_file_sizes") else {}
-    local_root = pathlib.Path(archive_root)
-    verified: set[str] = set()
-    for pq in sorted(local_root.rglob("*.parquet")):
-        rel = l1_repo_path(pq.relative_to(local_root))
-        if sizes.get(rel) == pq.stat().st_size:
-            verified.add(rel)
+    # L0 deletion is authorized only by remote copies identical in size and md5 to the local L1.
+    verified = arc.verified_paths(pathlib.Path(archive_root))
     confirmed = arc.remote_files(L1_REPO_PREFIX)
     if journal_root is not None:
         # Keep verified bytes until the second maintenance pass has removed their inputs.

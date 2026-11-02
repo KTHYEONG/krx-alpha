@@ -397,8 +397,12 @@ def test_generic_l0_lifecycle_covers_kis_regular(tmp_path, monkeypatch) -> None:
         def sync_manifest_tree(self, root):
             return SyncStats()
 
-        def remote_file_sizes(self, prefix):
-            return {key: len(value) for key, value in remote_bytes.items()}
+        def verified_paths(self, local_root, remote_prefix="l1/"):
+            return {
+                key
+                for path in local_root.rglob("*.parquet")
+                if remote_bytes.get(key := "l1/" + path.relative_to(local_root).as_posix()) == path.read_bytes()
+            }
 
         def remote_files(self, prefix):
             return set(remote_bytes)

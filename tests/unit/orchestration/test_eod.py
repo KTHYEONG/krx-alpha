@@ -73,10 +73,8 @@ def test_run_eod_offload_syncs_and_prunes_with_injected_archiver(tmp_path) -> No
         def remote_files(self, prefix):
             return {"l1/kis/H0STCNT0/dt=2026-07-01.parquet"}
 
-        def remote_file_sizes(self, prefix):
-            if prefix == "l1/":
-                return {"l1/kis/H0STCNT0/dt=2026-07-01.parquet": 1}
-            return {}
+        def verified_paths(self, local_root, remote_prefix="l1/"):
+            return {"l1/kis/H0STCNT0/dt=2026-07-01.parquet"}
 
     stats = run_eod_offload(tmp_path / "l1", archiver=_Arc(), reference_date=dt.date(2026, 9, 8))
 
@@ -773,8 +771,8 @@ def failing_archiver():
         def sync_manifest_tree(self, manifest_root):
             return SyncStats(uploaded=0, skipped_verified=0, failed_verification=1)
 
-        def remote_file_sizes(self, prefix):
-            return {}
+        def verified_paths(self, local_root, remote_prefix="l1/"):
+            return set()
 
     return _Failing()
 

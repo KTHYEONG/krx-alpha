@@ -1,7 +1,8 @@
-"""L1 Parquet -> rclone 원격 오프로드 (업로드 후 바이트 크기 검증)."""
+"""L1 Parquet -> rclone 원격 오프로드 (업로드 후 크기와 md5로 검증)."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import pathlib
@@ -42,7 +43,18 @@ class PurgeStats:
     failed: int = 0
 
 
+@dataclass(frozen=True)
+class RemoteObject:
+    """One remote file as listed by Drive; ``duplicate`` marks a path listed more than once with differing content."""
+
+    size: int
+    md5: str | None
+    duplicate: bool = False
+
+
 _STDERR_BRIEF_CHARS = 300
+_HASH_FLAGS = ["--hash", "--hash-type", "md5"]
+_MD5_CHUNK = 1024 * 1024
 
 
 def _brief(stderr: str | None) -> str:
@@ -75,6 +87,7 @@ class GDriveArchiver:
         self._timeout_s = timeout_s
         self._idle_flags = [] if io_idle_timeout_s is None else ["--timeout", f"{io_idle_timeout_s:g}s"]
         self._progress: Callable[[], None] | None = None
+        self._md5_cache: dict[pathlib.Path, tuple[int, int, str]] = {}
 
     def bind_progress(self, progress: Callable[[], None] | None) -> None:
         """Report liveness after every rclone call so EOD never goes silent longer than one call."""
@@ -110,13 +123,35 @@ class GDriveArchiver:
         rel = pathlib.Path(local_json).relative_to(manifest_root).as_posix()
         return f"manifests/{rel}"
 
-    def _remote_size(self, repo_path: str) -> int:
+    def local_md5(self, path: pathlib.Path) -> str:
+        """md5 hex digest of a local file, cached per (size, mtime_ns) so one EOD hashes each file once."""
+        local = pathlib.Path(path)
+        st = local.stat()
+        cached = self._md5_cache.get(local)
+        if cached is not None and cached[0] == st.st_size and cached[1] == st.st_mtime_ns:
+            return cached[2]
+        digest = hashlib.md5(usedforsecurity=False)
+        with local.open("rb") as handle:
+            while chunk := handle.read(_MD5_CHUNK):
+                digest.update(chunk)
+        hexdigest = digest.hexdigest()
+        self._md5_cache[local] = (st.st_size, st.st_mtime_ns, hexdigest)
+        return hexdigest
+
+    def matches(self, remote: RemoteObject | None, local: pathlib.Path) -> bool:
+        """True only when the remote object is unique and equals the local file in size and md5 (fail-closed)."""
+        if remote is None or remote.duplicate or remote.md5 is None:
+            return False
+        return remote.size == pathlib.Path(local).stat().st_size and remote.md5 == self.local_md5(local)
+
+    def _remote_object(self, repo_path: str) -> RemoteObject:
         dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
-        result = self._run(["rclone", "lsjson", dest])
+        result = self._run(["rclone", "lsjson", dest, *_HASH_FLAGS])
         entries = json.loads(result.stdout) if result.returncode == 0 else []
         if not entries:
             raise RemoteArchiveError(f"verify failed: {repo_path}")
-        return int(entries[0]["Size"])
+        objects = _objects_by_path([{**entry, "Path": repo_path} for entry in entries], repo_path)
+        return objects[repo_path]
 
     def upload_and_verify(self, local_parquet: pathlib.Path, repo_path: str) -> bool:
         local = pathlib.Path(local_parquet)
@@ -124,12 +159,13 @@ class GDriveArchiver:
         result = self._run(["rclone", "copyto", str(local), dest])
         if result.returncode != 0:
             raise RemoteArchiveError(f"upload failed: {repo_path} {result.stderr}")
-        return self._remote_size(repo_path) == local.stat().st_size
+        return self.matches(self._remote_object(repo_path), local)
 
-    def _lsjson_recursive(self, prefix: str = "") -> list[dict[str, Any]]:
+    def _lsjson_recursive(self, prefix: str = "", *, with_hash: bool = False) -> list[dict[str, Any]]:
         norm = prefix.rstrip("/")
         dest = f"{self._remote_name}:{self._remote_path}/{norm}" if norm else f"{self._remote_name}:{self._remote_path}"
-        result = self._run(["rclone", "lsjson", dest, "--recursive", "--fast-list", "--files-only"])
+        cmd = ["rclone", "lsjson", dest, "--recursive", "--fast-list", "--files-only"]
+        result = self._run([*cmd, *_HASH_FLAGS] if with_hash else cmd)
         if result.returncode == 3:
             return []
         if result.returncode != 0:
@@ -161,57 +197,60 @@ class GDriveArchiver:
             if not entry.get("IsDir", False) and str(entry.get("Path", "")).startswith(prefix)
         }
 
-    def remote_file_sizes(self, remote_prefix: str) -> dict[str, int]:
+    def remote_objects(self, remote_prefix: str) -> dict[str, RemoteObject]:
+        """Size and md5 of every remote file under ``remote_prefix``; duplicate names are flagged, not merged.
+
+        Raises:
+            RemoteArchiveError: listing failed or an entry has an invalid size.
+        """
         norm = remote_prefix[:-1] if remote_prefix.endswith("/") else remote_prefix
-        entries = self._lsjson_recursive(norm)
-        sizes: dict[str, int] = {}
-        for entry in entries:
-            if entry.get("IsDir", False):
-                continue
-            path = str(entry.get("Path", ""))
-            if not path.startswith(remote_prefix):
-                continue
-            raw_size = entry.get("Size", None)
-            try:
-                size = int(raw_size)  # type: ignore[arg-type]
-            except (TypeError, ValueError) as exc:
-                raise RemoteArchiveError(f"lsjson failed: {remote_prefix} invalid size") from exc
-            if size < 0:
-                raise RemoteArchiveError(f"lsjson failed: {remote_prefix} invalid size")
-            sizes[path] = size
-        return sizes
+        return _objects_by_path(self._lsjson_recursive(norm, with_hash=True), remote_prefix)
+
+    def verified_paths(self, local_root: pathlib.Path, remote_prefix: str = L1_REPO_PREFIX) -> set[str]:
+        """Repo paths of local L1 parquet files whose remote copy matches in size and md5."""
+        root = pathlib.Path(local_root)
+        objects = self.remote_objects(remote_prefix)
+        verified: set[str] = set()
+        for pq in sorted(root.rglob("*.parquet")):
+            rel = self.repo_path_for(root, pq)
+            if self.matches(objects.get(rel), pq):
+                verified.add(rel)
+        return verified
 
     def _upload_verified(self, local: pathlib.Path, repo_path: str, local_size: int) -> str | None:
-        """Upload one object and verify its remote size; return a failure reason or None when verified."""
+        """Upload one object and verify its remote size and md5; return a failure reason or None when verified."""
         dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
         result = self._run(["rclone", "copyto", str(local), dest])
         if result.returncode != 0:
             return f"upload_failed rc={result.returncode} detail={_brief(result.stderr)}"
         try:
-            remote_size = self._remote_size(repo_path)
+            remote = self._remote_object(repo_path)
         except RemoteArchiveError:
             return "verify_missing"
-        if remote_size != local_size:
-            return f"size_mismatch remote={remote_size} local={local_size}"
+        if remote.duplicate:
+            return "duplicate_remote_name"
+        if remote.size != local_size:
+            return f"size_mismatch remote={remote.size} local={local_size}"
+        if remote.md5 is None or remote.md5 != self.local_md5(local):
+            return f"md5_mismatch remote={remote.md5}"
         return None
 
     def sync_l1_tree(self, local_root: pathlib.Path, *, progress: Callable[[], None] | None = None) -> SyncStats:
         """Upload L1 objects whose remote size differs; a failed object is retried once after the pass."""
         root = pathlib.Path(local_root)
-        sizes = self.remote_file_sizes(L1_REPO_PREFIX)
+        objects = self.remote_objects(L1_REPO_PREFIX)
         stats = SyncStats()
         retry: list[tuple[pathlib.Path, str, int]] = []
         for pq in sorted(root.rglob("*.parquet")):
             try:
                 repo_path = self.repo_path_for(root, pq)
                 local_size = pq.stat().st_size
-                if sizes.get(repo_path) == local_size:
+                if self.matches(objects.get(repo_path), pq):
                     stats.skipped_verified += 1
                     continue
                 reason = self._upload_verified(pq, repo_path, local_size)
                 if reason is None:
                     stats.uploaded += 1
-                    sizes[repo_path] = local_size
                     continue
                 # Drive and network faults are often transient; retrying after the pass spaces the attempts apart.
                 logger.warning("[DATA] stage=rclone_offload status=RETRY path=%s reason=%s", repo_path, reason)
@@ -224,7 +263,6 @@ class GDriveArchiver:
                 reason = self._upload_verified(pq, repo_path, local_size)
                 if reason is None:
                     stats.uploaded += 1
-                    sizes[repo_path] = local_size
                     logger.info("[DATA] stage=rclone_offload status=RECOVERED path=%s", repo_path)
                     continue
                 logger.critical("[DATA] stage=rclone_offload status=FAIL path=%s reason=%s", repo_path, reason)
@@ -237,19 +275,18 @@ class GDriveArchiver:
     def sync_manifest_tree(self, manifest_root: pathlib.Path) -> SyncStats:
         """Upload manifests whose remote size differs; a failed one is retried once after the pass, then raises."""
         root = pathlib.Path(manifest_root)
-        sizes = self.remote_file_sizes("manifests/")
+        objects = self.remote_objects("manifests/")
         stats = SyncStats()
         retry: list[tuple[pathlib.Path, str, int]] = []
         for jf in sorted(path for path in root.rglob("*") if path.is_file() and path.suffix in {".json", ".jsonl"}):
             repo_path = self.manifest_repo_path_for(root, jf)
             local_size = jf.stat().st_size
-            if sizes.get(repo_path) == local_size:
+            if self.matches(objects.get(repo_path), jf):
                 stats.skipped_verified += 1
                 continue
             reason = self._upload_verified(jf, repo_path, local_size)
             if reason is None:
                 stats.uploaded += 1
-                sizes[repo_path] = local_size
                 continue
             logger.warning("[DATA] stage=manifest_offload status=RETRY path=%s reason=%s", repo_path, reason)
             retry.append((jf, repo_path, local_size))
@@ -258,7 +295,6 @@ class GDriveArchiver:
             if reason is not None:
                 raise RemoteArchiveError(f"manifest offload failed: {repo_path} {reason}")
             stats.uploaded += 1
-            sizes[repo_path] = local_size
         return stats
 
     def purge_superseded_l0(
@@ -323,6 +359,39 @@ class GDriveArchiver:
             stats.failed,
         )
         return stats
+
+
+def _objects_by_path(entries: list[dict[str, Any]], remote_prefix: str) -> dict[str, RemoteObject]:
+    objects: dict[str, RemoteObject] = {}
+    for entry in entries:
+        if entry.get("IsDir", False):
+            continue
+        path = str(entry.get("Path", ""))
+        if not path.startswith(remote_prefix):
+            continue
+        raw_size = entry.get("Size", None)
+        try:
+            size = int(raw_size)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise RemoteArchiveError(f"lsjson failed: {remote_prefix} invalid size") from exc
+        if size < 0:
+            raise RemoteArchiveError(f"lsjson failed: {remote_prefix} invalid size")
+        hashes = entry.get("Hashes")
+        md5 = str(hashes["md5"]).lower() if isinstance(hashes, dict) and hashes.get("md5") else None
+        prior = objects.get(path)
+        if prior is not None:
+            # Drive allows duplicate names and a reader gets an arbitrary copy: identical copies are still
+            # verifiable (cleanup only), conflicting copies are never verified.
+            conflict = prior.duplicate or prior.size != size or prior.md5 is None or prior.md5 != md5
+            logger.warning(
+                "[DATA] stage=remote_verify status=%s path=%s",
+                "DUPLICATE_CONFLICT" if conflict else "DUPLICATE_IDENTICAL",
+                path,
+            )
+            objects[path] = RemoteObject(size=size, md5=md5, duplicate=conflict)
+            continue
+        objects[path] = RemoteObject(size=size, md5=md5)
+    return objects
 
 
 class RcloneArchiver(GDriveArchiver):

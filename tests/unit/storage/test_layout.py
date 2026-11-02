@@ -399,9 +399,9 @@ def test_offload_verified_set_parity(tmp_path) -> None:
         def sync_manifest_tree(self, root):
             return SyncStats()
 
-        def remote_file_sizes(self, prefix):
-            assert prefix == "l1/"
-            return {f"l1/{rel}": (archive_root / rel).stat().st_size for rel in rels}
+        def verified_paths(self, local_root, remote_prefix="l1/"):
+            assert remote_prefix == "l1/"
+            return {f"l1/{rel}" for rel in rels}
 
         def remote_files(self, prefix):
             return set()

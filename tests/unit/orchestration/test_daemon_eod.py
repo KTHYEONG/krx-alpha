@@ -1556,8 +1556,12 @@ def test_housekeeping_preserves_invalidated_inputs_until_reverified(tmp_path, mo
         def sync_manifest_tree(self, root):
             return SyncStats()
 
-        def remote_file_sizes(self, prefix):
-            return {path: len(content) for path, content in self.l1_bytes.items()}
+        def verified_paths(self, local_root, remote_prefix="l1/"):
+            return {
+                rel
+                for path in local_root.rglob("*.parquet")
+                if self.l1_bytes.get(rel := "l1/" + path.relative_to(local_root).as_posix()) == path.read_bytes()
+            }
 
         def remote_files(self, prefix):
             return set(self.l1_bytes)

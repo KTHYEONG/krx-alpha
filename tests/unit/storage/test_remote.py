@@ -2,6 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
+
+def _md5(data: bytes) -> str:
+    return hashlib.md5(data, usedforsecurity=False).hexdigest()
+
+
+def _hashes(path: str | Path) -> dict[str, str]:
+    return {"md5": _md5(Path(path).read_bytes())}
+
 
 def test_rclone_archiver_repo_path_for_builds_l1_prefixed_posix_path(tmp_path) -> None:
     from src.storage.remote import RcloneArchiver
@@ -27,7 +38,8 @@ def test_upload_and_verify_returns_true_on_size_match(tmp_path) -> None:
         calls.append(args)
         if args[1] == "copyto":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        return SimpleNamespace(returncode=0, stdout=json.dumps([{"Path": "x", "Size": 100, "IsDir": False}]), stderr="")
+        entry = {"Path": "x", "Size": 100, "IsDir": False, "Hashes": {"md5": _md5(b"x" * 100)}}
+        return SimpleNamespace(returncode=0, stdout=json.dumps([entry]), stderr="")
 
     arc = RcloneArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
 
@@ -146,7 +158,7 @@ def test_sync_l1_tree_uploads_new_skips_existing(tmp_path) -> None:
     (root / "dt=2026-09-02.parquet").write_bytes(b"b" * 60)
 
     calls: list[list[str]] = []
-    remote_state = {"l1/kis/H0STCNT0/dt=2026-09-01.parquet": 50}
+    remote_state = {"l1/kis/H0STCNT0/dt=2026-09-01.parquet": (50, _md5(b"a" * 50))}
 
     def _runner(args, **kwargs):
         calls.append(args)
@@ -154,7 +166,7 @@ def test_sync_l1_tree_uploads_new_skips_existing(tmp_path) -> None:
             return SimpleNamespace(
                 returncode=0,
                 stdout=json.dumps(
-                    [{"Path": p, "IsDir": False, "Size": s} for p, s in sorted(remote_state.items())]
+                    [{"Path": p, "IsDir": False, "Size": s, "Hashes": {"md5": m}} for p, (s, m) in sorted(remote_state.items())]
                 ),
                 stderr="",
             )
@@ -164,11 +176,11 @@ def test_sync_l1_tree_uploads_new_skips_existing(tmp_path) -> None:
             dest = args[3]
             prefix = "quant-lake/live/krx-alpha/data/"
             repo_path = dest.split(prefix, 1)[1] if prefix in dest else _P(args[2]).name
-            remote_state[repo_path] = _P(args[2]).stat().st_size
+            remote_state[repo_path] = (_P(args[2]).stat().st_size, _hashes(args[2])["md5"])
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return SimpleNamespace(
             returncode=0,
-            stdout=json.dumps([{"Path": "x", "IsDir": False, "Size": 60}]),
+            stdout=json.dumps([{"Path": "x", "IsDir": False, "Size": 60, "Hashes": {"md5": _md5(b"b" * 60)}}]),
             stderr="",
         )
 
@@ -225,7 +237,8 @@ def test_sync_l1_tree_retries_transient_failure_once(tmp_path, caplog) -> None:
             if len(copies) == 1:
                 return SimpleNamespace(returncode=124, stdout="", stderr="rclone timed out after 600.0s")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        return SimpleNamespace(returncode=0, stdout=json.dumps([{"Path": "x", "Size": 50, "IsDir": False}]), stderr="")
+        entry = {"Path": "x", "Size": 50, "IsDir": False, "Hashes": {"md5": _md5(b"a" * 50)}}
+        return SimpleNamespace(returncode=0, stdout=json.dumps([entry]), stderr="")
 
     arc = RcloneArchiver(remote_name="gdrive", remote_path="q", runner=_runner)
     with caplog.at_level(logging.WARNING):
@@ -370,6 +383,7 @@ class _FakeRcloneState:
         import json
 
         self.remote_sizes: dict[str, int] = {}
+        self.remote_md5: dict[str, str] = {}
         self.upload_order: list[str] = []
         self.config = SimpleNamespace(
             remote_name="gdrive",
@@ -385,7 +399,7 @@ class _FakeRcloneState:
         # non-file entries exercising the IsDir/prefix guards.
         if "lsjson" in args and "--recursive" in args:
             entries = [
-                {"Path": path, "Size": size, "IsDir": False}
+                {"Path": path, "Size": size, "IsDir": False, "Hashes": {"md5": self.remote_md5.get(path, "")}}
                 for path, size in sorted(self.remote_sizes.items())
             ]
             entries.append({"Path": "l1", "IsDir": True})
@@ -399,9 +413,8 @@ class _FakeRcloneState:
             if not matched:
                 return SimpleNamespace(returncode=1, stdout="", stderr="not found")
             path, size = matched[0]
-            return SimpleNamespace(
-                returncode=0, stdout=self._json.dumps([{"Path": path, "Size": size, "IsDir": False}]), stderr=""
-            )
+            entry = {"Path": path, "Size": size, "IsDir": False, "Hashes": {"md5": self.remote_md5.get(path, "")}}
+            return SimpleNamespace(returncode=0, stdout=self._json.dumps([entry]), stderr="")
         # copyto upload: record basename order, mirror local size.
         if "copyto" in args:
             src = args[2]
@@ -416,6 +429,7 @@ class _FakeRcloneState:
             prefix = "quant-lake/live/krx-alpha/data/"
             repo_path = dest.split(prefix, 1)[1] if prefix in dest else local.name
             self.remote_sizes[repo_path] = len(data)
+            self.remote_md5[repo_path] = _md5(data)
             if repo_path.startswith("manifests/") or repo_path.startswith("manifest/"):
                 self.upload_order.append(repo_path.split("/", 1)[1])
             return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -435,9 +449,21 @@ def test_sync_l1_tree_skips_only_size_verified_object(tmp_path, fake_rclone):
 
     local = _write_l1(tmp_path, b'1234')
     fake_rclone.remote_sizes = {_relative(local): 4}
+    fake_rclone.remote_md5 = {_relative(local): _md5(b'1234')}
     stats = GDriveArchiver(fake_rclone.config).sync_l1_tree(tmp_path)
     assert stats.skipped_verified == 1
     assert stats.uploaded == 0
+
+
+def test_sync_l1_tree_reuploads_same_size_with_different_md5(tmp_path, fake_rclone):
+    from src.storage.remote import GDriveArchiver
+
+    local = _write_l1(tmp_path, b'1234')
+    fake_rclone.remote_sizes = {_relative(local): 4}
+    fake_rclone.remote_md5 = {_relative(local): _md5(b'9999')}
+    stats = GDriveArchiver(fake_rclone.config).sync_l1_tree(tmp_path)
+    assert (stats.uploaded, stats.skipped_verified, stats.failed_verification) == (1, 0, 0)
+    assert fake_rclone.remote_md5[_relative(local)] == _md5(b'1234')
 
 
 def test_sync_l1_tree_reuploads_size_mismatch_and_verifies(tmp_path, fake_rclone):
@@ -477,7 +503,7 @@ def test_sync_manifest_tree_offloads_growing_tick_tape_ledger(tmp_path, fake_rcl
 
 
 
-def test_remote_file_sizes_raises_on_unparseable_size():
+def test_remote_objects_raises_on_unparseable_size():
     import json
     from types import SimpleNamespace
 
@@ -495,7 +521,7 @@ def test_remote_file_sizes_raises_on_unparseable_size():
 
         archiver = GDriveArchiver(remote_name='gdrive', remote_path='quant-lake/live/krx-alpha/data', runner=_runner)
         with pytest.raises(RemoteArchiveError, match='invalid size'):
-            archiver.remote_file_sizes('l1/')
+            archiver.remote_objects('l1/')
 
 
 def test_sync_manifest_tree_skips_size_verified_object(tmp_path, fake_rclone):
@@ -503,6 +529,7 @@ def test_sync_manifest_tree_skips_size_verified_object(tmp_path, fake_rclone):
 
     _write_manifests(tmp_path, ['a.json'])
     fake_rclone.remote_sizes = {'manifests/a.json': 2}
+    fake_rclone.remote_md5 = {'manifests/a.json': _md5(b'{}')}
     stats = GDriveArchiver(fake_rclone.config).sync_manifest_tree(tmp_path)
 
     assert stats.uploaded == 0
@@ -572,6 +599,7 @@ def test_sync_l1_tree_lists_l1_prefix_once_with_fast_list(tmp_path) -> None:
         part.write_bytes(b"x" * (10 + i))
     calls: list[list[str]] = []
     remote_sizes: dict[str, int] = {}
+    remote_md5: dict[str, str] = {}
 
     def _runner(args, **kwargs):
         calls.append(args)
@@ -585,14 +613,12 @@ def test_sync_l1_tree_lists_l1_prefix_once_with_fast_list(tmp_path) -> None:
             dest = args[3]
             repo_path = dest.split("quant-lake/live/krx-alpha/data/", 1)[1]
             remote_sizes[repo_path] = _pl.Path(args[2]).stat().st_size
+            remote_md5[repo_path] = _hashes(args[2])["md5"]
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         dest = args[2]
         repo_path = dest.split("quant-lake/live/krx-alpha/data/", 1)[1]
-        return SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps([{"Path": repo_path, "Size": remote_sizes[repo_path], "IsDir": False}]),
-            stderr="",
-        )
+        entry = {"Path": repo_path, "Size": remote_sizes[repo_path], "IsDir": False, "Hashes": {"md5": remote_md5[repo_path]}}
+        return SimpleNamespace(returncode=0, stdout=json.dumps([entry]), stderr="")
 
     arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
     stats = arc.sync_l1_tree(tmp_path)
@@ -619,7 +645,8 @@ def test_sync_manifest_tree_retries_transient_failure_once(tmp_path) -> None:
         if args[1] == "copyto":
             copies.append(1)
             return SimpleNamespace(returncode=1 if len(copies) == 1 else 0, stdout="", stderr="network down")
-        return SimpleNamespace(returncode=0, stdout=json.dumps([{"Path": "x", "Size": 2, "IsDir": False}]), stderr="")
+        entry = {"Path": "x", "Size": 2, "IsDir": False, "Hashes": {"md5": _md5(b"{}")}}
+        return SimpleNamespace(returncode=0, stdout=json.dumps([entry]), stderr="")
 
     stats = GDriveArchiver(remote_name="gdrive", remote_path="q", runner=_runner).sync_manifest_tree(tmp_path)
 
@@ -655,7 +682,7 @@ def test_sync_manifest_tree_lists_manifests_prefix_once_sorted(tmp_path) -> None
         local = tmp_path / repo_path.split("/", 1)[1]
         return SimpleNamespace(
             returncode=0,
-            stdout=json.dumps([{"Path": repo_path, "Size": _pl.Path(local).stat().st_size, "IsDir": False}]),
+            stdout=json.dumps([{"Path": repo_path, "Size": _pl.Path(local).stat().st_size, "IsDir": False, "Hashes": _hashes(local)}]),
             stderr="",
         )
 
@@ -683,12 +710,12 @@ def test_missing_remote_prefix_returns_empty_listing(tmp_path) -> None:
         repo_path = dest.split("quant-lake/live/krx-alpha/data/", 1)[1]
         return SimpleNamespace(
             returncode=0,
-            stdout=json.dumps([{"Path": repo_path, "Size": 5, "IsDir": False}]),
+            stdout=json.dumps([{"Path": repo_path, "Size": 5, "IsDir": False, "Hashes": {"md5": _md5(b"x" * 5)}}]),
             stderr="",
         )
 
     arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
-    assert arc.remote_file_sizes("l1/") == {}
+    assert arc.remote_objects("l1/") == {}
 
     root = tmp_path / "l1root"
     (root / "ls" / "H0STASP0").mkdir(parents=True)
@@ -729,18 +756,18 @@ def test_lsjson_recursive_reframes_prefix_relative_entries() -> None:
     import json
     from types import SimpleNamespace
 
-    from src.storage.remote import GDriveArchiver
+    from src.storage.remote import GDriveArchiver, RemoteObject
 
     def _runner(args, **kwargs):
         assert args[2].endswith("/l1")
         return SimpleNamespace(
             returncode=0,
-            stdout=json.dumps([{"Path": "ls/H0STASP0/dt=2026-09-18.parquet", "Size": 5, "IsDir": False}]),
+            stdout=json.dumps([{"Path": "ls/H0STASP0/dt=2026-09-18.parquet", "Size": 5, "IsDir": False, "Hashes": {"md5": "AB"}}]),
             stderr="",
         )
 
     arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
-    assert arc.remote_file_sizes("l1/") == {"l1/ls/H0STASP0/dt=2026-09-18.parquet": 5}
+    assert arc.remote_objects("l1/") == {"l1/ls/H0STASP0/dt=2026-09-18.parquet": RemoteObject(size=5, md5="ab")}
 
 
 def test_lsjson_recursive_empty_prefix_lists_root() -> None:
@@ -991,3 +1018,77 @@ def test_io_idle_timeout_is_passed_to_every_rclone_call(tmp_path, monkeypatch) -
 
     assert calls == [[*calls[0][:-2], "--timeout", "45s"]]
     assert GDriveArchiver(runner=_runner)._idle_flags == []  # noqa: SLF001 - explicit construction stays flag-free
+
+
+def test_remote_objects_flags_duplicate_names_and_matches_fails_closed(tmp_path) -> None:
+    import json
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    local = tmp_path / "ls" / "H0STASP0" / "dt=2026-10-21.parquet"
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"abc")
+    rel = "l1/ls/H0STASP0/dt=2026-10-21.parquet"
+    good = {"Path": rel, "Size": 3, "IsDir": False, "Hashes": {"md5": _md5(b"abc")}}
+    listings = {
+        "duplicate": [good, {**good, "Hashes": {"md5": _md5(b"xyz")}}],
+        "no_hash": [{"Path": rel, "Size": 3, "IsDir": False}],
+        "unique": [good],
+        "identical_copies": [good, dict(good)],
+    }
+    for case, entries in listings.items():
+        def _runner(args, _entries=entries, **kwargs):
+            assert "--hash" in args
+            assert "md5" in args
+            return SimpleNamespace(returncode=0, stdout=json.dumps(_entries), stderr="")
+
+        arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+        objects = arc.remote_objects("l1/")
+        assert objects[rel].duplicate is (case == "duplicate")
+        assert (arc.verified_paths(tmp_path) == {rel}) is (case in ("unique", "identical_copies"))
+
+
+def test_local_md5_is_cached_until_file_changes(tmp_path) -> None:
+    import os
+
+    from src.storage.remote import GDriveArchiver
+
+    path = tmp_path / "a.parquet"
+    path.write_bytes(b"one")
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="x", runner=lambda *a, **k: None)
+    assert arc.local_md5(path) == _md5(b"one")
+    path.write_bytes(b"two")
+    os.utime(path, ns=(1, 1))
+    assert arc.local_md5(path) == _md5(b"two")
+
+
+def test_upload_verification_rejects_duplicate_name_and_md5_mismatch(tmp_path, caplog) -> None:
+    import json
+    import logging
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    part = tmp_path / "ls" / "H0STASP0" / "dt=2026-10-21.parquet"
+    part.parent.mkdir(parents=True)
+    part.write_bytes(b"abc")
+    entry = {"Path": "x", "Size": 3, "IsDir": False, "Hashes": {"md5": _md5(b"abc")}}
+    cases = {
+        "duplicate_remote_name": [entry, {**entry, "Size": 4}],
+        "md5_mismatch": [{**entry, "Hashes": {"md5": _md5(b"xyz")}}],
+    }
+    for reason, single in cases.items():
+        def _runner(args, _single=single, **kwargs):
+            if "--recursive" in args:
+                return SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr="")
+            if args[1] == "copyto":
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout=json.dumps(_single), stderr="")
+
+        caplog.clear()
+        arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+        with caplog.at_level(logging.CRITICAL):
+            stats = arc.sync_l1_tree(tmp_path)
+        assert (stats.uploaded, stats.failed_verification) == (0, 1)
+        assert f"reason={reason}" in caplog.text
