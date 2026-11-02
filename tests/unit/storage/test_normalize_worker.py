@@ -356,6 +356,38 @@ def test_worker_resolves_listing_symbols_for_partition_date(tmp_path, monkeypatc
     assert payload["tick"]["price_band_violation"] == 0
 
 
+def test_worker_exempts_symbol_without_prior_bar_before_morning_refresh(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    import json
+
+    import polars as pl
+    import pyarrow.parquet as pq
+
+    import src.storage.normalize_worker as worker_mod
+
+    _stub_collector_settings(monkeypatch, worker_mod, tmp_path)
+    day = dt.date(2026, 10, 29)
+    bars_dir = tmp_path / "data" / "bars" / "daily"
+    bars_dir.mkdir(parents=True)
+    # Given: the EOD pass of the listing day runs before the next-morning bar refresh adds `day`
+    pl.DataFrame({"date": [dt.date(2026, 10, 28)], "symbol": ["OLD"]}).write_parquet(bars_dir / "2026-10.parquet")
+    new_part = tmp_path / "new" / "l0" / "ls" / "H0STCNT0" / f"dt={day.isoformat()}"
+    _write_listing_l0_tick(new_part, symbol="NEW", price=21500, ref=15300)
+    old_part = tmp_path / "old" / "l0" / "ls" / "H0STCNT0" / f"dt={day.isoformat()}"
+    _write_listing_l0_tick(old_part, symbol="OLD", price=21500, ref=15300)
+
+    assert worker_mod.main(["--part", str(new_part), "--out", str(tmp_path / "new.parquet")]) == 0
+    assert worker_mod.main(["--part", str(old_part), "--out", str(tmp_path / "old.parquet")]) == 0
+
+    def _band(path):
+        meta = pq.read_metadata(path).metadata
+        assert meta is not None
+        return json.loads(meta[b"krx_alpha.dq"].decode())["tick"]["price_band_violation"]
+
+    assert _band(tmp_path / "new.parquet") == 0
+    assert _band(tmp_path / "old.parquet") == 1
+
+
 def test_worker_unparsable_partition_uses_standard_band(tmp_path, monkeypatch) -> None:
     import json
 
@@ -365,7 +397,7 @@ def test_worker_unparsable_partition_uses_standard_band(tmp_path, monkeypatch) -
 
     _stub_collector_settings(monkeypatch, worker_mod, tmp_path)
     calls: list = []
-    monkeypatch.setattr(worker_mod, "listing_day_symbols", lambda *a: calls.append(a) or frozenset({"NEW"}))
+    monkeypatch.setattr(worker_mod, "resolve_listing_context", lambda *a: calls.append(a) or (frozenset({"NEW"}), None))
     part = tmp_path / "l0" / "ls" / "H0STCNT0" / "dt=not-a-date"
     _write_listing_l0_tick(part, symbol="NEW", price=18000, ref=10000)
     out = tmp_path / "o.parquet"

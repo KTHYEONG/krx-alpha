@@ -224,6 +224,7 @@ def _summarize_tick_fields(
     rows: int,
     settings: DataQualitySettings,
     listing_symbols: frozenset[str],
+    established_symbols: frozenset[str] | None = None,
 ) -> TickQualitySummary:
     frame = raw_fields.with_columns(
         price=pl.col("price_raw").cast(pl.Float64, strict=False),
@@ -255,6 +256,8 @@ def _summarize_tick_fields(
     listing_upper = float(settings.listing_day_upper_ratio)
     listing_lower = float(settings.listing_day_lower_ratio)
     is_listing = pl.col("shcode").is_in(list(listing_symbols))
+    if established_symbols is not None:
+        is_listing = is_listing | ~pl.col("shcode").is_in(list(established_symbols))
     flagged = flagged.with_columns(
         dq_zero_volume=(~pl.col("dq_decode_fail")) & (pl.col("cvolume") <= 0),
         dq_price_band_violation=(~pl.col("dq_decode_fail"))
@@ -344,16 +347,18 @@ def decode_and_flag_ticks(
     chunk_rows: int = _TICK_CHUNK_ROWS,
     settings: DataQualitySettings | None = None,
     listing_symbols: frozenset[str] = frozenset(),
+    established_symbols: frozenset[str] | None = None,
 ) -> TickQualitySummary | None:
     """Decode tick rows and flag quality invariants.
 
-    ``listing_symbols`` are judged against the listing-day band ``[listing_day_lower_ratio, listing_day_upper_ratio] x ref_price``; every other symbol against ``ref_price x (1 +/- price_band_ratio)``. ``settings=None`` means ``DataQualitySettings()``.
+    ``listing_symbols``, and when ``established_symbols`` is given every symbol outside it, are judged against the listing-day band ``[listing_day_lower_ratio, listing_day_upper_ratio] x ref_price``; every other symbol against ``ref_price x (1 +/- price_band_ratio)``. ``settings=None`` means ``DataQualitySettings()``.
     """
     fields = decode_tick_raw_fields(df, chunk_rows=chunk_rows)
     if fields is None:
         return None
     resolved = settings if settings is not None else DataQualitySettings()
-    return _summarize_tick_fields(fields, rows=fields.height, settings=resolved, listing_symbols=listing_symbols)
+    return _summarize_tick_fields(fields, rows=fields.height, settings=resolved, listing_symbols=listing_symbols,
+                                  established_symbols=established_symbols)
 
 
 def summarize_tick_fields_bucketed(
@@ -363,10 +368,11 @@ def summarize_tick_fields_bucketed(
     buckets: int,
     settings: DataQualitySettings | None = None,
     listing_symbols: frozenset[str] = frozenset(),
+    established_symbols: frozenset[str] | None = None,
 ) -> TickQualitySummary:
     """Summarize spill-backed tick fields in shcode hash buckets with bounded memory.
 
-    ``listing_symbols`` are judged against the listing-day band ``[listing_day_lower_ratio, listing_day_upper_ratio] x ref_price``; every other symbol against ``ref_price x (1 +/- price_band_ratio)``. ``settings=None`` means ``DataQualitySettings()``.
+    ``listing_symbols``, and when ``established_symbols`` is given every symbol outside it, are judged against the listing-day band ``[listing_day_lower_ratio, listing_day_upper_ratio] x ref_price``; every other symbol against ``ref_price x (1 +/- price_band_ratio)``. ``settings=None`` means ``DataQualitySettings()``.
 
     Args:
         fields: Lazy tick field frame (e.g. scan of per-chunk spill parquet).
@@ -394,7 +400,8 @@ def summarize_tick_fields_bucketed(
         frame = fields.filter((pl.col("shcode").hash(_BUCKET_HASH_SEED) % buckets) == b).collect()
         if frame.height == 0:
             continue
-        s = _summarize_tick_fields(frame, rows=frame.height, settings=resolved, listing_symbols=listing_symbols)
+        s = _summarize_tick_fields(frame, rows=frame.height, settings=resolved, listing_symbols=listing_symbols,
+                                   established_symbols=established_symbols)
         decode_fail += s.decode_fail
         zero_volume += s.zero_volume
         price_band_violation += s.price_band_violation

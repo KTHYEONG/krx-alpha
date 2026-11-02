@@ -13,21 +13,28 @@ logger = logging.getLogger(__name__)
 
 
 def listing_day_symbols(bars_daily_dir: pathlib.Path, day: dt.date) -> frozenset[str]:
-    """Return symbols whose first-ever daily bar is ``day``.
+    """Return symbols whose first-ever daily bar is ``day``; see :func:`resolve_listing_context`."""
+    return resolve_listing_context(bars_daily_dir, day)[0]
 
-    The daily-bar store is the only point-in-time source of listing dates available to the
-    normalizer: the tick stream itself does not flag a listing day. A symbol counts as newly
-    listed only when ``day`` is strictly after the earliest bar date of the whole store, so
-    symbols present at the store's earliest bar date are never misclassified.
+
+def resolve_listing_context(bars_daily_dir: pathlib.Path, day: dt.date) -> tuple[frozenset[str], frozenset[str] | None]:
+    """Return ``(listed_on_day, established)`` for ``day`` from the daily-bar store.
+
+    ``listed_on_day`` holds symbols whose first-ever daily bar is ``day``. ``established`` holds
+    symbols with a daily bar strictly before ``day``; a ticking symbol outside it has no prior
+    close and is on its listing day (or first trading day after one), which matters because the
+    store only gains ``day``'s bars on the next morning's refresh, after ``day``'s EOD quality pass.
+    A symbol counts as newly listed only when ``day`` is strictly after the earliest bar date of
+    the whole store, so symbols present at the store's earliest bar date are never misclassified.
 
     Args:
         bars_daily_dir: Monthly daily-bar parquet directory (``DataPaths.bars_daily_dir``).
         day: Partition date being normalized.
 
     Returns:
-        Newly listed symbols for ``day``. Empty when the store is missing, empty, unreadable,
-        or holds no bar for ``day``; the caller then applies the standard band, which can
-        only over-report violations, never hide them.
+        ``(frozenset(), None)`` when the store is missing, empty, unreadable, or holds no bar
+        before ``day``; the caller then applies the standard band, which can only over-report
+        violations, never hide them.
 
     Note:
         Reads only the ``date`` and ``symbol`` columns, aggregating one month at a time.
@@ -42,11 +49,11 @@ def listing_day_symbols(bars_daily_dir: pathlib.Path, day: dt.date) -> frozenset
             "[DATA] stage=listing_days status=DEGRADED reason=%s",
             FileNotFoundError.__name__,
         )
-        return frozenset()
+        return frozenset(), None
     try:
         files = sorted(store.glob("*.parquet"))
         if not files:
-            return frozenset()
+            return frozenset(), None
         first_dates: dict[str, dt.date] = {}
         for path in files:
             month = re.fullmatch(r"(\d{4}-\d{2})\.parquet", path.name)
@@ -69,11 +76,13 @@ def listing_day_symbols(bars_daily_dir: pathlib.Path, day: dt.date) -> frozenset
                 if previous is None or first_date < previous:
                     first_dates[symbol] = first_date
         if not first_dates or min(first_dates.values()) >= day:
-            return frozenset()
-        return frozenset(symbol for symbol, first_date in first_dates.items() if first_date == day)
+            return frozenset(), None
+        listed = frozenset(symbol for symbol, first_date in first_dates.items() if first_date == day)
+        established = frozenset(symbol for symbol, first_date in first_dates.items() if first_date < day)
+        return listed, established
     except Exception as exc:
         logger.warning(
             "[DATA] stage=listing_days status=DEGRADED reason=%s",
             type(exc).__name__,
         )
-        return frozenset()
+        return frozenset(), None

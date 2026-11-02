@@ -196,3 +196,34 @@ def test_history_across_months_prevents_listing(tmp_path) -> None:
     })
 
     assert listing_day_symbols(root, day) == frozenset({"NEW"})
+
+
+def test_resolve_listing_context_returns_established_symbols_before_day(tmp_path) -> None:
+    import datetime as dt
+
+    import polars as pl
+
+    from src.storage.listing_days import resolve_listing_context
+
+    pl.DataFrame({
+        "date": [dt.date(2026, 10, 27), dt.date(2026, 10, 28), dt.date(2026, 10, 29), dt.date(2026, 10, 30)],
+        "symbol": ["A", "B", "C", "D"],
+    }).write_parquet(tmp_path / "2026-10.parquet")
+
+    listed, established = resolve_listing_context(tmp_path, dt.date(2026, 10, 29))
+
+    assert listed == frozenset({"C"})
+    assert established == frozenset({"A", "B"})
+
+
+def test_resolve_listing_context_without_prior_history_grants_no_exemption(tmp_path) -> None:
+    import datetime as dt
+
+    import polars as pl
+
+    from src.storage.listing_days import resolve_listing_context
+
+    pl.DataFrame({"date": [dt.date(2026, 10, 29)], "symbol": ["A"]}).write_parquet(tmp_path / "2026-10.parquet")
+
+    assert resolve_listing_context(tmp_path, dt.date(2026, 10, 29)) == (frozenset(), None)
+    assert resolve_listing_context(tmp_path / "missing", dt.date(2026, 10, 29)) == (frozenset(), None)

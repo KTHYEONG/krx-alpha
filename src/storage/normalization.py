@@ -174,6 +174,7 @@ def normalize_l0_partition(
     dq_settings: DataQualitySettings | None = None,
     phase_windows: tuple[PhaseWindow, ...] = MARKET_PHASE_WINDOWS,
     listing_symbols: frozenset[str] = frozenset(),
+    established_symbols: frozenset[str] | None = None,
 ) -> int:
     """Write one deduplicated, quality-annotated L1 partition from L0 records.
 
@@ -184,6 +185,8 @@ def normalize_l0_partition(
         dq_settings: Typed quality thresholds.
         phase_windows: Market-phase windows for the partition date.
         listing_symbols: Symbols judged under the listing-day price band for this partition date.
+        established_symbols: Symbols with a daily bar before the partition date; when given, every
+            other ticking symbol is also judged under the listing-day band.
 
     Returns:
         Number of persisted L1 records.
@@ -321,6 +324,7 @@ def normalize_l0_partition(
                 buckets=_TICK_BUCKETS,
                 settings=settings,
                 listing_symbols=listing_symbols,
+                established_symbols=established_symbols,
             )
             if tick_rows > 0
             else None
