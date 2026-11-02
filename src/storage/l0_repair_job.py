@@ -293,7 +293,19 @@ def _run_locked(
                     else:
                         if merge.status != "OK":
                             failed += 1
-                            logger.error("[DATA] stage=repair_ticks status=MISMATCH day=%s vendor=%s", day, vendor)
+                            logger.error(
+                                "[DATA] stage=repair_ticks status=MISMATCH day=%s vendor=%s reason=%s "
+                                "live_rows=%d received=%s filled_rows=%d recovered=%s deduped=%d overfill_dropped=%d",
+                                day,
+                                vendor,
+                                merge.mismatch_reason,
+                                merge.live_rows,
+                                merge.audit_trades_received,
+                                merge.filled_rows,
+                                merge.gapfill_recovered,
+                                merge.deduped_late_live,
+                                merge.overfill_dropped,
+                            )
                         else:
                             merged += 1
                             repair = derive_day_repair(

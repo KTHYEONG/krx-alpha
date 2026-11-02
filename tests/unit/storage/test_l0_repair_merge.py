@@ -278,6 +278,8 @@ def test_mismatch_not_published(tmp_path) -> None:
     _write_audit(paths, DAY, "ls", observed=3, confirmed=0)
     summary = build_repaired_ticks(paths=paths, journal_root=paths.journal_root, day=DAY, vendor="ls")
     assert summary.status == "MISMATCH"
+    assert summary.mismatch_reason == "live_rows_ne_received"
+    assert (summary.live_rows, summary.audit_trades_received) == (2, 3)
     assert not paths.repaired_ticks_path(DAY, "ls").exists()
     assert not paths.repair_summary_path(DAY, "ls").exists()
 
@@ -423,6 +425,8 @@ def test_overfill_within_tolerance_is_dropped_and_recorded(tmp_path) -> None:
     _write_gapfill(paths, DAY, "ls", audit_path, rows, residual=0, recovered=3)
     strict = build_repaired_ticks(paths=paths, journal_root=paths.journal_root, day=DAY, vendor="ls")
     assert strict.status == "MISMATCH"
+    assert strict.mismatch_reason == "overfill_over_tolerance"
+    assert strict.overfill_dropped > 0
     tolerant = build_repaired_ticks(
         paths=paths, journal_root=paths.journal_root, day=DAY, vendor="ls", overfill_tolerance_ratio=0.5
     )
@@ -972,6 +976,8 @@ def test_gapfill_height_mismatch_not_published(tmp_path) -> None:
     )
     summary = build_repaired_ticks(paths=paths, journal_root=paths.journal_root, day=DAY, vendor="ls")
     assert summary.status == "MISMATCH"
+    assert summary.mismatch_reason == "gapfill_rows_ne_recovered"
+    assert (summary.filled_rows, summary.gapfill_recovered) == (2, 1)
     assert not paths.repaired_ticks_path(DAY, "ls").exists()
 
 
@@ -1133,7 +1139,11 @@ def test_prebuild_mismatch_counts_as_failure(tmp_path, monkeypatch, caplog) -> N
     monkeypatch.setattr(
         job,
         "build_repaired_ticks",
-        lambda **kwargs: RepairedTicksSummary(DAY, "ls", 1, 0, 0, 1, "x" * 64, "MISMATCH"),
+        lambda **kwargs: RepairedTicksSummary(
+            DAY, "ls", 1, 0, 0, 1, "x" * 64, "MISMATCH",
+            audit_trades_received=2, overfill_dropped=7, mismatch_reason="overfill_over_tolerance",
+            gapfill_recovered=9,
+        ),
     )
     with caplog.at_level(_logging.WARNING):
         summary = _run(paths)
@@ -1141,6 +1151,8 @@ def test_prebuild_mismatch_counts_as_failure(tmp_path, monkeypatch, caplog) -> N
     assert summary.merged == 0
     assert summary.failed == 1
     assert "status=MISMATCH" in caplog.text
+    assert "reason=overfill_over_tolerance live_rows=1 received=2 filled_rows=0 recovered=9" in caplog.text
+    assert "overfill_dropped=7" in caplog.text
 
 
 def test_gapfill_rows_missing_column_raises(tmp_path) -> None:

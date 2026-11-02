@@ -51,6 +51,9 @@ _OUTPUT_SCHEMA = pa.schema(
 )
 
 
+MismatchReason = Literal["gapfill_rows_ne_recovered", "live_rows_ne_received", "overfill_over_tolerance"]
+
+
 @dataclass(frozen=True)
 class RepairedTicksSummary:
     day: dt.date
@@ -68,6 +71,8 @@ class RepairedTicksSummary:
     overfill_dropped: int = 0
     tape_topup_rows: int = 0
     tape_topup_unplaced: int = 0
+    mismatch_reason: MismatchReason | None = None
+    gapfill_recovered: int | None = None
 
 
 @dataclass(frozen=True)
@@ -389,10 +394,17 @@ def _mismatch(
     observed: int,
     audit_sha256: str,
     report_sha: str | None,
-    count_note: str | None = None,
+    *,
+    reason: MismatchReason,
+    received: int,
+    recovered: int,
+    deduped: int = 0,
+    overfill_dropped: int = 0,
 ) -> RepairedTicksSummary:
     return RepairedTicksSummary(
-        day, vendor, live_rows, filled_rows, residual, observed, audit_sha256, "MISMATCH", report_sha, count_note
+        day, vendor, live_rows, filled_rows, residual, observed, audit_sha256, "MISMATCH", report_sha,
+        audit_trades_received=received, deduped_late_live=deduped, overfill_dropped=overfill_dropped,
+        mismatch_reason=reason, gapfill_recovered=recovered,
     )
 
 
@@ -445,7 +457,10 @@ def _build_repaired_ticks(
     filled = _read_gapfill_rows(paths, day, vendor, recovered, db, batch_rows)
 
     if filled.height != recovered:
-        return _mismatch(day, vendor, 0, filled.height, residual, observed, audit_sha256, report_sha)
+        return _mismatch(
+            day, vendor, 0, filled.height, residual, observed, audit_sha256, report_sha,
+            reason="gapfill_rows_ne_recovered", received=received, recovered=recovered,
+        )
 
     target = paths.repaired_ticks_path(day, vendor)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -515,7 +530,10 @@ def _build_repaired_ticks(
                 if len(columns["symbol"]) >= batch_rows:
                     flush(writer)
             if live_rows != received:
-                outcome = _mismatch(day, vendor, live_rows, filled.height, residual, observed, audit_sha256, report_sha)
+                outcome = _mismatch(
+                    day, vendor, live_rows, filled.height, residual, observed, audit_sha256, report_sha,
+                    reason="live_rows_ne_received", received=received, recovered=recovered,
+                )
             else:
                 filled_rows = 0
                 next_slot: dict[tuple[str, int], int] = {}
@@ -563,7 +581,9 @@ def _build_repaired_ticks(
                         flush(writer)
                 if outcome is None and overfill_dropped > overfill_tolerance_ratio * filled.height:
                     outcome = _mismatch(
-                        day, vendor, live_rows, filled.height, residual, observed, audit_sha256, report_sha
+                        day, vendor, live_rows, filled.height, residual, observed, audit_sha256, report_sha,
+                        reason="overfill_over_tolerance", received=received, recovered=recovered,
+                        deduped=deduped, overfill_dropped=overfill_dropped,
                     )
                 if outcome is None and columns["symbol"]:
                     flush(writer)
