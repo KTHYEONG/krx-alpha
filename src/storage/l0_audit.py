@@ -898,7 +898,7 @@ class _Derivation:
         ):
             state.duplicates += 1
             return
-        if self.is_overlap(segment, frame):
+        if self.is_overlap(segment, frame) or self.fills_open_interval(segment, frame):
             self.absorb_overlap(state, segment, frame)
             return
         segment.seen_conns.add(frame.conn_id)
@@ -944,6 +944,18 @@ class _Derivation:
             and frame.conn_id != prev.conn_id
             and frame.conn_id in segment.seen_conns
         )
+
+    @staticmethod
+    def fills_open_interval(segment: _Segment, frame: _TickFrame) -> bool:
+        """A same-connection frame below the counter high that lands inside or on the bounds of a recorded loss interval.
+
+        LS can deliver one second's trades out of counter order on a single connection: a sparse rising pass, then
+        every counter again including the bounds it already sent. Treating those as regressions, and three of them as
+        a counter reset, double-counts the loss (2026-11-02 030530). Inside → fills the interval; on a bound → duplicate.
+        """
+        if segment.max_cum is None or frame.cum >= segment.max_cum:
+            return False
+        return any(iv.cum_prev <= frame.cum <= iv.cum_next for iv in segment.intervals)
 
     @staticmethod
     def absorb_overlap(state: _SymbolState, segment: _Segment, frame: _TickFrame) -> None:

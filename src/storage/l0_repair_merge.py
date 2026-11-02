@@ -501,7 +501,13 @@ def _build_repaired_ticks(
     gap_ranges: dict[str, list[tuple[int, int]]] = {}
     for symbol, lo, hi in db.execute("SELECT DISTINCT symbol, cum_prev, cum_next FROM fills "
         "WHERE cum_prev IS NOT NULL AND cum_next IS NOT NULL ORDER BY symbol, cum_prev"):
-        gap_ranges.setdefault(symbol, []).append((lo, hi))
+        spans = gap_ranges.setdefault(symbol, [])
+        # Union overlapping open spans so the bisect below sees disjoint ranges; with nested spans a live tick
+        # inside the outer span was missed and its gap-fill twin survived as overfill (2026-11-02).
+        if spans and lo < spans[-1][1]:
+            spans[-1] = (spans[-1][0], max(spans[-1][1], hi))
+        else:
+            spans.append((lo, hi))
     gap_starts = {symbol: [lo for lo, _ in spans] for symbol, spans in gap_ranges.items()}
 
     def inside_gap(symbol: str, cum: int) -> bool:

@@ -401,6 +401,30 @@ def test_filled_rows_duplicating_late_live_trade_are_dropped(tmp_path) -> None:
     assert repaired_ticks_valid(paths, DAY, "ls")
 
 
+def test_late_live_twin_inside_outer_of_nested_spans_is_deduped(tmp_path) -> None:
+    from src.storage.l0_repair_merge import build_repaired_ticks
+
+    paths = DataPaths(tmp_path)
+    # live 19 sits in outer span (10, 20) but past nested span (12, 18), the span a start-bisect lands on
+    _write_journal(paths, DAY, "ls", [("000001", "090000", 10), ("000001", "090009", 20), ("000001", "090001", 19)])
+    audit_path = _write_audit(paths, DAY, "ls", observed=3, confirmed=2, symbols=(_gap_symbol(2),))
+
+    def row(seq: int, interval: int, lo: int, hi: int, chetime: str) -> dict:
+        return {
+            "symbol": "000001", "chetime": chetime, "price": 100, "volume": 1, "tape_seq": seq,
+            "interval_id": interval, "cum_prev": lo, "cum_next": hi, "vendor": "kis",
+            "provenance": "gapfill:kis_xvendor",
+        }
+
+    _write_gapfill(
+        paths, DAY, "ls", audit_path, [row(0, 0, 10, 20, "090001"), row(1, 1, 12, 18, "090005")],
+        residual=0, recovered=2,
+    )
+    summary = build_repaired_ticks(paths=paths, journal_root=paths.journal_root, day=DAY, vendor="ls")
+    assert summary.status == "OK"
+    assert (summary.filled_rows, summary.deduped_late_live, summary.overfill_dropped) == (1, 1, 0)
+
+
 def test_overfill_within_tolerance_is_dropped_and_recorded(tmp_path) -> None:
     from src.storage.l0_repair_merge import build_repaired_ticks
 

@@ -575,7 +575,7 @@ def test_duplicates_do_not_shift_baseline(tmp_path) -> None:
     assert ledger.net_missing == 0
 
 
-def test_out_of_order_frame_is_ignored_safely(tmp_path) -> None:
+def test_out_of_order_frame_fills_its_interval(tmp_path) -> None:
     _write(tmp_path / "l0", TICK, [
         _tick("005930", 10, 0, 100, 10, "090100", _ns(9, 0, 10)),
         _tick("005930", 12, 0, 120, 10, "090101", _ns(9, 0, 20)),
@@ -587,9 +587,10 @@ def test_out_of_order_frame_is_ignored_safely(tmp_path) -> None:
     audit = _derive(tmp_path / "l0")
 
     (ledger,) = audit.symbols
-    assert ledger.regressions == 1
-    assert [(iv.cum_prev, iv.cum_next, iv.missing_trades) for iv in ledger.intervals] == [(10, 12, 1)]
-    assert (ledger.net_missing, ledger.confirmed_missing) == (1, 1)
+    # trade 11 was received, only late: it closes the interval instead of staying counted as loss
+    assert ledger.regressions == 0
+    assert ledger.intervals == ()
+    assert (ledger.net_missing, ledger.confirmed_missing, ledger.frames) == (0, 0, 4)
 
 
 def test_counter_reset_needs_confirmation(tmp_path) -> None:
@@ -1345,6 +1346,22 @@ def test_reset_keeps_pre_reset_conservation_and_interval_totals(tmp_path) -> Non
     assert (ledger.resets, ledger.frames, ledger.trades_observed, ledger.net_missing) == (1, 6, 12, 6)
     assert ledger.confirmed_missing == 6
     assert sum(iv.missing_trades for iv in ledger.intervals) == 6
+
+
+@pytest.mark.parametrize(("late", "absorbed"), [([15, 16], 2), ([15, 16, 17, 18], 4), ([11, 12, 20, 21], 3)])
+def test_same_connection_out_of_order_burst_fills_its_interval(tmp_path, late, absorbed) -> None:
+    """LS sparse rising pass then the skipped counters (bounds re-sent) on one connection: no reset, no double count."""
+    from src.core.config import AuditSettings
+
+    cums = [10, 20, 22, *late, 23]
+    _write(tmp_path, TICK, [
+        _tick("005930", cum, 0, cum * 10, 10, "120812", _ns(12, 8, i)) for i, cum in enumerate(cums)
+    ])
+    ledger, = _derive(tmp_path, settings=AuditSettings(counter_reset_confirm_frames=3)).symbols
+    assert (ledger.resets, ledger.regressions, ledger.duplicates) == (0, 0, len(late) - absorbed)
+    assert ledger.net_missing == 10 - absorbed
+    assert sum(iv.missing_trades for iv in ledger.intervals) == 10 - absorbed
+    assert {(iv.cum_prev, iv.cum_next) for iv in ledger.intervals} <= {(10, 20), (20, 22)}
 
 
 def test_repeated_regression_does_not_confirm_reset(tmp_path) -> None:
