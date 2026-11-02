@@ -33,6 +33,7 @@ _SCHEMA_DISAGREE_TOLERANCE: float = 0.01
 _QUOTE_LEVELS: int = 10
 _QUOTE_CHUNK_ROWS: int = 20_000
 _TICK_CHUNK_ROWS: int = 20_000
+_TICK_CONN_KEY: str = "conn_id"
 _BUCKET_HASH_SEED: int = 0x9E3779B1
 _LEGACY_AUCTION_HOTIME_WINDOWS: tuple[tuple[int, int], ...] = ((83000, 90000), (152000, 153000))
 _AUCTION_PHASES: tuple[str, ...] = (MarketPhase.OPENING_AUCTION.value, MarketPhase.CLOSING_AUCTION.value)
@@ -204,7 +205,17 @@ def _split_by_vendor(chunk: pl.DataFrame) -> dict[str, pl.DataFrame]:
 
 
 def _decode_tick_chunk_mixed(chunk: pl.DataFrame) -> pl.DataFrame:
-    return pl.concat([_VENDOR_DECODERS[vendor][0](part) for vendor, part in _split_by_vendor(chunk).items()])
+    # Vendor tick decoders are 1:1 per row, so the connection id is carried positionally.
+    return pl.concat([
+        _VENDOR_DECODERS[vendor][0](part).with_columns(_connection_key(part))
+        for vendor, part in _split_by_vendor(chunk).items()
+    ])
+
+
+def _connection_key(part: pl.DataFrame) -> pl.Series:
+    if "conn_id" not in part.columns:
+        return pl.Series(_TICK_CONN_KEY, [""] * part.height, dtype=pl.String)
+    return part.get_column("conn_id").cast(pl.String).fill_null("").alias(_TICK_CONN_KEY)
 
 
 def _summarize_tick_fields(
@@ -256,12 +267,16 @@ def _summarize_tick_fields(
         & pl.col("ref_from_drate").is_not_null()
         & ((pl.col("ref_price") - pl.col("ref_from_drate")).abs() > pl.col("ref_from_drate").abs() * _SCHEMA_DISAGREE_TOLERANCE),
     )
-    flagged = flagged.sort(["shcode", "recv_wall_ns"]).with_columns(
-        volume_prev=pl.col("volume").shift(1).over("shcode"),
+    # Cumulative counters are monotone only within one vendor connection: during a standby/handover
+    # overlap two connections deliver the same trades, so a per-symbol sequence across connections
+    # interleaves two copies of the stream (10-27: 3861/3869 regressions were cross-connection).
+    series = ["shcode", _TICK_CONN_KEY] if _TICK_CONN_KEY in flagged.columns else ["shcode"]
+    flagged = flagged.sort([*series, "recv_wall_ns"]).with_columns(
+        volume_prev=pl.col("volume").shift(1).over(series),
         total_checnt=pl.col("mdchecnt") + pl.col("mschecnt"),
     )
     flagged = flagged.with_columns(
-        checnt_prev=pl.col("total_checnt").shift(1).over("shcode"),
+        checnt_prev=pl.col("total_checnt").shift(1).over(series),
     )
     flagged = flagged.with_columns(
         vol_delta=pl.col("volume") - pl.col("volume_prev"),

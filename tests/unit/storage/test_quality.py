@@ -160,6 +160,61 @@ def test_decode_and_flag_ticks_flags_cum_volume_regression() -> None:
     assert summary.cum_volume_regression == 1
 
 
+def test_cum_volume_regression_is_judged_per_connection() -> None:
+    import json
+    import polars as pl
+    from src.storage.quality import decode_and_flag_ticks
+
+    def _tick(volume, checnt):
+        b = {'shcode': '005930', 'price': '70000', 'cvolume': '1', 'volume': str(volume), 'change': '0', 'sign': '3',
+             'drate': '0.00', 'mdchecnt': str(checnt), 'mschecnt': '0'}
+        return json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': '005930'}, 'body': b}, ensure_ascii=False)
+
+    # Given: a handover overlap where two connections deliver the same trades interleaved by receive time
+    overlap = pl.DataFrame({
+        'raw': [_tick(100, 10), _tick(101, 11), _tick(100, 10), _tick(101, 11), _tick(102, 12)],
+        'tr_id': ['H0STCNT0'] * 5,
+        'recv_wall_ns': [100, 200, 210, 220, 300],
+        'conn_id': ['ls-a', 'ls-a', 'ls-b', 'ls-b', 'ls-b'],
+    })
+    # Given: the same receive order on a single connection is a real feed regression
+    single = overlap.with_columns(pl.lit('ls-a').alias('conn_id'))
+
+    overlap_summary = decode_and_flag_ticks(overlap)
+    single_summary = decode_and_flag_ticks(single)
+
+    assert overlap_summary is not None
+    assert single_summary is not None
+    assert overlap_summary.cum_volume_regression == 0
+    assert overlap_summary.tick_loss == 0
+    assert single_summary.cum_volume_regression == 1
+
+
+def test_cum_volume_regression_per_connection_survives_bucketed_spill(tmp_path) -> None:
+    import json
+    import polars as pl
+    from src.storage.quality import decode_tick_raw_fields, summarize_tick_fields_bucketed
+
+    def _tick(symbol, volume):
+        b = {'shcode': symbol, 'price': '70000', 'cvolume': '1', 'volume': str(volume), 'change': '0', 'sign': '3',
+             'drate': '0.00', 'mdchecnt': '1', 'mschecnt': '0'}
+        return json.dumps({'header': {'tr_cd': 'S3_', 'tr_key': symbol}, 'body': b}, ensure_ascii=False)
+
+    df = pl.DataFrame({
+        'raw': [_tick('005930', 100), _tick('005930', 101), _tick('005930', 100), _tick('000660', 50), _tick('000660', 40)],
+        'tr_id': ['H0STCNT0'] * 5,
+        'recv_wall_ns': [100, 200, 210, 100, 200],
+        'conn_id': ['ls-a', 'ls-a', 'ls-b', 'ls-a', 'ls-a'],
+    })
+    fields = decode_tick_raw_fields(df)
+    assert fields is not None
+    fields.write_parquet(tmp_path / '000000.parquet')
+
+    summary = summarize_tick_fields_bucketed(pl.scan_parquet(tmp_path / '*.parquet'), rows=fields.height, buckets=3)
+
+    assert summary.cum_volume_regression == 1
+
+
 def test_decode_and_flag_ticks_flags_tick_loss_and_quantifies_lost_volume() -> None:
     import json
     import polars as pl
