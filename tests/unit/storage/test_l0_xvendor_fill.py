@@ -192,10 +192,12 @@ def test_interval_ids_stable_across_residual() -> None:
     assert rows["interval_id"].to_list() == [1, 1]
 
 
-def test_missing_peer_partition_is_harmless(tmp_path) -> None:
+def test_missing_peer_partition_is_harmless_but_loud(tmp_path, caplog) -> None:
     day = dt.date(2026, 10, 20)
     audit = _audit(_interval())
-    assert peer_trades_for_gaps(audit, tmp_path, peer="kis", day=day) == {}
+    with caplog.at_level(logging.WARNING, logger="src.storage.l0_gapfill"):
+        assert peer_trades_for_gaps(audit, tmp_path, peer="kis", day=day) == {}
+    assert "reason=peer_l0_missing peer=kis day=2026-10-20 gap_symbols=1" in caplog.text
     rows, recovered, _ = derive_cross_vendor_fill(audit, [("kis", {})])
     assert rows.height == 0
     assert recovered == {}
@@ -256,14 +258,22 @@ def test_peer_trades_hostile_inputs(caplog, tmp_path: pathlib.Path) -> None:
     assert any(record.message.startswith("[DATA] stage=xvendor_fill") for record in caplog.records)
 
 
-def test_peer_trades_glob_error_is_empty(tmp_path: pathlib.Path, monkeypatch) -> None:
+def test_peer_trades_glob_error_is_empty(tmp_path: pathlib.Path, monkeypatch, caplog) -> None:
     import pathlib as _pathlib
 
     day = dt.date(2026, 10, 20)
     part = tmp_path / "kis" / "krx" / "regular" / "H0STCNT0" / f"dt={day.isoformat()}"
     part.mkdir(parents=True)
     monkeypatch.setattr(_pathlib.Path, "glob", lambda self, pattern: (_ for _ in ()).throw(OSError("down")))
-    assert peer_trades_for_gaps(_audit(_interval()), tmp_path, peer="kis", day=day) == {}
+    with caplog.at_level(logging.WARNING, logger="src.storage.l0_gapfill"):
+        assert peer_trades_for_gaps(_audit(_interval()), tmp_path, peer="kis", day=day) == {}
+    assert "reason=peer_l0_missing" in caplog.text
+
+
+def test_peer_trades_without_gaps_stays_quiet(tmp_path, caplog) -> None:
+    with caplog.at_level(logging.WARNING, logger="src.storage.l0_gapfill"):
+        assert peer_trades_for_gaps(_audit(), tmp_path, peer="kis", day=dt.date(2026, 10, 20)) == {}
+    assert "peer_l0_missing" not in caplog.text
 
 
 def test_cross_vendor_deficit_garbage_tolerated() -> None:

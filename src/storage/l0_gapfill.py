@@ -132,8 +132,14 @@ def peer_trades_for_gaps(
     try:
         files = sorted(partition.glob(L0_JOURNAL_GLOB), key=lambda p: p.name) if partition.is_dir() else []
     except OSError:
-        return {}
+        files = []
     if not files:
+        logger.warning(
+            "[DATA] stage=repair_ticks status=WARN reason=peer_l0_missing peer=%s day=%s gap_symbols=%d",
+            peer,
+            day.isoformat(),
+            len(merged),
+        )
         return {}
     found: dict[str, dict[int, PeerTrade]] = {}
     conflicts = 0

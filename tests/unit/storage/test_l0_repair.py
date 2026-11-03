@@ -842,3 +842,63 @@ def test_hold_expiry_boundary_and_custom_gate_vendor(tmp_path, caplog) -> None:
     with caplog.at_level(logging.CRITICAL):
         assert l0_hold_reason(rel, day, paths=paths, settings=settings, tape_done=frozenset(), cutoff=day + dt.timedelta(days=3)) is None
     assert len([r for r in caplog.records if "status=EXPIRED" in r.getMessage()]) == 1
+
+
+def _kis_hold(paths, day, cutoff, **kw):
+    import pathlib
+
+    from src.storage.l0_repair import l0_hold_reason
+
+    _write_audit(paths, day, "kis", _audit_doc(day, "kis"))
+    return l0_hold_reason(
+        pathlib.PurePath(f"kis/krx/regular/H0STCNT0/dt={day.isoformat()}"),
+        day,
+        paths=paths,
+        settings=_settings(**kw),
+        tape_done=frozenset({("005930", day)}),
+        cutoff=cutoff,
+    )
+
+
+def test_peer_partition_held_while_repair_vendor_unrepaired(tmp_path) -> None:
+    paths = _paths(tmp_path)
+    day = dt.date(2026, 9, 12)
+    sym = {"symbol": "005930", "confirmed_missing": 2, "intervals_truncated": 0, "intervals": []}
+    _write_audit(paths, day, "ls", _audit_doc(day, "ls", confirmed=2, symbols=[sym]))
+    assert _kis_hold(paths, day, dt.date(2026, 9, 14)) == "kis:peer_of_ls:gapfill_pending"
+
+
+def test_peer_partition_held_while_repair_vendor_unaudited(tmp_path) -> None:
+    paths = _paths(tmp_path)
+    day = dt.date(2026, 9, 12)
+    (paths.journal_root / "ls" / "krx" / "regular" / "H0STCNT0" / "dt=2026-09-12").mkdir(parents=True)
+    assert _kis_hold(paths, day, dt.date(2026, 9, 14)) == "kis:peer_of_ls:unaudited"
+
+
+@pytest.mark.parametrize("ls_audit", [None, "clean"])
+def test_peer_partition_released_without_pending_repair(tmp_path, ls_audit) -> None:
+    paths = _paths(tmp_path)
+    day = dt.date(2026, 9, 12)
+    if ls_audit == "clean":
+        _write_audit(paths, day, "ls", _audit_doc(day, "ls"))
+    assert _kis_hold(paths, day, dt.date(2026, 9, 14)) is None
+
+
+def test_peer_hold_expires_with_repair_vendor_bound(tmp_path, caplog) -> None:
+    paths = _paths(tmp_path)
+    day = dt.date(2026, 9, 1)
+    sym = {"symbol": "005930", "confirmed_missing": 2, "intervals_truncated": 0, "intervals": []}
+    _write_audit(paths, day, "ls", _audit_doc(day, "ls", confirmed=2, symbols=[sym]))
+    with caplog.at_level(logging.CRITICAL):
+        out = _kis_hold(paths, day, dt.date(2026, 9, 14), hold_max_extra_days=0)
+    assert out is None
+    assert "status=EXPIRED vendor=kis" in caplog.text
+    assert "state=peer_of_ls:gapfill_pending" in caplog.text
+
+
+def test_peer_hold_inert_when_hold_disabled(tmp_path) -> None:
+    paths = _paths(tmp_path)
+    day = dt.date(2026, 9, 12)
+    sym = {"symbol": "005930", "confirmed_missing": 2, "intervals_truncated": 0, "intervals": []}
+    _write_audit(paths, day, "ls", _audit_doc(day, "ls", confirmed=2, symbols=[sym]))
+    assert _kis_hold(paths, day, dt.date(2026, 9, 14), hold_enabled=False) is None

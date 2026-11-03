@@ -289,21 +289,47 @@ def l0_hold_reason(
     tape_done: AbstractSet[tuple[str, dt.date]],
     cutoff: dt.date,
 ) -> str | None:
-    """Reason string (`<vendor>:<state>`) when deleting this L0 partition must wait, else None."""
+    """Reason string (`<vendor>:<state>`, or `<peer>:peer_of_<vendor>:<state>`) when deleting this L0 partition must wait, else None.
+
+    A cross-vendor peer partition is held while any repair vendor of the same day is unrepaired, because gap-fill reads the peer from L0.
+    """
     if not settings.hold_enabled:
         return None
     vendor = audited_tick_vendor(part_relpath, gate_vendors=settings.gate_vendors)
     if vendor is None:
         return None
-    repair = derive_day_repair(paths, part_date, vendor, settings=settings, tape_done=tape_done)
-    if repair.state is RepairState.CLEAN or repair.state is RepairState.REPAIRED:
+    pending = _pending_repair(paths, part_date, vendor, settings=settings, tape_done=tape_done)
+    if pending is None:
         return None
     if (cutoff - part_date).days > settings.hold_max_extra_days:
         logger.critical(
             "[DATA] stage=repair_hold status=EXPIRED vendor=%s day=%s state=%s",
             vendor,
             part_date.isoformat(),
-            repair.state.value,
+            pending,
         )
         return None
-    return f"{vendor}:{repair.state.value}"
+    return f"{vendor}:{pending}"
+
+
+def _pending_repair(
+    paths: DataPaths,
+    day: dt.date,
+    vendor: str,
+    *,
+    settings: RepairSettings,
+    tape_done: AbstractSet[tuple[str, dt.date]],
+) -> str | None:
+    repair = derive_day_repair(paths, day, vendor, settings=settings, tape_done=tape_done)
+    if repair.state not in (RepairState.CLEAN, RepairState.REPAIRED):
+        return repair.state.value
+    if vendor not in settings.xvendor_peers or vendor in settings.repair_vendors:
+        return None
+    for repair_vendor in settings.repair_vendors:
+        partition = paths.journal_root / repair_vendor / "krx" / "regular" / "H0STCNT0" / f"dt={day.isoformat()}"
+        if not partition.is_dir() and not paths.session_audit_path(day, repair_vendor).exists():
+            continue
+        peer_of = derive_day_repair(paths, day, repair_vendor, settings=settings, tape_done=tape_done)
+        if peer_of.state not in (RepairState.CLEAN, RepairState.REPAIRED):
+            return f"peer_of_{repair_vendor}:{peer_of.state.value}"
+    return None
