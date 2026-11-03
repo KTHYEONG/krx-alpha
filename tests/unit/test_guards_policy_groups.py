@@ -163,6 +163,8 @@ def test_freeze_hint_is_appended_and_defaults_to_generic_text(guards: ModuleType
     generic = guards.evaluate_bash("deploy-now", now, tmp_path, guards.load_guard_spec(plain))
     custom = guards.evaluate_bash("deploy-now", now, tmp_path, guards.load_guard_spec(hinted))
 
-    assert generic.rule == "freeze" and generic.reason.endswith("Run it after the freeze ends.")
-    assert custom.rule == "freeze" and custom.reason.endswith("Use the nightly job.")
+    assert generic.rule == "freeze"
+    assert generic.reason.endswith("Run it after the freeze ends.")
+    assert custom.rule == "freeze"
+    assert custom.reason.endswith("Use the nightly job.")
     assert "krx" not in generic.reason
