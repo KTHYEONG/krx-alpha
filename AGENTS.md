@@ -20,6 +20,7 @@ Verify code changes against the project's native toolchains before concluding ta
 - **Test Runner:** `uv run pytest`
 - **Git Commits:** Run the project's `commit` skill.
 - Instruction budget: `uv run python tools/instruction_budget.py`
+- Commit guard: git config core.hooksPath .githooks (one-time per clone)
 
 ## 4. Communication & Language
 - **Natural Korean:** Converse, explain rationales, and report findings in Korean (한국어). In structured output cards, keep English keys/badges; write descriptions in Korean.

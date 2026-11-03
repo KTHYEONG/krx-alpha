@@ -9,3 +9,6 @@ allowed_exec_modes = ["paper", "mock"]
 live_arm_env = "KRX_ALPHA_EXEC_LIVE_ARMED"
 forbidden_force_push_flags = ["--force", "-f", "--force-with-lease", "--mirror"]
 coarse_risk_pattern = '\b(rm|docker|systemctl|git\s+push)\b|src[./]cli[./]main'
+forbidden_staged_prefixes = ["scratch/", "tmp/", "docs/specs/"]
+forbidden_name_globs = [".env", ".env.*", ".envrc", "*.pem", "*.key"]
+max_staged_bytes = 5000000

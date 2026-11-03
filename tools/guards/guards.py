@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Fail-closed PreToolUse guard for Claude Code Bash calls (stdlib only, run with python3 -I)."""
+"""Fail-closed guards: Claude Code PreToolUse Bash hook and git pre-commit hook (stdlib only, run with python3 -I)."""
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import posixpath
 import re
 import shlex
+import subprocess
 import sys
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
@@ -21,6 +23,8 @@ _MAX_COMMAND_CHARS = 100_000
 _MAX_REASON_CHARS = 300
 _MAX_TARGET_ECHO_CHARS = 120
 _MAX_NESTING_DEPTH = 3
+_MAX_LISTED_STAGED_PATHS = 20
+_GIT_TIMEOUT_SECONDS = 60
 _SPEC_PATH = Path(__file__).resolve().with_name("guards.toml")
 
 _OPERATOR_CHARS = "();&|<>"
@@ -83,6 +87,9 @@ class GuardSpec:
     live_arm_env: str
     forbidden_force_push_flags: tuple[str, ...]
     coarse_risk_pattern: str
+    forbidden_staged_prefixes: tuple[str, ...]
+    forbidden_name_globs: tuple[str, ...]
+    max_staged_bytes: int
 
 
 @dataclass(frozen=True)
@@ -90,6 +97,12 @@ class GuardDecision:
     allow: bool
     rule: str
     reason: str
+
+
+@dataclass(frozen=True)
+class StagedEntry:
+    path: str
+    size_bytes: int
 
 
 @dataclass(frozen=True)
@@ -119,6 +132,9 @@ def load_guard_spec(path: Path) -> GuardSpec:
         live_arm_env=_text(raw, "live_arm_env"),
         forbidden_force_push_flags=_texts(raw, "forbidden_force_push_flags"),
         coarse_risk_pattern=_text(raw, "coarse_risk_pattern", regex=True),
+        forbidden_staged_prefixes=_texts(raw, "forbidden_staged_prefixes"),
+        forbidden_name_globs=_texts(raw, "forbidden_name_globs"),
+        max_staged_bytes=_non_negative_int(raw, "max_staged_bytes"),
     )
     try:
         ZoneInfo(spec.timezone)
@@ -209,19 +225,91 @@ def main_pretool(stdin: TextIO, stderr: TextIO, now: datetime, project_dir: Path
     return 2
 
 
+def evaluate_staged(entries: Sequence[StagedEntry], spec: GuardSpec) -> GuardDecision:
+    """Deny when any staged entry is under a forbidden prefix, matches a forbidden name glob, or exceeds the size cap."""
+    offenders: list[tuple[str, str]] = []
+    for entry in entries:
+        rule = _staged_rule(entry, spec)
+        if rule is not None:
+            offenders.append((entry.path, rule))
+    if not offenders:
+        return _ALLOW
+    rules = ",".join(dict.fromkeys(rule for _, rule in offenders))
+    return GuardDecision(allow=False, rule=rules, reason=_staged_reason(offenders))
+
+
+def _staged_rule(entry: StagedEntry, spec: GuardSpec) -> str | None:
+    if any(entry.path.startswith(prefix) for prefix in spec.forbidden_staged_prefixes):
+        return "staged_path"
+    name = posixpath.basename(entry.path)
+    if any(fnmatch.fnmatchcase(name, pattern) for pattern in spec.forbidden_name_globs):
+        return "staged_name"
+    if entry.size_bytes > spec.max_staged_bytes:
+        return "staged_size"
+    return None
+
+
+def _staged_reason(offenders: Sequence[tuple[str, str]]) -> str:
+    lines = [f"Blocked: commit stages {len(offenders)} forbidden file(s)."]
+    lines.extend(f"  {rule}: {path}" for path, rule in offenders[:_MAX_LISTED_STAGED_PATHS])
+    hidden = len(offenders) - _MAX_LISTED_STAGED_PATHS
+    if hidden > 0:
+        lines.append(f"  ... and {hidden} more")
+    lines.append("Unstage with: git restore --staged <path>")
+    return "\n".join(lines)
+
+
+def main_precommit(repo_root: Path, git: Callable[[Sequence[str]], bytes], stderr: TextIO, spec: GuardSpec) -> int:
+    """Git pre-commit hook: return 0 to allow, 1 to deny or fail closed; diagnostics go to stderr."""
+    try:
+        entries = _staged_entries(repo_root, git)
+    except Exception as exc:
+        stderr.write(f"guard internal error (fail-closed): {type(exc).__name__}: {str(exc)[:_MAX_REASON_CHARS]}\n")
+        return 1
+    decision = evaluate_staged(entries, spec)
+    if decision.allow:
+        return 0
+    stderr.write(f"{decision.reason}\n")
+    return 1
+
+
+def _staged_entries(repo_root: Path, git: Callable[[Sequence[str]], bytes]) -> list[StagedEntry]:
+    root = str(repo_root)
+    listing = git(["-C", root, "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"])
+    entries: list[StagedEntry] = []
+    for raw_path in listing.split(b"\0"):
+        if not raw_path:
+            continue
+        path = raw_path.decode("utf-8")
+        size_text = git(["-C", root, "cat-file", "-s", f":{path}"]).decode("ascii").strip()
+        if not size_text.isdigit():
+            raise ValueError(f"unparsable staged blob size for {path!r}")
+        entries.append(StagedEntry(path=path, size_bytes=int(size_text)))
+    return entries
+
+
 def _run_pretool() -> int:
     spec = load_guard_spec(_SPEC_PATH)
     project_dir = Path(os.environ.get("CLAUDE_PROJECT_DIR") or str(Path.cwd())).absolute()
     return main_pretool(sys.stdin, sys.stderr, datetime.now(timezone.utc), project_dir, spec)
 
 
-_HANDLERS: Mapping[str, Callable[[], int]] = {"pretool": _run_pretool}
+def _run_precommit() -> int:
+    spec = load_guard_spec(_SPEC_PATH)
+    return main_precommit(Path.cwd(), _git_bytes, sys.stderr, spec)
+
+
+def _git_bytes(args: Sequence[str]) -> bytes:
+    return subprocess.run(["git", *args], capture_output=True, check=True, timeout=_GIT_TIMEOUT_SECONDS).stdout  # noqa: S603, S607
+
+
+_HANDLERS: Mapping[str, Callable[[], int]] = {"pretool": _run_pretool, "precommit": _run_precommit}
 
 
 def main(argv: Sequence[str]) -> int:
     handler = _HANDLERS.get(argv[0]) if argv else None
     if handler is None:
-        sys.stderr.write("usage: guards.py pretool\n")
+        sys.stderr.write("usage: guards.py pretool|precommit\n")
         return 2
     try:
         return handler()
@@ -251,6 +339,13 @@ def _texts(raw: Mapping[str, Any], key: str, regex: bool = False) -> tuple[str, 
 
 def _clock(raw: Mapping[str, Any], key: str) -> time:
     return time.fromisoformat(_text(raw, key))
+
+
+def _non_negative_int(raw: Mapping[str, Any], key: str) -> int:
+    value = _field(raw, key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"guard spec key '{key}' must be a non-negative integer")
+    return value
 
 
 def _field(raw: Mapping[str, Any], key: str) -> Any:
