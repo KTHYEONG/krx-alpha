@@ -11,4 +11,6 @@ forbidden_force_push_flags = ["--force", "-f", "--force-with-lease", "--mirror"]
 coarse_risk_pattern = '\b(rm|docker|systemctl|git\s+push)\b|src[./]cli[./]main'
 forbidden_staged_prefixes = ["scratch/", "tmp/", "docs/specs/"]
 forbidden_name_globs = [".env", ".env.*", ".envrc", "*.pem", "*.key"]
+allowed_staged_names = [".gitkeep"]
+freeze_hint = "Defer to the 22:00 KST krx-deferred-recreate timer or run after the freeze ends."
 max_staged_bytes = 5000000

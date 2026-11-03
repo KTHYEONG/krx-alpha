@@ -11,7 +11,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GUARDS_PATH = REPO_ROOT / "tools" / "guards" / "guards.py"
-SPEC_PATH = REPO_ROOT / "tools" / "guards" / "guards.toml"
+SPEC_PATH = REPO_ROOT / "tests" / "unit" / "guards_test_config.toml"
 KST = ZoneInfo("Asia/Seoul")
 MARKET_HOURS = datetime(2026, 11, 3, 10, 0, tzinfo=KST)
 

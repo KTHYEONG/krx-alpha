@@ -11,7 +11,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GUARDS_PATH = REPO_ROOT / "tools" / "guards" / "guards.py"
-SPEC_PATH = REPO_ROOT / "tools" / "guards" / "guards.toml"
+SPEC_PATH = REPO_ROOT / "tests" / "unit" / "guards_test_config.toml"
 KST = ZoneInfo("Asia/Seoul")
 MARKET_HOURS = datetime(2026, 11, 3, 10, 0, tzinfo=KST)
 AFTER_FREEZE = datetime(2026, 11, 3, 22, 30, tzinfo=KST)
@@ -143,3 +143,99 @@ def test_text_commands_are_not_treated_as_deploy_actions(decide, command: str) -
 
 def test_real_compose_up_still_frozen(decide) -> None:
     assert decide("docker compose up -d").rule == "freeze"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "docker status: $(git status)"',
+        'git commit -m "$(cat msg.txt)"',
+        "rm scratch/$NAME.txt",
+        "ls $(pwd)",
+        "echo '`rm -rf ~/x`'",
+        "echo '$(rm -rf ~/x)'",
+    ],
+)
+def test_benign_substitution_and_inert_quotes_allowed(decide, command: str) -> None:
+    assert decide(command).allow
+
+
+@pytest.mark.parametrize(
+    ("command", "rule"),
+    [
+        ("echo $(rm -rf ~/x)", "rm"),
+        ("echo `rm -rf ~/x`", "rm"),
+        ('echo "$(rm -rf ~/x)"', "rm"),
+        ('echo "`rm -rf ~/x`"', "rm"),
+        ("cat <<EOF\n$(rm -rf ~/x)\nEOF", "rm"),
+        ("ls <(rm -rf ~/x)", "rm"),
+    ],
+)
+def test_substitution_bodies_are_evaluated_everywhere_active(decide, command: str, rule: str) -> None:
+    decision = decide(command)
+
+    assert not decision.allow
+    assert decision.rule == rule
+
+
+def test_quoted_heredoc_body_substitution_is_inert(decide) -> None:
+    assert decide("cat <<'EOF'\n$(rm -rf ~/x)\nEOF").allow
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "$(echo rm) -rf ~/x",
+        "$(echo git) push --force origin main",
+        "$(echo docker) compose up -d",
+        "X=rm; $X -rf ~/x",
+        'bash -c "$(echo rm -rf ~/x)"',
+    ],
+)
+def test_dynamic_command_word_with_risky_tool_denied(decide, command: str) -> None:
+    decision = decide(command)
+
+    assert not decision.allow
+    assert decision.rule == "internal_error"
+
+
+@pytest.mark.parametrize("command", ['"$(git rev-parse --show-toplevel)/scripts/run.sh"', '"$VENV/bin/python" x.py'])
+def test_dynamic_command_word_without_risky_tool_allowed(decide, command: str) -> None:
+    assert decide(command).allow
+
+
+def test_substitution_nesting_beyond_limit_denied(decide) -> None:
+    decision = decide("echo $(echo $(echo $(echo $(true))))")
+
+    assert not decision.allow
+    assert decision.rule == "internal_error"
+
+
+@pytest.mark.parametrize("command", ["rm -rf `pwd", "echo $(pwd", 'echo "$(pwd"'])
+def test_unterminated_substitution_never_raises(decide, command: str) -> None:
+    decide(command)
+
+
+def test_unterminated_substitution_with_recursive_rm_denied(decide) -> None:
+    assert not decide("rm -rf `pwd").allow
+
+
+@pytest.mark.parametrize("command", ["git push origin $BRANCH", "git push origin $(echo main)", "git push origin `echo main`"])
+def test_push_with_expansion_denied(decide, command: str) -> None:
+    decision = decide(command)
+
+    assert not decision.allow
+    assert decision.rule == "internal_error"
+
+
+def test_push_without_expansion_allowed(decide) -> None:
+    assert decide("git push origin main").allow
+
+
+def test_order_with_expansion_denied(decide) -> None:
+    command = "KRX_ALPHA_EXEC_MODE=mock uv run python -m src.cli.main order --symbol $S --side buy --qty 1"
+
+    decision = decide(command)
+
+    assert not decision.allow
+    assert decision.rule == "internal_error"

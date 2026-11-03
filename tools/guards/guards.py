@@ -68,34 +68,45 @@ _TEXT_COMMANDS = frozenset(
     {"echo", "printf", "cat", "grep", "egrep", "fgrep", "rg", "head", "tail", "sed", "awk", "less", "more", "wc", "git", "diff", "tee"}
 )
 _HEREDOC_START = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-_SUBSTITUTION_MARKERS = ("`", "$(", "<(", ">(")
+_DYNAMIC_COMMAND_WORD = re.compile(
+    r"(?:^|[;&|({])\s*(?:(?:\w+=\S*|sudo|env|command|nohup|time|nice|exec|builtin|then|do|else|if|while|until|!)\s+)*[\"']?[$`]",
+    re.MULTILINE,
+)
 
-_LIVE_REASON = "Blocked: live trading is human-only. Do not set KRX_ALPHA_EXEC_LIVE_ARMED or KRX_ALPHA_EXEC_MODE=live."
 _FORCE_PUSH_REASON = "Blocked: force push or '+' refspec is forbidden. Push without force or ask the user."
 
 
 @dataclass(frozen=True)
 class GuardSpec:
-    timezone: str
-    freeze_start: time
-    freeze_end: time
+    timezone: str | None
+    freeze_start: time | None
+    freeze_end: time | None
     freeze_command_patterns: tuple[str, ...]
     order_cli_markers: tuple[str, ...]
     order_subcommands: tuple[str, ...]
-    exec_mode_env: str
+    exec_mode_env: str | None
     allowed_exec_modes: tuple[str, ...]
-    live_arm_env: str
+    live_arm_env: str | None
     forbidden_force_push_flags: tuple[str, ...]
     coarse_risk_pattern: str
     forbidden_staged_prefixes: tuple[str, ...]
     forbidden_name_globs: tuple[str, ...]
     max_staged_bytes: int
+    allowed_staged_names: tuple[str, ...] = ()
+    deny_tools: tuple[DenyTool, ...] = ()
+    freeze_hint: str = ""
 
 
 @dataclass(frozen=True)
 class GuardDecision:
     allow: bool
     rule: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class DenyTool:
+    tool: str
     reason: str
 
 
@@ -117,32 +128,76 @@ _ALLOW = GuardDecision(allow=True, rule="", reason="")
 
 
 def load_guard_spec(path: Path) -> GuardSpec:
-    """Parse the policy TOML; raises ValueError on a missing, ill-typed, or invalid key."""
+    """Parse the policy TOML; an absent optional group is disabled, a partial group or invalid key raises ValueError."""
     with path.open("rb") as handle:
         raw: dict[str, Any] = tomllib.load(handle)
-    spec = GuardSpec(
-        timezone=_text(raw, "timezone"),
-        freeze_start=_clock(raw, "freeze_start"),
-        freeze_end=_clock(raw, "freeze_end"),
-        freeze_command_patterns=_texts(raw, "freeze_command_patterns", regex=True),
-        order_cli_markers=_texts(raw, "order_cli_markers"),
-        order_subcommands=_texts(raw, "order_subcommands"),
-        exec_mode_env=_text(raw, "exec_mode_env"),
-        allowed_exec_modes=_texts(raw, "allowed_exec_modes"),
-        live_arm_env=_text(raw, "live_arm_env"),
+    timezone_name, freeze_start, freeze_end, freeze_patterns = _freeze_group(raw)
+    order_markers, order_subcommands, exec_mode_env, allowed_modes = _order_group(raw)
+    return GuardSpec(
+        timezone=timezone_name,
+        freeze_start=freeze_start,
+        freeze_end=freeze_end,
+        freeze_command_patterns=freeze_patterns,
+        order_cli_markers=order_markers,
+        order_subcommands=order_subcommands,
+        exec_mode_env=exec_mode_env,
+        allowed_exec_modes=allowed_modes,
+        live_arm_env=_optional_text(raw, "live_arm_env"),
         forbidden_force_push_flags=_texts(raw, "forbidden_force_push_flags"),
         coarse_risk_pattern=_text(raw, "coarse_risk_pattern", regex=True),
         forbidden_staged_prefixes=_texts(raw, "forbidden_staged_prefixes"),
         forbidden_name_globs=_texts(raw, "forbidden_name_globs"),
+        allowed_staged_names=_optional_texts(raw, "allowed_staged_names"),
         max_staged_bytes=_non_negative_int(raw, "max_staged_bytes"),
+        deny_tools=_deny_tools(raw),
+        freeze_hint=_optional_text(raw, "freeze_hint") or "",
     )
+
+
+def _freeze_group(raw: Mapping[str, Any]) -> tuple[str | None, time | None, time | None, tuple[str, ...]]:
+    patterns = _optional_texts(raw, "freeze_command_patterns", regex=True)
+    if not patterns:
+        return None, None, None, ()
+    zone = _text(raw, "timezone")
+    start = _clock(raw, "freeze_start")
+    end = _clock(raw, "freeze_end")
     try:
-        ZoneInfo(spec.timezone)
+        ZoneInfo(zone)
     except (KeyError, ValueError) as exc:
-        raise ValueError(f"guard spec timezone is not a valid IANA name: {spec.timezone}") from exc
-    if not spec.freeze_start < spec.freeze_end:
+        raise ValueError(f"guard spec timezone is not a valid IANA name: {zone}") from exc
+    if not start < end:
         raise ValueError("guard spec requires freeze_start < freeze_end")
-    return spec
+    return zone, start, end, patterns
+
+
+def _order_group(raw: Mapping[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...], str | None, tuple[str, ...]]:
+    markers = _optional_texts(raw, "order_cli_markers")
+    if not markers:
+        return (), (), _optional_text(raw, "exec_mode_env"), ()
+    return markers, _texts(raw, "order_subcommands"), _text(raw, "exec_mode_env"), _texts(raw, "allowed_exec_modes")
+
+
+def _deny_tools(raw: Mapping[str, Any]) -> tuple[DenyTool, ...]:
+    entries = raw.get("deny_tools", [])
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        raise ValueError("guard spec key 'deny_tools' must be an array of tables")
+    tools: list[DenyTool] = []
+    for entry in entries:
+        reason = _text(entry, "reason")
+        if len(reason) > _MAX_REASON_CHARS:
+            raise ValueError(f"guard spec key 'reason' in deny_tools exceeds {_MAX_REASON_CHARS} characters")
+        tools.append(DenyTool(tool=_text(entry, "tool", regex=True), reason=reason))
+    return tuple(tools)
+
+
+def _optional_text(raw: Mapping[str, Any], key: str) -> str | None:
+    return _text(raw, key) if key in raw else None
+
+
+def _optional_texts(raw: Mapping[str, Any], key: str, regex: bool = False) -> tuple[str, ...]:
+    if key not in raw or raw[key] == []:
+        return ()
+    return _texts(raw, key, regex=regex)
 
 
 def evaluate_bash(command: str, now: datetime, project_dir: Path, spec: GuardSpec) -> GuardDecision:
@@ -173,6 +228,20 @@ def _evaluate(command: str, now: datetime, project_dir: Path, spec: GuardSpec, d
         if not inner.allow:
             return inner
 
+    try:
+        bodies = [
+            *_substitution_bodies(parse_text, quote_aware=True),
+            *_substitution_bodies(unquoted_bodies, quote_aware=False),
+        ]
+    except ValueError:
+        return _unparsed_decision(parse_text, spec)
+    if bodies and depth >= _MAX_NESTING_DEPTH:
+        return _deny("internal_error", "Blocked: command substitution nesting is too deep to verify. Run the inner command directly.")
+    for body in bodies:
+        inner = _evaluate(body, now, project_dir, spec, depth + 1)
+        if not inner.allow:
+            return inner
+
     root = posixpath.normpath(project_dir.as_posix())
     reason = _live_env_reason(commands, spec)
     if reason is not None:
@@ -189,7 +258,7 @@ def _evaluate(command: str, now: datetime, project_dir: Path, spec: GuardSpec, d
     reason = _freeze_reason(commands, spec, now)
     if reason is not None:
         return _deny("freeze", reason)
-    reason = _substitution_reason(parse_text + "\n" + unquoted_bodies, commands, spec)
+    reason = _expansion_reason(commands, spec) or _dynamic_command_reason(parse_text, commands, spec)
     if reason is not None:
         return _deny("internal_error", reason)
     return _ALLOW
@@ -206,7 +275,11 @@ def main_pretool(stdin: TextIO, stderr: TextIO, now: datetime, project_dir: Path
         stderr.write("guard: hook payload is not a JSON object (fail-closed)\n")
         return 2
     if payload.get("tool_name") != "Bash":
-        return 0
+        reason = _tool_denial(payload.get("tool_name"), spec.deny_tools)
+        if reason is None:
+            return 0
+        stderr.write(f"{reason}\n")
+        return 2
     tool_input = payload.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str):
@@ -225,6 +298,12 @@ def main_pretool(stdin: TextIO, stderr: TextIO, now: datetime, project_dir: Path
     return 2
 
 
+def _tool_denial(tool_name: object, deny_tools: Sequence[DenyTool]) -> str | None:
+    if not isinstance(tool_name, str):
+        return None
+    return next((tool.reason for tool in deny_tools if re.fullmatch(tool.tool, tool_name)), None)
+
+
 def evaluate_staged(entries: Sequence[StagedEntry], spec: GuardSpec) -> GuardDecision:
     """Deny when any staged entry is under a forbidden prefix, matches a forbidden name glob, or exceeds the size cap."""
     offenders: list[tuple[str, str]] = []
@@ -239,9 +318,10 @@ def evaluate_staged(entries: Sequence[StagedEntry], spec: GuardSpec) -> GuardDec
 
 
 def _staged_rule(entry: StagedEntry, spec: GuardSpec) -> str | None:
-    if any(entry.path.startswith(prefix) for prefix in spec.forbidden_staged_prefixes):
-        return "staged_path"
     name = posixpath.basename(entry.path)
+    exempt = name in spec.allowed_staged_names
+    if not exempt and any(entry.path.startswith(prefix) for prefix in spec.forbidden_staged_prefixes):
+        return "staged_path"
     if any(fnmatch.fnmatchcase(name, pattern) for pattern in spec.forbidden_name_globs):
         return "staged_name"
     if entry.size_bytes > spec.max_staged_bytes:
@@ -562,16 +642,22 @@ def _find_start_paths(args: Sequence[str]) -> list[str]:
 
 
 def _live_env_reason(commands: Sequence[_SimpleCommand], spec: GuardSpec) -> str | None:
-    arm = spec.live_arm_env.lower()
-    mode = spec.exec_mode_env.lower()
+    arm = spec.live_arm_env.lower() if spec.live_arm_env is not None else None
+    mode = spec.exec_mode_env.lower() if spec.exec_mode_env is not None else None
     for command in commands:
         for token in command.tokens:
             lowered = token.lower()
-            if lowered.startswith(f"{arm}=") and lowered.partition("=")[2] in _ARMED_VALUES:
-                return _LIVE_REASON
-            if lowered == f"{mode}=live":
-                return _LIVE_REASON
+            if arm is not None and lowered.startswith(f"{arm}=") and lowered.partition("=")[2] in _ARMED_VALUES:
+                return _live_reason(spec)
+            if mode is not None and lowered == f"{mode}=live":
+                return _live_reason(spec)
     return None
+
+
+def _live_reason(spec: GuardSpec) -> str:
+    forbidden = [spec.live_arm_env, None if spec.exec_mode_env is None else f"{spec.exec_mode_env}=live"]
+    names = " or ".join(name for name in forbidden if name is not None)
+    return f"Blocked: live trading is human-only. Do not set {names}."
 
 
 def _rm_reason(commands: Sequence[_SimpleCommand], root: str) -> str | None:
@@ -667,29 +753,31 @@ def _git_push_args(args: Sequence[str]) -> Sequence[str] | None:
 
 
 def _order_reason(commands: Sequence[_SimpleCommand], spec: GuardSpec) -> str | None:
+    mode_env = spec.exec_mode_env
+    if not spec.order_cli_markers or mode_env is None:
+        return None
     for command in commands:
-        argv = command.argv
-        marker_index = next(
-            (index for index, token in enumerate(argv) if any(token.endswith(m) for m in spec.order_cli_markers)),
-            None,
-        )
-        if marker_index is None or not any(token in spec.order_subcommands for token in argv[marker_index + 1 :]):
+        if not _order_invocation(command.argv, spec):
             continue
         modes = [
             assignment.partition("=")[2]
             for assignment in command.assignments
-            if assignment.startswith(f"{spec.exec_mode_env}=")
+            if assignment.startswith(f"{mode_env}=")
         ]
         if modes and all(mode in spec.allowed_exec_modes for mode in modes):
             continue
+        allowed = " or ".join(spec.allowed_exec_modes)
         return (
             f"Blocked: order CLI needs an explicit mode on the same command "
-            f"({spec.exec_mode_env}=paper or mock prefix). Live orders are human-only."
+            f"({mode_env}={allowed} prefix). Live orders are human-only."
         )
     return None
 
 
 def _freeze_reason(commands: Sequence[_SimpleCommand], spec: GuardSpec, now: datetime) -> str | None:
+    zone, start, end = spec.timezone, spec.freeze_start, spec.freeze_end
+    if not spec.freeze_command_patterns or zone is None or start is None or end is None:
+        return None
     frozen = [
         command
         for command in commands
@@ -699,13 +787,12 @@ def _freeze_reason(commands: Sequence[_SimpleCommand], spec: GuardSpec, now: dat
     ]
     if not frozen:
         return None
-    local = now.astimezone(ZoneInfo(spec.timezone)).time()
-    if not spec.freeze_start <= local < spec.freeze_end:
+    local = now.astimezone(ZoneInfo(zone)).time()
+    if not start <= local < end:
         return None
     return (
-        f"Blocked: docker/compose/service-restart commands are frozen {spec.freeze_start:%H:%M}~"
-        f"{spec.freeze_end:%H:%M} {spec.timezone} (now {local:%H:%M}). "
-        "Defer to the 22:00 KST krx-deferred-recreate timer or run after the freeze ends."
+        f"Blocked: docker/compose/service-restart commands are frozen {start:%H:%M}~"
+        f"{end:%H:%M} {zone} (now {local:%H:%M}). " + (spec.freeze_hint or "Run it after the freeze ends.")
     )
 
 
@@ -713,23 +800,119 @@ def _is_read_only_compose(argv: Sequence[str]) -> bool:
     return len(argv) >= 3 and _command_name(argv) == "docker" and argv[1] == "compose" and argv[2] in _READ_ONLY_COMPOSE
 
 
-def _substitution_reason(command: str, commands: Sequence[_SimpleCommand], spec: GuardSpec) -> str | None:
-    if not any(marker in command for marker in _SUBSTITUTION_MARKERS):
+def _substitution_bodies(text: str, *, quote_aware: bool) -> list[str]:
+    """Bodies of active `$(…)`, `<(…)`, `>(…)` and backtick substitutions; raises ValueError when one is unterminated.
+
+    Single-quoted text is inert; heredoc bodies pass quote_aware=False because quotes are literal there.
+    Known residuals (not detected): `$RM -rf ~/x` when the text names no risky tool, eval through variables, pipes into a bare sh.
+    """
+    bodies: list[str] = []
+    length = len(text)
+    index = 0
+    single = False
+    double = False
+    while index < length:
+        char = text[index]
+        if single:
+            single = char != "'"
+            index += 1
+        elif char == "\\":
+            index += 2
+        elif quote_aware and char == "'" and not double:
+            single = True
+            index += 1
+        elif quote_aware and char == '"':
+            double = not double
+            index += 1
+        elif char == "`":
+            end = _backtick_end(text, index + 1)
+            bodies.append(text[index + 1 : end])
+            index = end + 1
+        elif text[index + 1 : index + 2] == "(" and (char == "$" or (char in "<>" and not double)):
+            end = _paren_end(text, index + 2)
+            bodies.append(text[index + 2 : end])
+            index = end + 1
+        else:
+            index += 1
+    if single or double:
+        raise ValueError("unterminated quote")
+    return bodies
+
+
+def _backtick_end(text: str, start: int) -> int:
+    index = start
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+        elif text[index] == "`":
+            return index
+        else:
+            index += 1
+    raise ValueError("unterminated backtick substitution")
+
+
+def _paren_end(text: str, start: int) -> int:
+    depth = 1
+    index = start
+    single = False
+    double = False
+    while index < len(text):
+        char = text[index]
+        if single:
+            single = char != "'"
+        elif char == "\\":
+            index += 1
+        elif char == "'" and not double:
+            single = True
+        elif char == '"':
+            double = not double
+        elif not double and char == "(":
+            depth += 1
+        elif not double and char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    raise ValueError("unterminated command substitution")
+
+
+def _order_invocation(argv: Sequence[str], spec: GuardSpec) -> bool:
+    marker_index = next(
+        (index for index, token in enumerate(argv) if any(token.endswith(m) for m in spec.order_cli_markers)),
+        None,
+    )
+    return marker_index is not None and any(token in spec.order_subcommands for token in argv[marker_index + 1 :])
+
+
+def _expansion_reason(commands: Sequence[_SimpleCommand], spec: GuardSpec) -> str | None:
+    for command in commands:
+        argv = command.argv
+        argument_sensitive = (
+            _command_name(argv) == "git" and _git_push_args(argv[1:]) is not None
+        ) or _order_invocation(argv, spec)
+        if argument_sensitive and any("$" in token or "`" in token for token in argv):
+            return "Blocked: arguments of git push or the order CLI use shell expansion that cannot be verified. Spell them out."
+    return None
+
+
+def _dynamic_command_reason(parse_text: str, commands: Sequence[_SimpleCommand], spec: GuardSpec) -> str | None:
+    if _DYNAMIC_COMMAND_WORD.search(parse_text) is None:
         return None
     joined = " ".join(token for simple in commands for token in simple.tokens)
     coarse = re.compile(spec.coarse_risk_pattern)
-    if coarse.search(command) is None and coarse.search(joined) is None:
+    if coarse.search(parse_text) is None and coarse.search(joined) is None:
         return None
-    return (
-        "Blocked: command or process substitution around a risky command could not be verified. "
-        "Run the inner command as a separate, reviewed call."
-    )
+    return "Blocked: the command word is computed at runtime and the command mentions a risky tool. Run the real command directly."
 
 
 def _unparsed_decision(command: str, spec: GuardSpec) -> GuardDecision:
-    live_pattern = rf"{re.escape(spec.live_arm_env)}=(?:true|1|yes)|{re.escape(spec.exec_mode_env)}=live"
-    if re.search(live_pattern, command, re.IGNORECASE):
-        return _deny("live_env", _LIVE_REASON)
+    live_patterns: list[str] = []
+    if spec.live_arm_env is not None:
+        live_patterns.append(rf"{re.escape(spec.live_arm_env)}=(?:true|1|yes)")
+    if spec.exec_mode_env is not None:
+        live_patterns.append(rf"{re.escape(spec.exec_mode_env)}=live")
+    if live_patterns and re.search("|".join(live_patterns), command, re.IGNORECASE):
+        return _deny("live_env", _live_reason(spec))
     if re.search(r"(?<![\w.-])rm(?!\w)", command) and re.search(r"(?<!\S)-[A-Za-z]*[rR]|--recursive", command):
         return _deny("rm", _rm_denied("unparseable command with a recursive flag"))
     flags = "|".join(re.escape(flag) for flag in spec.forbidden_force_push_flags)

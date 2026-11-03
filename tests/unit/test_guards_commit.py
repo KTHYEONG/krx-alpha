@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import io
 import os
@@ -15,7 +16,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GUARDS_PATH = REPO_ROOT / "tools" / "guards" / "guards.py"
-SPEC_PATH = REPO_ROOT / "tools" / "guards" / "guards.toml"
+SPEC_PATH = REPO_ROOT / "tests" / "unit" / "guards_test_config.toml"
 HOOK_PATH = REPO_ROOT / ".githooks" / "pre-commit"
 WRAPPER_TEXT = b'#!/bin/sh\nexec python3 -I "$(git rev-parse --show-toplevel)/tools/guards/guards.py" precommit\n'
 GIT_TIMEOUT_SECONDS = 60
@@ -89,6 +90,31 @@ def test_size_cap_is_strict(guards: ModuleType, spec: Any) -> None:
     decision = guards.evaluate_staged(over, spec)
     assert not decision.allow
     assert decision.rule == "staged_size"
+
+
+@pytest.mark.parametrize("path", ["scratch/.gitkeep", "docs/specs/.gitkeep"])
+def test_allowed_name_exempt_from_prefix_rule(guards: ModuleType, spec: Any, path: str) -> None:
+    assert guards.evaluate_staged(_entries(guards, path), spec).allow
+
+
+def test_non_allowed_name_under_prefix_still_denied(guards: ModuleType, spec: Any) -> None:
+    decision = guards.evaluate_staged(_entries(guards, "scratch/a.py"), spec)
+    assert not decision.allow
+    assert decision.rule == "staged_path"
+
+
+def test_allowed_name_still_size_checked(guards: ModuleType, spec: Any) -> None:
+    entries = _entries(guards, "scratch/.gitkeep", size=spec.max_staged_bytes + 1)
+    decision = guards.evaluate_staged(entries, spec)
+    assert not decision.allow
+    assert decision.rule == "staged_size"
+
+
+def test_allowed_name_not_exempt_from_name_glob(guards: ModuleType, spec: Any) -> None:
+    config = dataclasses.replace(spec, allowed_staged_names=(".env",))
+    decision = guards.evaluate_staged(_entries(guards, "scratch/.env"), config)
+    assert not decision.allow
+    assert decision.rule == "staged_name"
 
 
 def test_all_offenders_listed_and_capped(guards: ModuleType, spec: Any) -> None:

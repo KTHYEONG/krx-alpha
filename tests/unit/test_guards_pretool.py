@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import io
 import json
@@ -15,7 +16,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GUARDS_PATH = REPO_ROOT / "tools" / "guards" / "guards.py"
-SPEC_PATH = REPO_ROOT / "tools" / "guards" / "guards.toml"
+SPEC_PATH = REPO_ROOT / "tests" / "unit" / "guards_test_config.toml"
 MARKET_HOURS = datetime(2026, 11, 3, 10, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
 
@@ -133,3 +134,56 @@ def test_main_rejects_unknown_subcommand(guards: ModuleType, capsys: pytest.Capt
     assert guards.main([]) == 2
     assert guards.main(["bogus"]) == 2
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("tool", ["WebFetch", "WebSearch"])
+def test_deny_tool_blocks_non_bash_tool(
+    guards: ModuleType, spec: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str], tool: str
+) -> None:
+    payload = json.dumps({"tool_name": tool, "tool_input": {"query": "krx"}})
+    code, stderr = _run(guards, spec, payload, tmp_path)
+    assert code == 2
+    assert stderr == f"{spec.deny_tools[0].reason}\n"
+    assert capsys.readouterr().out == ""
+
+
+def test_unlisted_tool_allowed(guards: ModuleType, spec: Any, tmp_path: Path) -> None:
+    payload = json.dumps({"tool_name": "Read", "tool_input": {"file_path": "AGENTS.md"}})
+    assert _run(guards, spec, payload, tmp_path) == (0, "")
+
+
+def test_deny_tools_not_applied_to_bash(guards: ModuleType, spec: Any, tmp_path: Path) -> None:
+    catch_all = dataclasses.replace(spec, deny_tools=(guards.DenyTool(tool=".*", reason="all tools denied"),))
+    assert _run(guards, catch_all, _bash_payload("echo hi"), tmp_path) == (0, "")
+    code, stderr = _run(guards, catch_all, _bash_payload("rm -rf ~/x"), tmp_path)
+    assert code == 2
+    assert "recursive rm" in stderr
+
+
+def test_no_deny_tools_means_no_denials(guards: ModuleType, tmp_path: Path) -> None:
+    path = tmp_path / "guards.toml"
+    path.write_text(_fixture_text_before_deny_tools(), encoding="utf-8")
+    config = guards.load_guard_spec(path)
+    assert config.deny_tools == ()
+    payload = json.dumps({"tool_name": "WebFetch", "tool_input": {}})
+    assert _run(guards, config, payload, tmp_path) == (0, "")
+
+
+@pytest.mark.parametrize(
+    ("entry", "match"),
+    [
+        ('tool = "("\nreason = "x"\n', "invalid regex"),
+        ('tool = "WebFetch"\n', "missing key 'reason'"),
+        ('reason = "x"\n', "missing key 'tool'"),
+        ('tool = "WebFetch"\nreason = "' + "x" * 301 + '"\n', "exceeds 300"),
+    ],
+)
+def test_bad_deny_tool_entry_rejected(guards: ModuleType, tmp_path: Path, entry: str, match: str) -> None:
+    path = tmp_path / "guards.toml"
+    path.write_text(_fixture_text_before_deny_tools() + "[[deny_tools]]\n" + entry, encoding="utf-8")
+    with pytest.raises(ValueError, match=match):
+        guards.load_guard_spec(path)
+
+
+def _fixture_text_before_deny_tools() -> str:
+    return SPEC_PATH.read_text(encoding="utf-8").split("[[deny_tools]]", maxsplit=1)[0]
