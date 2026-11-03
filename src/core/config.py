@@ -113,6 +113,8 @@ class CollectorSettings(BaseSettings):
     # 야간 23:30 KST 백업은 20:00 EOD 점검 시점에 보통 20.5시간 전 성공이다.
     # 36시간이면 하룻밤 누락을 감지하면서 다음날 아침까지 끝나는 재시도는 허용한다.
     host_backup_max_age_h: float = 36.0
+    # A one-night miss self-heals on the next run; only a multi-day failure pages the operator.
+    backup_page_stale_days: int = Field(default=2, ge=1)
     stale_bars_max_calendar_days: int = 4
     normalize_timeout_s: float = 900.0
     schedule: SessionSchedule = SessionSchedule()
@@ -731,6 +733,8 @@ class LivenessSettings(BaseSettings):
     ping_interval_s: float = 60.0
     ping_timeout_s: float = 5.0
     crash_alert_daily_budget: int = 3
+    # A single crash self-heals via the container restart; the Nth crash of one KST day pages.
+    crash_page_min_daily: int = Field(default=2, ge=1)
 
     @property
     def enabled(self) -> bool:
@@ -785,6 +789,8 @@ class RepairSettings(BaseSettings):
     xvendor_conflating_peers: tuple[str, ...] = ("kiwoom",)
     overdue_days: int = Field(default=2, ge=1, le=7)
     overdue_attempts: int = Field(default=2, ge=1, le=5)
+    # Days before hold expiry at which an unrepaired L0 day pages the operator.
+    expiry_page_lead_days: int = Field(default=2, ge=1, le=7)
 
     @model_validator(mode="after")
     def check_repair_vendor_scope(self) -> RepairSettings:

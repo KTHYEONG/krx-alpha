@@ -113,6 +113,33 @@ def test_excess_staleness_exits_2_with_critical(tmp_path, monkeypatch, caplog) -
     assert rc == 2
     assert "status=STALE" in caplog.text
     assert sum(r.levelno == logging.CRITICAL and "status=STALE" in r.getMessage() for r in caplog.records) == 1
+    from src.core.alerts import page_kind
+
+    assert all(page_kind(r) is None for r in caplog.records)
+
+
+def test_logging_uses_shared_ledger_and_log_dir(tmp_path, monkeypatch) -> None:
+    from src.cli import toss_program_trades_sync as cli
+
+    paths = _sync_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("KRX_ALPHA_PERSISTENT_LOGS", "true")
+    seen: list[tuple[str, dict]] = []
+
+    def _capture(component, **kwargs):
+        seen.append((component, kwargs))
+        raise SystemExit(0)
+
+    monkeypatch.setattr(cli, "configure_logging", _capture)
+    import pytest
+
+    with pytest.raises(SystemExit):
+        cli.main(["--session-date", "2026-09-25", "--complete-through", "2026-09-24"])
+    assert seen == [
+        (
+            "toss-program-trades-sync",
+            {"log_dir": paths.logs_dir, "alert_ledger_path": paths.alert_ledger_file},
+        )
+    ]
 
 
 def test_sync_within_tolerance_exits_0(tmp_path, monkeypatch, caplog) -> None:

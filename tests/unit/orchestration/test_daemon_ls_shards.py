@@ -390,6 +390,11 @@ def test_ls_shard_one_circuit_open_alerts_once_per_episode(tmp_path, monkeypatch
     assert (
         caplog.text.count("[DATA] stage=ls_shard_stream status=FAIL reason=circuit_open shard=1 date=2026-09-16") == 1
     )
+    from src.core.alerts import PageKind, page_kind
+
+    assert [page_kind(r) for r in caplog.records if "reason=circuit_open" in r.getMessage()] == [
+        PageKind.REGULAR_FEED_DOWN
+    ]
     assert runner.children.get(daemon_mod.StreamChildKey.REGULAR_LS_B) is not None
 
 

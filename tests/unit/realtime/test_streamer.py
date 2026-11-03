@@ -881,6 +881,10 @@ def test_streamer_pump_logs_critical_when_final_flush_fails(caplog) -> None:
         asyncio.run(streamer.pump(asyncio.Event()))
 
     assert "[DATA] stage=stream_flush status=FAIL error=disk full" in caplog.text
+    from src.core.alerts import PageKind, page_kind
+
+    flush = [r for r in caplog.records if "stage=stream_flush status=FAIL" in r.getMessage()]
+    assert [page_kind(r) for r in flush] == [PageKind.JOURNAL_WRITE_FAIL]
     assert adapter.closed is True
 
 
@@ -952,6 +956,13 @@ def test_streamer_escalates_auth_rejection_once_and_caps_backoff_at_auth_limit(c
     )
     assert sink.gaps == [("005930", 0, 600_000_000_000, "auth_rejected")]
     assert "stage=stream_outage status=UNRESOLVED reason=auth_rejected outage_s=600" in caplog.text
+    from src.core.alerts import PageKind, page_kind, resolved_kind
+
+    outage = [r for r in caplog.records if "stage=stream_outage" in r.getMessage()]
+    assert [(page_kind(r), resolved_kind(r)) for r in outage] == [
+        (PageKind.STREAM_AUTH_REJECTED, None),
+        (None, None),
+    ]
 
 
 def test_streamer_escalates_regular_session_outage_after_threshold_and_logs_recovery(caplog) -> None:
@@ -1027,6 +1038,13 @@ def test_streamer_escalates_regular_session_outage_after_threshold_and_logs_reco
     )
     assert sink.gaps == [("005930", 0, 470_000_000_000, "disconnect")]
     assert "stage=stream_outage status=RECOVERED reason=disconnect outage_s=470" in caplog.text
+    from src.core.alerts import PageKind, page_kind, resolved_kind
+
+    outage = [r for r in caplog.records if "stage=stream_outage" in r.getMessage()]
+    assert [(page_kind(r), resolved_kind(r)) for r in outage] == [
+        (PageKind.STREAM_OUTAGE, None),
+        (None, PageKind.STREAM_OUTAGE),
+    ]
 
 
 def test_streamer_does_not_escalate_transient_outage_outside_regular_session(caplog) -> None:

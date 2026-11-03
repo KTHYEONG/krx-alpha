@@ -14,7 +14,7 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from src.core.errors import KrxAlphaError
-from src.core.observability import EVENT
+from src.core.observability import EVENT, PageKind, page, page_resolved
 from src.core.session_anchors import (
     STANDARD_KRX_AFTER_MARKET_OPEN,
     STANDARD_NXT_AFTER_MARKET_OPEN,
@@ -209,6 +209,7 @@ class RealtimeStreamer:
         self._outage: tuple[int, str] | None = None
         self._failures: int = 0
         self._outage_alerted: bool = False
+        self._outage_page: PageKind | None = None
         self._last_pump_frames: int = 0
         self._last_disconnect_detail: str | None = None
         self._last_frame_wall_ns: int | None = None
@@ -251,8 +252,10 @@ class RealtimeStreamer:
                 "RECOVERED" if recovered else "UNRESOLVED",
                 reason,
                 (end_ns - start_ns) // 1_000_000_000,
+                extra=page_resolved(self._outage_page) if recovered and self._outage_page is not None else None,
             )
             self._outage_alerted = False
+            self._outage_page = None
         self._outage = None
 
     async def _retire_adapter(self) -> None:
@@ -428,7 +431,12 @@ class RealtimeStreamer:
             try:
                 self._sink.flush()
             except (KrxAlphaError, OSError) as flush_exc:
-                logger.critical("[DATA] stage=stream_flush status=FAIL error=%s", str(flush_exc), exc_info=True)
+                logger.critical(
+                    "[DATA] stage=stream_flush status=FAIL error=%s",
+                    str(flush_exc),
+                    exc_info=True,
+                    extra=page(PageKind.JOURNAL_WRITE_FAIL),
+                )
                 cleanup_error = flush_exc if isinstance(flush_exc, KrxAlphaError) else JournalWriteError(str(flush_exc))
             try:
                 await self._adapter.aclose()
@@ -483,12 +491,16 @@ class RealtimeStreamer:
                 outage_s = (self._wall_ns() - self._outage[0]) / 1e9
                 regular = self._silence_limit is not None and self._silence_limit() is not None
                 if reason == "auth_rejected" or (regular and outage_s >= OUTAGE_CRITICAL_S):
+                    self._outage_page = (
+                        PageKind.STREAM_AUTH_REJECTED if reason == "auth_rejected" else PageKind.STREAM_OUTAGE
+                    )
                     logger.critical(
                         "[DATA] stage=stream_outage status=CRITICAL reason=%s detail=%s outage_s=%d consecutive_failures=%d",
                         reason,
                         self._last_disconnect_detail,
                         int(outage_s),
                         self._failures,
+                        extra=page(self._outage_page),
                     )
                     self._outage_alerted = True
             if (max_cycles is not None and cycle >= max_cycles) or stop.is_set():

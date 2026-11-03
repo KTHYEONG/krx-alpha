@@ -1,4 +1,4 @@
-"""CRITICAL email alerts and digest rendering with bounded sending."""
+"""Operator page emails: explicit opt-in pages only, bounded by a shared dedup ledger."""
 
 import contextlib
 import datetime as dt
@@ -14,31 +14,27 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from email.message import EmailMessage
+from enum import StrEnum
+from types import MappingProxyType
 from typing import Literal, Protocol
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.core.config import AlertSettings
-from src.core.log_format import format_record_timestamp
 
 ALERT_COOLDOWN_S: float = 1800.0
 ALERT_DAILY_CAP: int = 20
-# One mail per failure kind per KST day: repeats add no signal (they stay in events jsonl and the dashboard).
+# One mail per page key per KST day: repeats add no signal (they stay in events jsonl and the dashboard).
 ALERT_PER_KEY_DAILY_CAP: int = 1
 ALERT_FIRST_OCCURRENCE_RESERVE: int = 5
 ALERT_SEND_ATTEMPTS: int = 3
 ALERT_RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 8.0)
-ALERT_LINE_MAX_CHARS: int = 300
-# Host-relative (~/krx-alpha) path of the persistent events log the card points the reader to.
-ALERT_EVENTS_LOG_TEMPLATE: str = "data/logs/events-{component}.jsonl"
-DIGEST_STATUS_OK: str = "OK"
 
 _KST = ZoneInfo("Asia/Seoul")
-_KV_RE = re.compile(r"(\w+)=(\S+)")
 _NUMERIC_RE = re.compile(r"(?<![A-Za-z0-9_])[0-9][0-9\.,/:\-]*(?![A-Za-z0-9_])")
 _ALERT_LEDGER_SCHEMA_VERSION = 2
 _DEGRADED_PID: int | None = None
@@ -361,163 +357,194 @@ class FileAlertLedger:
         except OSError as exc:
             self._note_degraded(exc)
 
-_STAGE_LABELS: dict[str, str] = {
-    "backup_freshness": "백업점검",
-    "eod_offload": "백업전송",
-    "eod_maintenance": "마감정리",
-    "eod_reconciliation": "정합성검증",
-    "eod_readiness": "마감준비검증",
-    "streamer": "시세수집",
-    "stream_flush": "시세저장",
-    "stream_outage": "시세단절장애",
-    "snapshots": "스냅샷수집",
-    "journal_flush": "저널저장",
-    "ingest_watchdog": "수집감시",
-    "ingest_latency": "수집지연",
-    "ingest_lag": "실시간수집지연",
-    "open_delay": "개장지연",
-    "session_audit": "세션감사",
-    "session_reconciliation": "세션정합성",
-    "rclone_offload": "원격저장",
-    "prune": "데이터정리",
-    "quarantine": "데이터격리",
-    "order": "주문실행",
-    "oms": "주문실행",
-    "session": "세션관리",
-    "orchestration": "데몬관리",
-    "aftermarket_reselection": "애프터마켓종목선정",
-    "aftermarket_plan": "애프터마켓수집계획",
-    "bootstrap": "초기화",
-    "unknown_ambiguous": "주문매핑모호",
-    "integrity_violation": "체결정합성위반",
-    "shard_watchdog": "샤드감시",
-}
+class PageKind(StrEnum):
+    """Incidents that need a human now; every other CRITICAL stays log-only."""
 
-_REASON_LABELS: dict[str, str] = {
-    "auth_expired": "GDrive 인증 만료",
-    "circuit_open": "소켓 단절 (서킷오픈)",
-    "remote_error": "원격 스토리지 오류",
-    "size_mismatch": "파일 크기 불일치",
-    "unverified": "검증 실패",
-    "stale": "수집 지연",
-    "worker_crash": "프로세스 비정상 종료",
-    "no_bars_store": "일봉 스토어 없음",
-    "rclone_settings_missing": "rclone 설정 누락",
-    "maintenance_error": "정리 작업 오류",
-    "stale_bars_calendar_unknown": "일봉 지연 (캘린더 불명)",
-    "stale_bars_fallback_failed": "일봉 KIS 대체 갱신 실패",
-    "orchestration_error": "데몬 오케스트레이션 오류",
-    "candidates_not_ready": "수집 대상 종목 준비 실패",
-    "orchestration_failed": "오케스트레이션 실패 (임시 가동)",
-    "aftermarket_not_ready": "애프터마켓 수집 마감 미완료",
-    "session_data_gap": "세션 데이터 누락 감지",
-    "latency_exceeded": "전달 지연 임계 초과",
-    "live_lag_exceeded": "실시간 전달 지연 임계 초과",
-    "open_delay_suspected": "개장 지연 의심 (첫 체결 미수신)",
-    "trade_loss_exceeded": "거래 손실 임계 초과",
-    "auth_rejected": "증권사 인증 거부",
-    "ntp_unmeasured": "NTP 시간 동기화 측정 실패",
-    "quarantine_exists": "격리 대상 중복",
-    "stale_budget_exhausted": "스태일 재시작 예산 소진",
-    "venue_wide_silence": "베뉴 전체 침묵",
-}
+    REGULAR_FEED_DOWN = "regular_feed_down"
+    REGULAR_SHARD_STALE = "regular_shard_stale"
+    NO_FIRST_FRAME = "no_first_frame"
+    STREAM_AUTH_REJECTED = "stream_auth_rejected"
+    STREAM_OUTAGE = "stream_outage"
+    JOURNAL_WRITE_FAIL = "journal_write_fail"
+    DISK_LOW = "disk_low"
+    FEED_COVERAGE_HOLE = "feed_coverage_hole"
+    KIS_PREFLIGHT_FAIL = "kis_preflight_fail"
+    STORE_MIGRATION = "store_migration"
+    OFFLOAD_AUTH_EXPIRED = "offload_auth_expired"
+    OFFLOAD_SETTINGS_MISSING = "offload_settings_missing"
+    REPAIR_EXHAUSTED = "repair_exhausted"
+    REPAIR_HOLD_EXPIRING = "repair_hold_expiring"
+    DAEMON_CRASH_LOOP = "daemon_crash_loop"
+    BACKUP_STALE = "backup_stale"
 
 
-def format_alert_subject(
-    component: str,
-    msg: str,
-    fields: dict[str, str],
-    *,
-    bot_name: str = "krx-alpha",
-) -> str:
-    """Build a labeled alert subject from stage/reason fields."""
-    stage = fields.get("stage", "")
-    reason = fields.get("reason", "")
-    stage_label = _STAGE_LABELS.get(stage, stage)
-    reason_label = _REASON_LABELS.get(reason, reason)
-
-    if stage_label and reason_label:
-        core = f"[{stage_label}] {reason_label}"
-    elif stage_label:
-        status = fields.get("status", "FAIL")
-        core = f"[{stage_label}] {status}"
-    elif reason_label:
-        core = f"[{component}] {reason_label}"
-    else:
-        clean = re.sub(r"\[\w+\]\s*", "", msg).strip()
-        core = f"[{component}] {clean[:40]}"
-
-    return f"[{bot_name}][실패] {core}"
+@dataclass(frozen=True)
+class PageText:
+    summary: str
+    auto_action: str
+    operator_action: str
 
 
-def _one_line(text: str) -> str:
-    flat = " ".join(text.split())
-    return flat if len(flat) <= ALERT_LINE_MAX_CHARS else flat[: ALERT_LINE_MAX_CHARS - 1] + "…"
+PAGE_TEXTS: Mapping[PageKind, PageText] = MappingProxyType(
+    {
+        PageKind.REGULAR_FEED_DOWN: PageText(
+            "정규장 시세 수집 프로세스 중단",
+            "재시작을 한도까지 시도했으나 복구되지 않아 재시작을 멈춤",
+            "지금 VPS에서 데몬 로그를 확인하고 원인 해소 후 데몬 재기동 (장 마감 전)",
+        ),
+        PageKind.REGULAR_SHARD_STALE: PageText(
+            "정규장 KIS 샤드 시세 정지",
+            "정지 샤드 재시작을 오늘 한도까지 시도했으나 계속 정지",
+            "지금 KIS 데이터 키와 웹소켓 상태를 확인하고 데몬 재기동 (장 마감 전)",
+        ),
+        PageKind.NO_FIRST_FRAME: PageText(
+            "정규장 개장 후 첫 시세 미수신",
+            "수집 프로세스는 재접속을 계속하나 원본이 저장되지 않음",
+            "지금 증권사 접속 상태와 수집 로그를 확인 (장 마감 전)",
+        ),
+        PageKind.STREAM_AUTH_REJECTED: PageText(
+            "증권사 시세 인증 거부",
+            "인증 백오프로 재접속을 계속 시도 중",
+            "지금 증권사 앱키·토큰 상태를 확인하고 필요 시 재발급 (장 마감 전)",
+        ),
+        PageKind.STREAM_OUTAGE: PageText(
+            "정규장 시세 연결 장기 단절",
+            "자동 재접속을 반복 중이며 공백 구간은 기록됨",
+            "지금 증권사 장애 공지와 VPS 네트워크를 확인 (장 마감 전)",
+        ),
+        PageKind.JOURNAL_WRITE_FAIL: PageText(
+            "시세 원본 저장 실패 (유실 위험)",
+            "해당 수집 프로세스를 종료하고 재시작에 맡김",
+            "지금 VPS 디스크 용량과 쓰기 권한을 확인",
+        ),
+        PageKind.DISK_LOW: PageText(
+            "디스크 여유 공간 부족",
+            "정규화를 건너뛰고 원격 검증된 원본만 정리",
+            "다음 장 시작(08:10) 전에 디스크 공간 확보",
+        ),
+        PageKind.FEED_COVERAGE_HOLE: PageText(
+            "정규장 일부 종목 수집 공백",
+            "없음 (LS·KIS 어디에도 배정되지 않은 종목은 수집되지 않음)",
+            "지금 KIS 데이터 키 슬롯 설정을 확인하고 데몬 재기동",
+        ),
+        PageKind.KIS_PREFLIGHT_FAIL: PageText(
+            "KIS 주 키 토큰 발급 실패",
+            "LS 수집은 계속하나 KIS 의존 수집·보정은 중단",
+            "지금 KIS 앱키 상태를 확인하고 재발급 (장 시작 전)",
+        ),
+        PageKind.STORE_MIGRATION: PageText(
+            "일봉 저장소 이관 실패로 세션 준비 중단",
+            "세션 준비를 중단(fail-closed)하고 대기",
+            "지금 레거시 저장소 파일을 점검하고 데몬 재기동 (장 시작 전)",
+        ),
+        PageKind.OFFLOAD_AUTH_EXPIRED: PageText(
+            "원격 백업 인증 만료",
+            "원격 검증 전까지 원본 삭제를 보류",
+            "오늘 안에 rclone config reconnect gdrive: 실행",
+        ),
+        PageKind.OFFLOAD_SETTINGS_MISSING: PageText(
+            "원격 백업 설정 누락",
+            "원격 검증 전까지 원본 삭제를 보류",
+            "오늘 안에 rclone 원격 설정을 복구하고 데몬 재기동",
+        ),
+        PageKind.REPAIR_EXHAUSTED: PageText(
+            "누락 체결 자동 복구 재시도 소진",
+            "원본 삭제를 보류(hold)하고 매일 밤 재시도",
+            "원본 보존 만료 전에 수동 복구(repair-ticks) 실행",
+        ),
+        PageKind.REPAIR_HOLD_EXPIRING: PageText(
+            "미복구 원본 보존 만료 임박 (곧 영구 삭제)",
+            "보존 연장 한도에 도달하면 원본이 삭제됨",
+            "만료 전에 수동 복구 실행 또는 보존 연장 설정 상향",
+        ),
+        PageKind.DAEMON_CRASH_LOOP: PageText(
+            "수집 데몬 반복 비정상 종료",
+            "Docker가 매번 자동 재시작 중",
+            "지금 데몬 로그에서 크래시 원인을 확인 (장중이면 즉시)",
+        ),
+        PageKind.BACKUP_STALE: PageText(
+            "백업 2일 이상 실패",
+            "매일 예정된 백업을 계속 재시도",
+            "오늘 안에 백업 작업 로그를 확인하고 수동 백업 실행",
+        ),
+    }
+)
+
+PAGE_ATTR: str = "krx_page"
+PAGE_DEADLINE_ATTR: str = "krx_page_deadline"
+RESOLVE_ATTR: str = "krx_resolve"
+PAGE_BOT_NAME: str = "krx"
 
 
-def format_alert_text(
-    record: logging.LogRecord,
-    component: str,
-    run_id: str,
-    fields: dict[str, str],
-    *,
-    bot_name: str = "krx-alpha",
-) -> str:
-    """Render the short CRITICAL alert card; the full record stays in the component's events jsonl."""
-    stage = fields.get("stage", "")
-    stage_label = _STAGE_LABELS.get(stage, stage) or "일반"
-    status = fields.get("status", "FAIL")
-    reason = fields.get("reason", "")
-    reason_label = _REASON_LABELS.get(reason, reason)
-    clean_msg = re.sub(r"\[\w+\]\s*", "", record.getMessage()).strip()
-    cause = f"{reason_label}: {clean_msg}" if reason_label else clean_msg
+def page(kind: PageKind, *, deadline: dt.date | None = None) -> dict[str, object]:
+    """Return logging ``extra`` marking a CRITICAL record as an operator page (the only records that mail)."""
+    extra: dict[str, object] = {PAGE_ATTR: kind}
+    if deadline is not None:
+        extra[PAGE_DEADLINE_ATTR] = deadline
+    return extra
+
+
+def page_resolved(kind: PageKind) -> dict[str, object]:
+    """Return logging ``extra`` clearing ``kind``; mails one line only if this process paged ``kind`` earlier."""
+    return {RESOLVE_ATTR: kind}
+
+
+def page_kind(record: logging.LogRecord) -> PageKind | None:
+    kind = getattr(record, PAGE_ATTR, None)
+    return kind if isinstance(kind, PageKind) else None
+
+
+def resolved_kind(record: logging.LogRecord) -> PageKind | None:
+    kind = getattr(record, RESOLVE_ATTR, None)
+    return kind if isinstance(kind, PageKind) else None
+
+
+def is_alert_record(record: logging.LogRecord) -> bool:
+    """Return whether the record is a page or a page clearance; every other record never mails."""
+    return page_kind(record) is not None or resolved_kind(record) is not None
+
+
+def _kst_clock(record: logging.LogRecord) -> str:
+    return dt.datetime.fromtimestamp(record.created, tz=_KST).strftime("%m-%d %H:%M")
+
+
+def format_page_subject(kind: PageKind, *, bot_name: str = PAGE_BOT_NAME) -> str:
+    return f"[긴급][{bot_name}] {PAGE_TEXTS[kind].summary}"
+
+
+def format_page_body(kind: PageKind, record: logging.LogRecord) -> str:
+    """Render the three-line Korean page body; it never carries the raw message, paths or run ids."""
+    text = PAGE_TEXTS[kind]
+    deadline = getattr(record, PAGE_DEADLINE_ATTR, None)
+    action = text.operator_action
+    if isinstance(deadline, dt.date):
+        action = f"{action} (기한: {deadline.isoformat()})"
     return "\n".join(
         [
-            f"• 무엇: {component} > {stage_label} {status}",
-            f"• 언제: {format_record_timestamp(record)} (KST)",
-            f"• 원인: {_one_line(cause) or '알 수 없음'}",
-            f"• 증거: {ALERT_EVENTS_LOG_TEMPLATE.format(component=component)} (run_id={run_id})",
+            f"무슨 일: {text.summary} ({_kst_clock(record)} KST)",
+            f"자동 조치: {text.auto_action}",
+            f"지금 할 일: {action}",
         ]
     )
 
 
-def _digest_fields(body: str) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    for line in body.splitlines():
-        if "=" in line:
-            k, v = line.split("=", 1)
-            fields[k.strip()] = v.strip()
-    return fields
+def format_resolved_subject(kind: PageKind, *, bot_name: str = PAGE_BOT_NAME) -> str:
+    return f"[해결됨][{bot_name}] {PAGE_TEXTS[kind].summary}"
 
 
-def format_digest_text(subject: str, body: str, *, bot_name: str = "krx-alpha") -> str:
-    """Render the short EOD warning card from the key=value digest; the full digest is archived on disk."""
-    fields = _digest_fields(body)
-    what = subject.removeprefix(f"[{bot_name}] ").strip() or "EOD"
-    lines = [
-        f"• 무엇: {what}",
-        f"• 언제: {dt.datetime.now(_KST).strftime('%Y-%m-%d %H:%M')} (KST)",
-        f"• 원인: {_one_line(fields.get('degraded_reasons', '')) or '알 수 없음'}",
-    ]
-    if fields.get("digest_path"):
-        lines.append(f"• 증거: {fields['digest_path']} (run_id={fields.get('run_id', '-')})")
-    return "\n".join(lines)
+def format_resolved_body(kind: PageKind, record: logging.LogRecord) -> str:
+    return f"해결됨: {PAGE_TEXTS[kind].summary} 상태가 복구됨 ({_kst_clock(record)} KST)"
 
 
 class EmailAlertHandler(logging.Handler):
-    """Send bounded CRITICAL alerts with per-day, per-key and cooldown limits.
+    """Mail operator pages (records marked by ``page``) under per-day, per-key and cooldown limits.
 
-    A single failure that keeps re-alerting (e.g. a restart circuit re-opening every window)
-    must not exhaust the daily budget and hide unrelated CRITICAL events raised later the same
-    day. Each alert key may be mailed at most ``per_key_daily_cap`` times per day, and repeat
-    sends of an already-mailed key may only use ``daily_cap - first_occurrence_reserve`` slots,
-    so at least ``first_occurrence_reserve`` slots always remain for keys first seen that day.
-    All counters reset on the KST day rollover. Suppressed alerts stay in the regular logs;
-    the handler only limits email delivery. Sender failures remain logged without recursively
-    escalating the same alert.
-
-    Limits are enforced by an ``AlertLedger``; pass a shared ``FileAlertLedger`` so child
-    processes draw from one budget.
+    Records without a page or clearance marker are ignored, whatever their level. A clearance
+    (``page_resolved``) mails one line only when this handler delivered a page of that kind
+    earlier in its process. One recurring page key cannot starve other pages:
+    each key mails at most ``per_key_daily_cap`` times per KST day, and repeats may only use
+    ``daily_cap - first_occurrence_reserve`` slots. Limits live in an ``AlertLedger``; a shared
+    ``FileAlertLedger`` gives child processes one budget. Sender failures are logged, never raised.
 
     Raises:
         ValueError: ``per_key_daily_cap < 1`` or ``first_occurrence_reserve`` outside
@@ -545,7 +572,7 @@ class EmailAlertHandler(logging.Handler):
             raise ValueError("per_key_daily_cap must be >= 1")
         if not 0 <= first_occurrence_reserve < daily_cap:
             raise ValueError("first_occurrence_reserve must be in [0, daily_cap)")
-        super().__init__(level=logging.CRITICAL)
+        super().__init__(level=logging.NOTSET)
         self._component = component
         self._run_id = run_id
         self._sender = sender
@@ -567,6 +594,7 @@ class EmailAlertHandler(logging.Handler):
         self._ledger: AlertLedger = ledger if ledger is not None else InMemoryAlertLedger()
         self._current_day: dt.date | None = None
         self._suppressed_logged: set[str] = set()
+        self._open_pages: set[PageKind] = set()
 
     @property
     def _sent_today(self) -> int:
@@ -583,26 +611,42 @@ class EmailAlertHandler(logging.Handler):
             logging.getLogger(__name__).warning("[SYS] stage=alert status=FAIL reason=%s", type(exc).__name__)
 
     def _emit_guarded(self, record: logging.LogRecord) -> None:
-        key = alert_dedup_key(record.getMessage())
+        kind = page_kind(record)
+        if kind is not None:
+            if self._deliver(
+                alert_dedup_key(record.getMessage()),
+                format_page_subject(kind),
+                format_page_body(kind, record),
+            ):
+                self._open_pages.add(kind)
+                logging.getLogger(__name__).info(
+                    "[SYS] stage=alert status=SENT kind=%s component=%s run_id=%s",
+                    kind.value, self._component, self._run_id,
+                )
+            return
+        cleared = resolved_kind(record)
+        if cleared is None or cleared not in self._open_pages:
+            return
+        self._open_pages.discard(cleared)
+        self._deliver(
+            f"resolved:{cleared.value}", format_resolved_subject(cleared), format_resolved_body(cleared, record)
+        )
+
+    def _deliver(self, key: str, subject: str, body: str) -> bool:
         day = self._today()
         if self._current_day is None or day != self._current_day:
             self._current_day = day
             self._suppressed_logged.clear()
-        now = self._clock()
-        decision = self._ledger.reserve(key, day=day, now_s=now, limits=self._limits)
+        decision = self._ledger.reserve(key, day=day, now_s=self._clock(), limits=self._limits)
         if not decision.send:
             if decision.suppressed_reason in ("per_key_cap", "repeat_budget"):
                 self._log_suppressed_once(key, str(decision.suppressed_reason))
-            return
+            return False
         try:
-            msg = record.getMessage()
-            fields = dict(_KV_RE.findall(msg))
-            subject = format_alert_subject(self._component, msg, fields)
-            text_body = format_alert_text(record, self._component, self._run_id, fields)
             attempts = max(1, self._send_attempts)
             for attempt in range(attempts):
                 try:
-                    self._sender(subject, text_body)
+                    self._sender(subject, body)
                     break
                 except (smtplib.SMTPException, OSError):
                     if attempt + 1 >= attempts:
@@ -616,6 +660,7 @@ class EmailAlertHandler(logging.Handler):
             )
             raise
         self._ledger.commit(key, day=day, reservation_id=decision.reservation_id)
+        return True
 
     def _log_suppressed_once(self, key: str, reason: str) -> None:
         if key in self._suppressed_logged:
@@ -642,44 +687,6 @@ def gmail_sender(settings: AlertSettings) -> Callable[..., None]:
     return send
 
 
-def send_digest(
-    subject: str,
-    body: str,
-    *,
-    settings: AlertSettings | None = None,
-    sender: Callable[..., None] | None = None,
-    sleep: Callable[[float], None] = time.sleep,
-    bot_name: str = "krx-alpha",
-) -> bool:
-    """Mail the EOD digest only when its ``status`` is not OK; returns whether a mail was sent.
-
-    A healthy EOD is visible on the dashboard and in the archived digest, so it never mails.
-    """
-    s = settings if settings is not None else AlertSettings()
-    sys_logger = logging.getLogger(__name__)
-    if _digest_fields(body).get("status") == DIGEST_STATUS_OK:
-        sys_logger.info("[SYS] stage=digest status=SKIPPED reason=status_ok")
-        return False
-    if not s.enabled:
-        sys_logger.info("[SYS] stage=digest status=DISABLED")
-        return False
-    mail_subject = f"[{bot_name}][경고] {subject.removeprefix(f'[{bot_name}] ')}"
-    text_body = format_digest_text(subject, body, bot_name=bot_name)
-    actual_sender = sender or gmail_sender(s)
-    attempts = ALERT_SEND_ATTEMPTS
-    for attempt in range(attempts):
-        try:
-            actual_sender(mail_subject, text_body)
-            sys_logger.info("[SYS] stage=digest status=SENT")
-            return True
-        except (smtplib.SMTPException, OSError) as exc:
-            if attempt + 1 >= attempts:
-                sys_logger.warning("[SYS] stage=digest status=FAIL reason=%s", type(exc).__name__)
-                return False
-            sleep(ALERT_RETRY_BACKOFF_S[attempt] if attempt < len(ALERT_RETRY_BACKOFF_S) else ALERT_RETRY_BACKOFF_S[-1])
-    return False  # pragma: no cover - loop above always returns; satisfies the type checker
-
-
 __all__ = [
     "ALERT_COOLDOWN_S",
     "ALERT_DAILY_CAP",
@@ -687,16 +694,24 @@ __all__ = [
     "ALERT_PER_KEY_DAILY_CAP",
     "ALERT_RETRY_BACKOFF_S",
     "ALERT_SEND_ATTEMPTS",
+    "PAGE_TEXTS",
     "AlertDecision",
     "AlertLedger",
     "AlertLimits",
     "EmailAlertHandler",
     "FileAlertLedger",
     "InMemoryAlertLedger",
+    "PageKind",
+    "PageText",
     "alert_dedup_key",
-    "format_alert_subject",
-    "format_alert_text",
-    "format_digest_text",
+    "format_page_body",
+    "format_page_subject",
+    "format_resolved_body",
+    "format_resolved_subject",
     "gmail_sender",
-    "send_digest",
+    "is_alert_record",
+    "page",
+    "page_kind",
+    "page_resolved",
+    "resolved_kind",
 ]

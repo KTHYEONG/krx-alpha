@@ -14,6 +14,7 @@ from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from src.core.alerts import PageKind, page
 from src.core.config import AuditMode, AuditSettings
 from src.core.session_anchors import STANDARD_AFTER_MARKET_END, SessionAnchors
 from src.realtime.kis_sharding import AftermarketShard
@@ -95,7 +96,10 @@ def run_eod_offload(
     if arc is None:
         arc = GDriveArchiver.try_from_env()
     if arc is None:
-        logger.critical("[DAEMON] stage=eod_offload status=FAIL reason=rclone_settings_missing")
+        logger.critical(
+            "[DAEMON] stage=eod_offload status=FAIL reason=rclone_settings_missing",
+            extra=page(PageKind.OFFLOAD_SETTINGS_MISSING),
+        )
         empty = SyncStats()
         return EodOffloadResult(l1=empty, manifests=SyncStats(), verified_remote_l1=frozenset(), purged=0)
     if progress is not None and hasattr(arc, "bind_progress"):

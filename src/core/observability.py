@@ -1,4 +1,4 @@
-"""관측 가능성 기반: 컴포넌트별 로깅·영속 JSONL 이벤트·CRITICAL 이메일 알림."""
+"""Observability base: per-component logging, persistent JSONL events and operator page emails."""
 
 import atexit
 import logging
@@ -11,21 +11,15 @@ from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from typing import IO
 
 from src.core.alerts import (
-    _REASON_LABELS as _REASON_LABELS,
-)
-from src.core.alerts import (
-    _STAGE_LABELS as _STAGE_LABELS,
-)
-from src.core.alerts import (
     ALERT_COOLDOWN_S,
     ALERT_DAILY_CAP,
     EmailAlertHandler,
     FileAlertLedger,
-    format_alert_subject,
-    format_alert_text,
-    format_digest_text,
+    PageKind,
     gmail_sender,
-    send_digest,
+    is_alert_record,
+    page,
+    page_resolved,
 )
 from src.core.config import AlertSettings, ObservabilitySettings, export_run_id
 from src.core.log_format import (
@@ -48,21 +42,18 @@ __all__ = [
     "EVENT",
     "LOG_FILE_BACKUPS",
     "LOG_FILE_MAX_BYTES",
-    "_REASON_LABELS",
-    "_STAGE_LABELS",
     "EmailAlertHandler",
     "EventFileFilter",
     "JsonlEventFormatter",
     "KeyValueFormatter",
+    "PageKind",
     "configure_logging",
-    "format_alert_subject",
-    "format_alert_text",
-    "format_digest_text",
     "format_record_exception",
     "format_record_timestamp",
     "gmail_sender",
     "new_run_id",
-    "send_digest",
+    "page",
+    "page_resolved",
     "shutdown_logging",
 ]
 
@@ -82,7 +73,10 @@ def configure_logging(
     alert_sender: Callable[[str, str], None] | None = None,
     alert_ledger_path: pathlib.Path | None = None,
 ) -> str:
-    """Install current process handlers and return a correlation run ID."""
+    """Install current process handlers and return a correlation run ID.
+
+    Only records marked with ``page``/``page_resolved`` reach the email path; other levels stay log-only.
+    """
     run_id = ObservabilitySettings().run_id or new_run_id(component)
     export_run_id(run_id)
     shutdown_logging()
@@ -109,7 +103,7 @@ def configure_logging(
     if alerts.enabled:
         q: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
         queue_handler = QueueHandler(q)
-        queue_handler.setLevel(logging.CRITICAL)
+        queue_handler.addFilter(is_alert_record)
         setattr(queue_handler, _MANAGED_ATTR, True)
         if alert_ledger_path is not None:
             email_handler = EmailAlertHandler(

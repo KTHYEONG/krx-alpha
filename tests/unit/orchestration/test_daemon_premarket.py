@@ -502,7 +502,7 @@ def _eod_runner(monkeypatch, tmp_path, *, ref_day, manifest_case):
     monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "ok"))
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **k: True)
     digests: list = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)))
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)))
     return runner, digests
 
 

@@ -13,6 +13,7 @@ from typing import cast
 from src.core.config import (
     CollectorSettings,
     KisTokenSettings,
+    ObservabilitySettings,
     TossCredentials,
     TossProgramTradesSettings,
     load_credentials,
@@ -61,12 +62,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         1: fatal error (credentials, token, unreadable store).
     """
     args = build_parser().parse_args(argv)
-    configure_logging("toss-program-trades-sync")
+    collector_paths = CollectorSettings().paths
+    configure_logging(
+        "toss-program-trades-sync",
+        log_dir=collector_paths.logs_dir if ObservabilitySettings().persistent_logs else None,
+        alert_ledger_path=collector_paths.alert_ledger_file,
+    )
     try:
         session_date = dt.date.fromisoformat(str(args.session_date))
         complete_through = dt.date.fromisoformat(str(args.complete_through))
         settings = TossProgramTradesSettings()
-        paths = CollectorSettings().paths
+        paths = collector_paths
         creds = load_credentials(TossCredentials)
         data = read_candidates(paths.candidates)
         rows = cast("list[dict[str, object]] | None", data.get("candidates") if data else None)

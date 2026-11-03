@@ -86,6 +86,7 @@ def test_business_eod_emits_overdue_critical(tmp_path, monkeypatch, caplog) -> N
         journal_retain_days=3,
         host_backup_status_path=tmp_path / "host.json",
         host_backup_max_age_h=36,
+        backup_page_stale_days=2,
     )
     repair = RepairSettings(overdue_days=2)
     runner = object.__new__(daemon_mod.DaemonRunner)
@@ -109,7 +110,7 @@ def test_business_eod_emits_overdue_critical(tmp_path, monkeypatch, caplog) -> N
     monkeypatch.setattr(daemon_mod.DaemonRunner, "_reconcile_regular_session", lambda self, *a, **k: (True, True))
     monkeypatch.setattr(daemon_mod.DaemonRunner, "_reconcile_crosscheck_sessions", lambda self, *a, **k: {})
     monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "ok"))
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: True)
     from tests.unit.orchestration.daemon_fixtures import _business_trading_day
 
     with caplog.at_level(logging.INFO):
@@ -125,6 +126,9 @@ def test_business_eod_emits_overdue_critical(tmp_path, monkeypatch, caplog) -> N
         and "reason=stalled" in r.getMessage()
         for r in caplog.records
     )
+    from src.core.alerts import page_kind
+
+    assert all(page_kind(r) is None for r in caplog.records if "reason=stalled" in r.getMessage())
 
 
 def test_torn_ledger_degrades_to_pending(tmp_path, monkeypatch) -> None:
@@ -341,6 +345,11 @@ def test_deadline_kill_judges_exhaustion(tmp_path, caplog) -> None:
     assert sum(
         r.levelno == logging.CRITICAL and "reason=attempts_exhausted" in r.getMessage() for r in caplog.records
     ) == 1
+    from src.core.alerts import PageKind, page_kind
+
+    assert [page_kind(r) for r in caplog.records if "reason=attempts_exhausted" in r.getMessage()] == [
+        PageKind.REPAIR_EXHAUSTED
+    ]
 
 
 def test_nightly_judgment_fires_once_per_window(tmp_path, caplog) -> None:

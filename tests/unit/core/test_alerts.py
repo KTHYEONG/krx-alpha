@@ -1,7 +1,11 @@
-def _record(msg="boom"):
+def _record(msg="boom", kind=None):
     import logging
 
-    return logging.LogRecord("x", logging.CRITICAL, __file__, 1, msg, (), None)
+    from src.core.alerts import PageKind
+
+    record = logging.LogRecord("x", logging.CRITICAL, __file__, 1, msg, (), None)
+    record.krx_page = kind or PageKind.REGULAR_FEED_DOWN
+    return record
 
 
 def test_transient_smtp_failure_retried_then_delivered() -> None:
@@ -81,6 +85,8 @@ def test_unexpected_formatting_error_keeps_listener_alive() -> None:
         if len(calls) == 1:
             raise ValueError("formatter exploded")
 
+    from src.core.alerts import PageKind, page
+
     configure_logging(
         "daemon",
         alert_settings=AlertSettings(
@@ -90,8 +96,8 @@ def test_unexpected_formatting_error_keeps_listener_alive() -> None:
     )
     try:
         log = logging.getLogger("src.orchestration.daemon")
-        log.critical("[DAEMON] stage=streamer status=FAIL reason=circuit_open")
-        log.critical("[DAEMON] stage=streamer status=FAIL reason=circuit_open")
+        log.critical("[DAEMON] stage=streamer status=FAIL reason=circuit_open", extra=page(PageKind.REGULAR_FEED_DOWN))
+        log.critical("[DAEMON] stage=streamer status=FAIL reason=circuit_open", extra=page(PageKind.REGULAR_FEED_DOWN))
     finally:
         shutdown_logging()
 
@@ -385,22 +391,68 @@ def test_invalid_limits_fail_fast() -> None:
 
 
 def _shard_budget_record(key="nxt:1", silent=240):
-    import logging
 
     msg = (
         "[DATA] stage=shard_watchdog status=FAIL reason=stale_budget_exhausted "
         f"key={key} silent_s={silent} limit_s=120 max_restarts=3"
     )
-    return logging.LogRecord("x", logging.CRITICAL, __file__, 1, msg, (), None)
+    return _record(msg)
 
 
-def test_shard_budget_alert_subject_labeled() -> None:
-    from src.core.alerts import format_alert_subject
+def test_page_subject_and_three_line_body_hide_raw_message() -> None:
+    from src.core.alerts import PAGE_TEXTS, PageKind, format_page_body, format_page_subject
 
-    fields = {"stage": "shard_watchdog", "reason": "stale_budget_exhausted"}
-    subject = format_alert_subject("daemon", _shard_budget_record().getMessage(), fields)
-    assert "샤드감시" in subject
-    assert "stale_budget_exhausted" not in subject
+    record = _record("[DATA] stage=x path=/srv/data/secret run_id=daemon-123 token=abc", PageKind.DISK_LOW)
+    subject = format_page_subject(PageKind.DISK_LOW)
+    lines = format_page_body(PageKind.DISK_LOW, record).splitlines()
+
+    assert subject == f"[긴급][krx] {PAGE_TEXTS[PageKind.DISK_LOW].summary}"
+    assert [line.split(": ", 1)[0] for line in lines] == ["무슨 일", "자동 조치", "지금 할 일"]
+    assert lines[0].endswith(" KST)")
+    assert not any(token in "\n".join(lines) for token in ("/srv", "daemon-123", "abc", "stage="))
+
+
+def test_page_deadline_appended_to_operator_action() -> None:
+    import datetime as dt
+
+    from src.core.alerts import PAGE_TEXTS, PageKind, format_page_body, page
+
+    record = _record("m", PageKind.REPAIR_HOLD_EXPIRING)
+    record.__dict__.update(page(PageKind.REPAIR_HOLD_EXPIRING, deadline=dt.date(2026, 11, 5)))
+    action = format_page_body(PageKind.REPAIR_HOLD_EXPIRING, record).splitlines()[2]
+    assert action == f"지금 할 일: {PAGE_TEXTS[PageKind.REPAIR_HOLD_EXPIRING].operator_action} (기한: 2026-11-05)"
+
+
+def test_page_text_table_covers_every_kind() -> None:
+    from src.core.alerts import PAGE_TEXTS, PageKind
+
+    assert set(PAGE_TEXTS) == set(PageKind)
+    assert all(t.summary and t.auto_action and t.operator_action for t in PAGE_TEXTS.values())
+
+
+def test_resolution_mails_once_only_after_own_page() -> None:
+    import logging
+
+    from src.core.alerts import EmailAlertHandler, PageKind, page_resolved
+
+    calls: list[tuple[str, str]] = []
+    handler = EmailAlertHandler(
+        component="daemon", run_id="r", sender=lambda s, b: calls.append((s, b)), cooldown_s=0, sleep=lambda s: None
+    )
+
+    def _clear() -> logging.LogRecord:
+        rec = logging.LogRecord("x", logging.WARNING, __file__, 1, "[DATA] recovered", (), None)
+        rec.__dict__.update(page_resolved(PageKind.NO_FIRST_FRAME))
+        return rec
+
+    handler.handle(_clear())
+    assert calls == []
+    handler.handle(_record("[DAEMON] stage=ingest_watchdog status=NO_FIRST_FRAME", PageKind.NO_FIRST_FRAME))
+    handler.handle(_clear())
+    handler.handle(_clear())
+    assert [s for s, _ in calls] == ["[긴급][krx] 정규장 개장 후 첫 시세 미수신", "[해결됨][krx] 정규장 개장 후 첫 시세 미수신"]
+    assert len(calls[1][1].splitlines()) == 1
+    assert calls[1][1].startswith("해결됨: ")
 
 
 def test_shard_dedup_key_by_venue_not_index_or_timing() -> None:
@@ -453,28 +505,6 @@ def _latency_breach_record(stream="H0STCNT0", minute="09:01", max_s=32.0):
     return logging.LogRecord("x", logging.CRITICAL, __file__, 1, msg, (), None)
 
 
-def test_latency_breach_alert_subject_labeled() -> None:
-    from src.core.alerts import format_alert_subject
-
-    fields = {"stage": "ingest_latency", "reason": "latency_exceeded"}
-    subject = format_alert_subject("daemon", _latency_breach_record().getMessage(), fields)
-    assert "수집지연" in subject
-    assert "전달 지연 임계 초과" in subject
-    assert "ingest_latency" not in subject
-    assert "latency_exceeded" not in subject
-
-
-def test_reconciliation_fail_alert_subject_uses_stage_label() -> None:
-    from src.core.alerts import format_alert_subject
-
-    msg = "[DATA] stage=session_reconciliation status=FAIL date=2026-10-15 reasons=trade_loss_exceeded:10198/1600000"
-    fields = {"stage": "session_reconciliation", "status": "FAIL"}
-    subject = format_alert_subject("daemon", msg, fields)
-    assert "세션정합성" in subject
-    assert "FAIL" in subject
-    assert "session_reconciliation" not in subject
-
-
 def test_latency_dedup_key_by_stream_not_minute_or_value() -> None:
     from src.core.alerts import alert_dedup_key
 
@@ -485,7 +515,7 @@ def test_latency_dedup_key_by_stream_not_minute_or_value() -> None:
     assert a != c
 
 
-def test_latency_and_gap_alerts_share_daily_budget() -> None:
+def test_unmarked_critical_records_never_mail() -> None:
     import datetime as dt
     import logging
 
@@ -512,7 +542,8 @@ def test_latency_and_gap_alerts_share_daily_budget() -> None:
     handler.handle(_latency_breach_record("H0STCNT0"))
     handler.handle(_latency_breach_record("H0STASP0"))
     handler.handle(gap_record)
-    assert len(calls) == 3
+    assert calls == []
+    assert handler._sent_today == 0
 
 
 def test_default_policy_mails_each_failure_kind_once_per_day() -> None:

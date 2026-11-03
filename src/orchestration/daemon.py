@@ -13,7 +13,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -55,7 +55,7 @@ from src.core.config import (
 from src.core.errors import KrxAlphaError, MissingCredentialsError
 from src.core.healthcheck import HealthcheckPinger, NoopPinger
 from src.core.lifecycle import DaemonLifecycleRecord, crash_alert_allowed, read_lifecycle, write_lifecycle
-from src.core.observability import EVENT, configure_logging, send_digest, shutdown_logging
+from src.core.observability import EVENT, PageKind, configure_logging, page, page_resolved, shutdown_logging
 from src.core.session_anchors import (
     STANDARD_NXT_PREMARKET_OPEN,
     AnchorSource,
@@ -269,7 +269,10 @@ def _kis_token_preflight(
     try:
         primary = _build_kis_client(paths)
     except MissingCredentialsError:
-        logger.critical("[SYS] stage=kis_token_preflight key_id=unknown result=fail reason=missing_credentials")
+        logger.critical(
+            "[SYS] stage=kis_token_preflight key_id=unknown result=fail reason=missing_credentials",
+            extra=page(PageKind.KIS_PREFLIGHT_FAIL),
+        )
         outcomes["unknown"] = "fail:missing_credentials"
         primary = None
     if primary is not None:
@@ -282,6 +285,7 @@ def _kis_token_preflight(
                 "[SYS] stage=kis_token_preflight key_id=%s result=fail reason=%s",
                 fingerprint,
                 exc.msg_cd,
+                extra=page(PageKind.KIS_PREFLIGHT_FAIL),
             )
             outcomes[fingerprint] = f"fail:{exc.msg_cd}"
         except Exception as exc:  # noqa: BLE001 - 프리플라이트 실패가 오케스트레이션을 막지 않도록 격리
@@ -349,7 +353,10 @@ def run_session_orchestration(
     # 이관 전 legacy 파일이 남아 있으면 빈 파티션에 90일 재백필이 조용히 진행되어
     # 이력이 잘린 채 선정되고 다음 기동부터 모호 상태가 되므로 fail-closed 한다.
     if paths.legacy_bars_file.exists():
-        logger.critical("[DAEMON] stage=orchestration status=FAIL reason=store_migration_pending")
+        logger.critical(
+            "[DAEMON] stage=orchestration status=FAIL reason=store_migration_pending",
+            extra=page(PageKind.STORE_MIGRATION),
+        )
         return False
     # bars 갱신 실패는 기존 store 로 진행 가능하므로 도메인 예외만 흡수한다 (광역 포획 금지).
     try:
@@ -633,7 +640,9 @@ def _run_eod_housekeeping(
     maintenance_ok = True
     disk_ok = check_disk_watermark(paths.root, min_free_gb=cfg.min_free_disk_gb)
     if not disk_ok:
-        logger.critical("[DATA] stage=eod_disk_guard status=FAIL min_free_gb=%s", cfg.min_free_disk_gb)
+        logger.critical(
+            "[DATA] stage=eod_disk_guard status=FAIL min_free_gb=%s", cfg.min_free_disk_gb, extra=page(PageKind.DISK_LOW)
+        )
         maintenance_ok = False
     try:
         if disk_ok:
@@ -674,6 +683,7 @@ def _run_eod_housekeeping(
             reason,
             "rclone_config_reconnect_gdrive" if reason == "auth_expired" else "check_remote",
             str(e),
+            extra=page(PageKind.OFFLOAD_AUTH_EXPIRED) if reason == "auth_expired" else None,
         )
     except Exception as e:  # noqa: BLE001
         offload_ok = False
@@ -726,8 +736,51 @@ def _run_eod_housekeeping(
     )
 
 
+def record_eod_digest(subject: str, body: str) -> None:
+    """Log the EOD digest outcome as one event line; the digest is archived and never mailed."""
+    fields = dict(line.split("=", 1) for line in body.splitlines() if "=" in line)
+    logger.info(
+        "[DAEMON] stage=eod_digest status=%s subject=%r degraded_reasons=%s digest_path=%s",
+        fields.get("status", "-"),
+        subject,
+        fields.get("degraded_reasons", "-"),
+        fields.get("digest_path", "-"),
+        extra=EVENT,
+    )
+
+
+def _repair_expiring(
+    paths: DataPaths, ref_day: dt.date, cfg: CollectorSettings, repair_settings: RepairSettings | None
+) -> list[tuple[str, dt.date]]:
+    """`(<day>:<vendor>:<state>, delete_on)` for unrepaired held days whose L0 the EOD of `delete_on` deletes.
+
+    Only days whose deletion is at most `expiry_page_lead_days` away are returned; the hold of a day
+    expires once its age exceeds `journal_retain_days + hold_max_extra_days`.
+    """
+    if repair_settings is None or not repair_settings.hold_enabled:
+        return []
+    try:
+        tape_done = read_ledger_done(paths.tick_tape_ledger)
+    except Exception:  # noqa: BLE001 - torn ledger degrades to pending, never fails EOD
+        tape_done = frozenset()
+    horizon = int(cfg.journal_retain_days) + int(repair_settings.hold_max_extra_days)
+    lead = int(repair_settings.expiry_page_lead_days)
+    expiring: list[tuple[str, dt.date]] = []
+    for age in range(horizon, max(horizon + 1 - lead, 0) - 1, -1):
+        day = ref_day - dt.timedelta(days=age)
+        for vendor in repair_settings.gate_vendors:
+            partition = paths.journal_root / vendor / "krx" / "regular" / "H0STCNT0" / f"dt={day.isoformat()}"
+            if not partition.is_dir():
+                continue
+            repair = derive_day_repair(paths, day, vendor, settings=repair_settings, tape_done=tape_done)
+            if repair.state is not RepairState.CLEAN and repair.state is not RepairState.REPAIRED:
+                delete_on = day + dt.timedelta(days=horizon + 1)
+                expiring.append((f"{day.isoformat()}:{vendor}:{repair.state.value}", delete_on))
+    return expiring
+
+
 def _archive_eod_digest(paths: DataPaths, ref_day: dt.date, subject: str, body: str) -> pathlib.Path | None:
-    """Persist the full EOD digest (mail only carries warnings); returns None when the write fails."""
+    """Persist the full EOD digest (the ops check reads it; it is never mailed); returns None when the write fails."""
     target = paths.eod_digest_path(ref_day)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -747,11 +800,21 @@ def _check_backup(
     *,
     now: dt.datetime,
     max_age: dt.timedelta,
+    page_after_days: int,
 ) -> tuple[list[str], bool, str]:
+    """Check host and manifest backups; page only once a backup has been stale for ``page_after_days`` or more."""
     host_reason = check_host_backup_freshness(status_path=status_path, now=now, max_age=max_age)
     host_label = "ok" if host_reason is None else host_reason
     if host_reason is not None:
-        logger.critical("[SYS] stage=host_backup_freshness status=STALE reason=%s", host_reason)
+        page_reason = check_host_backup_freshness(
+            status_path=status_path, now=now, max_age=dt.timedelta(days=page_after_days)
+        )
+        host_page = page_reason is not None and page_reason.startswith("stale:")
+        logger.critical(
+            "[SYS] stage=host_backup_freshness status=STALE reason=%s",
+            host_reason,
+            extra=page(PageKind.BACKUP_STALE) if host_page else None,
+        )
     try:
         missing = check_backup_freshness(manifest_dir=paths.manifest_dir, today=ref_day)
     except RemoteArchiveError as e:
@@ -762,11 +825,28 @@ def _check_backup(
         )
         return [], False, host_label
     if missing:
-        logger.critical("[DAEMON] stage=backup_freshness status=STALE missing=%d oldest=%s", len(missing), missing[0])
+        oldest = _oldest_manifest_day(missing)
+        manifest_page = oldest is not None and (ref_day - oldest).days >= page_after_days
+        logger.critical(
+            "[DAEMON] stage=backup_freshness status=STALE missing=%d oldest=%s",
+            len(missing),
+            missing[0],
+            extra=page(PageKind.BACKUP_STALE) if manifest_page else None,
+        )
         return missing, False, host_label
     if host_reason is not None:
         return [], False, host_label
     return [], True, host_label
+
+
+def _oldest_manifest_day(relpaths: Sequence[str]) -> dt.date | None:
+    days: list[dt.date] = []
+    for rel in relpaths:
+        try:
+            days.append(dt.date.fromisoformat(rel.rsplit("/", 1)[-1].split(".")[0]))
+        except ValueError:
+            continue
+    return min(days) if days else None
 
 
 def _candidate_symbols_and_tiers(path: pathlib.Path) -> tuple[tuple[str, ...], dict[str, str]]:
@@ -1048,6 +1128,7 @@ class SupervisionLogs:
     circuit_open: str
     circuit_level: int
     started: str | None = None
+    circuit_page: PageKind | None = None
 
 
 @dataclass(frozen=True)
@@ -1145,6 +1226,7 @@ class DaemonState:
     ls_shard_plan_day: dt.date | None = None
     aftermarket_deferred_slots: set[str] = field(default_factory=set)
     overdue_judged_for: dt.date | None = None
+    repair_expiry_paged: set[str] = field(default_factory=set)
 
     _CHILD_RESULT_FIELDS: ClassVar[Mapping[StreamChildKey, str]] = {
         StreamChildKey.REGULAR: "last_supervisor_result",
@@ -1485,6 +1567,7 @@ class DaemonRunner:
                 restarted="[DAEMON] stage=streamer status=RESTARTED exit_code=%s restarts=%d",
                 circuit_open="[DAEMON] stage=streamer status=FAIL reason=circuit_open",
                 circuit_level=logging.CRITICAL,
+                circuit_page=PageKind.REGULAR_FEED_DOWN,
             ),
             journal_vendor=lambda cfg: cfg.vendor,
             manifest_path=lambda paths, day: paths.manifest_path(day),
@@ -1857,7 +1940,9 @@ class DaemonRunner:
         st.overdue_judged_for = identity
         if entries:
             logger.critical(
-                "[DATA] stage=repair_overdue status=FAIL reason=attempts_exhausted days=%s", ",".join(entries)
+                "[DATA] stage=repair_overdue status=FAIL reason=attempts_exhausted days=%s",
+                ",".join(entries),
+                extra=page(PageKind.REPAIR_EXHAUSTED),
             )
         else:
             logger.info("[DATA] stage=repair_overdue status=OK reason=attempts_exhausted days=none")
@@ -2360,7 +2445,11 @@ class DaemonRunner:
             else:
                 logger.warning(logs.restarted, sup.last_exit_code)
         elif result == "circuit_open" and sup.take_circuit_alert():
-            logger.log(logs.circuit_level, logs.circuit_open)
+            logger.log(
+                logs.circuit_level,
+                logs.circuit_open,
+                extra=page(logs.circuit_page) if logs.circuit_page is not None else None,
+            )
         if key in DaemonState._CHILD_RESULT_FIELDS:
             self._state.set_child_result(key, result)
 
@@ -2478,6 +2567,7 @@ class DaemonRunner:
                 logger.warning(
                     "[DAEMON] stage=ingest_watchdog status=FIRST_FRAME_RECOVERED date=%s",
                     today.isoformat(),
+                    extra=page_resolved(PageKind.NO_FIRST_FRAME),
                 )
                 self._first_frame_alerted_for = None
             return
@@ -2486,6 +2576,7 @@ class DaemonRunner:
                 "[DAEMON] stage=ingest_watchdog status=NO_FIRST_FRAME date=%s due=%s",
                 today.isoformat(),
                 due.isoformat(),
+                extra=page(PageKind.NO_FIRST_FRAME),
             )
             self._first_frame_alerted_for = today
 
@@ -2806,8 +2897,12 @@ class DaemonRunner:
         today: dt.date,
         supervisors: Mapping[str, ProcessSupervisor],
         max_restarts: int,
+        budget_page: PageKind | None = None,
     ) -> bool:
-        """Log verdicts and stop at most one stale shard; returns True when stopped."""
+        """Log verdicts and stop at most one stale shard; returns True when stopped.
+
+        ``budget_page`` marks the restart-budget-exhausted CRITICAL as an operator page.
+        """
         st = self._state
         wide = [d for d in decisions if d.verdict is ShardVerdict.VENUE_WIDE_SILENCE]
         if wide and (venue, today) not in st.shard_venue_wide_warned:
@@ -2829,6 +2924,7 @@ class DaemonRunner:
                     d.silent_s or 0.0,
                     d.limit_s,
                     max_restarts,
+                    extra=page(budget_page) if budget_page is not None else None,
                 )
         for d in decisions:
             if not d.restart:
@@ -3301,6 +3397,7 @@ class DaemonRunner:
                 "[DATA] stage=ls_shard_stream status=FAIL reason=circuit_open shard=%d date=%s",
                 shard.shard_index,
                 today.isoformat(),
+                extra=page(PageKind.REGULAR_FEED_DOWN),
             )
 
     def _supervise_regular_kis(self, now: dt.datetime, anchors: SessionAnchors) -> None:
@@ -3350,6 +3447,7 @@ class DaemonRunner:
                         "[DATA] stage=regular_kis_stream status=FAIL reason=circuit_open shard=%s date=%s",
                         key,
                         today.isoformat(),
+                        extra=page(PageKind.REGULAR_FEED_DOWN),
                     )
             self._supervise_regular_kis_dynamic(today)
             self._watch_regular_kis_shards(now, today, anchors)
@@ -3388,6 +3486,7 @@ class DaemonRunner:
                 "[DATA] stage=regular_kis_dynamic status=FAIL reason=circuit_open slot=%s date=%s",
                 slot,
                 today.isoformat(),
+                extra=page(PageKind.REGULAR_FEED_DOWN),
             )
 
     def _stop_regular_kis_dynamic(self) -> None:
@@ -3454,6 +3553,7 @@ class DaemonRunner:
             today=today,
             supervisors=live,
             max_restarts=wd.max_restarts_per_day,
+            budget_page=PageKind.REGULAR_SHARD_STALE,
         )
 
     def _log_premarket_eod(self, ref_day: dt.date) -> None:
@@ -3594,12 +3694,14 @@ class DaemonRunner:
             )
         else:
             housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=self._eod_progress)
+        self._page_repair_expiry(ref_day, repair_settings)
         _check_backup(
             cfg.host_backup_status_path,
             paths,
             ref_day,
             now=now,
             max_age=dt.timedelta(hours=cfg.host_backup_max_age_h),
+            page_after_days=cfg.backup_page_stale_days,
         )
         logger.info(
             "[DAEMON] stage=eod_maintenance status=HOLIDAY deleted_partitions=%d uploaded=%d purged=%d date=%s",
@@ -3616,7 +3718,7 @@ class DaemonRunner:
         """Run business/unknown-day EOD: aftermarket readiness, housekeeping, reconciliation, backup, digest.
 
         Housekeeping always runs even when aftermarket manifests are not ready; every failed check
-        degrades the status instead of aborting so the digest is always sent once per date.
+        degrades the status instead of aborting so the digest is always recorded once per date.
         `aftermarket_restarts` is reset only after the digest.
         """
         st = self._state
@@ -3643,11 +3745,13 @@ class DaemonRunner:
             ref_day,
             now=now,
             max_age=dt.timedelta(hours=cfg.host_backup_max_age_h),
+            page_after_days=cfg.backup_page_stale_days,
         )
         repair_days = _repair_days_summary(paths, ref_day, cfg, repair_settings)
         overdue_days = _repair_overdue(paths, ref_day, cfg, repair_settings)
         if overdue_days:
             logger.critical("[DATA] stage=repair_overdue status=FAIL reason=stalled days=%s", ",".join(overdue_days))
+        self._page_repair_expiry(ref_day, repair_settings)
         degraded_reasons = [
             name
             for name, failed in (
@@ -3714,9 +3818,33 @@ class DaemonRunner:
         digest_path = _archive_eod_digest(paths, ref_day, subject, digest_body)
         if digest_path is not None:
             digest_body = f"{digest_body}\ndigest_path={digest_path}"
-        send_digest(subject, digest_body)
+        record_eod_digest(subject, digest_body)
         st.aftermarket_restarts = 0
         st.shard_stale_restarts = 0
+
+    def _page_repair_expiry(self, ref_day: dt.date, repair_settings: RepairSettings | None) -> None:
+        """Page once per unrepaired held day that EOD will delete within the expiry lead; never raises."""
+        st = self._state
+        try:
+            expiring = _repair_expiring(self._paths, ref_day, self._cfg, repair_settings)
+        except Exception as exc:  # noqa: BLE001 - the expiry check never fails EOD
+            logger.error(
+                "[DATA] stage=repair_hold status=FAIL reason=expiry_check_error error=%s",
+                type(exc).__name__,
+                exc_info=True,
+            )
+            return
+        fresh = [(label, delete_on) for label, delete_on in expiring if label not in st.repair_expiry_paged]
+        if not fresh:
+            return
+        st.repair_expiry_paged.update(label for label, _ in fresh)
+        deadline = min(delete_on for _, delete_on in fresh)
+        logger.critical(
+            "[DATA] stage=repair_hold status=EXPIRING days=%s delete_on=%s",
+            ",".join(label for label, _ in fresh),
+            deadline.isoformat(),
+            extra=page(PageKind.REPAIR_HOLD_EXPIRING, deadline=deadline),
+        )
 
     def _aftermarket_eod_blocked(self, now: dt.datetime, ref_day: dt.date, anchors: SessionAnchors) -> bool:
         """Return whether missing aftermarket manifests degrade this EOD."""
@@ -3997,6 +4125,7 @@ def _migrate_market_stores(paths: DataPaths) -> None:
                 "[DATA] stage=store_migration status=FAIL store=%s reason=%s",
                 name,
                 str(exc),
+                extra=page(PageKind.STORE_MIGRATION),
             )
 
 
@@ -4051,13 +4180,15 @@ def run_collector_daemon(
     if previous is not None and not previous.clean_exit and previous.crash_error is None:
         today = clock().astimezone(_KST).date()
         if crash_alert_allowed(previous, today, liveness.crash_alert_daily_budget):
-            logger.critical(
-                "[SYS] stage=daemon_restart status=UNCLEAN reason=killed previous_run_id=%s",
-                previous.run_id,
-            )
             # OOM/SIGKILL 루프는 재기동마다 여기로 오므로 크래시와 같은 일일 예산을 영속 차감한다.
             alerts_sent = alerts_sent + 1 if alert_day == today else 1
             alert_day = today
+            logger.critical(
+                "[SYS] stage=daemon_restart status=UNCLEAN reason=killed previous_run_id=%s crashes_today=%d",
+                previous.run_id,
+                alerts_sent,
+                extra=page(PageKind.DAEMON_CRASH_LOOP) if alerts_sent >= liveness.crash_page_min_daily else None,
+            )
         else:
             logger.error(
                 "[SYS] stage=daemon_restart status=UNCLEAN reason=killed previous_run_id=%s",
@@ -4128,8 +4259,14 @@ def run_collector_daemon(
         error_type = type(exc).__name__
         crash_day = clock().astimezone(_KST).date()
         if crash_alert_allowed(record, crash_day, liveness.crash_alert_daily_budget):
-            logger.critical("[SYS] stage=daemon_crash error=%s", error_type, exc_info=True)
             sent = record.crash_alerts_sent + 1 if record.crash_alert_day == crash_day else 1
+            logger.critical(
+                "[SYS] stage=daemon_crash error=%s crashes_today=%d",
+                error_type,
+                sent,
+                exc_info=True,
+                extra=page(PageKind.DAEMON_CRASH_LOOP) if sent >= liveness.crash_page_min_daily else None,
+            )
             record = replace(record, crash_error=error_type, crash_alert_day=crash_day, crash_alerts_sent=sent)
         else:
             logger.error("[SYS] stage=daemon_crash error=%s", error_type, exc_info=True)
@@ -4147,7 +4284,7 @@ def run_collector_daemon(
 def main() -> None:
     """Run the daemon and make every termination observable.
 
-    Crashes are reported through a CRITICAL log line (email) and a healthcheck
+    Crashes are reported through a CRITICAL log line (paged from the second one of a day) and a healthcheck
     ``fail`` before re-raising so Docker still restarts the process; a previous
     run that ended without either a clean exit or a recorded crash (SIGKILL,
     OOM) is reported at the next start.

@@ -895,6 +895,9 @@ def test_regular_circuit_alert_once_per_episode_with_probes(tmp_path, monkeypatc
             runner._supervise_stream_child(daemon_mod.StreamChildKey.REGULAR, now, anchors)
     criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
     assert criticals == ["[DAEMON] stage=streamer status=FAIL reason=circuit_open"]
+    from src.core.alerts import PageKind, page_kind
+
+    assert [page_kind(r) for r in caplog.records if r.levelno == logging.CRITICAL] == [PageKind.REGULAR_FEED_DOWN]
     assert runner.state.streamer_restarts == 2
 
 
@@ -936,6 +939,9 @@ def test_snapshot_circuit_alert_once_per_episode_with_probes(tmp_path, monkeypat
             runner._supervise_stream_child(daemon_mod.StreamChildKey.SNAPSHOT, now, None)
     criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
     assert criticals == ["[DAEMON] stage=snapshots status=FAIL reason=circuit_open"]
+    from src.core.alerts import page_kind
+
+    assert all(page_kind(r) is None for r in caplog.records)
 
 
 def test_heartbeat_treats_probe_restart_as_alive(tmp_path, monkeypatch, caplog) -> None:
@@ -1084,6 +1090,9 @@ def test_first_frame_watchdog_alerts_once_without_frames(tmp_path, monkeypatch, 
     assert alerts[0].getMessage() == (
         "[DAEMON] stage=ingest_watchdog status=NO_FIRST_FRAME date=2026-09-14 due=08:35:00"
     )
+    from src.core.alerts import PageKind, page_kind
+
+    assert page_kind(alerts[0]) is PageKind.NO_FIRST_FRAME
 
 
 def test_first_frame_watchdog_silent_before_due(tmp_path, monkeypatch, caplog) -> None:
@@ -1185,6 +1194,9 @@ def test_first_frame_watchdog_recovery_reported_once(tmp_path, monkeypatch, capl
     assert recovered[0].getMessage() == (
         "[DAEMON] stage=ingest_watchdog status=FIRST_FRAME_RECOVERED date=2026-09-14"
     )
+    from src.core.alerts import PageKind, resolved_kind
+
+    assert resolved_kind(recovered[0]) is PageKind.NO_FIRST_FRAME
 
 
 def test_first_frame_watchdog_shifted_open_moves_window(tmp_path, monkeypatch, caplog) -> None:

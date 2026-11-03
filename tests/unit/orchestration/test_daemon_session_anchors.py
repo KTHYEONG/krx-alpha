@@ -223,7 +223,7 @@ def test_standard_day_transitions_and_watchdog_unchanged(tmp_path, monkeypatch, 
     digests: list = []
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **kw: ([], True, "ok"))
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda *a, **kw: digests.append(a))
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda *a, **kw: digests.append(a))
     monkeypatch.setattr(
         daemon_mod,
         "_run_eod_housekeeping",
@@ -402,7 +402,7 @@ def test_csat_eod_reconciliation_receives_day_anchors(tmp_path, monkeypatch) -> 
     )
     monkeypatch.setattr(daemon_mod, "aftermarket_eod_ready", lambda **kw: True)
     monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **kw: ([], True, "ok"))
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda *a, **kw: True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda *a, **kw: True)
     now_holder["now"] = dt.datetime(2026, 11, 19, 20, 5, tzinfo=ZoneInfo("Asia/Seoul"))
 
     runner.step(now_holder["now"])

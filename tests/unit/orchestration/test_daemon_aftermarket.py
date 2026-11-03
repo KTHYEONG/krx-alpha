@@ -1377,7 +1377,7 @@ def test_eod_degrades_when_a_venue_is_unplanned(tmp_path, monkeypatch, caplog, m
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **kw: ([], True, "ok"))
     digests = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)))
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)))
     now = dt.datetime(2026, 9, 16, 20, 5, tzinfo=ZoneInfo("Asia/Seoul"))
 
     with caplog.at_level(logging.CRITICAL):

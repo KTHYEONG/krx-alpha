@@ -137,7 +137,7 @@ def test_business_eod_degrades_on_hold(tmp_path, monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "ok"))
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     monkeypatch.setattr(runner, "_reconcile_regular_session", lambda *a, **k: (True, True))
     monkeypatch.setattr(daemon_mod, "_repair_days_summary", lambda *a, **k: "2026-09-12:ls:gapfill_pending")
     anchors = _anchors(day)
@@ -182,7 +182,7 @@ def test_business_eod_ok_when_nothing_held(tmp_path, monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "ok"))
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     monkeypatch.setattr(runner, "_reconcile_regular_session", lambda *a, **k: (True, True))
     monkeypatch.setattr(daemon_mod, "_repair_days_summary", lambda *a, **k: "none")
     anchors = _anchors(day)

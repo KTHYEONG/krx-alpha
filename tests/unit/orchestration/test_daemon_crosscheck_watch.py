@@ -67,7 +67,7 @@ def _stub_eod(monkeypatch, runner) -> list[tuple[str, str]]:
         ),
     )
     monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "ok"))
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     return digests
 
 

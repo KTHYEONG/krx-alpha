@@ -102,6 +102,11 @@ def test_run_eod_offload_returns_zeros_when_archiver_missing(tmp_path, caplog, m
     assert stats.l1.failed_verification == 0
     assert old_pq.exists()
     assert any(r.levelno == logging.CRITICAL for r in caplog.records)
+    from src.core.alerts import PageKind, page_kind
+
+    assert [page_kind(r) for r in caplog.records if "rclone_settings_missing" in r.getMessage()] == [
+        PageKind.OFFLOAD_SETTINGS_MISSING
+    ]
 
 
 def test_run_eod_maintenance_forwards_quarantine_root(tmp_path, monkeypatch) -> None:
@@ -1074,6 +1079,9 @@ def test_run_eod_remote_l0_purge_returns_zero_stats_without_archiver(tmp_path, c
     assert out.skipped_absent == 0
     assert out.failed == 0
     assert "rclone_settings_missing" in caplog.text
+    from src.core.alerts import page_kind
+
+    assert all(page_kind(r) is None for r in caplog.records)
 
 
 def _write_host_status(path, last_ok_at) -> None:

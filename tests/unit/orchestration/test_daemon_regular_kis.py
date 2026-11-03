@@ -269,6 +269,9 @@ def test_circuit_alert_once_per_shard_per_day(monkeypatch, tmp_path, caplog) -> 
     alerts = [r for r in caplog.records if "circuit_open" in r.getMessage()]
     assert len(alerts) == 1
     assert "krx-00" in alerts[0].getMessage()
+    from src.core.alerts import PageKind, page_kind
+
+    assert page_kind(alerts[0]) is PageKind.REGULAR_FEED_DOWN
 
 
 def _ok_audit(day):
@@ -329,7 +332,7 @@ def test_eod_audit_never_alters_status(monkeypatch, tmp_path, caplog) -> None:
     anchors = _anchors(ref_day)
     day = TradingDayView(date=ref_day, status=TradingDayStatus.BUSINESS, trading_day=None)
     digests: list = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)))
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)))
     runners = {}
     for enabled in (True, False):
         runners[enabled] = _eod_runner(monkeypatch, tmp_path, ref_day=ref_day, enabled=enabled, digests=digests)

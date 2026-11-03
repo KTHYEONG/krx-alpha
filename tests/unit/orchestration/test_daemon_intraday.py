@@ -166,6 +166,11 @@ def test_dynamic_child_restart_and_circuit_are_reported(monkeypatch, tmp_path, c
 
     assert "status=RESTARTED slot=5" in caplog.text
     assert "reason=circuit_open slot=5" in caplog.text
+    from src.core.alerts import PageKind, page_kind
+
+    assert {page_kind(r) for r in caplog.records if "reason=circuit_open" in r.getMessage()} == {
+        PageKind.REGULAR_FEED_DOWN
+    }
 
 
 def test_stop_children_includes_dynamic_kis_shard(monkeypatch, tmp_path) -> None:

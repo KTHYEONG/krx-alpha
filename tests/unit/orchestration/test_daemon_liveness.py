@@ -64,7 +64,7 @@ def _boom(self, now):
     raise OSError(28, "No space left on device")
 
 
-def test_crash_emits_critical_alert_and_healthcheck_fail(tmp_path, monkeypatch) -> None:
+def test_single_crash_logs_critical_without_page_and_fails_healthcheck(tmp_path, monkeypatch) -> None:
     import src.orchestration.daemon as daemon_mod
     from src.core.lifecycle import read_lifecycle
 
@@ -78,8 +78,7 @@ def test_crash_emits_critical_alert_and_healthcheck_fail(tmp_path, monkeypatch) 
     with pytest.raises(OSError, match="No space left on device"):
         daemon_mod.main()
 
-    assert len(sent) == 1
-    assert "daemon_crash" in sent[0][1]
+    assert sent == []
     assert ("fail", "daemon_crash:OSError") in pings
     record = read_lifecycle(tmp_path / "data" / "work" / "daemon_lifecycle.json")
     assert record is not None
@@ -109,7 +108,9 @@ def test_crash_loop_bounded_by_daily_budget(tmp_path, monkeypatch, caplog) -> No
                     settings=settings, sleep_fn=lambda s: None, now_fn=lambda: now
                 )
 
-    assert len(sent) == 3
+    # The first crash of the day self-heals via restart; the 2nd and 3rd page as a crash loop.
+    assert [subject for subject, _ in sent] == ["[긴급][krx] 수집 데몬 반복 비정상 종료"] * 2
+    assert all(len(body.splitlines()) == 3 for _, body in sent)
     crit = [
         r for r in caplog.records
         if r.levelno == logging.CRITICAL and "stage=daemon_crash" in r.getMessage()
@@ -409,6 +410,9 @@ def test_kill_loop_bounded_by_daily_budget(tmp_path, monkeypatch, caplog) -> Non
 
     killed = [r for r in caplog.records if "stage=daemon_restart status=UNCLEAN reason=killed" in r.getMessage()]
     assert [r.levelno for r in killed] == [logging.CRITICAL] * 3 + [logging.ERROR] * 3
+    from src.core.alerts import PageKind, page_kind
+
+    assert [page_kind(r) for r in killed[:3]] == [None, PageKind.DAEMON_CRASH_LOOP, PageKind.DAEMON_CRASH_LOOP]
 
 
 def test_startup_failure_reported_as_crash(tmp_path, monkeypatch, caplog) -> None:

@@ -120,7 +120,7 @@ class _TimelineHarness:
 
         monkeypatch.setattr(daemon_mod, "_run_eod_housekeeping", _housekeeping)
         monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "ok"))
-        monkeypatch.setattr(daemon_mod, "send_digest", lambda s, b: self.calls.append(["digest", s]) or True)
+        monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda s, b: self.calls.append(["digest", s]) or True)
 
         def _refresh(*, session_date, generated_at, client, out_path, capacity, venue, excluded_symbols):
             from src.realtime.contracts import MarketVenue

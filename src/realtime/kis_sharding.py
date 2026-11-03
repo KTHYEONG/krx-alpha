@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from src.core.config import kis_data_env
 from src.core.errors import KrxAlphaError, MissingCredentialsError, SlotBudgetExceededError
-from src.core.observability import EVENT
+from src.core.observability import EVENT, PageKind, page
 from src.realtime.contracts import MarketVenue
 
 logger = logging.getLogger(__name__)
@@ -207,7 +207,7 @@ def plan_regular_kis_shards(
             len(selected - ls_covered_symbols),
             len(uncovered),
             ",".join(uncovered) or "none",
-            extra=EVENT,
+            extra={**EVENT, **page(PageKind.FEED_COVERAGE_HOLE)} if uncovered else EVENT,
         )
     if len(ordered) > capacity:
         logger.warning(

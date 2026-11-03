@@ -1541,6 +1541,10 @@ def test_kis_token_preflight_failure_does_not_block_other_key(tmp_path, monkeypa
     assert outcomes[primary_fp] == "fail:EGW00103"
     assert outcomes[snapshot_fp] == "cache"
     assert "result=fail reason=EGW00103" in caplog.text
+    from src.core.alerts import PageKind, page_kind
+
+    failures = [r for r in caplog.records if "result=fail" in r.getMessage()]
+    assert [page_kind(r) for r in failures] == [PageKind.KIS_PREFLIGHT_FAIL]
 
 
 def test_kis_token_preflight_logs_fingerprints_only(tmp_path, monkeypatch, caplog) -> None:
@@ -1660,6 +1664,13 @@ def test_kis_token_preflight_maps_missing_credentials_for_both_keys(tmp_path, mo
 
     assert outcomes == {"unknown": "fail:missing_credentials", "unknown-data": "fail:missing_credentials"}
     assert caplog.text.count("reason=missing_credentials") == 2
+    from src.core.alerts import PageKind, page_kind
+
+    # Only the primary key gates the session; the snapshot data slot is not a page.
+    assert [page_kind(r) for r in caplog.records if "result=fail" in r.getMessage()] == [
+        PageKind.KIS_PREFLIGHT_FAIL,
+        None,
+    ]
 
 
 def test_build_snapshot_preflight_client_uses_configured_data_slot_without_network(tmp_path, monkeypatch) -> None:
@@ -1723,6 +1734,9 @@ def test_kis_token_preflight_records_snapshot_key_vendor_error(tmp_path, monkeyp
         r.levelno == logging.CRITICAL and "key_id=snapfp000001" in r.getMessage() and "reason=EGW00103" in r.getMessage()
         for r in caplog.records
     )
+    from src.core.alerts import page_kind
+
+    assert all(page_kind(r) is None for r in caplog.records)
 
 
 def test_run_collector_daemon_logs_failed_store_migration_and_continues(tmp_path, monkeypatch, caplog) -> None:
@@ -1778,6 +1792,11 @@ def test_run_collector_daemon_logs_failed_store_migration_and_continues(tmp_path
 
     # Then: 모호 상태로 CRITICAL을 남기고 루프는 계속된다
     assert "[DATA] stage=store_migration status=FAIL store=bars" in caplog.text
+    from src.core.alerts import PageKind, page_kind
+
+    migration = [r for r in caplog.records if "stage=store_migration status=FAIL" in r.getMessage()]
+    assert migration
+    assert all(page_kind(r) is PageKind.STORE_MIGRATION for r in migration)
     assert settings.paths.legacy_bars_file.exists()
     assert (settings.paths.bars_daily_dir / "2026-09.parquet").read_bytes() == b"existing-partition"
 
@@ -1804,7 +1823,10 @@ def test_run_session_orchestration_fails_closed_while_migration_pending(tmp_path
     # Then: 빈 파티션에 재백필하지 않고 fail-closed
     assert ready is False
     assert refreshed == []
-    assert any("reason=store_migration_pending" in r.getMessage() for r in caplog.records)
+    from src.core.alerts import PageKind, page_kind
+
+    pending = [r for r in caplog.records if "reason=store_migration_pending" in r.getMessage()]
+    assert [page_kind(r) for r in pending] == [PageKind.STORE_MIGRATION]
 
 
 def test_run_session_orchestration_reports_progress_between_stages(tmp_path, monkeypatch) -> None:

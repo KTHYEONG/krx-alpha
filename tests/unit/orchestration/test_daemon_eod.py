@@ -501,7 +501,7 @@ def test_run_collector_daemon_eod_offload_remote_auth_failure_is_critical(tmp_pa
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     digests: list[tuple[str, str]] = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     def _offload(*a, **kw):
@@ -520,6 +520,11 @@ def test_run_collector_daemon_eod_offload_remote_auth_failure_is_critical(tmp_pa
         m.startswith("[DAEMON] stage=eod_offload status=FAIL reason=auth_expired hint=rclone_config_reconnect_gdrive")
         for m in criticals
     )
+    from src.core.alerts import PageKind, page_kind
+
+    assert [page_kind(r) for r in caplog.records if "stage=eod_offload status=FAIL" in r.getMessage()] == [
+        PageKind.OFFLOAD_AUTH_EXPIRED
+    ]
     assert "deleted_partitions=0 uploaded=0 purged=0 status=DEGRADED" in caplog.text
     assert len(digests) == 1
     body_lines = digests[0][1].splitlines()
@@ -544,7 +549,7 @@ def test_run_collector_daemon_eod_backup_freshness_stale_is_critical(tmp_path, m
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     digests: list[tuple[str, str]] = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     seen: dict[str, object] = {}
@@ -587,7 +592,7 @@ def test_run_collector_daemon_eod_backup_freshness_remote_failure_is_critical(tm
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     digests: list[tuple[str, str]] = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     monkeypatch.setattr(
@@ -622,7 +627,7 @@ def test_run_collector_daemon_eod_passes_substantive_reconciliation_inputs(tmp_p
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     digests: list[tuple[str, str]] = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     seen: dict[str, object] = {}
@@ -668,7 +673,7 @@ def test_run_collector_daemon_eod_sends_daily_digest_once_per_date(tmp_path, mon
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     digests: list[tuple[str, str]] = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     monkeypatch.setattr(
@@ -847,7 +852,7 @@ def test_daemon_holiday_eod_runs_housekeeping_without_alerts(tmp_path, monkeypat
 
     monkeypatch.setattr(daemon_mod, "aftermarket_eod_ready", _must_not_call)
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", _must_not_call)
-    monkeypatch.setattr(daemon_mod, "send_digest", _must_not_call)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", _must_not_call)
     now = dt.datetime(2026, 9, 24, 20, 5, tzinfo=kst)
     _write_eod_host_status(settings, now, 20)
     with caplog.at_level(logging.INFO):
@@ -949,7 +954,7 @@ def test_daemon_aftermarket_failure_still_runs_housekeeping(tmp_path, monkeypatc
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
     digests: list[tuple[str, str]] = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     now = dt.datetime(2026, 9, 15, 20, 5, tzinfo=ZoneInfo("Asia/Seoul"))
 
     with caplog.at_level(logging.INFO):
@@ -989,7 +994,7 @@ def test_daemon_ready_aftermarket_and_clean_checks_report_ok(tmp_path, monkeypat
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
     digests: list[tuple[str, str]] = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     now = dt.datetime(2026, 9, 15, 20, 5, tzinfo=ZoneInfo("Asia/Seoul"))
     _write_eod_host_status(settings, now, 20)
     with caplog.at_level(logging.INFO):
@@ -1223,7 +1228,7 @@ def test_stale_host_backup_degrades_business_day_eod(tmp_path, monkeypatch, capl
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     digests: list[tuple[str, str]] = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     monkeypatch.setattr(
         daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 2, "skipped": 0, "failed": 0, "purged": 1}
     )
@@ -1275,7 +1280,7 @@ def test_business_eod_ignores_data_root_work_status_and_reports_missing(tmp_path
     )
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     monkeypatch.setattr(
         daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 14))
     )
@@ -1309,7 +1314,7 @@ def test_fresh_host_backup_keeps_business_day_eod_ok(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
     digests: list[tuple[str, str]] = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     monkeypatch.setattr(
         daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 2, "skipped": 0, "failed": 0, "purged": 1}
     )
@@ -1353,7 +1358,7 @@ def test_holiday_eod_checks_host_backup_freshness_without_digest(tmp_path, monke
     def _must_not_send(**kw):
         raise AssertionError("holiday EOD must not send a digest")
 
-    monkeypatch.setattr(daemon_mod, "send_digest", _must_not_send)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", _must_not_send)
     eod_time = dt.datetime(2026, 9, 24, 20, 5, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
     with caplog.at_level(logging.CRITICAL):
@@ -1405,6 +1410,9 @@ def test_eod_housekeeping_low_disk_skips_maintenance_but_offloads(tmp_path, monk
     assert result.maintenance_ok is False
     criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
     assert any("stage=eod_disk_guard" in message for message in criticals)
+    from src.core.alerts import PageKind, page_kind
+
+    assert [page_kind(r) for r in caplog.records if "stage=eod_disk_guard" in r.getMessage()] == [PageKind.DISK_LOW]
 
 
 def test_eod_housekeeping_failed_partitions_degrade_maintenance(tmp_path, monkeypatch) -> None:
@@ -1654,7 +1662,8 @@ def _prearm_daemon_runner(tmp_path, plan, *, enabled=True):
     runner = object.__new__(daemon_mod.DaemonRunner)
     runner._runtime = SimpleNamespace(audit=AuditSettings(mode=AuditMode.OFF))
     runner._cfg = SimpleNamespace(
-        after_market_enabled=enabled, host_backup_status_path=tmp_path / "host.json", host_backup_max_age_h=36
+        after_market_enabled=enabled, host_backup_status_path=tmp_path / "host.json", host_backup_max_age_h=36,
+        backup_page_stale_days=2,
     )
     runner._paths = DataPaths(tmp_path / "data")
     runner._premarket_cfg = SimpleNamespace(enabled=False)
@@ -1754,7 +1763,7 @@ def test_digest_carries_prearm_late_count(tmp_path, monkeypatch) -> None:
     )
     monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "fresh"))
     digests = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)))
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)))
     from tests.unit.orchestration.daemon_fixtures import _business_trading_day
 
     runner._run_business_eod(now, day, _business_trading_day(day), anchors)
@@ -1793,7 +1802,7 @@ def test_prearm_verdicts_never_change_eod_status(tmp_path, monkeypatch, caplog) 
         daemon_mod.DaemonRunner, "_reconcile_crosscheck_sessions", lambda self, ref_day, day_v, anchors_v: {}
     )
     monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "fresh"))
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: True)
     monkeypatch.setattr(
         daemon_mod.DaemonRunner, "_aftermarket_eod_blocked", lambda self, now_v, ref_day, anchors_v: False
     )
@@ -1905,7 +1914,7 @@ def test_eod_digest_carries_zero_frame_count_and_keeps_ok(tmp_path, monkeypatch,
     )
     monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "fresh"))
     digests = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)))
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)))
     monkeypatch.setattr(
         daemon_mod.DaemonRunner, "_aftermarket_eod_blocked", lambda self, now_v, ref_day, anchors_v: False
     )
@@ -2047,7 +2056,7 @@ def _stub_full_eod(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
     digests: list[tuple[str, str]] = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
     _write_eod_host_status(settings, eod_time, 20)
     monkeypatch.setattr(
@@ -2241,7 +2250,7 @@ def test_mode_off_skips_audit_pipeline(tmp_path, monkeypatch) -> None:
     )
     monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "ok"))
     digests: list = []
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append((subject, body)) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append((subject, body)) or True)
     view = TradingDayView(date=day, status=TradingDayStatus.BUSINESS, trading_day=_biz(day))
     now = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 

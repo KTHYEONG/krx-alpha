@@ -266,6 +266,9 @@ def test_storm_bound_and_budget_critical_once(monkeypatch, tmp_path, caplog) -> 
     assert len(criticals) == 1
     assert criticals[0].levelno == logging.CRITICAL
     assert "key=nxt:0" in criticals[0].getMessage()
+    from src.core.alerts import page_kind
+
+    assert page_kind(criticals[0]) is None
     current = runner._children.aftermarket["nxt:0"]
     assert current.stop_restart_calls == []
 
@@ -429,7 +432,7 @@ def test_digest_counts_stale_restarts(monkeypatch, tmp_path) -> None:
         lambda *a, **k: daemon_mod._EodHousekeeping(deleted=1, uploaded=2, purged=3, maintenance_ok=True, offload_ok=True),
     )
     monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "ok"))
-    monkeypatch.setattr(daemon_mod, "send_digest", lambda subject, body: digests.append(body) or True)
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append(body) or True)
     monkeypatch.setattr(runner, "_aftermarket_eod_blocked", lambda *a, **k: False)
     monkeypatch.setattr(runner, "_log_aftermarket_prearm", lambda *a, **k: 0)
     monkeypatch.setattr(runner, "_log_aftermarket_coverage", lambda *a, **k: 0)

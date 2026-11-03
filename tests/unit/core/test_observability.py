@@ -155,13 +155,13 @@ def test_configure_logging_exports_generated_run_id(monkeypatch) -> None:
     assert ObservabilitySettings().run_id == run_id
 
 
-def test_configure_logging_sends_critical_email_via_background_queue(monkeypatch) -> None:
+def test_configure_logging_mails_only_marked_pages_via_background_queue(monkeypatch) -> None:
     import io
     import logging
     from logging.handlers import QueueHandler
 
     from src.core.config import AlertSettings
-    from src.core.observability import configure_logging, shutdown_logging
+    from src.core.observability import PageKind, configure_logging, page, shutdown_logging
 
     monkeypatch.setenv("KRX_ALPHA_RUN_ID", "r")
     sent: list[tuple[str, str]] = []
@@ -175,13 +175,15 @@ def test_configure_logging_sends_critical_email_via_background_queue(monkeypatch
     queue_handlers = [h for h in logging.getLogger().handlers if isinstance(h, QueueHandler)]
     log = logging.getLogger("src.orchestration.daemon")
     log.error("[DAEMON] stage=eod_maintenance error=x")
-    log.critical("[DAEMON] stage=streamer status=FAIL reason=circuit_open")
+    log.critical("[DAEMON] stage=eod_maintenance status=FAIL reason=maintenance_error error=x")
+    log.critical("[DAEMON] stage=streamer status=FAIL reason=circuit_open", extra=page(PageKind.REGULAR_FEED_DOWN))
     shutdown_logging()
 
     assert len(queue_handlers) == 1
-    assert queue_handlers[0].level == logging.CRITICAL
-    assert sent[0][0] == "[krx-alpha][실패] [시세수집] 소켓 단절 (서킷오픈)"
-    assert "circuit_open" in sent[0][1]
+    assert len(sent) == 1
+    assert sent[0][0] == "[긴급][krx] 정규장 시세 수집 프로세스 중단"
+    assert "circuit_open" not in sent[0][1]
+    assert len(sent[0][1].splitlines()) == 3
     assert "stage=alert status=ENABLED" in stream.getvalue()
 
 
@@ -191,7 +193,7 @@ def test_configure_logging_shared_ledger_bounds_repeats(tmp_path, monkeypatch) -
     import logging
 
     from src.core.config import AlertSettings
-    from src.core.observability import configure_logging, shutdown_logging
+    from src.core.observability import PageKind, configure_logging, page, shutdown_logging
 
     monkeypatch.setenv("KRX_ALPHA_RUN_ID", "r-ledger")
     sent: list[tuple[str, str]] = []
@@ -205,8 +207,8 @@ def test_configure_logging_shared_ledger_bounds_repeats(tmp_path, monkeypatch) -
     )
     try:
         log = logging.getLogger("src.orchestration.daemon")
-        log.critical("[DATA] stage=quality tr_id=H0STCNT0 vendor=kis rows=1")
-        log.critical("[DATA] stage=quality tr_id=H0STCNT0 vendor=kis rows=999")
+        log.critical("[DATA] stage=quality tr_id=H0STCNT0 vendor=kis rows=1", extra=page(PageKind.DISK_LOW))
+        log.critical("[DATA] stage=quality tr_id=H0STCNT0 vendor=kis rows=999", extra=page(PageKind.DISK_LOW))
     finally:
         shutdown_logging()
     assert ledger_path.exists()
@@ -220,7 +222,7 @@ def test_configure_logging_without_ledger_path_creates_no_file(tmp_path, monkeyp
     import logging
 
     from src.core.config import AlertSettings
-    from src.core.observability import configure_logging, shutdown_logging
+    from src.core.observability import PageKind, configure_logging, page, shutdown_logging
 
     monkeypatch.setenv("KRX_ALPHA_RUN_ID", "r-noledeger")
     monkeypatch.chdir(tmp_path)
@@ -232,8 +234,8 @@ def test_configure_logging_without_ledger_path_creates_no_file(tmp_path, monkeyp
         alert_sender=lambda subject, body: sent.append(subject),
     )
     try:
-        logging.getLogger(__name__).critical("[DATA] stage=quality rows=1")
-        logging.getLogger(__name__).critical("[DATA] stage=quality rows=999")
+        logging.getLogger(__name__).critical("[DATA] stage=quality rows=1", extra=page(PageKind.DISK_LOW))
+        logging.getLogger(__name__).critical("[DATA] stage=quality rows=999", extra=page(PageKind.DISK_LOW))
     finally:
         shutdown_logging()
     assert len(sent) == 1
@@ -249,14 +251,14 @@ def test_process_exit_drains_email_queue_and_commits_shared_budget(tmp_path) -> 
     code = """
 import io, logging, pathlib, sys, time
 from src.core.config import AlertSettings
-from src.core.observability import configure_logging
+from src.core.observability import PageKind, configure_logging, page
 configure_logging(
     "child", stream=io.StringIO(), alert_ledger_path=pathlib.Path(sys.argv[1]),
     alert_settings=AlertSettings(alert_gmail_user="u@x", alert_gmail_app_password="pw", alert_gmail_to="t@x"),
     alert_sender=lambda subject, body: time.sleep(0.1),
 )
-logging.getLogger("child").critical("[DATA] stage=quality rows=1")
-logging.getLogger("child").critical("[DATA] stage=quality rows=999")
+logging.getLogger("child").critical("[DATA] stage=quality rows=1", extra=page(PageKind.DISK_LOW))
+logging.getLogger("child").critical("[DATA] stage=quality rows=999", extra=page(PageKind.DISK_LOW))
 """
     result = subprocess.run(  # noqa: S603 - trusted child program and isolated ledger
         [sys.executable, "-c", code, str(ledger_path)], check=False, capture_output=True, text=True, timeout=15,
@@ -283,7 +285,11 @@ def test_email_alert_handler_applies_cooldown_and_daily_cap() -> None:
     )
 
     def rec(msg: str) -> logging.LogRecord:
-        return logging.LogRecord("x", logging.CRITICAL, __file__, 1, msg, (), None)
+        from src.core.observability import PageKind, page
+
+        record = logging.LogRecord("x", logging.CRITICAL, __file__, 1, msg, (), None)
+        record.__dict__.update(page(PageKind.DISK_LOW))
+        return record
 
     handler.handle(rec("A failure"))
     now["t"] = 10.0
@@ -314,7 +320,10 @@ def test_email_alert_handler_logs_warning_and_does_not_raise_on_send_failure(cap
     handler = EmailAlertHandler(
         component="daemon", run_id="r", sender=failing, clock=lambda: 0.0, sleep=lambda s: None
     )
+    from src.core.observability import PageKind, page
+
     record = logging.LogRecord("x", logging.CRITICAL, __file__, 1, "[DAEMON] down", (), None)
+    record.__dict__.update(page(PageKind.DAEMON_CRASH_LOOP))
 
     with caplog.at_level(logging.WARNING):
         handler.handle(record)
@@ -362,151 +371,6 @@ def test_gmail_sender_sends_via_smtp_ssl(monkeypatch) -> None:
     assert msg.get_content().strip() == "body-1"
 
 
-def test_send_digest_sends_via_sender_when_alerts_enabled(caplog) -> None:
-    import logging
-
-    from src.core.config import AlertSettings
-    from src.core.observability import send_digest
-
-    sent: list[tuple[str, str]] = []
-    settings = AlertSettings(alert_gmail_user="u@x", alert_gmail_app_password="pw", alert_gmail_to="t@x")
-
-    with caplog.at_level(logging.INFO):
-        ok = send_digest(
-            "[krx-alpha] EOD 2026-09-14 DEGRADED",
-            "run_id=d-1\nstatus=DEGRADED\ndegraded_reasons=backup,reconcile\ndigest_path=data/logs/eod_digests/2026-09-14.txt",
-            settings=settings,
-            sender=lambda s, b: sent.append((s, b)),
-        )
-
-    assert ok is True
-    assert len(sent) == 1
-    assert sent[0][0] == "[krx-alpha][경고] EOD 2026-09-14 DEGRADED"
-    lines = sent[0][1].splitlines()
-    assert lines[0] == "• 무엇: EOD 2026-09-14 DEGRADED"
-    assert lines[1].startswith("• 언제: ")
-    assert lines[1].endswith("(KST)")
-    assert lines[2:] == ["• 원인: backup,reconcile", "• 증거: data/logs/eod_digests/2026-09-14.txt (run_id=d-1)"]
-    assert "stage=digest status=SENT" in caplog.text
-
-
-def test_send_digest_never_mails_ok_status(caplog) -> None:
-    import logging
-
-    from src.core.config import AlertSettings
-    from src.core.observability import send_digest
-
-    def _never(subject, body):
-        raise AssertionError("OK digest must not mail")
-
-    settings = AlertSettings(alert_gmail_user="u@x", alert_gmail_app_password="pw", alert_gmail_to="t@x")
-    with caplog.at_level(logging.INFO):
-        ok = send_digest("[krx-alpha] EOD 2026-09-14 OK", "run_id=d\nstatus=OK", settings=settings, sender=_never)
-
-    assert ok is False
-    assert "stage=digest status=SKIPPED reason=status_ok" in caplog.text
-
-def test_send_digest_skips_when_alerts_disabled(caplog) -> None:
-    import logging
-
-    from src.core.config import AlertSettings
-    from src.core.observability import send_digest
-
-    def _never(subject, body):
-        raise AssertionError("must not send")
-
-    with caplog.at_level(logging.INFO):
-        ok = send_digest("s", "b", settings=AlertSettings(alert_gmail_user="", alert_gmail_app_password="", alert_gmail_to=""), sender=_never)
-
-    assert ok is False
-    assert "stage=digest status=DISABLED" in caplog.text
-
-def test_send_digest_logs_warning_and_returns_false_on_smtp_failure(caplog) -> None:
-    import logging
-    import smtplib
-
-    from src.core.config import AlertSettings
-    from src.core.observability import send_digest
-
-    def _broken(subject, body):
-        raise smtplib.SMTPServerDisconnected("closed")
-
-    settings = AlertSettings(alert_gmail_user="u@x", alert_gmail_app_password="pw", alert_gmail_to="t@x")
-    sleeps: list[float] = []
-    with caplog.at_level(logging.WARNING):
-        ok = send_digest("s", "b", settings=settings, sender=_broken, sleep=sleeps.append)
-
-    assert ok is False
-    assert "stage=digest status=FAIL reason=SMTPServerDisconnected" in caplog.text
-    assert sleeps == [2.0, 8.0]
-
-
-def test_format_alert_subject_mappings() -> None:
-    from src.core.observability import format_alert_subject
-
-    # 1. stage & reason mapped
-    s1 = format_alert_subject("daemon", "[DAEMON] stage=backup_freshness status=FAIL reason=auth_expired", {"stage": "backup_freshness", "reason": "auth_expired"})
-    assert s1 == "[krx-alpha][실패] [백업점검] GDrive 인증 만료"
-
-    # 2. stage only
-    s2 = format_alert_subject("streamer", "[STREAM] stage=stream_flush status=TIMEOUT", {"stage": "stream_flush", "status": "TIMEOUT"})
-    assert s2 == "[krx-alpha][실패] [시세저장] TIMEOUT"
-
-    # 3. reason only
-    s3 = format_alert_subject("daemon", "reason=circuit_open", {"reason": "circuit_open"})
-    assert s3 == "[krx-alpha][실패] [daemon] 소켓 단절 (서킷오픈)"
-
-    # 4. fallback unmapped
-    s4 = format_alert_subject("daemon", "[DAEMON] unexpected crash at startup", {})
-    assert s4 == "[krx-alpha][실패] [daemon] unexpected crash at startup"
-
-
-def test_format_alert_text_is_short_card() -> None:
-    import logging
-
-    from src.core.observability import format_alert_text
-
-    record = logging.LogRecord(
-        name="src.orchestration.daemon",
-        level=logging.CRITICAL,
-        pathname="daemon.py",
-        lineno=10,
-        msg="[DAEMON] stage=backup_freshness status=FAIL reason=auth_expired hint=rclone_config_reconnect_gdrive",
-        args=(),
-        exc_info=None,
-    )
-    fields = {
-        "stage": "backup_freshness",
-        "status": "FAIL",
-        "reason": "auth_expired",
-        "hint": "rclone_config_reconnect_gdrive",
-    }
-
-    lines = format_alert_text(record, "daemon", "daemon-123", fields).splitlines()
-    assert len(lines) == 4
-    assert lines[0] == "• 무엇: daemon > 백업점검 FAIL"
-    assert lines[1].startswith("• 언제: ")
-    assert lines[1].endswith("(KST)")
-    assert lines[2] == (
-        "• 원인: GDrive 인증 만료: stage=backup_freshness status=FAIL reason=auth_expired hint=rclone_config_reconnect_gdrive"
-    )
-    assert lines[3] == "• 증거: data/logs/events-daemon.jsonl (run_id=daemon-123)"
-
-
-def test_format_alert_text_bounds_long_message_to_one_line() -> None:
-    import logging
-
-    from src.core.alerts import ALERT_LINE_MAX_CHARS
-    from src.core.observability import format_alert_text
-
-    record = logging.LogRecord("x", logging.CRITICAL, __file__, 1, "[DAEMON] boom\n" + "x" * 1000, (), None)
-    cause = format_alert_text(record, "daemon", "r", {}).splitlines()[2]
-
-    assert cause.startswith("• 원인: boom x")
-    assert len(cause.removeprefix("• 원인: ")) == ALERT_LINE_MAX_CHARS
-    assert cause.endswith("…")
-
-
 def test_gmail_sender_sends_plain_text_only(monkeypatch) -> None:
     import smtplib
 
@@ -538,25 +402,3 @@ def test_gmail_sender_sends_plain_text_only(monkeypatch) -> None:
     msg = seen["msg"]
     assert msg.is_multipart() is False
     assert msg.get_content().strip() == "plain-body"
-
-
-def test_aftermarket_alert_labels_use_canonical_term() -> None:
-    from src.core.observability import _REASON_LABELS, _STAGE_LABELS
-
-    for key in ("aftermarket_reselection", "aftermarket_plan"):
-        label = _STAGE_LABELS[key]
-        assert "애프터마켓" in label
-        assert "시간외" not in label
-    reason = _REASON_LABELS["aftermarket_not_ready"]
-    assert "애프터마켓" in reason
-    assert "시간외" not in reason
-
-
-def test_format_digest_text_omits_evidence_without_archive_path() -> None:
-    from src.core.observability import format_digest_text
-
-    lines = format_digest_text("[krx-alpha] EOD 2026-09-14 DEGRADED", "status=DEGRADED\nrun_id=daemon-1").splitlines()
-
-    assert lines[0] == "• 무엇: EOD 2026-09-14 DEGRADED"
-    assert lines[2] == "• 원인: 알 수 없음"
-    assert len(lines) == 3

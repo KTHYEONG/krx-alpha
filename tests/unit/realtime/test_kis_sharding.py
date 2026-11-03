@@ -401,6 +401,11 @@ def test_regular_plan_reports_uncovered_tail_beyond_combined_capacity(caplog) ->
     assert tuple(s for shard in plan for s in shard.symbols) == symbols[100:180]
     assert "stage=regular_feed_coverage status=VIOLATION" in caplog.text
     assert "uncovered=5 uncovered_symbols=" + ",".join(symbols[180:]) in caplog.text
+    from src.core.alerts import PageKind, page_kind
+
+    coverage = [r for r in caplog.records if "stage=regular_feed_coverage" in r.getMessage()]
+    assert [page_kind(r) for r in coverage] == [PageKind.FEED_COVERAGE_HOLE]
+    assert coverage[0].krx_event is True
 
 
 def test_regular_plan_retains_original_order_when_ls_covers_every_symbol() -> None:

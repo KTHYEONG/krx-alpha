@@ -73,7 +73,11 @@ def _concurrent_children(code: str, ledger: pathlib.Path, *, count: int = 2) -> 
 
 
 def _rec(msg: str) -> logging.LogRecord:
-    return logging.LogRecord("x", logging.CRITICAL, __file__, 1, msg, (), None)
+    from src.core.alerts import PageKind, page
+
+    record = logging.LogRecord("x", logging.CRITICAL, __file__, 1, msg, (), None)
+    record.__dict__.update(page(PageKind.REGULAR_FEED_DOWN))
+    return record
 
 
 def test_dedup_ignores_numeric_variation() -> None:
@@ -138,7 +142,7 @@ def test_cross_process_budget(tmp_path: pathlib.Path, distinct_keys: bool, expec
     ledger = tmp_path / "shared.json"
     code = f"""
 import datetime as dt, json, logging, pathlib, sys, time
-from src.core.alerts import EmailAlertHandler, FileAlertLedger
+from src.core.alerts import EmailAlertHandler, FileAlertLedger, PageKind, page
 deliveries = []
 handler = EmailAlertHandler(
     component="child", run_id="r", ledger=FileAlertLedger(pathlib.Path(sys.argv[1])),
@@ -150,7 +154,9 @@ print("READY", flush=True)
 sys.stdin.readline()
 for i in range(20):
     kind = chr(97+i) if {distinct_keys!r} else "shared"
-    handler.handle(logging.LogRecord("x", logging.CRITICAL, "f", 1, f"stage=quality kind={{kind}} rows={{i}}", (), None))
+    rec = logging.LogRecord("x", logging.CRITICAL, "f", 1, f"stage=quality kind={{kind}} rows={{i}}", (), None)
+    rec.__dict__.update(page(PageKind.REGULAR_FEED_DOWN))
+    handler.handle(rec)
 print(json.dumps({{"delivered":len(deliveries)}}), flush=True)
 """
     with _concurrent_children(code, ledger) as children:
