@@ -917,7 +917,9 @@ def test_select_universe_empty_selection_is_valid() -> None:
 
     result = select_universe_detailed(featured, decision, slot_budget=100)
 
-    expected_columns = ["decision_date", "symbol", "selection_reasons", "daily_change_pct", "trade_value_100m", "tv_ratio"]
+    expected_columns = [
+        "decision_date", "symbol", "selection_reasons", "daily_change_pct", "trade_value_100m", "tv_ratio", "direction",
+    ]
     assert result.selected.height == 0
     assert result.dropped.height == 0
     assert result.selected.columns == expected_columns

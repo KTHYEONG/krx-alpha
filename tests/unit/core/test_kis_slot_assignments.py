@@ -41,6 +41,9 @@ def _krx_rows() -> dict[str, dict[str, object]]:
         elif row["purpose"] == "regular_kis_ws":
             name = "regular_kis_ws"
             assert str(row["slot"]) in [str(slot) for slot in selectors["KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS"]]
+        elif row["purpose"] == "regular_kis_dynamic_ws":
+            name = "regular_kis_dynamic_ws"
+            assert str(row["slot"]) not in [str(slot) for slot in selectors["KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS"]]
         elif row["slot"] == selectors["KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT"]:
             name = "premarket_ws"
         else:
@@ -124,7 +127,14 @@ def test_window_overlap_boundaries(left: list[str], right: list[str], overlaps: 
 
 def test_krx_rows_exact() -> None:
     krx = _krx_rows()
-    assert set(krx) == {"snapshot_rest", "minute_history_rest", "premarket_ws", "regular_kis_ws", "aftermarket_ws"}
+    assert set(krx) == {
+        "snapshot_rest",
+        "minute_history_rest",
+        "premarket_ws",
+        "regular_kis_ws",
+        "regular_kis_dynamic_ws",
+        "aftermarket_ws",
+    }
 
     assert krx["snapshot_rest"]["channel"] == "rest"
     assert krx["snapshot_rest"]["slots"] == ["2"]
@@ -141,6 +151,10 @@ def test_krx_rows_exact() -> None:
     assert krx["regular_kis_ws"]["channel"] == "ws"
     assert krx["regular_kis_ws"]["slots"] == ["1", "2", "3", "4"]
     assert krx["regular_kis_ws"]["window_kst"] == ["08:28", "15:32"]
+
+    assert krx["regular_kis_dynamic_ws"]["channel"] == "ws"
+    assert krx["regular_kis_dynamic_ws"]["slots"] == ["5"]
+    assert krx["regular_kis_dynamic_ws"]["window_kst"] == ["09:00", "15:32"]
 
     assert krx["aftermarket_ws"]["channel"] == "ws"
     assert krx["aftermarket_ws"]["slots"] == ["1", "2", "3", "4"]
@@ -219,4 +233,4 @@ def test_assignment_table_excluded_from_image() -> None:
 def test_canonical_table_hash_pinned() -> None:
     raw = TABLE_PATH.read_bytes()
     assert raw.splitlines()[0] == b"# canonical: krx-alpha/deploy/shared/kis_slot_assignments.toml schema=1"
-    assert hashlib.sha256(raw).hexdigest() == "5064bbb38e126f37befdbd26a80578000bfd061fb0e4dd49478f2e8386e6a751"
+    assert hashlib.sha256(raw).hexdigest() == "f4bf2bae16ea5ad89099e59ba3b3b52f45d9fe7b16024a103ae5a7608864bf2e"

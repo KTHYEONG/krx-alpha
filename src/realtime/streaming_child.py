@@ -17,7 +17,8 @@ from src.core.errors import SlotBudgetExceededError
 from src.realtime.connection_handover import Handover, SwapRequest
 from src.realtime.contracts import L0Frame, VendorAck, VendorAdapter
 from src.realtime.lag_monitor import LagMonitor
-from src.realtime.streamer import FrameSink, RealtimeStreamer, SessionFrameSink
+from src.realtime.streamer import FrameSink, LiveSubscriptionWatch, RealtimeStreamer, SessionFrameSink
+from src.realtime.ws_lease import Lease, WsLeaseLedger
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,10 @@ class HandoverSettings:
     max_sessions: int | None = None
     stall_lag_s: float | None = None
     refresh_cooldown_s: float = 30.0
+    lease_ledger: WsLeaseLedger | None = None
+    owner: str = ""
+    primary_lease: Lease | None = None
+    lease_ttl_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -87,6 +92,7 @@ async def run_streaming_child(
     lag_monitor: LagMonitor | None = None,
     frame_observers: tuple[FrameObserver, ...] = (),
     handover: HandoverSettings | None = None,
+    live_watch: LiveSubscriptionWatch | None = None,
 ) -> None:
     """Drive one bootstrapped session until SIGTERM/deadline/max_cycles, then persist."""
     stop = asyncio.Event()
@@ -102,6 +108,7 @@ async def run_streaming_child(
 
         deadline_task = asyncio.ensure_future(_deadline_watch())
     http: aiohttp.ClientSession | None = None
+    handover_state: Handover | None = None
     try:
         http = aiohttp.ClientSession()
         adapter = adapter_factory(http)
@@ -115,10 +122,13 @@ async def run_streaming_child(
         for observer in frame_observers:
             sink = LagMonitoringSink(sink, observer)
         extra: dict[str, Any] = {}
+        if live_watch is not None:
+            extra["pairs_provider"] = live_watch.pairs
+            extra["live_watch"] = live_watch
         if handover is not None:
-            extra["handover"] = Handover(
+            handover_state = Handover(
                 adapter_factory=lambda: adapter_factory(http),
-                pairs=pairs,
+                pairs=live_watch.pairs if live_watch is not None else pairs,
                 request=handover.request,
                 max_s=handover.max_s,
                 cooldown_s=handover.cooldown_s,
@@ -126,7 +136,12 @@ async def run_streaming_child(
                 max_sessions=handover.max_sessions,
                 stall_lag_s=handover.stall_lag_s,
                 refresh_cooldown_s=handover.refresh_cooldown_s,
+                lease_ledger=handover.lease_ledger,
+                owner=handover.owner,
+                primary_lease=handover.primary_lease,
+                lease_ttl_s=handover.lease_ttl_s,
             )
+            extra["handover"] = handover_state
         streamer = streamer_factory(
             adapter=adapter,
             sink=sink,
@@ -136,6 +151,8 @@ async def run_streaming_child(
         )
         await streamer.run_forever(stop, max_cycles=max_cycles)
     finally:
+        if handover_state is not None:
+            handover_state.release_primary_lease()
         if deadline_task is not None:
             deadline_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

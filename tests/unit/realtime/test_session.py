@@ -1039,3 +1039,42 @@ def test_bootstrap_rejects_non_positive_symbol_limit(tmp_path) -> None:
         with pytest.raises(ValueError, match="symbol_limit"):
             bootstrap_session(cfg, now_ns=1)
     assert not (tmp_path / "s.json").exists()
+
+
+def test_bootstrap_session_rejects_a_negative_shard_index(tmp_path) -> None:
+    import datetime as dt
+    from dataclasses import replace
+
+    import pytest
+
+    from src.realtime.session import SessionConfig, bootstrap_session
+
+    cfg = SessionConfig(
+        session_date=dt.date(2026, 9, 14),
+        journal_root=tmp_path / "l0",
+        manifest_path=tmp_path / "session.json",
+        candidates_path=tmp_path / "candidates.json",
+        ntp_host="primary",
+        slot_budget=1,
+        max_clock_offset_ns=2_000_000_000,
+        desired_streams=("H0STCNT0",),
+        vendor="ls",
+    )
+
+    with pytest.raises(ValueError, match="ls_shard_index -1 must be non-negative"):
+        bootstrap_session(replace(cfg, ls_shard_index=-1))
+    assert not cfg.manifest_path.exists()
+
+
+def test_shard_rows_report_candidates_missing_from_the_candidate_file(caplog) -> None:
+    import logging
+
+    from src.realtime.session import _rows_for_symbols
+
+    caplog.set_level(logging.WARNING, logger="src.realtime.session")
+    rows = [{"symbol": "005930", "tier": "A"}, {"symbol": "000660", "tier": "B"}]
+
+    kept = _rows_for_symbols(rows, ("005930", "035420"))
+
+    assert kept == [{"symbol": "005930", "tier": "A"}]
+    assert "status=MISSING_CANDIDATES missing=1" in caplog.text

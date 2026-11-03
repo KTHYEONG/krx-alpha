@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from src.realtime.contracts import L0Frame, VendorAdapter
 from src.realtime.lag_monitor import event_second_of
 from src.realtime.ls_limits import classify_ls_close_reason
+from src.realtime.ws_lease import Lease, LeaseRole, LeaseUnavailable, WsLeaseLedger
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ class _Standby:
     started: float
     first_event_s: int | None = None
     newest_event_s: int | None = None
+    lease: Lease | None = None
 
 
 class Handover:
@@ -72,13 +74,15 @@ class Handover:
     until it closes, so a vendor that stalls subscriptions at the open still has a ready connection. While both are open, a frame whose raw payload was already recorded from the
     other connection is dropped, so L0 and downstream partitions never hold the same event twice.
     A standby failure never affects the old connection.
+    With a lease ledger, every connection holds a slot: a standby without one is never opened, and a lost
+    standby slot drops only the standby.
     """
 
     def __init__(
         self,
         *,
         adapter_factory: Callable[[], VendorAdapter],
-        pairs: list[tuple[str, str]],
+        pairs: list[tuple[str, str]] | Callable[[], list[tuple[str, str]]],
         request: SwapRequest,
         max_s: float,
         cooldown_s: float,
@@ -88,6 +92,10 @@ class Handover:
         stall_lag_s: float | None = None,
         refresh_cooldown_s: float = 30.0,
         wall_clock: Callable[[], dt.datetime] = _now_kst,
+        lease_ledger: WsLeaseLedger | None = None,
+        owner: str = "",
+        primary_lease: Lease | None = None,
+        lease_ttl_s: float = 0.0,
     ) -> None:
         if max_s <= 0 or cooldown_s < 0:
             raise ValueError("max_s must be positive and cooldown_s non-negative")
@@ -95,6 +103,8 @@ class Handover:
             raise ValueError("stall_lag_s must be positive")
         if refresh_cooldown_s < 0:
             raise ValueError("refresh_cooldown_s must be non-negative")
+        if lease_ledger is not None and lease_ttl_s <= 0:
+            raise ValueError("lease_ttl_s must be positive when a lease ledger is used")
         self._factory = adapter_factory
         self._pairs = pairs
         self._request = request
@@ -118,6 +128,15 @@ class Handover:
         self._standby_owner = 0
         self._primary_event_s = -1
         self._dropped = 0
+        self._ledger = lease_ledger
+        self._owner = owner
+        self._primary_lease = primary_lease
+        self._lease_renew_s = lease_ttl_s / 3
+        self._lease_tended_at: float | None = monotonic() if lease_ledger is not None else None
+        self._opening_lease: Lease | None = None
+
+    def _current_pairs(self) -> list[tuple[str, str]]:
+        return list(self._pairs() if callable(self._pairs) else self._pairs)
 
     @property
     def active(self) -> bool:
@@ -179,15 +198,14 @@ class Handover:
             )
             return
         self._last_start = now
-        self._opening = asyncio.ensure_future(self._open())
-        logger.warning("[DATA] stage=stream_handover status=STARTED")
+        self._start_opening()
 
     async def _open(self) -> VendorAdapter | None:
         adapter: VendorAdapter | None = None
         try:
             adapter = self._factory()
             await adapter.connect()
-            acks = await adapter.subscribe(self._pairs)
+            acks = await adapter.subscribe(self._current_pairs())
             if not acks or not all(ack.accepted for ack in acks):
                 raise ValueError("standby subscription rejected")
         except asyncio.CancelledError:
@@ -245,38 +263,42 @@ class Handover:
                 primary_seen = self._seen.copy()
                 await self._drop_standby()
                 self._seen = primary_seen
-            self._refresh_overlap = True
-            self._opening = asyncio.ensure_future(self._open())
-            logger.warning("[DATA] stage=stream_handover status=STARTED")
+            self._refresh_overlap = self._start_opening()
             return None
         if self._opening is not None and self._opening in done:
-            adapter = self._opening.result()
-            self._opening = None
+            opening, self._opening = self._opening, None
+            lease, self._opening_lease = self._opening_lease, None
+            adapter = None if opening.cancelled() else opening.result()
+            if adapter is not None and self._ledger is not None and lease is None:
+                await self._close(adapter)
+                adapter = None
             if adapter is not None:
-                self._standby = _Standby(adapter, asyncio.ensure_future(adapter.recv()), self._monotonic())
+                self._standby = _Standby(adapter, asyncio.ensure_future(adapter.recv()), self._monotonic(), lease=lease)
                 self._standby_owner += 1
                 if not self._refresh_overlap:
                     self._seen.clear()
                 self._primary_event_s = -1
                 self._dropped = 0
             else:
+                self._release_lease(lease)
                 self._seen.clear()
             self._refresh_overlap = False
+        if self._ledger is not None:
+            await self._tend_leases()
         standby = self._standby
         if standby is None:
             return None
         if standby.recv_task.done() and standby.recv_task in done and standby.recv_task.exception() is not None:
-            logger.warning(
-                "[DATA] stage=stream_handover status=STANDBY_LOST reason=%s",
-                classify_ls_close_reason(str(standby.recv_task.exception())),
-            )
-            await self._drop_standby()
+            await self._lose_standby(classify_ls_close_reason(str(standby.recv_task.exception())))
             return None
         if self._window is not None and self._window():
             return None
         caught_up = standby.first_event_s is not None and self._primary_event_s >= standby.first_event_s
         expired = self._monotonic() - standby.started >= self._max_s
         if not (caught_up or expired):
+            return None
+        if standby.lease is not None and not self._renew(standby.lease):
+            await self._lose_standby("lease_lost")
             return None
         primary_recv.cancel()
         await asyncio.gather(primary_recv, return_exceptions=True)
@@ -310,6 +332,7 @@ class Handover:
         self._seen.clear()
         # The swap a pending request asked for has just happened; keeping it would open a spurious standby.
         self._request.take()
+        self._take_over_primary_lease(standby.lease)
         return CutOver(standby.adapter, standby.recv_task)
 
     async def _drop_standby(self) -> None:
@@ -319,14 +342,94 @@ class Handover:
             standby.recv_task.cancel()
             await asyncio.gather(standby.recv_task, return_exceptions=True)
             await self._close(standby.adapter)
+            self._release_lease(standby.lease)
 
     async def aclose(self) -> None:
         """Cancel any bring-up in flight and close the standby; safe to call repeatedly."""
         self._refresh_overlap = False
         if self._opening is not None:
             opening, self._opening = self._opening, None
+            lease, self._opening_lease = self._opening_lease, None
             opening.cancel()
             outcome = (await asyncio.gather(opening, return_exceptions=True))[0]
             if outcome is not None and not isinstance(outcome, BaseException):
                 await self._close(outcome)
+            self._release_lease(lease)
         await self._drop_standby()
+
+    def release_primary_lease(self) -> None:
+        """Return this process's PRIMARY slot to the ledger; call once the receive loop has stopped."""
+        lease, self._primary_lease = self._primary_lease, None
+        self._release_lease(lease)
+
+    def _start_opening(self) -> bool:
+        """Start a standby bring-up; False when the lease ledger denies the STANDBY slot."""
+        if self._ledger is not None:
+            try:
+                self._opening_lease = self._ledger.acquire(self._owner, LeaseRole.STANDBY)
+            except LeaseUnavailable:
+                logger.warning("[DATA] stage=stream_handover status=OPEN_SKIPPED reason=lease_denied")
+                return False
+        self._opening = asyncio.ensure_future(self._open())
+        logger.warning("[DATA] stage=stream_handover status=STARTED")
+        return True
+
+    async def _lose_standby(self, reason: str) -> None:
+        logger.warning("[DATA] stage=stream_handover status=STANDBY_LOST reason=%s", reason)
+        await self._drop_standby()
+
+    async def _tend_leases(self) -> None:
+        """Renew held leases at most once per ttl/3; a lost standby is dropped and a lost primary slot is re-acquired."""
+        now = self._monotonic()
+        if self._lease_tended_at is not None and now - self._lease_tended_at < self._lease_renew_s:
+            return
+        self._lease_tended_at = now
+        if self._opening is not None and self._opening_lease is not None and not self._renew(self._opening_lease):
+            logger.warning("[DATA] stage=stream_handover status=OPEN_FAILED reason=lease_lost")
+            self._opening_lease = None
+            self._opening.cancel()
+        if self._standby is not None and self._standby.lease is not None and not self._renew(self._standby.lease):
+            await self._lose_standby("lease_lost")
+        if self._primary_lease is not None and self._renew(self._primary_lease):
+            return
+        if self._primary_lease is not None:
+            logger.warning("[SYS] stage=ws_lease status=PRIMARY_LOST owner=%s", self._owner)
+        self._primary_lease = self._acquire_primary()
+
+    def _renew(self, lease: Lease) -> bool:
+        """Renew `lease`; False only when the ledger reports it gone, an unreadable ledger keeps it."""
+        assert self._ledger is not None  # noqa: S101 - callers check
+        try:
+            return self._ledger.renew(lease)
+        except LeaseUnavailable as exc:
+            logger.warning("[SYS] stage=ws_lease status=RENEW_DEFERRED reason=%s", exc)
+            return True
+
+    def _acquire_primary(self) -> Lease | None:
+        assert self._ledger is not None  # noqa: S101 - callers check
+        try:
+            return self._ledger.acquire(self._owner, LeaseRole.PRIMARY)
+        except LeaseUnavailable:
+            return None
+
+    def _take_over_primary_lease(self, standby_lease: Lease | None) -> None:
+        if self._ledger is None:
+            return
+        retired, self._primary_lease = self._primary_lease, None
+        if standby_lease is not None:
+            try:
+                self._primary_lease = self._ledger.promote(standby_lease)
+            except LeaseUnavailable as exc:
+                logger.warning("[SYS] stage=ws_lease status=PROMOTE_FAILED reason=%s", exc)
+                self._release_lease(standby_lease)
+        if self._primary_lease is None:
+            self._primary_lease = self._acquire_primary()
+        self._release_lease(retired)
+
+    def _release_lease(self, lease: Lease | None) -> None:
+        if self._ledger is None or lease is None:
+            return
+        try:
+            self._ledger.release(lease)
+        except LeaseUnavailable as exc:
+            logger.warning("[SYS] stage=ws_lease status=RELEASE_FAILED reason=%s", exc)

@@ -65,6 +65,10 @@ class JsonWsOAuthAdapter(ABC):
         self._pending: list[L0Frame] = []
         self.unparsable_frames = 0
         self._unparsable_warned = False
+        self._live_lock = asyncio.Lock()
+        self._live_waiter: asyncio.Future[str] | None = None
+        self._late_acks = 0
+        self._subscribed: list[tuple[str, str]] = []
 
     @property
     def _logger(self) -> logging.Logger:
@@ -153,6 +157,9 @@ class JsonWsOAuthAdapter(ABC):
         self._pending = []
         self.unparsable_frames = 0
         self._unparsable_warned = False
+        self._live_waiter = None
+        self._late_acks = 0
+        self._subscribed = []
 
     async def _replace_rejected_token(self, token: str) -> None:
         try:
@@ -222,12 +229,85 @@ class JsonWsOAuthAdapter(ABC):
             rsp_cd = str(resp["header"].get("rsp_cd"))
             self._check_ack_code(rsp_cd)
             acks.append(VendorAck(symbol, stream, rsp_cd == "00000", rsp_cd))
+        self._subscribed.extend((a.symbol, a.stream) for a in acks if a.accepted)
         if acks and not any(a.accepted for a in acks) and self._all_rejected_is_auth(acks):
             codes = ",".join(sorted({a.code for a in acks}))
             if self._token is not None:
                 await self._replace_rejected_token(self._token)
             raise VendorAuthRejected(f"auth_rejected:all_acks_rejected:{codes}")
         return acks
+
+    def subscribed_pairs(self) -> tuple[tuple[str, str], ...]:
+        """Pairs accepted on the current connection (reset on connect)."""
+        return tuple(self._subscribed)
+
+    async def subscribe_live(self, pairs: list[tuple[str, str]]) -> list[VendorAck]:
+        """Subscribe while recv() is running; acks are routed through recv(); never reads the socket itself.
+
+        Raises: ValueError when cumulative pairs exceed capacity (nothing sent); VendorDisconnected on send failure;
+        VendorAuthRejected when every answered ack is rejected. Ack timeouts return accepted=False, code="timeout".
+        """
+        async with self._live_lock:
+            if len(self._subscribed) + len(pairs) > self.capacity_pairs:
+                raise ValueError(
+                    f"live subscribe exceeds capacity: {len(self._subscribed)}+{len(pairs)}>{self.capacity_pairs}"
+                )
+            acks: list[VendorAck] = []
+            for idx, (symbol, stream) in enumerate(pairs):
+                if self._subscribe_spacing_s is not None and idx > 0:
+                    await asyncio.sleep(self._subscribe_spacing_s)
+                try:
+                    await self._ws.send_str(
+                        json.dumps(
+                            {
+                                "header": {"token": self._token, "tr_type": self.SUBSCRIBE_TR_TYPE},
+                                "body": self._subscribe_body(symbol, stream),
+                            }
+                        )
+                    )
+                except (aiohttp.ClientError, OSError) as exc:
+                    raise await self._on_subscribe_send_failure(acks, exc) from exc
+                ack = await self._await_live_ack(symbol, stream)
+                acks.append(ack)
+                if ack.accepted:
+                    self._subscribed.append((symbol, stream))
+            answered = [a for a in acks if a.code != "timeout"]
+            if answered and not any(a.accepted for a in answered) and self._all_rejected_is_auth(answered):
+                codes = ",".join(sorted({a.code for a in answered}))
+                if self._token is not None:
+                    await self._replace_rejected_token(self._token)
+                raise VendorAuthRejected(f"auth_rejected:all_acks_rejected:{codes}")
+            return acks
+
+    async def _await_live_ack(self, symbol: str, stream: str) -> VendorAck:
+        waiter: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._live_waiter = waiter
+        try:
+            rsp_cd = await asyncio.wait_for(waiter, timeout=self._ack_timeout_s)
+        except TimeoutError:
+            self._late_acks += 1
+            self._logger.warning(
+                "[DATA] stage=live_subscribe status=TIMEOUT conn_id=%s symbol=%s stream=%s",
+                self._conn_id,
+                symbol,
+                stream,
+            )
+            return VendorAck(symbol, stream, False, "timeout")
+        finally:
+            self._live_waiter = None
+        self._check_ack_code(rsp_cd)
+        return VendorAck(symbol, stream, rsp_cd == "00000", rsp_cd)
+
+    def _route_live_ack(self, header: dict[str, Any]) -> bool:
+        waiter = self._live_waiter
+        if waiter is not None and not waiter.done():
+            waiter.set_result(str(header["rsp_cd"]))
+            return True
+        if self._late_acks > 0:
+            self._late_acks -= 1
+            self._logger.info("[DATA] stage=live_subscribe status=LATE_ACK_IGNORED conn_id=%s", self._conn_id)
+            return True
+        return False
 
     async def recv(self) -> L0Frame:
         """Return the next data frame (stashed frames first); raises VendorDisconnected on close/transport errors."""
@@ -263,6 +343,8 @@ class JsonWsOAuthAdapter(ABC):
                 frame = self._data_frame(o, header, data)
                 if frame is not None:
                     return frame
+                if "rsp_cd" in header and self._route_live_ack(header):
+                    continue
                 if self._counts_as_unparsable(header):
                     self._note_unparsable(len(data) if isinstance(data, str) else 0)
                 continue

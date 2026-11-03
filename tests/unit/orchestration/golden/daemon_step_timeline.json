@@ -124,16 +124,21 @@
         "ingest_stale": false,
         "last_db_crosscheck_result": null,
         "last_ingest_check": null,
+        "last_kiwoom_crosscheck_result": null,
         "last_snapshot_result": "running",
         "last_summary": "2026-09-16T08:25:00+09:00",
         "last_supervisor_result": "running",
+        "ls_shard_plan": [],
+        "ls_shard_plan_day": null,
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": "2026-09-16T08:30:00+09:00",
         "next_premarket_pool_at": null,
+        "nightly_done": {},
         "orchestrated_for": null,
         "orchestration_attempts": 1,
         "orchestration_day": "2026-09-16",
+        "overdue_judged_for": null,
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
         "premarket_circuit_alerted_day": null,
@@ -149,10 +154,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "nightly_done": {},
-        "last_kiwoom_crosscheck_result": null,
-        "overdue_judged_for": null
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T08:25:00+09:00"
     },
@@ -200,16 +202,21 @@
         "ingest_stale": false,
         "last_db_crosscheck_result": null,
         "last_ingest_check": null,
+        "last_kiwoom_crosscheck_result": null,
         "last_snapshot_result": "running",
         "last_summary": "2026-09-16T08:25:00+09:00",
         "last_supervisor_result": "running",
+        "ls_shard_plan": [],
+        "ls_shard_plan_day": null,
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": "2026-09-16T08:30:00+09:00",
         "next_premarket_pool_at": null,
+        "nightly_done": {},
         "orchestrated_for": null,
         "orchestration_attempts": 1,
         "orchestration_day": "2026-09-16",
+        "overdue_judged_for": null,
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
         "premarket_circuit_alerted_day": null,
@@ -225,10 +232,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "nightly_done": {},
-        "last_kiwoom_crosscheck_result": null,
-        "overdue_judged_for": null
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T08:26:00+09:00"
     },
@@ -244,6 +248,18 @@
             "STREAMER_ACTIVE"
           ],
           false
+        ],
+        [
+          "INFO",
+          "[DATA] stage=collection_tiers date=%s tier_a=%d tier_b_static=%d tier_b_reserve=%d tier_c=%d",
+          [
+            "2026-09-16",
+            1,
+            0,
+            0,
+            0
+          ],
+          true
         ],
         [
           "INFO",
@@ -333,16 +349,34 @@
         "ingest_stale": false,
         "last_db_crosscheck_result": null,
         "last_ingest_check": null,
+        "last_kiwoom_crosscheck_result": null,
         "last_snapshot_result": "running",
         "last_summary": "2026-09-16T08:25:00+09:00",
         "last_supervisor_result": "running",
+        "ls_shard_plan": [
+          {
+            "dynamic_reserve_symbols": 0,
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "window_standby": true
+          }
+        ],
+        "ls_shard_plan_day": "2026-09-16",
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
+        "overdue_judged_for": null,
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
         "premarket_circuit_alerted_day": null,
@@ -358,10 +392,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "nightly_done": {},
-        "last_kiwoom_crosscheck_result": null,
-        "overdue_judged_for": null
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T08:31:00+09:00"
     },
@@ -439,16 +470,34 @@
         "ingest_stale": true,
         "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_kiwoom_crosscheck_result": null,
         "last_snapshot_result": "running",
         "last_summary": "2026-09-16T09:10:00+09:00",
         "last_supervisor_result": "running",
+        "ls_shard_plan": [
+          {
+            "dynamic_reserve_symbols": 0,
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "window_standby": true
+          }
+        ],
+        "ls_shard_plan_day": "2026-09-16",
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
+        "overdue_judged_for": null,
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
         "premarket_circuit_alerted_day": null,
@@ -464,10 +513,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "nightly_done": {},
-        "last_kiwoom_crosscheck_result": null,
-        "overdue_judged_for": null
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T09:10:00+09:00"
     },
@@ -562,16 +608,34 @@
         "ingest_stale": true,
         "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_kiwoom_crosscheck_result": null,
         "last_snapshot_result": "running",
         "last_summary": "2026-09-16T15:32:00+09:00",
         "last_supervisor_result": "running",
+        "ls_shard_plan": [
+          {
+            "dynamic_reserve_symbols": 0,
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "window_standby": true
+          }
+        ],
+        "ls_shard_plan_day": "2026-09-16",
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
+        "overdue_judged_for": null,
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
         "premarket_circuit_alerted_day": null,
@@ -587,10 +651,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "nightly_done": {},
-        "last_kiwoom_crosscheck_result": null,
-        "overdue_judged_for": null
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T15:32:00+09:00"
     },
@@ -737,16 +798,34 @@
         "ingest_stale": true,
         "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_kiwoom_crosscheck_result": null,
         "last_snapshot_result": "running",
         "last_summary": "2026-09-16T15:45:00+09:00",
         "last_supervisor_result": "running",
+        "ls_shard_plan": [
+          {
+            "dynamic_reserve_symbols": 0,
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "window_standby": true
+          }
+        ],
+        "ls_shard_plan_day": "2026-09-16",
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
+        "overdue_judged_for": null,
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
         "premarket_circuit_alerted_day": null,
@@ -762,10 +841,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "nightly_done": {},
-        "last_kiwoom_crosscheck_result": null,
-        "overdue_judged_for": null
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T15:45:00+09:00"
     },
@@ -916,16 +992,34 @@
         "ingest_stale": true,
         "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_kiwoom_crosscheck_result": null,
         "last_snapshot_result": "running",
         "last_summary": "2026-09-16T16:05:00+09:00",
         "last_supervisor_result": "running",
+        "ls_shard_plan": [
+          {
+            "dynamic_reserve_symbols": 0,
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "window_standby": true
+          }
+        ],
+        "ls_shard_plan_day": "2026-09-16",
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
+        "overdue_judged_for": null,
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
         "premarket_circuit_alerted_day": null,
@@ -941,10 +1035,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "nightly_done": {},
-        "last_kiwoom_crosscheck_result": null,
-        "overdue_judged_for": null
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T16:05:00+09:00"
     },
@@ -1155,16 +1246,34 @@
         "ingest_stale": true,
         "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_kiwoom_crosscheck_result": null,
         "last_snapshot_result": null,
         "last_summary": "2026-09-16T20:05:00+09:00",
         "last_supervisor_result": null,
+        "ls_shard_plan": [
+          {
+            "dynamic_reserve_symbols": 0,
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "window_standby": true
+          }
+        ],
+        "ls_shard_plan_day": "2026-09-16",
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
+        "overdue_judged_for": null,
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
         "premarket_circuit_alerted_day": null,
@@ -1180,10 +1289,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "nightly_done": {},
-        "last_kiwoom_crosscheck_result": null,
-        "overdue_judged_for": null
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T20:05:00+09:00"
     },
@@ -1247,16 +1353,34 @@
         "ingest_stale": true,
         "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_kiwoom_crosscheck_result": null,
         "last_snapshot_result": null,
         "last_summary": "2026-09-16T20:05:00+09:00",
         "last_supervisor_result": null,
+        "ls_shard_plan": [
+          {
+            "dynamic_reserve_symbols": 0,
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "window_standby": true
+          }
+        ],
+        "ls_shard_plan_day": "2026-09-16",
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
+        "overdue_judged_for": null,
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
         "premarket_circuit_alerted_day": null,
@@ -1272,10 +1396,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "nightly_done": {},
-        "last_kiwoom_crosscheck_result": null,
-        "overdue_judged_for": null
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T20:06:00+09:00"
     },
@@ -1360,16 +1481,34 @@
         "ingest_stale": true,
         "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_kiwoom_crosscheck_result": null,
         "last_snapshot_result": null,
         "last_summary": "2026-09-16T22:00:00+09:00",
         "last_supervisor_result": null,
+        "ls_shard_plan": [
+          {
+            "dynamic_reserve_symbols": 0,
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "window_standby": true
+          }
+        ],
+        "ls_shard_plan_day": "2026-09-16",
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
+        "overdue_judged_for": null,
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
         "premarket_circuit_alerted_day": null,
@@ -1385,10 +1524,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "nightly_done": {},
-        "last_kiwoom_crosscheck_result": null,
-        "overdue_judged_for": null
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T22:00:00+09:00"
     },
@@ -1499,16 +1635,34 @@
         "ingest_stale": true,
         "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_kiwoom_crosscheck_result": null,
         "last_snapshot_result": null,
         "last_summary": "2026-09-17T09:00:00+09:00",
         "last_supervisor_result": null,
+        "ls_shard_plan": [
+          {
+            "dynamic_reserve_symbols": 0,
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "window_standby": true
+          }
+        ],
+        "ls_shard_plan_day": "2026-09-16",
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
+        "overdue_judged_for": null,
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
         "premarket_circuit_alerted_day": null,
@@ -1524,10 +1678,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "nightly_done": {},
-        "last_kiwoom_crosscheck_result": null,
-        "overdue_judged_for": null
+        "streamer_restarts": 0
       },
       "instant": "2026-09-17T09:00:00+09:00"
     },
@@ -1628,16 +1779,34 @@
         "ingest_stale": true,
         "last_db_crosscheck_result": null,
         "last_ingest_check": "2026-09-16T09:10:00+09:00",
+        "last_kiwoom_crosscheck_result": null,
         "last_snapshot_result": null,
         "last_summary": "2026-09-17T20:05:00+09:00",
         "last_supervisor_result": null,
+        "ls_shard_plan": [
+          {
+            "dynamic_reserve_symbols": 0,
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "window_standby": true
+          }
+        ],
+        "ls_shard_plan_day": "2026-09-16",
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
         "orchestration_day": "2026-09-16",
+        "overdue_judged_for": null,
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-16",
         "premarket_circuit_alerted_day": null,
@@ -1653,10 +1822,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "nightly_done": {},
-        "last_kiwoom_crosscheck_result": null,
-        "overdue_judged_for": null
+        "streamer_restarts": 0
       },
       "instant": "2026-09-17T20:05:00+09:00"
     },
@@ -1701,6 +1867,18 @@
             "graceful"
           ],
           false
+        ],
+        [
+          "INFO",
+          "[DATA] stage=collection_tiers date=%s tier_a=%d tier_b_static=%d tier_b_reserve=%d tier_c=%d",
+          [
+            "2026-09-18",
+            1,
+            0,
+            0,
+            0
+          ],
+          true
         ]
       ],
       "calls": [
@@ -1804,16 +1982,34 @@
         "ingest_stale": false,
         "last_db_crosscheck_result": null,
         "last_ingest_check": null,
+        "last_kiwoom_crosscheck_result": null,
         "last_snapshot_result": "running",
         "last_summary": "2026-09-18T08:25:00+09:00",
         "last_supervisor_result": "running",
+        "ls_shard_plan": [
+          {
+            "dynamic_reserve_symbols": 0,
+            "shard_index": 0,
+            "streams": [
+              "H0STCNT0",
+              "H0STASP0"
+            ],
+            "symbols": [
+              "005930"
+            ],
+            "window_standby": true
+          }
+        ],
+        "ls_shard_plan_day": "2026-09-18",
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "nightly_done": {},
         "orchestrated_for": "2026-09-18",
         "orchestration_attempts": 1,
         "orchestration_day": "2026-09-18",
+        "overdue_judged_for": null,
         "possible_holiday_warned_for": null,
         "preflight_day": "2026-09-18",
         "premarket_circuit_alerted_day": null,
@@ -1829,10 +2025,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "nightly_done": {},
-        "last_kiwoom_crosscheck_result": null,
-        "overdue_judged_for": null
+        "streamer_restarts": 0
       },
       "instant": "2026-09-18T08:25:00+09:00"
     }
@@ -1867,6 +2060,8 @@
     "[DAEMON] stage=ingest_watchdog status=POSSIBLE_HOLIDAY date=%s",
     "[DAEMON] stage=ingest_watchdog status=RECOVERED date=%s age_s=%d",
     "[DAEMON] stage=ingest_watchdog status=STALE date=%s age_s=%s",
+    "[DAEMON] stage=intraday_discovery status=FAIL reason=circuit_open",
+    "[DAEMON] stage=intraday_discovery status=RESTARTED exit_code=%s",
     "[DAEMON] stage=kiwoom_crosscheck status=FAIL reason=circuit_open",
     "[DAEMON] stage=kiwoom_crosscheck status=RESTARTED exit_code=%s",
     "[DAEMON] stage=nightly_%s status=FAIL exit_code=launch reason=%s",
@@ -1897,6 +2092,12 @@
     "[DATA] stage=aftermarket_prearm status=%s venue=%s shard=%d open=%s start_lead_s=%s ack_lead_s=%s reason=%s",
     "[DATA] stage=aftermarket_reselection status=OK venue=%s symbols=%d",
     "[DATA] stage=aftermarket_stream status=DEFERRED reason=slot_busy_regular_kis slot=%s",
+    "[DATA] stage=collection_tiers date=%s tier_a=%d tier_b_static=%d tier_b_reserve=%d tier_c=%d",
+    "[DATA] stage=ls_shard_plan status=SKIP reason=%s date=%s",
+    "[DATA] stage=ls_shard_stream status=FAIL reason=circuit_open shard=%d date=%s",
+    "[DATA] stage=ls_shard_stream status=RESTARTED shard=%d exit_code=%s",
+    "[DATA] stage=ls_shard_stream status=STARTED shard=%d date=%s",
+    "[DATA] stage=membership status=FAIL error_type=%s reason=%s date=%s",
     "[DATA] stage=premarket_eod status=%s date=%s accepted=%d planned=%d",
     "[DATA] stage=premarket_eod status=SKIPPED date=%s accepted=%d planned=%d",
     "[DATA] stage=premarket_plan status=SKIP reason=%s date=%s",
@@ -1911,6 +2112,8 @@
     "[DATA] stage=regular_kis_audit status=ERROR date=%s error=%s",
     "[DATA] stage=regular_kis_audit status=WRITE_FAIL date=%s error=%s",
     "[DATA] stage=regular_kis_compare date=%s kis_loss_ratio=%.6g ls_loss_ratio=%.6g kis_open_max_lag_s=%s ls_open_max_lag_s=%s kis_symbols=%d",
+    "[DATA] stage=regular_kis_dynamic status=FAIL reason=circuit_open slot=%s date=%s",
+    "[DATA] stage=regular_kis_dynamic status=RESTARTED slot=%s exit_code=%s",
     "[DATA] stage=regular_kis_plan status=SKIP reason=%s date=%s",
     "[DATA] stage=regular_kis_plan status=SKIP reason=degraded_candidates date=%s",
     "[DATA] stage=regular_kis_stream status=FAIL reason=circuit_open shard=%s date=%s",

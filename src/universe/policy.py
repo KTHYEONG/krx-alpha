@@ -6,7 +6,7 @@ import datetime as dt
 import logging
 import math
 from dataclasses import dataclass
-from typing import cast
+from typing import Literal, cast
 
 import polars as pl
 
@@ -16,7 +16,23 @@ from src.marketdata.schema import REQUIRED_BAR_COLUMNS
 
 logger = logging.getLogger(__name__)
 
-FEATURE_COLUMNS: tuple[str, ...] = ("tv_median_20", "close_max_60", "tv_ratio")
+FEATURE_COLUMNS: tuple[str, ...] = ("tv_median_20", "close_max_60", "close_min_60", "tv_ratio")
+UPSIDE_REASONS: frozenset[str] = frozenset({"limit_up", "surge10", "volsurge", "newhigh60"})
+DOWNSIDE_REASONS: frozenset[str] = frozenset({"limit_down", "plunge10", "volsurge_down", "newlow60"})
+POLICY_VERSION_V1: str = "tiered_v1"
+POLICY_VERSION_SYMMETRIC: str = "tiered_v2_symmetric"
+_NORMALIZATION_HELPER_COLUMNS: tuple[str, ...] = (
+    "_implied_base",
+    "_implied_valid",
+    "_prev_close",
+    "_base_valid",
+    "_event_base",
+    "_is_implied",
+    "_event_ratio_raw",
+    "_event_ratio",
+    "_cum_event",
+    "_norm_close",
+)
 PRICE_LIMIT_GUARD_PCT: float = 31.0
 LIMIT_UP_PCT: float = 29.0
 SURGE_PCT: float = 10.0
@@ -36,7 +52,7 @@ SECURITY_CLASS_COLUMNS: tuple[str, ...] = ("section", "stock_cert_kind")
 
 
 def compute_selection_features(bars: pl.DataFrame) -> pl.DataFrame:
-    """Attach rolling selection features; close_max_60 is corporate-action adjusted to each row's own price basis using only rows at or before it."""
+    """Attach rolling selection features; close_max_60 and close_min_60 are corporate-action adjusted to each row's own price basis using only rows at or before it."""
     missing = [c for c in REQUIRED_BAR_COLUMNS if c not in bars.columns]
     if missing:
         raise ValueError(f"missing required bar columns: {missing}")
@@ -59,7 +75,10 @@ def compute_selection_features(bars: pl.DataFrame) -> pl.DataFrame:
     clean = clean.with_columns([
         pl.col("trade_value_100m").rolling_median(window_size=TV_MEDIAN_WINDOW).over("symbol").alias("tv_median_20"),
     ])
-    clean = _with_close_max_60(clean)
+    clean = _with_event_normalized_close(clean)
+    clean = _with_close_extremum_60(clean, extremum="max")
+    clean = _with_close_extremum_60(clean, extremum="min")
+    clean = clean.drop([c for c in _NORMALIZATION_HELPER_COLUMNS if c in clean.columns])
     clean = clean.with_columns([
         pl.when(pl.col("tv_median_20") > 0)
         .then(pl.col("trade_value_100m") / pl.col("tv_median_20"))
@@ -70,7 +89,7 @@ def compute_selection_features(bars: pl.DataFrame) -> pl.DataFrame:
     return clean
 
 
-def _with_close_max_60(clean: pl.DataFrame) -> pl.DataFrame:
+def _with_event_normalized_close(clean: pl.DataFrame) -> pl.DataFrame:
     prev_close = pl.col("close").shift(1).over("symbol")
     implied_expr = pl.col("close") / (1.0 + pl.col("daily_change_pct") / 100.0)
     implied_valid = (
@@ -120,19 +139,37 @@ def _with_close_max_60(clean: pl.DataFrame) -> pl.DataFrame:
         .alias("_event_ratio"),
     ])
     clean = clean.with_columns(pl.col("_event_ratio").cum_prod().over("symbol").alias("_cum_event"))
-    clean = clean.with_columns((pl.col("close") / pl.col("_cum_event")).alias("_norm_close"))
-    clean = clean.with_columns(
-        pl.col("_norm_close").rolling_max(window_size=NEWHIGH_LOOKBACK - 1).over("symbol").alias("_past_norm_max")
+    return clean.with_columns((pl.col("close") / pl.col("_cum_event")).alias("_norm_close"))
+
+
+def _with_close_extremum_60(clean: pl.DataFrame, *, extremum: Literal["max", "min"]) -> pl.DataFrame:
+    is_max = extremum == "max"
+    normalized = pl.col("_norm_close")
+    past_extremum = (
+        normalized.rolling_max(window_size=NEWHIGH_LOOKBACK - 1)
+        if is_max
+        else normalized.rolling_min(window_size=NEWHIGH_LOOKBACK - 1)
     )
-    clean = clean.with_columns(pl.col("_past_norm_max").shift(1).over("symbol").alias("_past_norm_max"))
+    clean = clean.with_columns(past_extremum.over("symbol").alias("_past_norm_ext"))
+    clean = clean.with_columns(pl.col("_past_norm_ext").shift(1).over("symbol").alias("_past_norm_ext"))
+    combine = pl.max_horizontal if is_max else pl.min_horizontal
     clean = clean.with_columns(
-        pl.when(pl.col("_past_norm_max").is_not_null())
-        .then(pl.max_horizontal([pl.col("_cum_event") * pl.col("_past_norm_max"), pl.col("close")]))
+        pl.when(pl.col("_past_norm_ext").is_not_null())
+        .then(combine([pl.col("_cum_event") * pl.col("_past_norm_ext"), pl.col("close")]))
         .otherwise(None)
-        .alias("close_max_60"),
+        .alias(f"close_{extremum}_60"),
     )
-    drop_cols = [c for c in ["_implied_base", "_implied_valid", "_prev_close", "_base_valid", "_event_base", "_is_implied", "_event_ratio_raw", "_event_ratio", "_cum_event", "_norm_close", "_past_norm_max"] if c in clean.columns]
-    return clean.drop(drop_cols)
+    return clean.drop("_past_norm_ext")
+
+
+def _required_feature_columns(*, downside: bool) -> tuple[str, ...]:
+    if downside:
+        return FEATURE_COLUMNS
+    return tuple(c for c in FEATURE_COLUMNS if c != "close_min_60")
+
+
+def policy_version_for(*, downside_enabled: bool) -> str:
+    return POLICY_VERSION_SYMMETRIC if downside_enabled else POLICY_VERSION_V1
 
 
 def ineligible_security_symbols(bars: pl.DataFrame) -> frozenset[str]:
@@ -163,7 +200,7 @@ def ineligible_security_symbols(bars: pl.DataFrame) -> frozenset[str]:
     return frozenset(out)
 
 
-def _event_qualifying(cand: pl.DataFrame) -> pl.DataFrame:
+def _event_qualifying(cand: pl.DataFrame, *, downside: bool) -> pl.DataFrame:
     filtered = cand
     if "stock_cert_kind" in filtered.columns:
         filtered = filtered.filter(
@@ -171,26 +208,34 @@ def _event_qualifying(cand: pl.DataFrame) -> pl.DataFrame:
         )
     if "section" in filtered.columns:
         filtered = filtered.filter(pl.col("section").is_null() | (~pl.col("section").is_in(EXCLUDED_SECTIONS)))
-    cond_limit_up = (pl.col("daily_change_pct") >= LIMIT_UP_PCT).fill_null(False)
-    cond_surge10 = (pl.col("daily_change_pct") >= SURGE_PCT).fill_null(False)
-    cond_volsurge = ((pl.col("tv_ratio") >= VOLSURGE_RATIO) & (pl.col("daily_change_pct") >= VOLSURGE_MIN_CHANGE_PCT)).fill_null(
-        False
-    )
-    cond_newhigh60 = ((pl.col("close") >= pl.col("close_max_60")) & (pl.col("daily_change_pct") >= NEWHIGH_MIN_CHANGE_PCT)).fill_null(
-        False
-    )
+    change = pl.col("daily_change_pct")
+    tv_ratio = pl.col("tv_ratio")
+    close = pl.col("close")
+    up_conds: dict[str, pl.Expr] = {
+        "limit_up": (change >= LIMIT_UP_PCT).fill_null(False),
+        "surge10": (change >= SURGE_PCT).fill_null(False),
+        "volsurge": ((tv_ratio >= VOLSURGE_RATIO) & (change >= VOLSURGE_MIN_CHANGE_PCT)).fill_null(False),
+        "newhigh60": ((close >= pl.col("close_max_60")) & (change >= NEWHIGH_MIN_CHANGE_PCT)).fill_null(False),
+    }
+    down_conds: dict[str, pl.Expr] = {}
+    if downside:
+        down_conds = {
+            "limit_down": (change <= -LIMIT_UP_PCT).fill_null(False),
+            "plunge10": (change <= -SURGE_PCT).fill_null(False),
+            "volsurge_down": ((tv_ratio >= VOLSURGE_RATIO) & (change <= -VOLSURGE_MIN_CHANGE_PCT)).fill_null(False),
+            "newlow60": ((close <= pl.col("close_min_60")) & (change <= -NEWHIGH_MIN_CHANGE_PCT)).fill_null(False),
+        }
+    up_any = pl.any_horizontal(list(up_conds.values()))
+    down_any = pl.any_horizontal(list(down_conds.values())) if down_conds else pl.lit(False)
+    if filtered.select((up_any & down_any).any()).item():
+        raise ValueError("a row qualifies as both upside and downside event")
+    reasons = [pl.when(cond).then(pl.lit(name)).otherwise(None) for name, cond in {**up_conds, **down_conds}.items()]
     liquid = pl.col("trade_value_100m") >= LIQUIDITY_FLOOR_100M
-    filtered = filtered.with_columns(
-        pl.concat_list([
-            pl.when(cond_limit_up).then(pl.lit("limit_up")).otherwise(None),
-            pl.when(cond_surge10).then(pl.lit("surge10")).otherwise(None),
-            pl.when(cond_volsurge).then(pl.lit("volsurge")).otherwise(None),
-            pl.when(cond_newhigh60).then(pl.lit("newhigh60")).otherwise(None),
-        ])
-        .list.drop_nulls()
-        .alias("selection_reasons")
-    )
-    return filtered.filter((cond_limit_up | cond_surge10 | cond_volsurge | cond_newhigh60) & liquid)
+    filtered = filtered.with_columns([
+        pl.concat_list(reasons).list.drop_nulls().alias("selection_reasons"),
+        pl.when(up_any).then(pl.lit("up")).when(down_any).then(pl.lit("down")).otherwise(None).alias("direction"),
+    ])
+    return filtered.filter((up_any | down_any) & liquid)
 
 
 @dataclass(frozen=True)
@@ -199,14 +244,16 @@ class UniverseSelection:
     dropped: pl.DataFrame  # same schema, ordered by priority (trade_value_100m desc, symbol asc)
 
 
-def select_universe_detailed(featured: pl.DataFrame, decision_date: dt.date, *, slot_budget: int) -> UniverseSelection:
+def select_universe_detailed(
+    featured: pl.DataFrame, decision_date: dt.date, *, slot_budget: int, downside: bool = False
+) -> UniverseSelection:
     """Select the decision-date universe and enforce the slot budget by truncation.
 
     Qualifying symbols above ``slot_budget`` are ranked by ``trade_value_100m`` descending, ties by ``symbol`` ascending
     (a total order, so the result is independent of input row order); the top ``slot_budget`` are kept. Truncation
     instead of failure is deliberate: selection count is data-dependent, and aborting the session degrades collection to
     stale candidates, a far larger loss than dropping the lowest-liquidity tail. Exclusion rules and the liquidity floor
-    apply before ranking, so excluded symbols never consume budget.
+    apply before ranking, so excluded symbols never consume budget. ``downside`` enables the mirrored downside events.
 
     Returns: ``selected`` (sorted by symbol) and ``dropped`` (priority order). ``selected + dropped`` equals the qualifying set.
     Raises: ValueError if ``slot_budget < 1``, required columns are missing, or a row is dated after ``decision_date``.
@@ -214,7 +261,7 @@ def select_universe_detailed(featured: pl.DataFrame, decision_date: dt.date, *, 
     """
     if slot_budget < 1:
         raise ValueError(f"slot_budget must be >= 1, got {slot_budget}")
-    missing = [c for c in list(REQUIRED_BAR_COLUMNS) + list(FEATURE_COLUMNS) if c not in featured.columns]
+    missing = [c for c in list(REQUIRED_BAR_COLUMNS) + list(_required_feature_columns(downside=downside)) if c not in featured.columns]
     if missing:
         raise ValueError(f"missing required columns: {missing}")
     if featured.height > 0:
@@ -230,7 +277,7 @@ def select_universe_detailed(featured: pl.DataFrame, decision_date: dt.date, *, 
     if "section" in cand.columns:
         cand = cand.filter(pl.col("section").is_null() | (~pl.col("section").is_in(EXCLUDED_SECTIONS)))
     excluded = eligible - cand.height
-    qualifying = _event_qualifying(featured.filter(pl.col("date") == decision_date))
+    qualifying = _event_qualifying(featured.filter(pl.col("date") == decision_date), downside=downside)
     output_columns = [
         "decision_date",
         "symbol",
@@ -238,6 +285,7 @@ def select_universe_detailed(featured: pl.DataFrame, decision_date: dt.date, *, 
         "daily_change_pct",
         "trade_value_100m",
         "tv_ratio",
+        "direction",
     ]
     base = qualifying.with_columns(pl.lit(decision_date).alias("decision_date")).select(output_columns)
     if base.height <= slot_budget:
@@ -266,6 +314,7 @@ def select_universe_detailed(featured: pl.DataFrame, decision_date: dt.date, *, 
     dropped_tv = sum(v for v in dropped_values if isinstance(v, (int, float)) and math.isfinite(v))
     share = (dropped_tv / total_tv) if total_tv > 0 else 0.0
     head = dropped_ranked["symbol"].to_list()[:DROPPED_LOG_SAMPLE]
+    dropped_directions = dropped_ranked["direction"].to_list()
     logger.info(
         "[ALGO] decision=%s selected=%d excluded=%d budget=%d",
         decision_date.isoformat(),
@@ -274,13 +323,15 @@ def select_universe_detailed(featured: pl.DataFrame, decision_date: dt.date, *, 
         slot_budget,
     )
     logger.warning(
-        "[ALGO] decision=%s status=TRUNCATED kept=%d dropped=%d budget=%d dropped_tv_share=%.6f dropped_head=%s",
+        "[ALGO] decision=%s status=TRUNCATED kept=%d dropped=%d budget=%d dropped_tv_share=%.6f dropped_head=%s dropped_direction=up:%d,down:%d",
         decision_date.isoformat(),
         kept_ranked.height,
         dropped_ranked.height,
         slot_budget,
         share,
         ",".join(str(s) for s in head),
+        dropped_directions.count("up"),
+        dropped_directions.count("down"),
     )
     return UniverseSelection(selected=selected, dropped=dropped_ranked)
 
@@ -358,13 +409,20 @@ def select_core_panel(
     )
 
 
-def select_follow_up(featured: pl.DataFrame, decision_date: dt.date, *, follow_sessions: int) -> pl.DataFrame:
-    """Return symbols that qualified for the event layer on any of the previous follow_sessions dates and still trade on decision_date; columns symbol, follow_age."""
+def select_follow_up(
+    featured: pl.DataFrame, decision_date: dt.date, *, follow_sessions: int, downside: bool = False
+) -> pl.DataFrame:
+    """Return symbols that qualified for the event layer on any of the previous follow_sessions dates and still trade on decision_date.
+
+    Columns: symbol, follow_age, direction (direction of the most recent qualifying day).
+    """
     if follow_sessions < 0:
         raise ValueError(f"follow_sessions must be >= 0, got {follow_sessions}")
-    empty = pl.DataFrame(
-        {"symbol": pl.Series([], dtype=pl.String), "follow_age": pl.Series([], dtype=pl.Int32)}
-    )
+    empty = pl.DataFrame({
+        "symbol": pl.Series([], dtype=pl.String),
+        "follow_age": pl.Series([], dtype=pl.Int32),
+        "direction": pl.Series([], dtype=pl.String),
+    })
     if follow_sessions == 0:
         return empty
     _check_lookahead(featured, decision_date)
@@ -372,13 +430,13 @@ def select_follow_up(featured: pl.DataFrame, decision_date: dt.date, *, follow_s
     window = prior[-follow_sessions:] if follow_sessions <= len(prior) else prior
     if not window:
         return empty
-    age_by_symbol: dict[str, int] = {}
+    age_by_symbol: dict[str, tuple[int, str]] = {}
     for idx, day in enumerate(window):
         order = len(window) - idx
-        qualifying = _event_qualifying(featured.filter(pl.col("date") == day))
-        for symbol in qualifying["symbol"].to_list():
-            if symbol not in age_by_symbol or order < age_by_symbol[symbol]:
-                age_by_symbol[symbol] = order
+        qualifying = _event_qualifying(featured.filter(pl.col("date") == day), downside=downside)
+        for symbol, direction in zip(qualifying["symbol"].to_list(), qualifying["direction"].to_list(), strict=True):
+            if symbol not in age_by_symbol or order < age_by_symbol[symbol][0]:
+                age_by_symbol[symbol] = (order, str(direction))
     if not age_by_symbol:
         return empty
     today = featured.filter(pl.col("date") == decision_date)
@@ -390,13 +448,15 @@ def select_follow_up(featured: pl.DataFrame, decision_date: dt.date, *, follow_s
         today = today.filter(pl.col("section").is_null() | (~pl.col("section").is_in(EXCLUDED_SECTIONS)))
     today = today.filter(pl.col("trade_value_100m") >= LIQUIDITY_FLOOR_100M)
     tradable = set(today["symbol"].to_list())
-    rows = [(s, a) for s, a in age_by_symbol.items() if s in tradable]
+    rows = [(s, a, d) for s, (a, d) in age_by_symbol.items() if s in tradable]
     rows.sort(key=lambda t: (t[1], t[0]))
     if not rows:
         return empty
-    return pl.DataFrame(
-        {"symbol": [s for s, _ in rows], "follow_age": pl.Series([a for _, a in rows], dtype=pl.Int32)}
-    )
+    return pl.DataFrame({
+        "symbol": [s for s, _, _ in rows],
+        "follow_age": pl.Series([a for _, a, _ in rows], dtype=pl.Int32),
+        "direction": [d for _, _, d in rows],
+    })
 
 
 def _rank_key_value(value: object) -> float:
@@ -410,13 +470,21 @@ def _rank_key_value(value: object) -> float:
 def select_universe_tiered(
     featured: pl.DataFrame, decision_date: dt.date, *, slot_budget: int, tiers: UniverseTierSettings
 ) -> UniverseSelection:
-    """Merge core, event and follow-up layers into one priority-ordered selection within slot_budget."""
+    """Merge core, event and follow-up layers into one priority-ordered selection within slot_budget.
+
+    Event and follow-up layers are direction-symmetric when ``tiers.downside_enabled``; ranking stays direction-neutral.
+    """
+    downside = bool(tiers.downside_enabled)
     core_enabled = bool(tiers.core_enabled)
     if not core_enabled:
-        return select_universe_detailed(featured, decision_date, slot_budget=slot_budget)
+        return select_universe_detailed(featured, decision_date, slot_budget=slot_budget, downside=downside)
     if slot_budget < 1:
         raise ValueError(f"slot_budget must be >= 1, got {slot_budget}")
-    missing = [c for c in list(REQUIRED_BAR_COLUMNS) + list(FEATURE_COLUMNS) if c not in featured.columns]
+    missing = [
+        c
+        for c in list(REQUIRED_BAR_COLUMNS) + list(_required_feature_columns(downside=downside))
+        if c not in featured.columns
+    ]
     if missing:
         raise ValueError(f"missing required columns: {missing}")
     _check_lookahead(featured, decision_date)
@@ -437,7 +505,7 @@ def select_universe_tiered(
         exit_rank=exit_rank,
         warmup_sessions=warmup_sessions,
     )
-    follow = select_follow_up(featured, decision_date, follow_sessions=follow_sessions)
+    follow = select_follow_up(featured, decision_date, follow_sessions=follow_sessions, downside=downside)
     cand_today = featured.filter(pl.col("date") == decision_date)
     eligible = cand_today.height
     if "stock_cert_kind" in cand_today.columns:
@@ -451,13 +519,16 @@ def select_universe_tiered(
             pl.col("section").is_null() | (~pl.col("section").is_in(EXCLUDED_SECTIONS))
         )
     excluded = eligible - cand_today_counted.height
-    event_q = _event_qualifying(featured.filter(pl.col("date") == decision_date))
+    event_q = _event_qualifying(featured.filter(pl.col("date") == decision_date), downside=downside)
     event_by_symbol: dict[str, dict[str, object]] = {row["symbol"]: row for row in event_q.to_dicts()}
     dec_rows: dict[str, dict[str, object]] = {}
     for row in featured.filter(pl.col("date") == decision_date).to_dicts():
         dec_rows[str(row["symbol"])] = row
     core_by_symbol: dict[str, int] = dict(zip(core["symbol"].to_list(), core["core_rank"].to_list(), strict=True)) if core.height else {}
     follow_by_symbol: dict[str, int] = dict(zip(follow["symbol"].to_list(), follow["follow_age"].to_list(), strict=True)) if follow.height else {}
+    follow_direction_by_symbol: dict[str, str] = (
+        dict(zip(follow["symbol"].to_list(), follow["direction"].to_list(), strict=True)) if follow.height else {}
+    )
     output_columns = [
         "decision_date",
         "symbol",
@@ -467,6 +538,7 @@ def select_universe_tiered(
         "tv_ratio",
         "tier",
         "core_rank",
+        "direction",
     ]
     symbols = set(core_by_symbol) | set(event_by_symbol) | set(follow_by_symbol)
     core_rows: list[dict[str, object]] = []
@@ -499,14 +571,13 @@ def select_universe_tiered(
             reasons = [f"follow:{follow_by_symbol[symbol]}"]
         if in_event:
             src = event_by_symbol[symbol]
-            daily = src.get("daily_change_pct")
-            tv = src.get("trade_value_100m")
-            ratio = src.get("tv_ratio")
+            direction: object = src["direction"]
         else:
             src = dec_rows.get(symbol, {})
-            daily = src.get("daily_change_pct")
-            tv = src.get("trade_value_100m")
-            ratio = src.get("tv_ratio")
+            direction = follow_direction_by_symbol.get(symbol)
+        daily = src.get("daily_change_pct")
+        tv = src.get("trade_value_100m")
+        ratio = src.get("tv_ratio")
         record: dict[str, object] = {
             "decision_date": decision_date,
             "symbol": symbol,
@@ -516,6 +587,7 @@ def select_universe_tiered(
             "tv_ratio": ratio,
             "tier": tier,
             "core_rank": core_by_symbol.get(symbol),
+            "direction": direction,
         }
         if tier == "core":
             core_rows.append(record)
@@ -543,6 +615,7 @@ def select_universe_tiered(
         "tv_ratio": featured.schema["tv_ratio"],
         "tier": pl.String(),
         "core_rank": pl.Int32(),
+        "direction": pl.String(),
     }
     if not ordered:
         empty = pl.DataFrame(schema=schema)
@@ -575,6 +648,7 @@ def select_universe_tiered(
     tier_list = dropped["tier"].to_list()
     n_event_drop = sum(1 for t in tier_list if t == "event")
     n_follow_drop = sum(1 for t in tier_list if t == "follow")
+    dropped_directions = dropped["direction"].to_list()
     logger.info(
         "[ALGO] decision=%s selected=%d excluded=%d budget=%d",
         decision_date.isoformat(),
@@ -583,7 +657,7 @@ def select_universe_tiered(
         slot_budget,
     )
     logger.warning(
-        "[ALGO] decision=%s status=TRUNCATED kept=%d dropped=%d budget=%d dropped_tv_share=%.6f dropped_head=%s tier_dropped=event:%d,follow:%d",
+        "[ALGO] decision=%s status=TRUNCATED kept=%d dropped=%d budget=%d dropped_tv_share=%.6f dropped_head=%s tier_dropped=event:%d,follow:%d dropped_direction=up:%d,down:%d",
         decision_date.isoformat(),
         kept.height,
         dropped.height,
@@ -592,5 +666,7 @@ def select_universe_tiered(
         ",".join(str(s) for s in head),
         n_event_drop,
         n_follow_drop,
+        dropped_directions.count("up"),
+        dropped_directions.count("down"),
     )
     return UniverseSelection(selected=kept, dropped=dropped)

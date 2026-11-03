@@ -1356,3 +1356,78 @@ def test_watchdog_stale_limits_rejected() -> None:
             snapshot=SnapshotSettings(),
             shard_watchdog=ShardWatchdogSettings(premarket_stale_limit_s=1.0),
         )
+
+
+def test_ls_capacity_defaults_preserve_legacy_budgets() -> None:
+    # Given: 기본 설정 (LS 세션 1개, 예약 0)
+    from src.core.config import CollectorSettings
+
+    settings = CollectorSettings()
+
+    # When / Then: 신규 필드 기본값과 기존 예산 유도식이 변하지 않는다 (회귀 가드)
+    assert settings.ls_active_sessions == 1
+    assert settings.ls_dynamic_reserve_symbols == 0
+    assert settings.ws_lease_ttl_s == 30.0
+    assert settings.subscription_symbol_budget == settings.ls_capacity_pairs // len(settings.streams) == 100
+    assert settings.universe_slot_budget == 100
+
+
+def test_ls_sharded_budget_is_active_capacity_minus_reserve() -> None:
+    from src.core.config import CollectorSettings
+
+    settings = CollectorSettings(ls_active_sessions=2, ls_dynamic_reserve_symbols=40)
+
+    assert settings.subscription_symbol_budget == 160
+    assert settings.universe_slot_budget == 160
+
+
+def test_ls_active_sessions_must_leave_one_standby_session() -> None:
+    from pydantic import ValidationError
+
+    from src.core.config import CollectorSettings
+
+    assert CollectorSettings(ls_active_sessions=2).ls_active_sessions == 2
+    with pytest.raises(ValidationError):
+        CollectorSettings(ls_active_sessions=3)
+
+
+def test_ls_reserve_cannot_exceed_static_capacity() -> None:
+    from pydantic import ValidationError
+
+    from src.core.config import CollectorSettings
+
+    with pytest.raises(ValidationError):
+        CollectorSettings(ls_dynamic_reserve_symbols=101)
+
+
+def test_ws_lease_ttl_must_be_positive() -> None:
+    from pydantic import ValidationError
+
+    from src.core.config import CollectorSettings
+
+    assert CollectorSettings(ws_lease_ttl_s=5.0).ws_lease_ttl_s == 5.0
+    with pytest.raises(ValidationError):
+        CollectorSettings(ws_lease_ttl_s=0)
+
+
+def test_single_session_host_stays_valid_with_one_ls_session(monkeypatch) -> None:
+    from src.core.config import CollectorSettings
+
+    monkeypatch.setenv("KRX_ALPHA_LS_MAX_SESSIONS", "1")
+
+    settings = CollectorSettings()
+
+    assert settings.ls_active_sessions == 1
+    assert settings.subscription_symbol_budget == settings.ls_capacity_pairs // len(settings.streams)
+
+
+def test_two_active_sessions_still_require_a_spare_session(monkeypatch) -> None:
+    import pytest
+
+    from src.core.config import CollectorSettings
+
+    monkeypatch.setenv("KRX_ALPHA_LS_MAX_SESSIONS", "2")
+    monkeypatch.setenv("KRX_ALPHA_LS_ACTIVE_SESSIONS", "2")
+
+    with pytest.raises(ValueError, match="ls_max_sessions - 1"):
+        CollectorSettings()

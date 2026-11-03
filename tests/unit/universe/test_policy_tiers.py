@@ -401,7 +401,7 @@ def test_tiered_empty_selection() -> None:
     assert got.selected.height == 0
     assert got.selected.columns == [
         "decision_date", "symbol", "selection_reasons", "daily_change_pct",
-        "trade_value_100m", "tv_ratio", "tier", "core_rank",
+        "trade_value_100m", "tv_ratio", "tier", "core_rank", "direction",
     ]
 
 

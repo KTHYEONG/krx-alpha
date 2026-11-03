@@ -13,7 +13,7 @@ import polars as pl
 from src.core.config import UniverseTierSettings
 from src.core.paths import DataPaths
 from src.marketdata.partitioned_store import scan_month_partitions
-from src.universe.policy import compute_selection_features, select_universe_tiered
+from src.universe.policy import compute_selection_features, policy_version_for, select_universe_tiered
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,7 @@ def replay_universe_history(
             pl.lit("unavailable").cast(pl.String).alias("managed_filter"),
             pl.lit(is_short).cast(pl.Boolean).alias("short_warmup"),
             pl.lit(run_id).cast(pl.String).alias("replay_run_id"),
+            pl.lit(policy_version_for(downside_enabled=forced.downside_enabled)).cast(pl.String).alias("policy_version"),
         ])
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(f".{target.name}.tmp")

@@ -170,6 +170,10 @@ def emit_candidates(path: pathlib.Path, rows: list[dict[str, Any]], *, rev: int,
             entry["tier"] = row["tier"]
         if "core_rank" in row:
             entry["core_rank"] = row["core_rank"]
+        if "direction" in row:
+            entry["direction"] = row["direction"]
+        if "warning_level" in row:
+            entry["warning_level"] = row["warning_level"]
         mapped.append(entry)
     write_candidates(pathlib.Path(path), mapped, rev=rev, dropped_symbols=dropped_symbols)
     return len(mapped)

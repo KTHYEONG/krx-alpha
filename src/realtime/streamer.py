@@ -154,6 +154,14 @@ class SessionFrameSink:
         return written
 
 
+class LiveSubscriptionWatch(Protocol):
+    """Per-connection watcher that subscribes admitted pairs on the live adapter; ``pairs`` is the full current set."""
+
+    def pairs(self) -> list[tuple[str, str]]: ...
+
+    async def run(self, adapter_of: Callable[[], Any], stop: asyncio.Event) -> None: ...
+
+
 class RealtimeStreamer:
     """Reconnect/flush loop driving one vendor adapter into one frame sink.
 
@@ -179,12 +187,16 @@ class RealtimeStreamer:
         rng: Callable[[], float] = random.random,
         wall_ns: Callable[[], int] = time.time_ns,
         monotonic: Callable[[], float] = time.monotonic,
+        pairs_provider: Callable[[], list[tuple[str, str]]] | None = None,
+        live_watch: LiveSubscriptionWatch | None = None,
     ) -> None:
         if silence_poll_interval_s <= 0:
             raise ValueError(f"silence_poll_interval_s must be positive, got {silence_poll_interval_s}")
         self._adapter = adapter
         self._sink = sink
         self._replay_pairs = replay_pairs
+        self._pairs_provider = pairs_provider
+        self._live_watch = live_watch
         self._flush_every = flush_every
         self._flush_interval_s = flush_interval_s
         self._silence_limit = silence_limit
@@ -249,6 +261,11 @@ class RealtimeStreamer:
         except Exception:  # noqa: BLE001 - the retired connection is already replaced
             logger.debug("[DATA] stage=stream_close status=SUPPRESSED reason=retired")
 
+    def _connect_pairs(self) -> list[tuple[str, str]]:
+        if self._pairs_provider is None:
+            return self._replay_pairs
+        return list(self._pairs_provider())
+
     async def pump(self, stop: asyncio.Event) -> str:
         """Run one connection until stop, vendor failure, or silence watchdog.
 
@@ -273,9 +290,11 @@ class RealtimeStreamer:
             "stopped" | "watchdog" | "disconnect" | "auth_rejected".
         """
         frames = 0
+        watch_task: asyncio.Future[Any] | None = None
         try:
             await self._adapter.connect()
-            acks = await self._adapter.subscribe(self._replay_pairs)
+            connect_pairs = self._connect_pairs()
+            acks = await self._adapter.subscribe(connect_pairs)
             for ack in acks:
                 self._sink.note_ack(self._adapter.name, ack)
             subscribed_ns = self._wall_ns()
@@ -284,8 +303,8 @@ class RealtimeStreamer:
                 accepted_pairs = {(ack.symbol, ack.stream) for ack in acks if ack.accepted}
                 logger.info(
                     "[DATA] stage=ls_subscriptions status=%s pairs=%d accepted_pairs=%d rejected_pairs=%d",
-                    "OK" if len(accepted_pairs) == len(self._replay_pairs) else "PARTIAL",
-                    len(self._replay_pairs),
+                    "OK" if len(accepted_pairs) == len(connect_pairs) else "PARTIAL",
+                    len(connect_pairs),
                     len(accepted_pairs),
                     len({(ack.symbol, ack.stream) for ack in acks if not ack.accepted}),
                     extra=EVENT,
@@ -308,6 +327,8 @@ class RealtimeStreamer:
             armed = False
             recv_task = asyncio.ensure_future(self._adapter.recv())
             stop_task = asyncio.ensure_future(stop.wait())
+            if self._live_watch is not None:
+                watch_task = asyncio.ensure_future(self._live_watch.run(lambda: self._adapter, stop))
             try:
                 while not stop.is_set():
                     limit = self._silence_limit() if self._silence_limit is not None else None
@@ -372,10 +393,13 @@ class RealtimeStreamer:
                     await self._handover.aclose()
                 # Cancelling a pending recv may discard a frame already read from the
                 # socket, so it happens only once pump is returning for good.
-                for pending in (recv_task, stop_task):
+                pendings: list[asyncio.Future[Any]] = [recv_task, stop_task]
+                if watch_task is not None:
+                    pendings.append(watch_task)
+                for pending in pendings:
                     pending.cancel()
                 primary_error = sys.exception()
-                outcomes = await asyncio.gather(recv_task, stop_task, return_exceptions=True)
+                outcomes = await asyncio.gather(*pendings, return_exceptions=True)
                 for outcome in outcomes:
                     if (
                         isinstance(outcome, KrxAlphaError)

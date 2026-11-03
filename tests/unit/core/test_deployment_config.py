@@ -741,7 +741,7 @@ def test_runtime_dependencies_match_code_usage() -> None:
         _normalize(re.split(r"[<>=!~;\s\[]", req, maxsplit=1)[0].strip()) for req in raw["project"]["dependencies"]
     }
 
-    local_tops = {"src", "__future__"}
+    local_tops = {"src", "deploy", "__future__"}
     local_tops.update(p.stem for p in Path("src").iterdir())
     stdlib = set(sys.stdlib_module_names)
 

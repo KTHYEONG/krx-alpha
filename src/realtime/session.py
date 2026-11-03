@@ -3,12 +3,14 @@
 # ruff: noqa: I001 - preserve required import order
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import datetime as dt
 import logging
 import os
 import pathlib
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -17,10 +19,12 @@ from src.core.calendar import SessionSchedule, SessionState, calc_sleep_seconds,
 from src.core.config import DataPaths
 from src.core.session_anchors import STANDARD_NXT_PREMARKET_END, resolve_session_anchors
 from src.realtime.clock import ClockUnsyncedError, measure_ntp_offset_ns
-from src.realtime.contracts import MarketSession, MarketVenue
+from src.realtime.contracts import LiveSubscribable, MarketSession, MarketVenue, VendorAck
 from src.realtime.ls_limits import LsGuardConfig, apply_ls_subscription_guard
 from src.realtime.kis_sharding import AftermarketShard
+from src.universe.intraday import read_dynamic_admissions
 from src.universe.ipc import read_candidates
+from src.universe.membership import MembershipFileError, MembershipRow, append_membership
 from src.storage.journal import L0JournalWriter
 from src.realtime.manifest import SessionManifest
 from src.storage.retention import check_disk_watermark, StorageExhaustedError, prune_old_journals
@@ -75,6 +79,10 @@ class SessionConfig:
     # Reason recorded on the restart gap when this boot follows a previous boot; None means the default `restart`.
     restart_reason: str | None = None
     ls_guard: LsGuardConfig | None = None
+    # Index 0 keeps the untagged legacy journal; index >= 1 writes `s<index>` files beside shard 0.
+    ls_shard_index: int = 0
+    # Restricts candidate rows to one LS shard's symbols; None keeps the full candidate set.
+    ls_symbols: tuple[str, ...] | None = None
 
 
 @dataclass
@@ -137,10 +145,24 @@ class CollectorSession:
         return sum(writer.flush() for writer in self.journals.values())
 
     def note_ack(
-        self, *, vendor: str, tr_id: str, symbol: str, rt_cd: str, accepted: bool, acked_at_ns: int | None = None
+        self,
+        *,
+        vendor: str,
+        tr_id: str,
+        symbol: str,
+        rt_cd: str,
+        accepted: bool,
+        acked_at_ns: int | None = None,
+        dynamic: bool = False,
     ) -> None:
         self.manifest.record_ack(
-            vendor=vendor, tr_id=tr_id, symbol=symbol, rt_cd=rt_cd, accepted=accepted, acked_at_ns=acked_at_ns
+            vendor=vendor,
+            tr_id=tr_id,
+            symbol=symbol,
+            rt_cd=rt_cd,
+            accepted=accepted,
+            acked_at_ns=acked_at_ns,
+            dynamic=dynamic,
         )
 
     def note_gap(self, *, symbol: str, gap_start_ns: int, gap_end_ns: int, reason: str) -> None:
@@ -151,6 +173,15 @@ class CollectorSession:
 
     def persist(self) -> None:
         self.manifest.save(self.manifest_path)
+
+
+def _rows_for_symbols(rows: list[dict[str, Any]], symbols: tuple[str, ...]) -> list[dict[str, Any]]:
+    allowed = set(symbols)
+    kept = [row for row in rows if str(row["symbol"]) in allowed]
+    missing = len(allowed) - len({str(row["symbol"]) for row in kept})
+    if missing:
+        logger.warning("[DATA] stage=ls_shard status=MISSING_CANDIDATES missing=%d", missing)
+    return kept
 
 
 def bootstrap_session(
@@ -176,6 +207,8 @@ def bootstrap_session(
         raise ValueError("journal_retain_days must be nonnegative")
     if cfg.symbol_limit is not None and cfg.symbol_limit < 1:
         raise ValueError(f"symbol_limit {cfg.symbol_limit} must be positive")
+    if cfg.ls_shard_index < 0:
+        raise ValueError(f"ls_shard_index {cfg.ls_shard_index} must be non-negative")
     if cfg.restart_reason not in (None, "restart", "stale_child"):
         raise ValueError(f"restart_reason {cfg.restart_reason!r} must be None, 'restart' or 'stale_child'")
     hosts = (cfg.ntp_host, *cfg.ntp_fallback_hosts)
@@ -244,6 +277,8 @@ def bootstrap_session(
         manifest.credential_key_id = cfg.shard.credential_key_id
         desired = {str(symbol): tuple(cfg.shard.streams) for symbol in cfg.shard.symbols}
     else:
+        if cfg.ls_symbols is not None:
+            rows = _rows_for_symbols(rows, cfg.ls_symbols)
         if cfg.symbol_limit is not None:
             rows = rows[: cfg.symbol_limit]
         desired = {str(row["symbol"]): tuple(cfg.desired_streams) for row in rows}
@@ -271,8 +306,11 @@ def bootstrap_session(
             for stream in cfg.desired_streams
         }
     else:
+        ls_file_tag = f"s{cfg.ls_shard_index}" if cfg.ls_shard_index else None
         journals = {
-            (cfg.vendor, stream): L0JournalWriter(root=cfg.journal_root, vendor=cfg.vendor, stream=stream)
+            (cfg.vendor, stream): L0JournalWriter(
+                root=cfg.journal_root, vendor=cfg.vendor, stream=stream, file_tag=ls_file_tag
+            )
             for stream in cfg.desired_streams
         }
     if manifest.boots:
@@ -319,3 +357,143 @@ def bootstrap_session(
         session.current_state(),
     )
     return session
+
+
+@dataclass(frozen=True)
+class DynamicFeed:
+    """One B feed's IPC identity: which admissions it consumes and where its ack rows are recorded."""
+
+    vendor: str
+    feed: str
+    streams: tuple[str, ...]
+    ipc_path: pathlib.Path
+    membership_path: pathlib.Path
+    ls_shard: int | None = None
+    kis_slot: str | None = None
+
+
+class DynamicPairWatcher:
+    """Subscribes IPC-admitted pairs of one B feed on the live connection and records each ack.
+
+    The watcher never reads the socket; ``subscribe_live`` resolves its acks through the receive loop.
+    ``pairs()`` is the static set plus every accepted dynamic pair, so a reconnect or a standby
+    subscribes the current full set.
+    """
+
+    def __init__(
+        self,
+        *,
+        feed: DynamicFeed,
+        session: CollectorSession,
+        static_pairs: Sequence[tuple[str, str]],
+        initial_dynamic: Sequence[tuple[str, str]] = (),
+        poll_s: float = 5.0,
+        wall_ns: Callable[[], int] = time.time_ns,
+    ) -> None:
+        if poll_s <= 0:
+            raise ValueError("poll_s must be positive")
+        self._feed = feed
+        self._session = session
+        self._static = tuple(static_pairs)
+        self._accepted: list[tuple[str, str]] = list(dict.fromkeys(initial_dynamic))
+        self._rejected: set[tuple[str, str]] = set()
+        self._bound: LiveSubscribable | None = None
+        self._rev: int | None = None
+        self._poll_s = poll_s
+        self._wall_ns = wall_ns
+
+    def pairs(self) -> list[tuple[str, str]]:
+        return list(dict.fromkeys([*self._static, *self._accepted]))
+
+    async def run(self, adapter_of: Callable[[], Any], stop: asyncio.Event) -> None:
+        """Poll the IPC file every ``poll_s`` until stop; failures are logged and retried on the next tick."""
+        self._bound = None
+        while not stop.is_set():
+            try:
+                await self.tick(adapter_of())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - a watcher failure must never stop the receive loop
+                self._rev = None
+                logger.error(
+                    "[DATA] stage=intraday_watch status=ERROR feed=%s error_type=%s",
+                    self._feed.feed,
+                    type(exc).__name__,
+                    exc_info=True,
+                )
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=self._poll_s)
+
+    async def tick(self, adapter: LiveSubscribable | None) -> int:
+        """Subscribe unseen IPC pairs of this feed on ``adapter``; returns the number of pairs sent."""
+        if adapter is None:
+            return 0
+        if adapter is not self._bound:
+            # A cut-over adapter may lack pairs admitted after it connected; re-diff against what it holds.
+            self._bound = adapter
+            self._rev = None
+        plan = read_dynamic_admissions(self._feed.ipc_path)
+        if plan.rev == self._rev:
+            return 0
+        self._rev = plan.rev
+        wanted = dict.fromkeys(
+            (symbol, stream) for symbol in plan.symbols_for(self._feed.feed) for stream in self._feed.streams
+        )
+        held = set(adapter.subscribed_pairs())
+        new = [pair for pair in wanted if pair not in held and pair not in self._rejected]
+        if not new:
+            return 0
+        try:
+            acks = await adapter.subscribe_live(new)
+        except BaseException:
+            self._rev = None
+            raise
+        self._record(acks)
+        return len(new)
+
+    def _record(self, acks: Sequence[VendorAck]) -> None:
+        decided = self._wall_ns()
+        rows: list[MembershipRow] = []
+        for ack in acks:
+            reason = f"accepted:{ack.code}" if ack.accepted else f"rejected:{ack.code}"
+            rows.append(
+                MembershipRow(
+                    symbol=ack.symbol,
+                    tier="B",
+                    source="ack",
+                    decided_at_ns=decided,
+                    direction=None,
+                    warning_level=None,
+                    ls_shard=self._feed.ls_shard,
+                    kis_slot=self._feed.kis_slot,
+                    trade_value_krw=None,
+                    reason=reason,
+                )
+            )
+            self._session.note_ack(
+                vendor=self._feed.vendor,
+                tr_id=ack.stream,
+                symbol=ack.symbol,
+                rt_cd=ack.code,
+                accepted=ack.accepted,
+                acked_at_ns=decided,
+                dynamic=True,
+            )
+            if ack.accepted:
+                self._accepted.append((ack.symbol, ack.stream))
+            elif ack.code != "timeout":
+                self._rejected.add((ack.symbol, ack.stream))
+        try:
+            append_membership(self._feed.membership_path, rows)
+        except (OSError, ValueError, MembershipFileError) as exc:
+            logger.error(
+                "[DATA] stage=intraday_watch status=FAIL reason=membership_write feed=%s error_type=%s",
+                self._feed.feed,
+                type(exc).__name__,
+            )
+        logger.info(
+            "[DATA] stage=intraday_watch feed=%s subscribed=%d accepted=%d",
+            self._feed.feed,
+            len(acks),
+            sum(1 for ack in acks if ack.accepted),
+        )

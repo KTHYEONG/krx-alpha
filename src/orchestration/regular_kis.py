@@ -14,6 +14,7 @@ _KST = ZoneInfo("Asia/Seoul")
 
 __all__ = [
     "regular_kis_collection_due",
+    "regular_kis_dynamic_stream_cmd",
     "regular_kis_stream_cmd",
 ]
 
@@ -57,4 +58,24 @@ def regular_kis_stream_cmd(today: dt.date, paths: DataPaths, *, shard: Aftermark
         shard.credential_key_id,
         "--symbols",
         ",".join(shard.symbols),
+    ]
+
+
+def regular_kis_dynamic_stream_cmd(today: dt.date, paths: DataPaths, *, slot: str, key_id: str) -> list[str]:
+    """argv for ``collect-regular-kis-dynamic`` on the intraday KIS dynamic slot."""
+    return [
+        sys.executable,
+        "-m",
+        "src.cli.main",
+        "collect-regular-kis-dynamic",
+        "--session-date",
+        today.isoformat(),
+        "--journal-root",
+        str(paths.journal_root),
+        "--manifest-path",
+        str(paths.regular_kis_manifest_path(today, int(slot))),
+        "--credential-slot",
+        slot,
+        "--credential-key-id",
+        key_id,
     ]

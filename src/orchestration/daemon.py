@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import importlib
 import logging
+import math
 import pathlib
 import re
 import signal
@@ -12,7 +13,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -43,6 +44,7 @@ from src.core.config import (
     ShardWatchdogSettings,
     SnapshotSettings,
     TickTapeBackfillSettings,
+    TickTapeOverflowSettings,
     TossCredentials,
     TossProgramTradesSettings,
     UniverseTierSettings,
@@ -103,7 +105,11 @@ from src.orchestration.premarket import (
     premarket_stream_cmd,
     premarket_wake_cap_s,
 )
-from src.orchestration.regular_kis import regular_kis_collection_due, regular_kis_stream_cmd
+from src.orchestration.regular_kis import (
+    regular_kis_collection_due,
+    regular_kis_dynamic_stream_cmd,
+    regular_kis_stream_cmd,
+)
 from src.orchestration.shard_watchdog import (
     ShardDecision,
     ShardObservation,
@@ -115,6 +121,7 @@ from src.orchestration.shard_watchdog import (
 from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker, stop_supervisors
 from src.orchestration.trading_day_gate import TradingDayGate, TradingDayStatus, TradingDayView
 from src.realtime.contracts import MarketSession, MarketVenue
+from src.realtime.kis_lease import KisWebSocketLease
 from src.realtime.kis_sharding import (
     AftermarketShard,
     load_kis_data_credentials,
@@ -122,7 +129,8 @@ from src.realtime.kis_sharding import (
     plan_premarket_shard,
     plan_regular_kis_shards,
 )
-from src.realtime.ls_limits import prioritize_ls_pairs, split_ls_pairs
+from src.realtime.ls_limits import prioritize_ls_pairs
+from src.realtime.ls_sharding import LsShard, plan_ls_shards
 from src.realtime.manifest import SessionManifest
 from src.realtime.streamer import aftermarket_open_time
 from src.storage.l0_audit import AuditStatus, SessionAudit, derive_session_audit, write_session_audit
@@ -136,7 +144,9 @@ from src.universe.aftermarket import (
     aftermarket_candidate_session,
     refresh_aftermarket_candidates,
 )
+from src.universe.intraday import read_dynamic_admissions
 from src.universe.ipc import CandidateFileError, read_candidate_snapshot, read_candidates
+from src.universe.membership import MembershipRow, append_membership, read_membership
 from src.universe.policy import ineligible_security_symbols
 from src.universe.premarket import premarket_pool_ready, refresh_premarket_pool
 from src.universe.service import UniversePlanResult as UniversePlanResult
@@ -403,6 +413,7 @@ def run_session_orchestration(
         status_source=status_source,
         snapshot_store=SnapshotStore(paths=paths, session_date=today),
         tiers=tiers,
+        paths=paths,
     )
     tick()
     ready = _candidates_ready(paths.candidates)
@@ -758,7 +769,92 @@ def _check_backup(
     return [], True, host_label
 
 
-def _stream_cmd(today: dt.date, paths: DataPaths, *, degraded_reason: str | None) -> list[str]:
+def _candidate_symbols_and_tiers(path: pathlib.Path) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Return candidate symbols in priority order and their tiers; raises KrxAlphaError when the file is not ready."""
+    data = read_candidates(path)
+    rows = data.get("candidates") if isinstance(data, dict) else None
+    if (
+        not isinstance(rows, list)
+        or not rows
+        or not all(isinstance(row, dict) and isinstance(row.get("symbol"), str) and row["symbol"] for row in rows)
+    ):
+        raise KrxAlphaError(f"invalid candidates file: {path}")
+    symbols = tuple(str(row["symbol"]) for row in rows)
+    tiers = {str(row["symbol"]): str(row.get("tier", "event")) for row in rows}
+    return symbols, tiers
+
+
+def _latest_universe_decision(paths: DataPaths) -> dt.date | None:
+    """Return the newest decision date that has a published universe parquet."""
+    decisions: list[dt.date] = []
+    for path in paths.universe_dir.glob("*.parquet"):
+        try:
+            decisions.append(dt.date.fromisoformat(path.stem))
+        except ValueError:
+            continue
+    return max(decisions, default=None)
+
+
+def _read_optional_parquet(path: pathlib.Path) -> pl.DataFrame | None:
+    return pl.read_parquet(path) if path.exists() else None
+
+
+def _krw_from_100m(value: object) -> int | None:
+    """Convert a 100-million-KRW trade value to whole KRW; None for missing or non-finite input."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+        return None
+    return round(value * 1e8)
+
+
+def _krw_by_symbol(frame: pl.DataFrame | None) -> dict[str, int | None]:
+    if frame is None or "trade_value_100m" not in frame.columns:
+        return {}
+    return {
+        str(symbol): _krw_from_100m(value) for symbol, value in frame.select("symbol", "trade_value_100m").iter_rows()
+    }
+
+
+def _str_column_by_symbol(frame: pl.DataFrame | None, column: str) -> dict[str, str | None]:
+    if frame is None or column not in frame.columns:
+        return {}
+    return {
+        str(symbol): (str(value) if value is not None else None)
+        for symbol, value in frame.select("symbol", column).iter_rows()
+    }
+
+
+def _optional_str(value: object) -> str | None:
+    return str(value) if value is not None else None
+
+
+def _policy_drop_reason(row: Mapping[str, Any]) -> str:
+    reason = row.get("reasons")
+    return reason if isinstance(reason, str) and reason else "policy_dropped"
+
+
+def _sum_manifest_frame_counts(paths: Iterable[pathlib.Path]) -> dict[str, dict[str, int]] | None:
+    """Sum journaled frame counts per symbol and stream over manifests; None when no manifest tracks counts."""
+    total: dict[str, dict[str, int]] | None = None
+    for path in paths:
+        counts = SessionManifest.load(path).frame_counts
+        if counts is None:
+            continue
+        total = {} if total is None else total
+        for symbol, per_stream in counts.items():
+            bucket = total.setdefault(symbol, {})
+            for stream, count in per_stream.items():
+                bucket[stream] = bucket.get(stream, 0) + count
+    return total
+
+
+def _stream_cmd(
+    today: dt.date,
+    paths: DataPaths,
+    *,
+    degraded_reason: str | None,
+    manifest_path: pathlib.Path | None = None,
+    extra_args: tuple[str, ...] = (),
+) -> list[str]:
     cmd = [
         sys.executable,
         "-m",
@@ -769,12 +865,13 @@ def _stream_cmd(today: dt.date, paths: DataPaths, *, degraded_reason: str | None
         "--journal-root",
         str(paths.journal_root),
         "--manifest-path",
-        str(paths.manifest_path(today)),
+        str(paths.manifest_path(today) if manifest_path is None else manifest_path),
         "--candidates-path",
         str(paths.candidates),
         "--market-map",
         str(paths.market_map),
     ]
+    cmd += extra_args
     if degraded_reason is not None:
         cmd += ["--degraded-reason", degraded_reason]
     return cmd
@@ -808,6 +905,18 @@ def _db_crosscheck_cmd(today: dt.date, paths: DataPaths) -> list[str]:
         "--candidates-path",
         str(paths.candidates),
     ]
+
+
+def _intraday_discovery_cmd(today: dt.date, paths: DataPaths) -> list[str]:
+    return [sys.executable, "-m", "src.cli.main", "collect-intraday-discovery", "--session-date", today.isoformat()]
+
+
+def _intraday_discovery_active(runtime: CollectorRuntime, now: dt.datetime, anchors: SessionAnchors) -> bool:
+    """True from the regular open until the post-close screen plus one minute."""
+    end = (
+        dt.datetime.combine(dt.date(2000, 1, 1), runtime.intraday.post_close_screen_at) + dt.timedelta(seconds=60)
+    ).time()
+    return anchors.regular_open <= now.astimezone(_KST).time() < end
 
 
 def _kiwoom_crosscheck_cmd(today: dt.date, paths: DataPaths) -> list[str]:
@@ -909,6 +1018,8 @@ class StreamRole(StrEnum):
     AFTERMARKET = "aftermarket"
     PREMARKET = "premarket"
     REGULAR_KIS = "regular_kis"
+    REGULAR_LS = "regular_ls"
+    INTRADAY_DISCOVERY = "intraday_discovery"
 
 
 class StreamChildKey(StrEnum):
@@ -919,6 +1030,8 @@ class StreamChildKey(StrEnum):
     AFTERMARKET = "aftermarket"
     PREMARKET = "premarket"
     REGULAR_KIS = "regular_kis"
+    REGULAR_LS_B = "regular_ls_b"
+    INTRADAY_DISCOVERY = "intraday_discovery"
 
 
 class ChildLifecycle(StrEnum):
@@ -1028,6 +1141,8 @@ class DaemonState:
     regular_kis_plan: tuple[AftermarketShard, ...] = ()
     regular_kis_plan_day: dt.date | None = None
     regular_kis_circuit_alerted: set[str] = field(default_factory=set)
+    ls_shard_plan: tuple[LsShard, ...] = ()
+    ls_shard_plan_day: dt.date | None = None
     aftermarket_deferred_slots: set[str] = field(default_factory=set)
     overdue_judged_for: dt.date | None = None
 
@@ -1053,6 +1168,7 @@ class DaemonChildren:
     streams: dict[StreamChildKey, ProcessSupervisor] = field(default_factory=dict)
     aftermarket: dict[str, ProcessSupervisor] = field(default_factory=dict)
     regular_kis: dict[str, ProcessSupervisor] = field(default_factory=dict)
+    regular_kis_dynamic: ProcessSupervisor | None = None
     program_sync: Any | None = None
     program_sync_started_at: dt.datetime | None = None
     nightly: subprocess.Popen[bytes] | None = None
@@ -1210,6 +1326,25 @@ def _nightly_job_cmd(job: NightlyJob, *, deadline: dt.datetime) -> list[str]:
         "--deadline",
         deadline.isoformat(),
     ]
+
+
+
+def _nightly_job_env(job: NightlyJob, overflow: TickTapeOverflowSettings) -> dict[str, str]:
+    """Env overrides for the nightly child; tier C overflow settings reach the tick-tape job by env only."""
+    if job is not NightlyJob.TICK_TAPE:
+        return {}
+    prefix = str(TickTapeOverflowSettings.model_config["env_prefix"])
+    return {
+        f"{prefix}{name.upper()}": _env_text(getattr(overflow, name)) for name in TickTapeOverflowSettings.model_fields
+    }
+
+
+def _env_text(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, dt.time):
+        return value.isoformat()
+    return str(value)
 
 
 def _minute_backfill_settings(explicit: Any | None) -> Any | None:
@@ -1404,6 +1539,19 @@ class DaemonRunner:
             manifest_path=lambda paths, day: paths.kiwoom_crosscheck_manifest_path(day),
         ),
         StreamChildSpec(
+            key=StreamChildKey.INTRADAY_DISCOVERY,
+            role=StreamRole.INTRADAY_DISCOVERY,
+            lifecycle=ChildLifecycle.SESSION,
+            enabled=lambda runtime: runtime.intraday.enabled,
+            cmd=lambda today, paths, reason: _intraday_discovery_cmd(today, paths),
+            active=lambda runtime, now, anchors: _intraday_discovery_active(runtime, now, anchors),
+            logs=SupervisionLogs(
+                restarted="[DAEMON] stage=intraday_discovery status=RESTARTED exit_code=%s",
+                circuit_open="[DAEMON] stage=intraday_discovery status=FAIL reason=circuit_open",
+                circuit_level=logging.WARNING,
+            ),
+        ),
+        StreamChildSpec(
             key=StreamChildKey.AFTERMARKET,
             role=StreamRole.AFTERMARKET,
             lifecycle=ChildLifecycle.SHARDED,
@@ -1420,6 +1568,12 @@ class DaemonRunner:
             role=StreamRole.REGULAR_KIS,
             lifecycle=ChildLifecycle.SHARDED,
             enabled=lambda runtime: bool(getattr(getattr(runtime, "regular_kis", None), "enabled", False)),
+        ),
+        StreamChildSpec(
+            key=StreamChildKey.REGULAR_LS_B,
+            role=StreamRole.REGULAR_LS,
+            lifecycle=ChildLifecycle.SHARDED,
+            enabled=lambda runtime: runtime.collector.ls_active_sessions >= 2,
         ),
     )
 
@@ -1448,10 +1602,13 @@ class DaemonRunner:
         sleep: Callable[[float], None],
         program_sync_settings: TossProgramTradesSettings | None = None,
         tick_tape_settings: TickTapeBackfillSettings | None = None,
+        tick_tape_overflow_settings: TickTapeOverflowSettings | None = None,
         minute_backfill_settings: Any | None = None,
         repair_settings: RepairSettings | None = None,
+        wall_ns: Callable[[], int] = time.time_ns,
     ) -> None:
         self._runtime = runtime
+        self._wall_ns = wall_ns
         self._shutdown = shutdown
         self._now = now
         self._sleep = sleep
@@ -1480,6 +1637,9 @@ class DaemonRunner:
             program_sync_settings if program_sync_settings is not None else TossProgramTradesSettings()
         )
         self._tick_tape_cfg = tick_tape_settings if tick_tape_settings is not None else TickTapeBackfillSettings()
+        self._tick_tape_overflow_cfg = (
+            tick_tape_overflow_settings if tick_tape_overflow_settings is not None else TickTapeOverflowSettings()
+        )
         self._minute_cfg = _minute_backfill_settings(minute_backfill_settings)
         if repair_settings is not None:
             self._repair_cfg = repair_settings
@@ -1539,6 +1699,11 @@ class DaemonRunner:
             targets.append(regular)
         targets.extend(ch.aftermarket.values())
         targets.extend(ch.regular_kis.values())
+        if ch.regular_kis_dynamic is not None:
+            targets.append(ch.regular_kis_dynamic)
+        ls_b = ch.get(StreamChildKey.REGULAR_LS_B)
+        if ls_b is not None:
+            targets.append(ls_b)
         for spec in self._STREAM_SPECS:
             if spec.role is StreamRole.PRIMARY or spec.lifecycle is ChildLifecycle.SHARDED:
                 continue
@@ -1784,7 +1949,8 @@ class DaemonRunner:
             deadline = _nightly_window_end(identity, start=window[0], end=window[1])
             try:
                 ch.nightly = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-                    _nightly_job_cmd(job, deadline=deadline), env=child_process_env({})
+                    _nightly_job_cmd(job, deadline=deadline),
+                    env=child_process_env(_nightly_job_env(job, self._tick_tape_overflow_cfg)),
                 )
             except OSError as exc:
                 logger.critical(
@@ -1961,6 +2127,7 @@ class DaemonRunner:
         self._maybe_orchestrate(now, state, day)
         self._supervise_session_children(now, anchors)
         self._supervise_regular_kis(now, anchors)
+        self._supervise_regular_ls_shard(today)
         self._run_ingest_watchdog(now, state, day, anchors)
         self._run_first_frame_watchdog(now, state, day, anchors)
         self._run_crosscheck_watchdogs(now, state, day, anchors)
@@ -1973,6 +2140,7 @@ class DaemonRunner:
         self._stop_session_children()
         self._stop_aftermarket_children(clear_circuit_alerts=False)
         self._stop_regular_kis_children(clear_circuit_alerts=False)
+        self._stop_stream_child(StreamChildKey.REGULAR_LS_B)
         self._stop_nightly_child(reason="holiday")
 
     def _holiday_sleep_s(self, now: dt.datetime, state: SessionState) -> float:
@@ -1997,6 +2165,7 @@ class DaemonRunner:
             logger.warning("[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s", stale_stop)
         self._stop_session_children()
         self._stop_regular_kis_children(clear_circuit_alerts=True)
+        self._stop_stream_child(StreamChildKey.REGULAR_LS_B)
         self._stop_nightly_child(reason="new_session_day")
         st.orchestration_day = today
         st.next_orchestration_at = None
@@ -2009,6 +2178,8 @@ class DaemonRunner:
         st.regular_kis_plan = ()
         st.regular_kis_plan_day = None
         st.regular_kis_circuit_alerted.clear()
+        st.ls_shard_plan = ()
+        st.ls_shard_plan_day = None
         st.aftermarket_deferred_slots.clear()
 
     def _maybe_orchestrate(self, now: dt.datetime, state: SessionState, day: TradingDayView) -> None:
@@ -2119,10 +2290,10 @@ class DaemonRunner:
         replacing_degraded = self._children.regular_is_degraded
         if replacing_degraded:
             st.regular_kis_plan_day = None
+        self._ensure_ls_shard_plan(today)
         for spec in self._session_specs():
-            assert spec.cmd is not None
             self._install_stream_child(
-                spec.key, spec.cmd(today, self._paths, None), replaces_degraded=replacing_degraded
+                spec.key, self._session_child_cmd(spec, today, None), replaces_degraded=replacing_degraded
             )
 
     def _handle_orchestration_failure(self, now: dt.datetime, today: dt.date) -> None:
@@ -2190,7 +2361,8 @@ class DaemonRunner:
                 logger.warning(logs.restarted, sup.last_exit_code)
         elif result == "circuit_open" and sup.take_circuit_alert():
             logger.log(logs.circuit_level, logs.circuit_open)
-        self._state.set_child_result(key, result)
+        if key in DaemonState._CHILD_RESULT_FIELDS:
+            self._state.set_child_result(key, result)
 
     def _supervise_session_children(self, now: dt.datetime, anchors: SessionAnchors) -> None:
         """Supervise every enabled SESSION child in table order."""
@@ -2908,6 +3080,12 @@ class DaemonRunner:
 
     def _ensure_regular_kis_plan(self, today: dt.date) -> None:
         """Plan KIS coverage of LS omissions before overlapping the priority universe."""
+        intraday = self._runtime.intraday
+        regular_slots = tuple(getattr(getattr(self._runtime, "regular_kis", None), "credential_slots", ()))
+        if intraday.enabled and intraday.kis_dynamic_slot in regular_slots:
+            raise KrxAlphaError(
+                f"intraday kis_dynamic_slot {intraday.kis_dynamic_slot} must not be a regular_kis credential slot"
+            )
         st = self._state
         if st.regular_kis_plan_day == today:
             return
@@ -2942,10 +3120,10 @@ class DaemonRunner:
             pairs = [(symbol, stream) for symbol in symbols for stream in collector.streams]
             priority_pairs = prioritize_ls_pairs(pairs, tier_of=tiers, order=symbols)
             priority_symbols = tuple(dict.fromkeys(s for s, _ in priority_pairs))
-            ls_pairs, _ = split_ls_pairs(
-                pairs, collector.ls_max_subscriptions_per_session, tier_of=tiers, order=symbols
+            ls_shards = self._ensure_ls_shard_plan(today)
+            ls_covered = (
+                frozenset(s for shard in ls_shards for s in shard.symbols) if collector.vendor == "ls" else frozenset()
             )
-            ls_covered = frozenset(s for s, _ in ls_pairs) if collector.vendor == "ls" else frozenset()
             cfg = getattr(self._runtime, "regular_kis", None) or RegularKisSettings()
             st.regular_kis_plan = plan_regular_kis_shards(
                 symbols=priority_symbols,
@@ -2960,6 +3138,168 @@ class DaemonRunner:
             logger.error(
                 "[DATA] stage=regular_kis_plan status=SKIP reason=%s date=%s",
                 str(exc),
+                today.isoformat(),
+            )
+
+    def _ensure_ls_shard_plan(self, today: dt.date) -> tuple[LsShard, ...]:
+        """Plan LS shards once per session day from the candidates and record their tiers; returns () when planning fails."""
+        st = self._state
+        if st.ls_shard_plan_day == today:
+            return st.ls_shard_plan
+        st.ls_shard_plan_day = today
+        st.ls_shard_plan = ()
+        collector = self._runtime.collector
+        try:
+            symbols, tiers = _candidate_symbols_and_tiers(self._paths.candidates)
+            shards, overflow = plan_ls_shards(
+                symbols,
+                tiers=tiers,
+                streams=collector.streams,
+                active_sessions=collector.ls_active_sessions,
+                pairs_per_session=collector.ls_max_subscriptions_per_session,
+                dynamic_reserve_symbols=collector.ls_dynamic_reserve_symbols,
+                max_sessions=collector.ls_max_sessions,
+            )
+        except (KrxAlphaError, OSError, ValueError) as exc:
+            logger.error("[DATA] stage=ls_shard_plan status=SKIP reason=%s date=%s", str(exc), today.isoformat())
+            return ()
+        st.ls_shard_plan = shards
+        logger.info(
+            "[DATA] stage=collection_tiers date=%s tier_a=%d tier_b_static=%d tier_b_reserve=%d tier_c=%d",
+            today.isoformat(),
+            len(shards[0].symbols),
+            sum(len(shard.symbols) for shard in shards[1:]),
+            sum(shard.dynamic_reserve_symbols for shard in shards),
+            len(overflow),
+            extra=EVENT,
+        )
+        self._record_static_membership(today, shards, overflow)
+        return shards
+
+    def _record_static_membership(self, today: dt.date, shards: tuple[LsShard, ...], overflow: tuple[str, ...]) -> None:
+        """Append the day's static tier rows once; existing static rows (daemon restart) make this a no-op."""
+        path = self._paths.membership_path(today)
+        try:
+            if any(row.source == "static" for row in read_membership(path)):
+                return
+            append_membership(path, self._static_membership_rows(shards, overflow))
+        except Exception as exc:  # noqa: BLE001 - research metadata must never block collection planning
+            logger.error(
+                "[DATA] stage=membership status=FAIL error_type=%s reason=%s date=%s",
+                type(exc).__name__,
+                str(exc),
+                today.isoformat(),
+                exc_info=True,
+            )
+
+    def _static_membership_rows(self, shards: tuple[LsShard, ...], overflow: tuple[str, ...]) -> list[MembershipRow]:
+        decided_at_ns = self._wall_ns()
+        decision = _latest_universe_decision(self._paths)
+        universe = None if decision is None else _read_optional_parquet(self._paths.universe_out(decision))
+        dropped = None if decision is None else _read_optional_parquet(self._paths.universe_dropped_out(decision))
+        krw = _krw_by_symbol(universe)
+        direction = _str_column_by_symbol(universe, "direction")
+        warning = _str_column_by_symbol(universe, "warning_level")
+        rows = [
+            MembershipRow(
+                symbol=symbol,
+                tier="A" if shard.shard_index == 0 else "B",
+                source="static",
+                decided_at_ns=decided_at_ns,
+                direction=direction.get(symbol),
+                warning_level=warning.get(symbol),
+                ls_shard=shard.shard_index,
+                kis_slot=None,
+                trade_value_krw=krw.get(symbol),
+                reason=None,
+            )
+            for shard in shards
+            for symbol in shard.symbols
+        ]
+        rows.extend(
+            MembershipRow(
+                symbol=symbol,
+                tier="C",
+                source="static",
+                decided_at_ns=decided_at_ns,
+                direction=direction.get(symbol),
+                warning_level=warning.get(symbol),
+                ls_shard=None,
+                kis_slot=None,
+                trade_value_krw=krw.get(symbol),
+                reason="overflow",
+            )
+            for symbol in overflow
+        )
+        if dropped is not None:
+            rows.extend(
+                MembershipRow(
+                    symbol=str(row["symbol"]),
+                    tier="C",
+                    source="static",
+                    decided_at_ns=decided_at_ns,
+                    direction=_optional_str(row.get("direction")),
+                    warning_level=None,
+                    ls_shard=None,
+                    kis_slot=None,
+                    trade_value_krw=_krw_from_100m(row.get("trade_value_100m")),
+                    reason=_policy_drop_reason(row),
+                )
+                for row in dropped.iter_rows(named=True)
+            )
+        return rows
+
+    def _session_child_cmd(self, spec: StreamChildSpec, today: dt.date, reason: str | None) -> list[str]:
+        """Return a SESSION child command; the primary receives its shard-0 symbol set once LS sharding is active."""
+        if spec.key is not StreamChildKey.REGULAR:
+            assert spec.cmd is not None
+            return spec.cmd(today, self._paths, reason)
+        extra: tuple[str, ...] = ()
+        if self._runtime.collector.ls_active_sessions >= 2 and self._state.ls_shard_plan_day == today:
+            shard0 = next((s for s in self._state.ls_shard_plan if s.shard_index == 0), None)
+            if shard0 is not None:
+                extra = ("--symbols", ",".join(shard0.symbols))
+        return _stream_cmd(today, self._paths, degraded_reason=reason, extra_args=extra)
+
+    def _supervise_regular_ls_shard(self, today: dt.date) -> None:
+        """Start and supervise the LS shard-1 child once the primary child and that day's plan exist."""
+        if not self._stream_spec(StreamChildKey.REGULAR_LS_B).enabled(self._runtime):
+            return
+        st = self._state
+        ch = self._children
+        if ch.regular is None or st.ls_shard_plan_day != today:
+            return
+        shard = next((s for s in st.ls_shard_plan if s.shard_index == 1 and s.symbols), None)
+        if shard is None:
+            return
+        sup = ch.get(StreamChildKey.REGULAR_LS_B)
+        if sup is None:
+            sup = ProcessSupervisor(
+                cmd=_stream_cmd(
+                    today,
+                    self._paths,
+                    degraded_reason=None,
+                    manifest_path=self._paths.ls_manifest_path(today, shard.shard_index),
+                    extra_args=("--ls-shard-index", str(shard.shard_index), "--symbols", ",".join(shard.symbols)),
+                ),
+                breaker=RestartCircuitBreaker(),
+            )
+            ch.set(StreamChildKey.REGULAR_LS_B, sup)
+        result = sup.ensure_running()
+        if result == "started":
+            logger.info(
+                "[DATA] stage=ls_shard_stream status=STARTED shard=%d date=%s", shard.shard_index, today.isoformat()
+            )
+        elif result == "restarted":
+            logger.warning(
+                "[DATA] stage=ls_shard_stream status=RESTARTED shard=%d exit_code=%s",
+                shard.shard_index,
+                sup.last_exit_code,
+            )
+        elif result == "circuit_open" and sup.take_circuit_alert():
+            logger.critical(
+                "[DATA] stage=ls_shard_stream status=FAIL reason=circuit_open shard=%d date=%s",
+                shard.shard_index,
                 today.isoformat(),
             )
 
@@ -2985,6 +3325,7 @@ class DaemonRunner:
                 for live in ch.regular_kis.values():
                     live.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
                 ch.regular_kis.clear()
+                self._stop_regular_kis_dynamic()
                 return
             self._ensure_regular_kis_plan(today)
             for shard in st.regular_kis_plan:
@@ -3010,9 +3351,50 @@ class DaemonRunner:
                         key,
                         today.isoformat(),
                     )
+            self._supervise_regular_kis_dynamic(today)
             self._watch_regular_kis_shards(now, today, anchors)
         except (KrxAlphaError, KisApiError, OSError, ValueError) as exc:
             logger.warning("[DATA] stage=regular_kis_supervise status=FAIL reason=%s", str(exc))
+
+    def _supervise_regular_kis_dynamic(self, today: dt.date) -> None:
+        """Run the intraday KIS dynamic shard once its slot lease is free and the slot holds an admission."""
+        intraday = self._runtime.intraday
+        if not intraday.enabled or intraday.kis_dynamic_slot is None:
+            return
+        slot = intraday.kis_dynamic_slot
+        ch = self._children
+        sup = ch.regular_kis_dynamic
+        if sup is None:
+            if not read_dynamic_admissions(self._paths.dynamic_admissions(today)).symbols_for(f"kis:{slot}"):
+                return
+            cred = next((c for c in load_kis_data_credentials() if c.slot == slot), None)
+            if cred is None:
+                raise KrxAlphaError(f"no KIS data credential for dynamic slot {slot}")
+            lease = KisWebSocketLease(root=self._paths.kis_ws_lease_dir, credential_key_id=cred.key_id)
+            if not lease.is_free():
+                return
+            sup = ProcessSupervisor(
+                cmd=regular_kis_dynamic_stream_cmd(today, self._paths, slot=slot, key_id=cred.key_id),
+                breaker=RestartCircuitBreaker(),
+            )
+            ch.regular_kis_dynamic = sup
+        result = sup.ensure_running()
+        if result == "restarted":
+            logger.warning(
+                "[DATA] stage=regular_kis_dynamic status=RESTARTED slot=%s exit_code=%s", slot, sup.last_exit_code
+            )
+        elif result == "circuit_open":
+            logger.critical(
+                "[DATA] stage=regular_kis_dynamic status=FAIL reason=circuit_open slot=%s date=%s",
+                slot,
+                today.isoformat(),
+            )
+
+    def _stop_regular_kis_dynamic(self) -> None:
+        sup = self._children.regular_kis_dynamic
+        if sup is not None:
+            sup.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
+            self._children.regular_kis_dynamic = None
 
     def _watch_regular_kis_shards(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
         """Judge each running regular shard's journal freshness inside its window and stop a stale one."""
@@ -3190,6 +3572,7 @@ class DaemonRunner:
             logger.info("[DAEMON] stage=streamer_stop result=%s", result, extra=EVENT)
         self._stop_session_children()
         self._stop_regular_kis_children(clear_circuit_alerts=False)
+        self._stop_stream_child(StreamChildKey.REGULAR_LS_B)
         ref_day = now.astimezone(_KST).date()
         if st.eod_attempted_for != ref_day:
             st.eod_attempted_for = ref_day
@@ -3379,7 +3762,7 @@ class DaemonRunner:
         cfg = self._cfg
         paths = self._paths
         try:
-            manifest_frame_counts = SessionManifest.load(paths.manifest_path(ref_day)).frame_counts
+            manifest_frame_counts = _sum_manifest_frame_counts(paths.ls_manifest_paths(ref_day))
         except FileNotFoundError:
             manifest_frame_counts = None
         except (OSError, KrxAlphaError, ValueError, KeyError, TypeError, AttributeError) as exc:
@@ -3498,20 +3881,25 @@ class DaemonRunner:
                     and bool(getattr(repair_settings, "job_enabled", False))
                     and cfg.vendor in tuple(getattr(repair_settings, "repair_vendors", ()))
                 )
-                reconciled = check_session_reconciliation(
-                    manifest_path=paths.manifest_path(ref_day),
-                    date=ref_day,
-                    journal_root=paths.journal_root,
-                    streams=cfg.streams,
-                    vendor=cfg.vendor,
-                    venue=MarketVenue.KRX.value,
-                    session=MarketSession.REGULAR.value,
-                    regular_open=anchors.regular_open,
-                    regular_close=anchors.regular_close,
-                    audit=audit,
-                    audit_settings=getattr(self._runtime, "audit", None) or AuditSettings(),
-                    repair_pending=repair_pending,
-                )
+                reconciled = True
+                for manifest in paths.ls_manifest_paths(ref_day):
+                    reconciled = (
+                        check_session_reconciliation(
+                            manifest_path=manifest,
+                            date=ref_day,
+                            journal_root=paths.journal_root,
+                            streams=cfg.streams,
+                            vendor=cfg.vendor,
+                            venue=MarketVenue.KRX.value,
+                            session=MarketSession.REGULAR.value,
+                            regular_open=anchors.regular_open,
+                            regular_close=anchors.regular_close,
+                            audit=audit,
+                            audit_settings=getattr(self._runtime, "audit", None) or AuditSettings(),
+                            repair_pending=repair_pending,
+                        )
+                        and reconciled
+                    )
                 if not reconciled:
                     logger.critical(
                         "[DAEMON] stage=eod_maintenance status=FAIL reason=session_data_gap date=%s",
@@ -3582,6 +3970,7 @@ class DaemonRunner:
         for sup in self._children.regular_kis.values():
             sup.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
         self._children.regular_kis.clear()
+        self._stop_regular_kis_dynamic()
         if clear_circuit_alerts:
             self._state.regular_kis_circuit_alerted.clear()
 

@@ -27,6 +27,17 @@ class KisWebSocketLease:
             raise VendorAuthRejected(f"key_lease_busy:{self._path.name}") from None
         self._handle = handle
 
+    def is_free(self) -> bool:
+        """True when no live holder owns the key's lock; never blocks and leaves the lock unheld."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._path, "a+b") as handle:  # noqa: SIM115 - probe handle is closed in the same block
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return False
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return True
+
     async def release(self) -> None:
         handle, self._handle = self._handle, None
         if handle is not None:

@@ -10,7 +10,7 @@ import pathlib
 import time
 from typing import Any, cast
 
-from src.core.config import DataPaths, resolve_collector_runtime
+from src.core.config import DataPaths, IntradayAdmissionSettings, resolve_collector_runtime
 from src.core.errors import KrxAlphaError, MissingCredentialsError, SlotBudgetExceededError
 from src.core.observability import EVENT
 from src.core.session_anchors import resolve_session_anchors
@@ -19,9 +19,10 @@ from src.realtime.adapters.kis import KisRealtimeAdapter
 from src.realtime.contracts import MarketSession, MarketVenue
 from src.realtime.kis_lease import KisWebSocketLease
 from src.realtime.kis_sharding import AftermarketShard, load_kis_data_credentials, plan_regular_kis_shards
-from src.realtime.session import SessionConfig, StreamRoute, bootstrap_session
+from src.realtime.session import DynamicFeed, DynamicPairWatcher, SessionConfig, StreamRoute, bootstrap_session
 from src.realtime.streamer import RealtimeStreamer, regular_kis_silence_limit_s
 from src.realtime.streaming_child import resolve_clock_overrides, run_streaming_child
+from src.universe.intraday import read_dynamic_admissions
 from src.universe.ipc import read_candidates
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,16 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--max-cycles", type=int, default=None)
     parser.add_argument("--restart-reason", choices=["stale_child"], default=None)
     parser.set_defaults(handler=lambda args: asyncio.run(_run_stream(args)))
+    dynamic = subparsers.add_parser("collect-regular-kis-dynamic")
+    dynamic.add_argument("--session-date", required=True)
+    dynamic.add_argument("--journal-root", required=True)
+    dynamic.add_argument("--manifest-path", required=True)
+    dynamic.add_argument("--credential-slot", required=True)
+    dynamic.add_argument("--credential-key-id", required=True)
+    dynamic.add_argument("--ntp-host", default=None)
+    dynamic.add_argument("--max-clock-offset-ns", type=int, default=None)
+    dynamic.add_argument("--max-cycles", type=int, default=None)
+    dynamic.set_defaults(handler=lambda args: asyncio.run(_run_dynamic_stream(args)))
 
 
 def _deadline_ns(expected_close_ns: int, close_grace_s: float) -> int:
@@ -208,6 +219,128 @@ async def _run_stream(args: argparse.Namespace) -> int:
         slot_budget,
         cred.key_id,
         extra=EVENT,
+    )
+    return 0
+
+
+async def _run_dynamic_stream(args: argparse.Namespace) -> int:
+    """Collect KRX regular trades for the symbols the intraday plan assigns to the dynamic KIS slot until window end.
+
+    Returns:
+        0 after a graceful stop, or when started after the window already closed (no socket opened).
+
+    Raises:
+        KrxAlphaError: Intraday admission or regular KIS is disabled, or the slot is a regular credential slot.
+        MissingCredentialsError: Dynamic slot credential fingerprint mismatch.
+    """
+    runtime = resolve_collector_runtime()
+    settings = runtime.collector
+    regular_kis = runtime.regular_kis
+    intraday = IntradayAdmissionSettings()
+    if not intraday.enabled:
+        raise KrxAlphaError("intraday admission is disabled")
+    if not regular_kis.enabled:
+        raise KrxAlphaError("regular_kis collection is disabled")
+    slot = str(args.credential_slot)
+    if intraday.kis_dynamic_slot != slot:
+        raise KrxAlphaError(f"credential slot {slot} is not the configured kis_dynamic_slot")
+    if slot in regular_kis.credential_slots:
+        raise KrxAlphaError(f"kis dynamic slot {slot} must not be a regular_kis credential slot")
+    cred = next((c for c in load_kis_data_credentials() if c.slot == slot), None)
+    if cred is None or cred.key_id != str(args.credential_key_id):
+        raise MissingCredentialsError(f"credential fingerprint mismatch for slot {slot}")
+    capacity = int(regular_kis.pair_capacity_per_connection or 0)
+    streams: tuple[str, str] = tuple(regular_kis.streams)  # type: ignore[assignment]
+    route = StreamRoute(MarketVenue.KRX, MarketSession.REGULAR)
+    session_date = dt.date.fromisoformat(str(args.session_date))
+    paths = DataPaths(pathlib.Path(str(args.journal_root)).parent)
+    anchors = resolve_session_anchors(paths.session_calendar_dir, session_date)
+    overrides = resolve_clock_overrides(getattr(args, "ntp_host", None), getattr(args, "max_clock_offset_ns", None), settings)
+    if not 0 < overrides.max_clock_offset_ns <= 2_000_000_000:
+        raise ValueError("max_clock_offset_ns must be positive and at most 2 seconds")
+    feed = f"kis:{slot}"
+    ipc_path = paths.dynamic_admissions(session_date)
+    initial = [
+        (symbol, stream)
+        for symbol in dict.fromkeys(read_dynamic_admissions(ipc_path).symbols_for(feed))
+        for stream in streams
+    ]
+    shard = AftermarketShard(MarketVenue.KRX, int(slot), (), streams, cred.slot, cred.key_id)
+    cfg = SessionConfig(
+        session_date=session_date,
+        journal_root=pathlib.Path(str(args.journal_root)),
+        manifest_path=pathlib.Path(str(args.manifest_path)),
+        candidates_path=paths.candidates,
+        ntp_host=overrides.ntp_host,
+        slot_budget=capacity,
+        max_clock_offset_ns=overrides.max_clock_offset_ns,
+        desired_streams=streams,
+        vendor="kis",
+        ntp_fallback_hosts=settings.ntp_fallback_hosts,
+        route=route,
+        shard=shard,
+        min_free_disk_gb=float(settings.min_free_disk_gb),
+        journal_retain_days=settings.journal_retain_days,
+        restart_reason=getattr(args, "restart_reason", None),
+    )
+    session = bootstrap_session(cfg)
+    manifest = getattr(session, "manifest", None)
+    deadline = _deadline_ns(int(getattr(manifest, "expected_close_ns", 0) or 0), float(regular_kis.close_grace_s))
+    if time.time_ns() >= deadline:
+        logger.info(
+            "[DATA] stage=regular_kis_dynamic status=STOP date=%s slot=%s reason=window_closed",
+            session_date.isoformat(),
+            slot,
+            extra=EVENT,
+        )
+        return 0
+    watch = DynamicPairWatcher(
+        feed=DynamicFeed(
+            vendor="kis",
+            feed=feed,
+            streams=streams,
+            ipc_path=ipc_path,
+            membership_path=paths.membership_path(session_date),
+            kis_slot=slot,
+        ),
+        session=session,
+        static_pairs=(),
+        initial_dynamic=initial,
+    )
+    logger.info(
+        "[DATA] stage=regular_kis_dynamic status=START date=%s slot=%s initial_pairs=%d credential_key_id=%s",
+        session_date.isoformat(),
+        slot,
+        len(initial),
+        cred.key_id,
+        extra=EVENT,
+    )
+
+    def _adapter_factory(http: Any) -> Any:
+        lease = KisWebSocketLease(root=paths.kis_ws_lease_dir, credential_key_id=cred.key_id)
+        return KisRealtimeAdapter(
+            app_key=cred.app_key,
+            app_secret=cred.app_secret,
+            http=http,
+            route=route,
+            allowed_streams=streams,
+            capacity_pairs=capacity,
+            lease=lease,
+            ack_timeout_s=settings.kis_ack_timeout_s,
+        )
+
+    await run_streaming_child(
+        session=session,
+        adapter_factory=_adapter_factory,
+        replay_pairs=watch.pairs(),
+        live_watch=watch,
+        silence_limit=lambda: regular_kis_silence_limit_s(
+            dt.datetime.now(dt.UTC), anchors=anchors, limit_s=regular_kis.silence_limit_s
+        ),
+        max_cycles=getattr(args, "max_cycles", None),
+        streamer_factory=RealtimeStreamer,
+        stop_deadline_ns=deadline,
+        close_writer=True,
     )
     return 0
 

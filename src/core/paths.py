@@ -54,8 +54,9 @@ class DataPaths:
     def universe_replay_dir(self) -> pathlib.Path:
         return self.root / "universe_replay"
 
-    def universe_replay_out(self, day: dt.date) -> pathlib.Path:
-        return self.universe_replay_dir / f"{day.isoformat()}.parquet"
+    def universe_replay_out(self, day: dt.date, policy_version: str | None = None) -> pathlib.Path:
+        base = self.universe_replay_dir if policy_version is None else self.universe_replay_dir / policy_version
+        return base / f"{day.isoformat()}.parquet"
 
     @property
     def manifest_dir(self) -> pathlib.Path:
@@ -129,6 +130,13 @@ class DataPaths:
     def universe_out(self, day: dt.date) -> pathlib.Path:
         return self.universe_dir / f"{day.isoformat()}.parquet"
 
+    @property
+    def universe_dropped_dir(self) -> pathlib.Path:
+        return self.root / "universe_dropped"
+
+    def universe_dropped_out(self, decision_date: dt.date) -> pathlib.Path:
+        return self.universe_dropped_dir / f"{decision_date.isoformat()}.parquet"
+
     def snapshot_partition(self, dataset: str, day: dt.date) -> pathlib.Path:
         """Return the L1 day partition for a REST snapshot dataset.
 
@@ -188,6 +196,30 @@ class DataPaths:
     def regular_kis_manifest_path(self, day: dt.date, shard_index: int) -> pathlib.Path:
         """Return `manifest/regular_kis/<day>.krx.shard-<NN>.json`; pure path algebra."""
         return self.manifest_dir / "regular_kis" / f"{day.isoformat()}.krx.shard-{shard_index:02d}.json"
+
+    def ls_manifest_path(self, day: dt.date, shard_index: int) -> pathlib.Path:
+        """Return the LS manifest for a shard; shard 0 is the legacy `manifest_path(day)`. Pure path algebra."""
+        if shard_index < 0:
+            raise ValueError(f"shard_index must be >= 0, got {shard_index}")
+        if shard_index == 0:
+            return self.manifest_path(day)
+        return self.manifest_dir / "ls" / f"{day.isoformat()}.krx.shard-{shard_index:02d}.json"
+
+    def ls_manifest_paths(self, day: dt.date) -> tuple[pathlib.Path, ...]:
+        """Return the shard-0 manifest path, then existing shard>=1 LS manifests in shard order."""
+        prefix = f"{day.isoformat()}.krx.shard-"
+        shards: list[tuple[int, pathlib.Path]] = []
+        for path in (self.manifest_dir / "ls").glob(f"{prefix}*.json"):
+            digits = path.name[len(prefix) : -len(".json")]
+            if digits.isdigit() and int(digits) >= 1 and path.is_file():
+                shards.append((int(digits), path))
+        return (self.manifest_path(day), *(path for _, path in sorted(shards, key=lambda item: item[0])))
+
+    def membership_path(self, day: dt.date) -> pathlib.Path:
+        return self.manifest_dir / "membership" / f"{day.isoformat()}.jsonl"
+
+    def dynamic_admissions(self, day: dt.date) -> pathlib.Path:
+        return self.manifest_dir / "membership" / f"{day.isoformat()}.dynamic.json"
 
     def premarket_candidates(self, day: dt.date) -> pathlib.Path:
         return self.universe_dir / "premarket" / f"{day.isoformat()}.json"

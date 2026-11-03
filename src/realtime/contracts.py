@@ -75,6 +75,17 @@ class VendorAdapter(Protocol):
 
 
 @runtime_checkable
+class LiveSubscribable(Protocol):
+    """Optional adapter capability: subscribe pairs while the receive loop runs."""
+
+    async def subscribe_live(self, pairs: list[tuple[str, str]]) -> list[VendorAck]: ...
+
+    def subscribed_pairs(self) -> tuple[tuple[str, str], ...]:
+        """Pairs accepted on the current connection (reset on connect)."""
+        ...
+
+
+@runtime_checkable
 class HeartbeatProbe(Protocol):
     """Optional adapter telemetry for vendor application-level heartbeats.
 

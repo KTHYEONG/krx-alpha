@@ -19,11 +19,13 @@ from src.core.config import (
     KiwoomCredentials,
     RepairSettings,
     TickTapeBackfillSettings,
+    TickTapeOverflowSettings,
     load_credentials,
 )
 from src.core.errors import KrxAlphaError, MissingCredentialsError
 from src.core.paths import DataPaths
 from src.marketdata.tick_tape_backfill import (
+    abandon_stale_tier_c,
     pending_repair_symbol_days,
     plan_tick_tape_targets,
     read_ledger_done,
@@ -121,6 +123,7 @@ def _parse_only_symbols(raw: str | None) -> frozenset[str] | None:
 def run(args: argparse.Namespace) -> int:
     """Plan LS-uncovered symbol-days inside the vendor window and fetch their Kiwoom tapes."""
     settings = TickTapeBackfillSettings()
+    overflow = TickTapeOverflowSettings()
     if not settings.enabled and not getattr(args, "dry_run", False):
         logger.info("[DATA] stage=tick_tape_backfill status=SKIP reason=disabled")
         return 2
@@ -145,7 +148,11 @@ def run(args: argparse.Namespace) -> int:
             logger.warning("[DATA] stage=tick_tape_plan status=DEGRADED reason=repair_order error=%s", type(exc).__name__)
             repair_days = frozenset()
         targets = plan_tick_tape_targets(
-            sessions=sessions, paths=paths, ledger_done=ledger_done, repair_symbol_days=repair_days
+            sessions=sessions,
+            paths=paths,
+            ledger_done=ledger_done,
+            repair_symbol_days=repair_days,
+            overflow=overflow,
         )
     except (OSError, ValueError) as exc:
         logger.error("[DATA] stage=tick_tape_backfill status=FAIL reason=calendar_or_ledger error=%s", type(exc).__name__)
@@ -167,6 +174,10 @@ def run(args: argparse.Namespace) -> int:
         }
         print(json.dumps(plan))  # noqa: T201 - CLI result goes to stdout
         return 0
+    try:
+        abandon_stale_tier_c(sessions=sessions, paths=paths, ledger_done=ledger_done, overflow=overflow)
+    except (OSError, ValueError) as exc:
+        logger.warning("[DATA] stage=tick_tape_plan tier=C status=DEGRADED reason=stale_abandon error=%s", type(exc).__name__)
     if not targets:
         logger.info("[DATA] stage=tick_tape_backfill status=OK reason=nothing_to_do")
         return 2
@@ -208,6 +219,7 @@ def run(args: argparse.Namespace) -> int:
             now=_now_kst,
             run_id=run_id,
             should_stop=stop_event.is_set,
+            overflow=overflow,
         )
     except (KrxAlphaError, OSError, ValueError) as exc:
         logger.error("[DATA] stage=tick_tape_backfill status=FAIL reason=setup error=%s", type(exc).__name__)

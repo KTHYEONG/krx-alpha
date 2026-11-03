@@ -1,3 +1,6 @@
+import pytest
+
+
 def test_collect_stream_subcommand_registered() -> None:
     from src.cli.main import build_parser
 
@@ -378,3 +381,287 @@ def test_collect_stream_handover_can_be_disabled(tmp_path, monkeypatch) -> None:
     captured = _run_with_captured_streamer(tmp_path, monkeypatch, {"KRX_ALPHA_LAG_HANDOVER_ENABLED": "false"})
 
     assert "handover" not in captured
+
+
+def _ls_key_id() -> str:
+    import hashlib
+
+    return hashlib.sha256(b"k").hexdigest()[:12]
+
+
+def _ledger_rows(path) -> list:
+    import json
+
+    if not path.exists():
+        return []
+    return json.loads(path.read_text(encoding="utf-8"))["leases"]
+
+
+def _fill_ls_ledger(token_dir, owners: tuple[str, ...]) -> None:
+    from src.realtime.ws_lease import LeaseRole, WsLeaseLedger
+
+    ledger = WsLeaseLedger(token_dir, vendor="ls", key_id=_ls_key_id(), max_connections=3, ttl_s=600.0)
+    for owner in owners:
+        ledger.acquire(owner, LeaseRole.PRIMARY)
+
+
+def _run_shard(tmp_path, monkeypatch, *, index, symbols, env):
+    import argparse
+    import json
+
+    from src.cli import collect_stream
+    from src.realtime import session as session_module
+    from src.realtime.adapters import registry
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setenv("LS_APP_KEY", "k")
+    monkeypatch.setenv("LS_APP_SECRET", "s")
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(tmp_path / "tokens"))
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr("src.realtime.session.measure_ntp_offset_ns", lambda *a, **k: 0)
+    cp = tmp_path / "c.json"
+    candidates = ("005930", "000660")
+    write_candidates(cp, [{"symbol": s, "selection_reasons": ["limit_up"]} for s in candidates], rev=1)
+    mm = tmp_path / "m.json"
+    mm.write_text(json.dumps(dict.fromkeys(candidates, "KOSPI")), encoding="utf-8")
+    ledger_file = tmp_path / "tokens" / f"wslease_ls_{_ls_key_id()}.json"
+    captured: dict[str, object] = {}
+    journal_tags: list[object] = []
+    real_writer = session_module.L0JournalWriter
+
+    def _writer(**kwargs):
+        journal_tags.append(kwargs.get("file_tag"))
+        return real_writer(**kwargs)
+
+    class _FakeStreamer:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        async def run_forever(self, stop, *, max_cycles=None):
+            captured["ledger_during"] = _ledger_rows(ledger_file)
+
+    class _FakeHttp:
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(session_module, "L0JournalWriter", _writer)
+    monkeypatch.setattr(collect_stream, "RealtimeStreamer", _FakeStreamer)
+    monkeypatch.setattr(registry, "LsRealtimeAdapter", lambda **kw: object())
+    monkeypatch.setattr("aiohttp.ClientSession", lambda *a, **k: _FakeHttp())
+    args = argparse.Namespace(
+        session_date="2026-09-14",
+        journal_root=str(tmp_path / "l0"),
+        manifest_path=str(tmp_path / "s.json"),
+        candidates_path=str(cp),
+        market_map=str(mm),
+        ntp_host="h",
+        max_clock_offset_ns=2_000_000_000,
+        max_cycles=1,
+        ls_shard_index=index,
+        symbols=symbols,
+    )
+    rc = collect_stream.run(args)
+    return rc, captured, journal_tags, ledger_file
+
+
+def test_collect_stream_shard_arguments_default_to_the_legacy_shard() -> None:
+    from src.cli.main import build_parser
+
+    args = build_parser().parse_args(
+        [
+            "collect-stream",
+            "--session-date",
+            "2026-09-14",
+            "--journal-root",
+            "l0",
+            "--manifest-path",
+            "s.json",
+            "--candidates-path",
+            "c.json",
+            "--market-map",
+            "m.json",
+        ]
+    )
+
+    assert args.ls_shard_index == 0
+    assert args.symbols is None
+
+
+def test_shard_index_one_requires_symbols(tmp_path) -> None:
+    import argparse
+
+    from src.cli import collect_stream
+    from src.core.errors import KrxAlphaError
+
+    args = argparse.Namespace(
+        session_date="2026-09-14",
+        journal_root=str(tmp_path / "l0"),
+        manifest_path=str(tmp_path / "s.json"),
+        candidates_path=str(tmp_path / "c.json"),
+        market_map=str(tmp_path / "m.json"),
+        ls_shard_index=1,
+        symbols=None,
+    )
+
+    with pytest.raises(KrxAlphaError, match="symbols is required"):
+        collect_stream.run(args)
+    assert not (tmp_path / "s.json").exists()
+
+
+@pytest.mark.parametrize("symbols", ["005930,005930", "005930,", "00593", "005930;000660", "005930, "])
+def test_malformed_shard_symbols_fail_closed(tmp_path, symbols: str) -> None:
+    import argparse
+
+    from src.cli import collect_stream
+    from src.core.errors import KrxAlphaError
+
+    args = argparse.Namespace(
+        session_date="2026-09-14",
+        journal_root=str(tmp_path / "l0"),
+        manifest_path=str(tmp_path / "s.json"),
+        candidates_path=str(tmp_path / "c.json"),
+        market_map=str(tmp_path / "m.json"),
+        ls_shard_index=1,
+        symbols=symbols,
+    )
+
+    with pytest.raises(KrxAlphaError, match="symbols must be"):
+        collect_stream.run(args)
+
+
+def test_single_session_builds_no_lease_ledger(tmp_path, monkeypatch) -> None:
+    from src.cli import collect_stream
+    from src.realtime.connection_handover import Handover
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("single-session collection must not build a lease ledger")
+
+    monkeypatch.setattr(collect_stream, "WsLeaseLedger", _forbidden)
+
+    captured = _run_with_captured_streamer(tmp_path, monkeypatch, {})
+
+    assert isinstance(captured["handover"], Handover)
+
+
+@pytest.mark.parametrize(("index", "expected_tag"), [(0, None), (1, "s1")])
+def test_ls_shard_holds_its_primary_slot_while_streaming(tmp_path, monkeypatch, caplog, index, expected_tag) -> None:
+    caplog.set_level("INFO", logger="src.cli.collect_stream")
+    env = {"KRX_ALPHA_LS_ACTIVE_SESSIONS": "2", "KRX_ALPHA_LS_MAX_SESSIONS": "3"}
+
+    rc, captured, journal_tags, ledger_file = _run_shard(tmp_path, monkeypatch, index=index, symbols="005930", env=env)
+
+    assert rc == 0
+    held = captured["ledger_during"]
+    assert [(row["owner"].startswith(f"ls-shard-{index}-"), row["role"]) for row in held] == [(True, "primary")]
+    assert _ledger_rows(ledger_file) == []
+    assert {symbol for symbol, _ in captured["replay_pairs"]} == {"005930"}
+    assert journal_tags
+    assert set(journal_tags) == {expected_tag}
+    assert f"[DATA] stage=ls_shard index={index} symbols=1" in caplog.text
+
+
+def test_shard_one_exits_3_when_its_primary_slot_is_denied(tmp_path, monkeypatch) -> None:
+    _fill_ls_ledger(tmp_path / "tokens", ("a", "b", "c"))
+    env = {"KRX_ALPHA_LS_ACTIVE_SESSIONS": "2", "KRX_ALPHA_LS_MAX_SESSIONS": "3"}
+
+    rc, captured, _, ledger_file = _run_shard(tmp_path, monkeypatch, index=1, symbols="005930", env=env)
+
+    assert rc == 3
+    assert "replay_pairs" not in captured
+    assert not (tmp_path / "s.json").exists()
+    assert len(_ledger_rows(ledger_file)) == 3
+
+
+def test_shard_zero_proceeds_unleased_after_the_retry_window(tmp_path, monkeypatch, caplog) -> None:
+    from src.cli import collect_stream
+
+    monkeypatch.setattr(collect_stream, "_LEASE_RETRY_S", 0.01)
+    _fill_ls_ledger(tmp_path / "tokens", ("a", "b", "c"))
+    env = {"KRX_ALPHA_LS_ACTIVE_SESSIONS": "2", "KRX_ALPHA_LS_MAX_SESSIONS": "3", "KRX_ALPHA_WS_LEASE_TTL_S": "0.05"}
+
+    rc, captured, _, ledger_file = _run_shard(tmp_path, monkeypatch, index=0, symbols="005930", env=env)
+
+    assert rc == 0
+    assert "replay_pairs" in captured
+    assert [row["owner"] for row in captured["ledger_during"]] == ["a", "b", "c"]
+    assert any(record.levelname == "CRITICAL" and "PRIMARY_FORCED" in record.getMessage() for record in caplog.records)
+    assert [row["owner"] for row in _ledger_rows(ledger_file)] == ["a", "b", "c"]
+
+
+def test_shard_index_must_be_non_negative(tmp_path) -> None:
+    import argparse
+
+    from src.cli import collect_stream
+    from src.core.errors import KrxAlphaError
+
+    args = argparse.Namespace(
+        session_date="2026-09-14",
+        journal_root=str(tmp_path / "l0"),
+        manifest_path=str(tmp_path / "s.json"),
+        candidates_path=str(tmp_path / "c.json"),
+        market_map=str(tmp_path / "m.json"),
+        ls_shard_index=-1,
+        symbols=None,
+    )
+
+    with pytest.raises(KrxAlphaError, match="must be non-negative"):
+        collect_stream.run(args)
+    assert not (tmp_path / "s.json").exists()
+
+
+def test_ls_guard_config_keeps_only_the_shard_tiers_and_priority_order(tmp_path) -> None:
+    from src.cli.collect_stream import ls_guard_config
+    from src.core.config import CollectorSettings
+    from src.universe.ipc import write_candidates
+
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "tier": "A"}, {"symbol": "000660", "tier": "B"}], rev=1)
+
+    shard = ls_guard_config(CollectorSettings(), cp, shard_symbols=("000660",))
+    assert shard.order == ("000660",)
+    assert shard.tiers == {"000660": "B"}
+
+    empty = ls_guard_config(CollectorSettings(), cp, shard_symbols=("123456",))
+    assert empty.order is None
+    assert empty.tiers is None
+
+
+def test_shard_primary_release_failure_is_logged_and_the_run_completes(tmp_path, monkeypatch, caplog) -> None:
+    from src.realtime import ws_lease
+
+    caplog.set_level("WARNING", logger="src.cli.collect_stream")
+
+    def _unreleasable(self, lease):
+        raise ws_lease.LeaseUnavailable("ledger_unavailable")
+
+    monkeypatch.setattr(ws_lease.WsLeaseLedger, "release", _unreleasable)
+    env = {"KRX_ALPHA_LS_ACTIVE_SESSIONS": "2", "KRX_ALPHA_LS_MAX_SESSIONS": "3"}
+
+    rc, captured, _, ledger_file = _run_shard(tmp_path, monkeypatch, index=1, symbols="005930", env=env)
+
+    assert rc == 0
+    assert "replay_pairs" in captured
+    assert [row["role"] for row in _ledger_rows(ledger_file)] == ["primary"]
+    assert "status=RELEASE_FAILED reason=ledger_unavailable" in caplog.text
+
+
+@pytest.mark.parametrize(("index", "requests_standby"), [(0, True), (1, False)])
+def test_only_shard_zero_requests_lag_standbys(tmp_path, monkeypatch, index, requests_standby) -> None:
+    from src.cli import collect_stream
+
+    seen: list[object] = []
+    real_monitor = collect_stream.LagMonitor
+
+    def _monitor(**kwargs):
+        seen.append(kwargs.get("on_exceeded"))
+        return real_monitor(**kwargs)
+
+    monkeypatch.setattr(collect_stream, "LagMonitor", _monitor)
+    env = {"KRX_ALPHA_LS_ACTIVE_SESSIONS": "2", "KRX_ALPHA_LS_MAX_SESSIONS": "3"}
+
+    rc, _captured, _tags, _ledger = _run_shard(tmp_path, monkeypatch, index=index, symbols="005930", env=env)
+
+    assert rc == 0
+    assert len(seen) == 1
+    assert (seen[0] is not None) is requests_standby

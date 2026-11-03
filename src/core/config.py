@@ -22,6 +22,7 @@ from src.core.paths import (
     DataPaths,
 )
 from src.core.session_anchors import (
+    STANDARD_CLOSING_AUCTION,
     STANDARD_NXT_AFTER_MARKET_OPEN,
     STANDARD_REGULAR_CLOSE,
 )
@@ -73,6 +74,9 @@ class CollectorSettings(BaseSettings):
     # LS vendor ceilings below; env-overridable, never literals in stream logic.
     ls_max_sessions: int = Field(default=LS_MAX_SESSIONS, ge=1)
     ls_max_subscriptions_per_session: int = Field(default=LS_MAX_SUBSCRIPTIONS_PER_SESSION, ge=1)
+    ls_active_sessions: int = Field(default=1, ge=1)
+    ls_dynamic_reserve_symbols: int = Field(default=0, ge=0)
+    ws_lease_ttl_s: float = Field(default=30.0, gt=0)
     # Rotation of a fresh token is a transport problem, not expiry.
     ls_token_rotation_cooldown_s: float = Field(default=300.0, ge=0)
     regular_open_grace_s: float = Field(default=600.0, gt=0)
@@ -128,7 +132,7 @@ class CollectorSettings(BaseSettings):
 
     @property
     def subscription_symbol_budget(self) -> int:
-        return self.ls_capacity_pairs // len(self.streams)
+        return self.ls_capacity_pairs * self.ls_active_sessions // len(self.streams) - self.ls_dynamic_reserve_symbols
 
     @property
     def db_crosscheck_symbol_budget(self) -> int:
@@ -139,9 +143,22 @@ class CollectorSettings(BaseSettings):
         return self.kiwoom_capacity_pairs // len(self.streams)
 
     @model_validator(mode="after")
+    def check_ls_sharding_capacity(self) -> CollectorSettings:
+        """Keep one LS session for the shard-0 standby when sharding, and the static budget non-negative."""
+        if self.ls_active_sessions >= 2 and self.ls_active_sessions > self.ls_max_sessions - 1:
+            raise ValueError(
+                f"ls_active_sessions {self.ls_active_sessions} must be <= ls_max_sessions - 1 ({self.ls_max_sessions - 1})"
+            )
+        if self.subscription_symbol_budget < 0:
+            raise ValueError(
+                f"ls_dynamic_reserve_symbols {self.ls_dynamic_reserve_symbols} exceeds LS static symbol capacity"
+            )
+        return self
+
+    @model_validator(mode="after")
     def check_universe_budget_within_technical_capacity(self) -> CollectorSettings:
         if "universe_slot_budget" not in self.model_fields_set:
-            self.universe_slot_budget = self.ls_capacity_pairs // len(self.streams)
+            self.universe_slot_budget = self.subscription_symbol_budget
         elif self.universe_slot_budget < 1:
             raise ValueError(f"universe_slot_budget {self.universe_slot_budget} must be >= 1")
         if self.universe_slot_budget > self.subscription_symbol_budget:
@@ -260,6 +277,34 @@ class RegularKisSettings(BaseSettings):
         return len(self.credential_slots) * (self.pair_capacity_per_connection // len(self.streams))
 
 
+class IntradayAdmissionSettings(BaseSettings):
+    """Intraday discovery/admission (env_prefix='KRX_ALPHA_INTRADAY_'); inert when disabled."""
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_INTRADAY_", extra="ignore")
+
+    enabled: bool = False
+    poll_interval_s: float = Field(default=60.0, ge=15.0)
+    start_after_open_s: float = Field(default=30.0, ge=0)
+    admission_cutoff: dt.time = dt.time(15, 15)
+    post_close_screen_at: dt.time = dt.time(15, 31)
+    min_abs_change_pct: float = Field(default=5.0, gt=0)
+    min_trade_value_krw: int = Field(default=10_000_000_000, gt=0)
+    max_pages: int = Field(default=3, ge=1)
+    kis_dynamic_slot: str | None = "5"
+    status_check: bool = True
+
+    @model_validator(mode="after")
+    def check_cutoff_before_closing_auction(self) -> IntradayAdmissionSettings:
+        """Keep admissions clear of the 15:20 closing-auction ka10027 window and its slot-5 REST."""
+        if not self.admission_cutoff < STANDARD_CLOSING_AUCTION:
+            raise ValueError(
+                f"admission_cutoff {self.admission_cutoff} must precede closing auction start {STANDARD_CLOSING_AUCTION}"
+            )
+        if not self.admission_cutoff < self.post_close_screen_at:
+            raise ValueError("post_close_screen_at must follow admission_cutoff")
+        return self
+
+
 class KrxCredentials(BaseSettings):
     """KRX OpenAPI 자격증명 (필수, 빈 기본값 금지)."""
 
@@ -351,6 +396,24 @@ class TickTapeBackfillSettings(BaseSettings):
     def check_window_spans(self) -> TickTapeBackfillSettings:
         if self.window_start_kst == self.window_end_kst:
             raise ValueError("window_start_kst must differ from window_end_kst")
+        return self
+
+
+
+class TickTapeOverflowSettings(BaseSettings):
+    """Tier C same-night tick-tape budget; inert when `enabled` is false."""
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_TICK_TAPE_C_", extra="ignore")
+
+    enabled: bool = False
+    max_symbols: int = Field(default=60, ge=0)
+    deadline: dt.time = dt.time(4, 30)
+
+    @model_validator(mode="after")
+    def check_deadline_before_window_end(self) -> TickTapeOverflowSettings:
+        window_end = TickTapeBackfillSettings.model_fields["window_end_kst"].default
+        if self.deadline >= window_end:
+            raise ValueError("deadline must precede the tick-tape window end")
         return self
 
 
@@ -789,6 +852,7 @@ class UniverseTierSettings(BaseSettings):
     core_exit_rank: int = Field(default=75, ge=1)
     core_warmup_sessions: int = Field(default=20, ge=1)
     follow_sessions: int = Field(default=3, ge=0)
+    downside_enabled: bool = False
 
     @model_validator(mode="after")
     def check_core_rank_order(self) -> UniverseTierSettings:
@@ -809,6 +873,7 @@ class CollectorRuntime:
     regular_kis: RegularKisSettings = field(default_factory=lambda: RegularKisSettings())
     universe_tiers: UniverseTierSettings = field(default_factory=lambda: UniverseTierSettings())
     repair: RepairSettings = field(default_factory=lambda: RepairSettings())
+    intraday: IntradayAdmissionSettings = field(default_factory=lambda: IntradayAdmissionSettings())
 
 
 def resolve_collector_runtime(
@@ -822,6 +887,7 @@ def resolve_collector_runtime(
     regular_kis: RegularKisSettings | None = None,
     universe_tiers: UniverseTierSettings | None = None,
     repair: RepairSettings | None = None,
+    intraday: IntradayAdmissionSettings | None = None,
 ) -> CollectorRuntime:
     """Resolve one coherent collector configuration before child processes start.
 
@@ -893,6 +959,7 @@ def resolve_collector_runtime(
         regular_kis=resolved_regular_kis,
         universe_tiers=resolved_tiers,
         repair=resolved_repair,
+        intraday=intraday if intraday is not None else IntradayAdmissionSettings(),
     )
 
 

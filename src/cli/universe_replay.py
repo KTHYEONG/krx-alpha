@@ -7,6 +7,7 @@ import datetime as dt
 import logging
 
 from src.core.config import CollectorSettings, UniverseTierSettings
+from src.universe.policy import policy_version_for
 from src.universe.replay import replay_universe_history
 
 logger = logging.getLogger(__name__)
@@ -26,14 +27,16 @@ def run(args: argparse.Namespace) -> int:
         paths = settings.paths
         start = dt.date.fromisoformat(str(args.start))
         end = dt.date.fromisoformat(str(args.end))
+        tiers = UniverseTierSettings()
+        policy = policy_version_for(downside_enabled=tiers.downside_enabled)
         summary = replay_universe_history(
             bars_root=paths.bars_daily_dir,
-            out_dir=paths.universe_replay_dir,
+            out_dir=paths.universe_replay_dir / policy if tiers.downside_enabled else paths.universe_replay_dir,
             start=start,
             end=end,
             lookback_calendar_days=settings.selection_lookback_calendar_days,
             slot_budget=settings.universe_slot_budget,
-            tiers=UniverseTierSettings(),
+            tiers=tiers,
             overwrite=bool(getattr(args, "overwrite", False)),
         )
     except Exception as exc:

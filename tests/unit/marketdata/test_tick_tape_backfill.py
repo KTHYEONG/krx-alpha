@@ -581,3 +581,31 @@ def test_replay_alone_is_a_universe_source(tmp_path: pathlib.Path) -> None:
     _replay(paths, _prev(_D), ["CORE"])
     targets = plan_tick_tape_targets(sessions=[_D], paths=paths, ledger_done=frozenset())
     assert [item.symbol for item in targets] == ["CORE"]
+
+
+
+def _shard_manifest(paths: DataPaths, day: dt.date, shard_index: int, accepted: list[str]) -> None:
+    path = paths.ls_manifest_path(day, shard_index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"subscription_acks": [{"symbol": symbol, "accepted": True} for symbol in accepted]}),
+        encoding="utf-8",
+    )
+
+
+def test_shard_manifest_acks_join_the_legacy_accepted_set(tmp_path: pathlib.Path) -> None:
+    paths = DataPaths(tmp_path)
+    _universe(paths, _prev(_D), ["A", "B", "C"])
+    _manifest(paths, _D, ["A"])
+    _shard_manifest(paths, _D, 1, ["B"])
+    targets = plan_tick_tape_targets(sessions=[_D], paths=paths, ledger_done=frozenset())
+    assert [(item.symbol, item.days) for item in targets] == [("C", (_D,))]
+
+
+def test_unsharded_day_plans_from_legacy_manifest_only(tmp_path: pathlib.Path) -> None:
+    paths = DataPaths(tmp_path)
+    _universe(paths, _prev(_D), ["A", "B"])
+    _manifest(paths, _D, ["A"])
+    assert paths.ls_manifest_paths(_D) == (paths.manifest_path(_D),)
+    targets = plan_tick_tape_targets(sessions=[_D], paths=paths, ledger_done=frozenset())
+    assert [(item.symbol, item.days) for item in targets] == [("B", (_D,))]

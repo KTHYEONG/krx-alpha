@@ -113,7 +113,7 @@ def test_matches_production_selection(tmp_path) -> None:
     assert (replayed["managed_filter"].to_list()) == ["unavailable"] * replayed.height
     bars = scan_month_partitions(root, min_date=decision - dt.timedelta(days=150), max_date=decision).collect()
     expected = select_universe_tiered(compute_selection_features(bars), decision, slot_budget=100, tiers=tiers).selected
-    replay_only = {"managed_filter", "short_warmup", "replay_run_id"}
+    replay_only = {"managed_filter", "short_warmup", "replay_run_id", "policy_version"}
     assert_frame_equal(
         replayed.select(list(expected.columns)),
         expected,

@@ -93,6 +93,11 @@ class KisRealtimeAdapter:
         self._pending: list[L0Frame] = []
         self.pingpong_count: int = 0
         self.last_pingpong_wall_ns: int | None = None
+        self._live_lock = asyncio.Lock()
+        self._live_waiter: asyncio.Future[str] | None = None
+        self._live_key: tuple[str, str] | None = None
+        self._late_acks = 0
+        self._subscribed: list[tuple[str, str]] = []
 
     async def connect(self) -> None:
         if self._lease is not None:
@@ -120,6 +125,10 @@ class KisRealtimeAdapter:
         self._pending = []
         self.pingpong_count = 0
         self.last_pingpong_wall_ns = None
+        self._live_waiter = None
+        self._live_key = None
+        self._late_acks = 0
+        self._subscribed = []
 
     async def subscribe(self, pairs: list[tuple[str, str]]) -> list[VendorAck]:
         """Subscribe pairs sequentially; returns acks in send order."""
@@ -140,7 +149,92 @@ class KisRealtimeAdapter:
                 raise VendorDisconnected(f"subscribe_failed:{type(exc).__name__}") from exc
             ack = await self._await_subscribe_ack(symbol, stream)
             acks.append(ack)
+            if ack.accepted:
+                self._subscribed.append((symbol, stream))
         return acks
+
+    def subscribed_pairs(self) -> tuple[tuple[str, str], ...]:
+        """Pairs accepted on the current connection (reset on connect)."""
+        return tuple(self._subscribed)
+
+    async def subscribe_live(self, pairs: list[tuple[str, str]]) -> list[VendorAck]:
+        """Subscribe while recv() is running; acks are routed through recv(); never reads the socket itself.
+
+        Raises: ValueError when cumulative pairs exceed capacity (nothing sent); VendorDisconnected on send failure
+        or route mismatch; VendorAuthRejected on an IGW auth ack. Ack timeouts return accepted=False, code="timeout".
+        """
+        async with self._live_lock:
+            if len(self._subscribed) + len(pairs) > self.capacity_pairs:
+                raise ValueError(
+                    f"live subscribe exceeds capacity: {len(self._subscribed)}+{len(pairs)}>{self.capacity_pairs}"
+                )
+            acks: list[VendorAck] = []
+            for symbol, stream in pairs:
+                if stream not in self._allowed:
+                    raise VendorDisconnected(f"route_mismatch:{stream}")
+                try:
+                    await self._ws.send_str(
+                        json.dumps({
+                            "header": {"approval_key": self._approval_key, "custtype": "P", "tr_type": "1", "content-type": "utf-8"},
+                            "body": {"input": {"tr_id": stream, "tr_key": symbol}},
+                        })
+                    )
+                except (aiohttp.ClientError, OSError) as exc:
+                    raise VendorDisconnected(f"subscribe_failed:{type(exc).__name__}") from exc
+                ack = await self._await_live_ack(symbol, stream)
+                acks.append(ack)
+                if ack.accepted:
+                    self._subscribed.append((symbol, stream))
+            return acks
+
+    async def _await_live_ack(self, symbol: str, stream: str) -> VendorAck:
+        waiter: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._live_waiter = waiter
+        self._live_key = (symbol, stream)
+        try:
+            raw = await asyncio.wait_for(waiter, timeout=self._ack_timeout_s)
+        except TimeoutError:
+            self._late_acks += 1
+            logger.warning(
+                "[DATA] stage=live_subscribe status=TIMEOUT conn_id=%s symbol=%s stream=%s",
+                self._conn_id,
+                symbol,
+                stream,
+            )
+            return VendorAck(symbol, stream, False, "timeout")
+        finally:
+            self._live_waiter = None
+            self._live_key = None
+        return self._parse_ack(raw, symbol, stream)
+
+    @staticmethod
+    def _subscribe_response(raw: str) -> dict[str, Any] | None:
+        try:
+            o = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(o, dict) or not isinstance(o.get("body"), dict) or "rt_cd" not in o["body"]:
+            return None
+        return o
+
+    def _route_live_ack(self, raw: str) -> bool:
+        o = self._subscribe_response(raw)
+        if o is None:
+            return False
+        waiter, key = self._live_waiter, self._live_key
+        if waiter is not None and not waiter.done() and key is not None:
+            raw_header = o.get("header")
+            header: dict[str, Any] = raw_header if isinstance(raw_header, dict) else {}
+            if header.get("tr_id", key[1]) == key[1] and header.get("tr_key", key[0]) == key[0]:
+                waiter.set_result(raw)
+                return True
+            logger.debug("[DATA] stage=live_subscribe status=MISMATCH_IGNORED conn_id=%s", self._conn_id)
+            return True
+        if self._late_acks > 0:
+            self._late_acks -= 1
+            logger.info("[DATA] stage=live_subscribe status=LATE_ACK_IGNORED conn_id=%s", self._conn_id)
+            return True
+        return False
 
     async def _await_subscribe_ack(self, symbol: str, stream: str) -> VendorAck:
         """Wait for the ack of one request within `ack_timeout_s` total."""
@@ -265,6 +359,8 @@ class KisRealtimeAdapter:
             if "|" not in raw:
                 if _is_pingpong(raw):
                     await self._echo_pingpong(raw)
+                    continue
+                if self._route_live_ack(raw):
                     continue
                 raise VendorDisconnected(f"unknown_frame:{raw[:32]}")
             frames = self._parse_envelope(raw)

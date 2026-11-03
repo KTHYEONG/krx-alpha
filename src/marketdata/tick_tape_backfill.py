@@ -13,12 +13,18 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import polars as pl
 
 from src.brokers.kis.rate import HostPacedRateLimiter, host_state_path
-from src.core.config import KisTokenSettings, KiwoomCredentials, RepairSettings, TickTapeBackfillSettings
+from src.core.config import (
+    KisTokenSettings,
+    KiwoomCredentials,
+    RepairSettings,
+    TickTapeBackfillSettings,
+    TickTapeOverflowSettings,
+)
 from src.core.paths import DataPaths
 from src.marketdata.kiwoom_ticks import (
     KiwoomAuthRejected,
@@ -35,12 +41,14 @@ from src.marketdata.kiwoom_ticks import (
 )
 from src.marketdata.partitioned_store import PartitionedStoreError, scan_month_partitions
 from src.marketdata.toss_calendar import load_trading_day_cache, trading_day_from_cache
+from src.universe.membership import MembershipFileError, MembershipRow, effective_tiers, read_membership
 
 logger = logging.getLogger(__name__)
 
 TAPE_VENDOR: str = "kiwoom"
 _LEDGER_OK_STATUSES: frozenset[str] = frozenset({"complete", "vendor_empty"})
 _LEDGER_ATTEMPT_STATUSES: frozenset[str] = frozenset({"failed", "edge_partial"})
+_LEDGER_ABANDONED_STATUSES: frozenset[str] = frozenset({"abandoned"})
 # Rows staged on disk between durable checkpoints: bounds the work a killed run can lose, not memory.
 _FLUSH_ROW_LIMIT: int = 2_000_000
 
@@ -56,11 +64,17 @@ TAPE_PARTITION_SCHEMA: dict[str, Any] = {
 }
 
 
+TickTapeTier = Literal["repair", "gap", "C", "B_dynamic"]
+_DAY_SECONDS: int = 86_400
+_KST = dt.timezone(dt.timedelta(hours=9))
+
+
 @dataclass(frozen=True)
 class TickTapeTarget:
     symbol: str
     days: tuple[dt.date, ...]
     cost_hint: float
+    tier: TickTapeTier = "gap"
 
 
 @dataclass(frozen=True)
@@ -165,14 +179,62 @@ def _bars_value_sum(
     return float(frame.get_column("trade_value_100m").sum() or 0.0)
 
 
+def _membership_value_order(row: MembershipRow) -> tuple[bool, int, str]:
+    return (row.trade_value_krw is None, -(row.trade_value_krw or 0), row.symbol)
+
+
+def _overflow_targets(
+    *,
+    paths: DataPaths,
+    last_session: dt.date,
+    ledger_done: frozenset[tuple[str, dt.date]],
+    planned: AbstractSet[str],
+    overflow: TickTapeOverflowSettings,
+) -> list[TickTapeTarget]:
+    try:
+        latest = effective_tiers(read_membership(paths.membership_path(last_session)))
+    except (MembershipFileError, OSError) as exc:
+        logger.error(
+            "[DATA] stage=tick_tape_plan tier=C status=SKIP reason=membership_unreadable error=%s",
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return []
+    dynamic: list[MembershipRow] = []
+    tier_c: list[MembershipRow] = []
+    for symbol, row in latest.items():
+        if symbol in planned or (symbol, last_session) in ledger_done:
+            continue
+        if row.tier == "C":
+            tier_c.append(row)
+        elif row.tier == "B" and row.source == "dynamic":
+            dynamic.append(row)
+
+    def _target(row: MembershipRow, tier: TickTapeTier) -> TickTapeTarget:
+        hint = _bars_value_sum(paths.bars_daily_dir, row.symbol, last_session, last_session)
+        return TickTapeTarget(symbol=row.symbol, days=(last_session,), cost_hint=hint, tier=tier)
+
+    out = [_target(row, "B_dynamic") for row in sorted(dynamic, key=_membership_value_order)]
+    tier_c.sort(key=_membership_value_order)
+    kept = tier_c[: overflow.max_symbols]
+    dropped = len(tier_c) - len(kept)
+    if dropped:
+        logger.warning(
+            "[DATA] stage=tick_tape_plan tier=C status=TRUNCATED kept=%d dropped=%d", len(kept), dropped
+        )
+    out.extend(_target(row, "C") for row in kept)
+    return out
+
+
 def plan_tick_tape_targets(
     *,
     sessions: Sequence[dt.date],
     paths: DataPaths,
     ledger_done: frozenset[tuple[str, dt.date]],
     repair_symbol_days: AbstractSet[tuple[str, dt.date]] = frozenset(),
+    overflow: TickTapeOverflowSettings | None = None,
 ) -> tuple[TickTapeTarget, ...]:
-    """Per-symbol targets; symbols with a pending repair symbol-day are ordered first, oldest repair day first."""
+    """Per-symbol targets: repairs first, then A/B gaps; B-dynamic and tier C of the latest session follow when overflow is enabled."""
     ordered = sorted(set(sessions))
     if not ordered:
         return ()
@@ -192,7 +254,7 @@ def plan_tick_tape_targets(
             continue
         if not universe:
             continue
-        accepted = _read_manifest_accepted(paths.manifest_path(day))
+        accepted = frozenset().union(*(_read_manifest_accepted(path) for path in paths.ls_manifest_paths(day)))
         gaps = _read_audit_gap_symbols(paths.session_audit_path(day, "ls"))
         for symbol in universe:
             if (symbol, day) in ledger_done:
@@ -200,11 +262,6 @@ def plan_tick_tape_targets(
             if symbol in accepted and symbol not in gaps:
                 continue
             by_symbol.setdefault(symbol, []).append(day)
-    targets: list[TickTapeTarget] = []
-    for symbol, days in by_symbol.items():
-        ascending = tuple(sorted(days))
-        hint = _bars_value_sum(paths.bars_daily_dir, symbol, ascending[0], last_session)
-        targets.append(TickTapeTarget(symbol=symbol, days=ascending, cost_hint=hint))
     session_set = set(ordered)
     repair_earliest: dict[str, dt.date] = {}
     for repair_symbol, repair_day in repair_symbol_days:
@@ -213,12 +270,29 @@ def plan_tick_tape_targets(
         prev = repair_earliest.get(repair_symbol)
         if prev is None or repair_day < prev:
             repair_earliest[repair_symbol] = repair_day
+    targets: list[TickTapeTarget] = []
+    for symbol, days in by_symbol.items():
+        ascending = tuple(sorted(days))
+        hint = _bars_value_sum(paths.bars_daily_dir, symbol, ascending[0], last_session)
+        tier: TickTapeTier = "repair" if symbol in repair_earliest else "gap"
+        targets.append(TickTapeTarget(symbol=symbol, days=ascending, cost_hint=hint, tier=tier))
     targets.sort(
         key=lambda item: (
             0 if item.symbol in repair_earliest else 1,
             repair_earliest.get(item.symbol, item.days[0]),
             item.cost_hint,
             item.symbol,
+        )
+    )
+    if overflow is None or not overflow.enabled:
+        return tuple(targets)
+    targets.extend(
+        _overflow_targets(
+            paths=paths,
+            last_session=last_session,
+            ledger_done=ledger_done,
+            planned=frozenset(by_symbol),
+            overflow=overflow,
         )
     )
     return tuple(targets)
@@ -243,13 +317,12 @@ def pending_repair_symbol_days(
     return frozenset(out)
 
 
-def read_ledger_done(path: pathlib.Path) -> frozenset[tuple[str, dt.date]]:
-    """Return (symbol, date) pairs with status complete or vendor_empty; tolerates a torn final line."""
+def _read_ledger_pairs(path: pathlib.Path, statuses: AbstractSet[str]) -> frozenset[tuple[str, dt.date]]:
     try:
         contents = pathlib.Path(path).read_bytes()
     except FileNotFoundError:
         return frozenset()
-    done: set[tuple[str, dt.date]] = set()
+    found: set[tuple[str, dt.date]] = set()
     lines = contents.splitlines(keepends=True)
     for idx, line in enumerate(lines):
         stripped = line.strip()
@@ -263,13 +336,23 @@ def read_ledger_done(path: pathlib.Path) -> frozenset[tuple[str, dt.date]]:
             raise ValueError("corrupt tick-tape ledger") from None
         if not isinstance(record, Mapping):
             continue
-        if str(record.get("status")) not in _LEDGER_OK_STATUSES:
+        if str(record.get("status")) not in statuses:
             continue
         try:
-            done.add((str(record["symbol"]), dt.date.fromisoformat(str(record["date"]))))
+            found.add((str(record["symbol"]), dt.date.fromisoformat(str(record["date"]))))
         except (KeyError, TypeError, ValueError):
             continue
-    return frozenset(done)
+    return frozenset(found)
+
+
+def read_ledger_done(path: pathlib.Path) -> frozenset[tuple[str, dt.date]]:
+    """Return (symbol, date) pairs with status complete or vendor_empty; tolerates a torn final line."""
+    return _read_ledger_pairs(path, _LEDGER_OK_STATUSES)
+
+
+def read_ledger_abandoned(path: pathlib.Path) -> frozenset[tuple[str, dt.date]]:
+    """Return (symbol, date) pairs recorded with status abandoned; tolerates a torn final line."""
+    return _read_ledger_pairs(path, _LEDGER_ABANDONED_STATUSES)
 
 
 def read_ledger_attempts(path: pathlib.Path) -> Mapping[tuple[str, dt.date], int]:
@@ -302,6 +385,53 @@ def read_ledger_attempts(path: pathlib.Path) -> Mapping[tuple[str, dt.date], int
         base = re.sub(r"-\d+$", "", run_id)
         counts.setdefault(key, set()).add(base)
     return {key: len(bases) for key, bases in counts.items()}
+
+
+
+def abandon_stale_tier_c(
+    *,
+    sessions: Sequence[dt.date],
+    paths: DataPaths,
+    ledger_done: frozenset[tuple[str, dt.date]],
+    overflow: TickTapeOverflowSettings | None,
+) -> int:
+    """Append one same_night_only abandoned row per tier C symbol-day of an older session lacking a settled or abandoned row; returns rows written."""
+    if overflow is None or not overflow.enabled:
+        return 0
+    ordered = sorted(set(sessions))
+    if len(ordered) < 2:
+        return 0
+    closed = ledger_done | read_ledger_abandoned(paths.tick_tape_ledger)
+    records: list[dict[str, Any]] = []
+    for day in ordered[:-1]:
+        try:
+            latest = effective_tiers(read_membership(paths.membership_path(day)))
+        except (MembershipFileError, OSError) as exc:
+            logger.error(
+                "[DATA] stage=tick_tape_plan tier=C status=SKIP reason=membership_unreadable error=%s",
+                type(exc).__name__,
+                exc_info=True,
+            )
+            continue
+        for symbol, row in sorted(latest.items()):
+            if row.tier != "C" or (symbol, day) in closed:
+                continue
+            records.append(
+                {
+                    "date": day.isoformat(),
+                    "symbol": symbol,
+                    "status": "abandoned",
+                    "rows": 0,
+                    "run_id": "stale_tier_c",
+                    "vendor": TAPE_VENDOR,
+                    "tier": "C",
+                    "reason": "same_night_only",
+                }
+            )
+    _append_ledger_lines(paths.tick_tape_ledger, records)
+    if records:
+        logger.info("[DATA] stage=tick_tape_plan tier=C status=ABANDONED reason=same_night_only rows=%d", len(records))
+    return len(records)
 
 
 class _RunAuthError(KiwoomTickTapeError):
@@ -385,6 +515,20 @@ class _PersistenceError(Exception):
     """Staging or checkpoint I/O failed; aborts the run without settling the in-flight symbol."""
 
 
+class _CDeadlineError(Exception):
+    """Tier C walk stopped by the same-night deadline before a day was certified."""
+
+
+def _seconds_since(moment: dt.time, origin: dt.time) -> float:
+    return (_time_of_day_seconds(moment) - _time_of_day_seconds(origin)) % _DAY_SECONDS
+
+
+def _time_of_day_seconds(moment: dt.time) -> float:
+    return dt.timedelta(
+        hours=moment.hour, minutes=moment.minute, seconds=moment.second, microseconds=moment.microsecond
+    ).total_seconds()
+
+
 def run_tick_tape_backfill(
     *,
     targets: Sequence[TickTapeTarget],
@@ -397,6 +541,7 @@ def run_tick_tape_backfill(
     run_id: str,
     should_stop: Callable[[], bool] = lambda: False,
     sleep: Callable[[float], None] = time.sleep,
+    overflow: TickTapeOverflowSettings | None = None,
 ) -> TickTapeRunSummary:
     """Fetch targets under the host-shared pacer, page budget and deadline with same-cursor transient retries and end-of-run retry passes; never raises for per-symbol failures."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
@@ -448,6 +593,12 @@ def run_tick_tape_backfill(
         clamped = max(0.0, min(float(seconds), remaining))
         sleep(clamped)
         _boundary()
+
+    def _c_deadline_reached() -> bool:
+        if overflow is None or not overflow.enabled:
+            return False
+        origin = settings.window_start_kst
+        return _seconds_since(now().astimezone(_KST).time(), origin) >= _seconds_since(overflow.deadline, origin)
 
     def _issue() -> str:
         _boundary()
@@ -539,6 +690,16 @@ def run_tick_tape_backfill(
     failures: dict[str, tuple[TickTapeTarget, BaseException]] = {}
     pending_retry: list[str] = []
     aborted = False
+    c_done: set[str] = set()
+    c_abandoned: dict[str, str] = {}
+
+    def _abandon_tier_c(target: TickTapeTarget, reason: str) -> None:
+        c_abandoned[target.symbol] = reason
+        ledger_queue.extend(
+            {"date": day.isoformat(), "symbol": target.symbol, "status": "abandoned",
+             "rows": 0, "run_id": run_id, "vendor": TAPE_VENDOR, "tier": target.tier, "reason": reason}
+            for day in target.days
+        )
 
     def _process_target(target: TickTapeTarget) -> TapeWalk:
         nonlocal staged_rows
@@ -546,7 +707,9 @@ def run_tick_tape_backfill(
         label = _label()
         symbol_chunks: list[tuple[dt.date, pathlib.Path, int]] = []
 
-        def _fetch_page(key: str | None, _symbol: str = target.symbol) -> TickPage:
+        def _fetch_page(key: str | None, _symbol: str = target.symbol, _tier: TickTapeTier = target.tier) -> TickPage:
+            if _tier == "C" and _c_deadline_reached():
+                raise _CDeadlineError(_symbol)
             return _fetch(_symbol, key)
 
         def _stage_day(
@@ -587,16 +750,16 @@ def run_tick_tape_backfill(
             staged_rows += rows
             ledger_queue.append(
                 {"date": day.isoformat(), "symbol": target.symbol, "status": "complete",
-                 "rows": rows, "run_id": label, "vendor": TAPE_VENDOR}
+                 "rows": rows, "run_id": label, "vendor": TAPE_VENDOR, "tier": target.tier}
             )
         ledger_queue.extend(
             {"date": day.isoformat(), "symbol": target.symbol, "status": "vendor_empty",
-             "rows": 0, "run_id": label, "vendor": TAPE_VENDOR}
+             "rows": 0, "run_id": label, "vendor": TAPE_VENDOR, "tier": target.tier}
             for day in sorted(walk.vendor_empty)
         )
         ledger_queue.extend(
             {"date": day.isoformat(), "symbol": target.symbol, "status": "edge_partial",
-             "rows": 0, "run_id": label, "vendor": TAPE_VENDOR}
+             "rows": 0, "run_id": label, "vendor": TAPE_VENDOR, "tier": target.tier}
             for day in sorted(walk.edge_partial & frozenset(target.days))
         )
         return walk
@@ -643,9 +806,15 @@ def run_tick_tape_backfill(
             _boundary()
         except TapeBoundaryError:
             break
+        if target.tier == "C" and _c_deadline_reached():
+            _abandon_tier_c(target, "deadline")
+            continue
         started += 1
         try:
             walk = _process_target(target)
+        except _CDeadlineError:
+            _abandon_tier_c(target, "deadline")
+            continue
         except _RunAuthError:
             logger.error("[DATA] stage=tick_tape_backfill status=FAIL reason=auth run_id=%s", run_id)
             status = "FAIL"
@@ -670,6 +839,8 @@ def run_tick_tape_backfill(
             if _is_retryable(exc):
                 pending_retry.append(target.symbol)
             continue
+        if target.tier == "C":
+            c_done.add(target.symbol)
         _settle_success(walk, target)
         if _flush_if_needed():
             status, reason = "FAIL", "persistence"
@@ -697,8 +868,20 @@ def run_tick_tape_backfill(
                 except TapeBoundaryError:
                     stop_pass = True
                     break
+                if target.tier == "C" and _c_deadline_reached():
+                    failures.pop(target.symbol, None)
+                    if target.symbol in pending_retry:
+                        pending_retry.remove(target.symbol)
+                    _abandon_tier_c(target, "deadline")
+                    continue
                 try:
                     walk = _process_target(target)
+                except _CDeadlineError:
+                    failures.pop(target.symbol, None)
+                    if target.symbol in pending_retry:
+                        pending_retry.remove(target.symbol)
+                    _abandon_tier_c(target, "deadline")
+                    continue
                 except _RunAuthError:
                     failures.pop(target.symbol, None)
                     logger.error("[DATA] stage=tick_tape_backfill status=FAIL reason=auth run_id=%s", run_id)
@@ -724,6 +907,8 @@ def run_tick_tape_backfill(
                     if not _is_retryable(exc) and target.symbol in pending_retry:
                         pending_retry.remove(target.symbol)
                     continue
+                if target.tier == "C":
+                    c_done.add(target.symbol)
                 _settle_success(walk, target)
                 failures.pop(target.symbol, None)
                 if target.symbol in pending_retry:
@@ -740,9 +925,12 @@ def run_tick_tape_backfill(
         for target in targets:
             if target.symbol in failures:
                 _, failure = failures[target.symbol]
+                if target.tier == "C":
+                    _abandon_tier_c(target, type(failure).__name__)
+                    continue
                 ledger_queue.extend(
                     {"date": day.isoformat(), "symbol": target.symbol, "status": "failed",
-                     "rows": 0, "run_id": run_id, "vendor": TAPE_VENDOR,
+                     "rows": 0, "run_id": run_id, "vendor": TAPE_VENDOR, "tier": target.tier,
                      "reason": type(failure).__name__}
                     for day in target.days
                 )
@@ -759,7 +947,7 @@ def run_tick_tape_backfill(
     if status == "OK" and stop_requested:
         reason = "stop_requested"
     logger.info(
-        "[DATA] stage=tick_tape_backfill status=%s run_id=%s symbols=%d symbol_days=%d pages=%d edge_partial=%d failed=%d oversize=%d retried=%d",
+        "[DATA] stage=tick_tape_backfill status=%s run_id=%s symbols=%d symbol_days=%d pages=%d edge_partial=%d failed=%d oversize=%d retried=%d tier_c_done=%d tier_c_abandoned=%d",
         status,
         run_id,
         started,
@@ -769,6 +957,8 @@ def run_tick_tape_backfill(
         failed,
         oversize,
         retried,
+        len(c_done),
+        len(c_abandoned),
     )
     return TickTapeRunSummary(
         status=status,
