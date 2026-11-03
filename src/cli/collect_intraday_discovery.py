@@ -1,4 +1,4 @@
-"""collect-intraday-discovery CLI subcommand (Kiwoom ka10024 intraday admission poller)."""
+"""collect-intraday-discovery CLI subcommand (Kiwoom ka10032 intraday admission poller)."""
 
 from __future__ import annotations
 
@@ -59,12 +59,12 @@ logger = logging.getLogger(__name__)
 
 _KST = ZoneInfo("Asia/Seoul")
 _KIWOOM_VENDOR: str = "kiwoom"
-_KIWOOM_SCOPE: str = "ka10024"
+_KIWOOM_SCOPE: str = "ka10032"
 _CONSECUTIVE_FAILURE_CRITICAL: int = 5
 _CAPACITY_SOURCE: str = "intraday_capacity"
 _POST_CLOSE_SOURCE: str = "post_close_screen"
 _LIST_KIND: str = "kiwoom_trade_amount"
-_SOURCE_TR: str = "ka10024"
+_SOURCE_TR: str = "ka10032"
 _MARKET_DIV: str = "J"
 _UNKNOWN_LEVEL: str = "unknown"
 _LS_RESERVE_FEED: str = "ls:1"
@@ -390,7 +390,7 @@ def _slot_credential(slot: str, credentials: tuple[KisDataCredential, ...]) -> K
 
 
 def run(args: argparse.Namespace) -> int:
-    """Poll ka10024 on schedule and admit qualifiers until the post-close screen; returns 0.
+    """Poll ka10032 on schedule and admit qualifiers until the post-close screen; returns 0.
 
     Raises:
         KrxAlphaError: Intraday discovery is disabled.

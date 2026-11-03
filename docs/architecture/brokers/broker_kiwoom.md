@@ -100,11 +100,14 @@ next-key: <CONTINUATION_KEY>
 * **Body:** `{"mrkt_tp": "000", "stex_tp": "3", "trde_qty_tp": "0", "prc_tp": "0"}`
 * **Output:** 당일 거래량 상위 100~200 종목 리스트 (`stk_cd`, `cur_prc`, `trde_qty`, `flu_rt`).
 
-### 2.3 `ka10024` — 거래대금 상위 순위 (Top Trade Amount)
+### 2.3 `ka10032` — 거래대금 상위 요청 (Top Trade Amount)
 * **Path:** `POST /api/dostk/rkinfo`
-* **Headers:** `api-id: "ka10024"`
-* **Body:** `{"mrkt_tp": "000", "stex_tp": "3"}`
-* **Output:** 당일 거래대금 상위 종목 리스트 (`stk_cd`, `cur_prc`, `trde_amt` 백만원 단위, `flu_rt`).
+* **Headers:** `api-id: "ka10032"`, `cont-yn`, `next-key`
+* **Request Body (accepted live, 2026-11-03 20:16 KST):** `{"mrkt_tp": "000", "mang_stk_incls": "0", "stex_tp": "1"}` (`stex_tp` `"1"` = KRX). Whether `mang_stk_incls` is required and what its values mean are unverified.
+* **Output (`trde_prica_upper` array — 100 rows/page):** `cont-yn: Y` with an 8-character `next-key` pages onward (3 pages / 300 rows walked).
+  * Fields: `now_rank`, `pred_rank`, `stk_cd` (6-char, alphanumeric codes such as `0147B0` occur; no `_AL`/`_NX` suffix under `stex_tp=1`), `stk_nm`, `cur_prc` (signed), `pred_pre_sig`, `pred_pre`, `flu_rt` (signed), `sel_bid`, `buy_bid`, `now_trde_qty` (may hold the 32-bit overflow value 4294967295), `pred_trde_qty`, `trde_prica` (백만원).
+  * `trde_prica` unit: consistent with 백만원 (top row 3,228,357 vs 2.30M shares × ~1.41M KRW ≈ 3.26T KRW). The ±1% reconciliation against `bars.daily` is pending (same-scope comparison needs the post-close bar).
+* **Note:** `ka10024` on this path returns `return_code=1` `[1504] 해당 URI에서는 지원하는 API ID가 아닙니다`.
 
 ### 2.4 `ka10028` — 시가총액 상위 순위 (Market Cap Ranking)
 * **Path:** `POST /api/dostk/rkinfo`
@@ -112,11 +115,8 @@ next-key: <CONTINUATION_KEY>
 * **Body:** `{"mrkt_tp": "000"}`
 * **Output:** 시가총액 상위 종목 리스트 (`stk_cd`, `cur_prc`, `mkt_cap` 억원 단위).
 
-### 2.5 `ka10032` — 신고가 / 신저가 순위 (New High/Low Ranking)
-* **Path:** `POST /api/dostk/rkinfo`
-* **Headers:** `api-id: "ka10032"`
-* **Body:** `{"mrkt_tp": "000", "gubun": "1"}` (`"1"`: 신고가, `"2"`: 신저가)
-* **Output:** 52주/당일 신고가 및 신저가 포착 종목.
+### 2.5 (removed)
+* The earlier `ka10032` new-high/low entry was unverified and contradicted live evidence (`ka10032` is the trade-amount ranking, §2.3).
 
 ### 2.6 `ka10034` — 체결강도 상위 순위 (High Trade Strength)
 * **Path:** `POST /api/dostk/rkinfo`

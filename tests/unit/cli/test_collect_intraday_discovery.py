@@ -357,7 +357,7 @@ def test_ranking_rows_carry_point_in_time_metadata() -> None:
         {
             "session_date": _DAY,
             "observed_at_ns": 77,
-            "source_tr": "ka10024",
+            "source_tr": "ka10032",
             "market_div_code": "J",
             "list_kind": "kiwoom_trade_amount",
             "rank": 3,

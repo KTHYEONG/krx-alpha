@@ -42,13 +42,13 @@ class _Pacer:
         self.booked += 1
 
 
-def _item(rank: int, stk_cd: str = "004490_AL", trde_amt: str = "12345", flu_rt: str = "+6.10") -> dict:
+def _item(rank: int, stk_cd: str = "004490_AL", trde_prica: str = "12345", flu_rt: str = "+6.10") -> dict:
     return {
-        "rank": str(rank),
+        "now_rank": str(rank),
         "stk_cd": stk_cd,
         "cur_prc": "-12000",
         "flu_rt": flu_rt,
-        "trde_amt": trde_amt,
+        "trde_prica": trde_prica,
     }
 
 
@@ -56,7 +56,7 @@ def _page(items: list[dict], *, cont: str = "N", next_key: str | None = None) ->
     headers = {"cont-yn": cont}
     if next_key is not None:
         headers["next-key"] = next_key
-    return _Resp({"return_code": 0, "trde_prica_upr": items}, headers=headers)
+    return _Resp({"return_code": 0, "trde_prica_upper": items}, headers=headers)
 
 
 def _fetch(session: _Session, pacer: _Pacer, *, max_pages: int = 3, min_tv: int = 1) -> tuple:
@@ -82,12 +82,12 @@ def test_suffix_stripped_and_unit_converted() -> None:
     assert rows[0].change_pct == pytest.approx(6.10)
     assert rows[0].last_price == 12_000
     headers = session.calls[0]["headers"]
-    assert headers["api-id"] == "ka10024"
-    assert session.calls[0]["json"]["stex_tp"] == "1"
+    assert headers["api-id"] == "ka10032"
+    assert session.calls[0]["json"] == {"mrkt_tp": "000", "mang_stk_incls": "0", "stex_tp": "1"}
 
 
 def test_paging_stops_below_threshold_after_one_call() -> None:
-    session = _Session([_page([_item(1, trde_amt="100"), _item(2, "000020", trde_amt="1")], cont="Y", next_key="K")])
+    session = _Session([_page([_item(1, trde_prica="100"), _item(2, "000020", trde_prica="1")], cont="Y", next_key="K")])
     pacer = _Pacer()
 
     rows = _fetch(session, pacer, min_tv=50_000_000)
@@ -168,7 +168,7 @@ def test_invalid_symbol_row_is_dropped_not_fatal() -> None:
 
 
 def test_row_missing_field_is_vendor_error() -> None:
-    broken = {"stk_cd": "004490", "cur_prc": "1", "flu_rt": "1.0", "trde_amt": "1"}
+    broken = {"stk_cd": "004490", "cur_prc": "1", "flu_rt": "1.0", "trde_prica": "1"}
     session = _Session([_page([broken])])
 
     with pytest.raises(KiwoomTickTapeError, match="malformed"):
@@ -209,7 +209,7 @@ def test_unreadable_body_is_vendor_error() -> None:
 
 def test_missing_return_code_is_vendor_error() -> None:
     with pytest.raises(KiwoomTickTapeError, match="missing return_code"):
-        _fetch(_Session([_Resp({"trde_prica_upr": []})]), _Pacer())
+        _fetch(_Session([_Resp({"trde_prica_upper": []})]), _Pacer())
 
 
 @pytest.mark.parametrize(
@@ -223,7 +223,7 @@ def test_return_code_classification(code: int, error: type[Exception]) -> None:
 
 def test_rows_must_be_a_list() -> None:
     with pytest.raises(KiwoomTickTapeError, match="not a list"):
-        _fetch(_Session([_Resp({"return_code": 0, "trde_prica_upr": "nope"})]), _Pacer())
+        _fetch(_Session([_Resp({"return_code": 0, "trde_prica_upper": "nope"})]), _Pacer())
 
 
 def test_continuation_requires_next_key() -> None:
@@ -243,3 +243,9 @@ def test_vendor_error_raised_by_transport_propagates_unchanged() -> None:
 
     with pytest.raises(KiwoomAuthRejected, match="token revoked"):
         _fetch(_AuthSession(), _Pacer())  # type: ignore[arg-type]
+
+
+def test_alphanumeric_short_code_is_kept() -> None:
+    rows = _fetch(_Session([_page([_item(1, "0147B0")])]), _Pacer())
+
+    assert [row.symbol for row in rows] == ["0147B0"]

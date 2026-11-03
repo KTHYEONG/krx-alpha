@@ -1,4 +1,4 @@
-"""Kiwoom ka10024 KRX trade-amount ranking pages for intraday discovery."""
+"""Kiwoom ka10032 KRX trade-amount ranking pages for intraday discovery."""
 
 from __future__ import annotations
 
@@ -24,11 +24,12 @@ from src.marketdata.kiwoom_ticks import (
 
 logger = logging.getLogger(__name__)
 
-KIWOOM_RANKING_API_ID: str = "ka10024"
+KIWOOM_RANKING_API_ID: str = "ka10032"
 KIWOOM_RANKING_URL: str = f"{KIWOOM_CHART_URL.rsplit('/', 1)[0]}/rkinfo"
-KIWOOM_RANKING_LIST_KEY: str = "trde_prica_upr"
+KIWOOM_RANKING_LIST_KEY: str = "trde_prica_upper"
 KIWOOM_RANKING_STEX_TP: str = "1"
 KIWOOM_RANKING_MARKET: str = "000"
+KIWOOM_RANKING_MANAGED_INCLUDE: str = "0"
 KIWOOM_TRADE_AMOUNT_UNIT_KRW: int = 1_000_000
 KIWOOM_THROTTLE_RETRIES: int = 3
 KIWOOM_THROTTLE_BACKOFF_S: float = 1.2
@@ -59,11 +60,11 @@ def _parse_row(raw: Mapping[str, Any]) -> KiwoomRankingRow | None:
         return None
     try:
         return KiwoomRankingRow(
-            rank=int(str(raw["rank"]).strip()),
+            rank=int(str(raw["now_rank"]).strip()),
             symbol=stk_cd,
             last_price=abs(int(str(raw["cur_prc"]).strip())),
             change_pct=float(str(raw["flu_rt"]).strip()),
-            trade_value_krw=int(str(raw["trde_amt"]).strip()) * KIWOOM_TRADE_AMOUNT_UNIT_KRW,
+            trade_value_krw=int(str(raw["trde_prica"]).strip()) * KIWOOM_TRADE_AMOUNT_UNIT_KRW,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise KiwoomTickTapeError(f"kiwoom ranking row malformed: {type(exc).__name__}") from exc
@@ -83,7 +84,11 @@ def _post_page(
     try:
         resp = session.post(
             KIWOOM_RANKING_URL,
-            json={"mrkt_tp": KIWOOM_RANKING_MARKET, "stex_tp": KIWOOM_RANKING_STEX_TP},
+            json={
+                "mrkt_tp": KIWOOM_RANKING_MARKET,
+                "mang_stk_incls": KIWOOM_RANKING_MANAGED_INCLUDE,
+                "stex_tp": KIWOOM_RANKING_STEX_TP,
+            },
             headers=headers,
             timeout=timeout_s,
         )
@@ -155,7 +160,7 @@ def fetch_trade_amount_ranking(
     min_trade_value_krw: int,
     timeout_s: float,
 ) -> tuple[KiwoomRankingRow, ...]:
-    """ka10024 KRX-only ranking pages until max_pages or a page tail below min_trade_value_krw; raises KiwoomTickTapeError family on vendor failure."""
+    """ka10032 KRX-only ranking pages until max_pages or a page tail below min_trade_value_krw; raises KiwoomTickTapeError family on vendor failure."""
     _ = app_key
     if max_pages < 1:
         raise ValueError("max_pages must be >= 1")
