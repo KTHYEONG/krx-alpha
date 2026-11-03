@@ -7,28 +7,30 @@
 - **Trading Session Freeze:** Strictly defer deployments and heavy maintenance during market hours (08:10~22:00 KST).
 - **Clock Drift & Fail-Closed:** NTP clock drift must stay $\le 2.0s$. On drift violation, abort safely (Fail-Closed, `ClockUnsyncedError`). Paper mode sockets must never reach real broker gateways.
 - **Workspace Hygiene:** Keep exploratory experiments and temporary files strictly isolated under `scratch/`. Never commit raw cache or scratch files.
+- **Core Quant Invariants (details: `.agents/rules/domain.md`):** Point-in-time data only, no lookahead; historical universe including delisted names; results net of friction with capacity limits; no magic numbers (typed `Spec`/`Config`); ledgers conserve exactly (integer KRW/`Decimal`); on anomalies fail closed to `NO_TRADE`.
+- **Config & Secrets:** Runtime settings are externalized and validated at application boundaries; never hardcode environment-dependent secrets or endpoints.
 
 ## 2. Autonomy & Execution Contract
-- **Bias Toward Action & Diagnostic Autonomy:** For data queries, exploratory scratch diagnostics, and empirical root-cause isolation, execute immediately without asking for permission. When asked open-ended questions about bugs or data anomalies, proactively run scratch experiments under `scratch/` to discover truth. Never modify production code or commit in response to open-ended diagnostic queries.
-- **Skills as On-Demand Tools:** Skills (`probe`, `spec`, `implement`, `check`, `refactor`, `commit`, `ship`) are user-level (`~/.agents/skills`) and project-agnostic; this project's policy is the Workflow Profile in §6. Individual slash invocations (`/probe`, `/spec`, etc.) execute only that skill and halt for user review. `/ship` is the explicit autonomy opt-in for the approved implement → check → commit chain. Specs live under `docs/specs/` (gitignored for model/tool handoffs without repo bloat).
+- **Bias Toward Action & Diagnostic Autonomy:** Run data queries and scratch diagnostics without asking permission; for open-ended bug or anomaly questions, run experiments under `scratch/` to find the truth. Never modify production code or commit in response to open-ended diagnostic queries.
+- **Skills as On-Demand Tools:** Skills (`probe`, `spec`, `implement`, `check`, `refactor`, `commit`, `ship`) live in `~/.agents/skills`; project policy is §6. Slash invocations run only their skill and halt for review; `/ship` is the explicit autonomy opt-in. Specs live under `docs/specs/` (gitignored for model/tool handoffs).
 
 ## 3. Project Toolchain & Verification
 Verify code changes against the project's native toolchains before concluding tasks:
 - **Quality Gate:** `uv run python tools/verify.py`
 - **Test Runner:** `uv run pytest`
 - **Git Commits:** Run the project's `commit` skill.
+- Instruction budget: `uv run python tools/instruction_budget.py`
 
 ## 4. Communication & Language
-- **Natural Korean:** Converse, explain rationales, and report findings in Korean (한국어). Inside structured output cards, retain English keys/badges while writing descriptions in Korean.
+- **Natural Korean:** Converse, explain rationales, and report findings in Korean (한국어). In structured output cards, keep English keys/badges; write descriptions in Korean.
 - **Technical English:** System instructions, rules, specifications (`docs/specs/`), code, and docstrings are written in English.
 
 ## 5. Domain Rule Routing
-- **Domain Invariants:** [domain.md](.agents/rules/domain.md) — *Financial invariants, temporal causality, market frictions, and conservation laws.*
-- **Testing & Quality:** [testing.md](.agents/rules/testing.md) — *Invariant-driven testing, boundary conditions, failure isolation, and diff-coverage.*
-- **Architecture & Standards:** [code-style.md](.agents/rules/code-style.md) — *Module boundaries, strong static typing contracts, and toolchain alignment.*
-- **Documentation & Comments:** [documentation.md](.agents/rules/documentation.md) — *Production docstrings, architecture specs, and non-obvious rationale.*
-- **Performance & Optimization:** [performance.md](.agents/rules/performance.md) — *Vectorized panel builds, hot-loop profiling, and resource budgets.*
-- **Logging & Diagnostics:** [logging.md](.agents/rules/logging.md) — *Operational logging, 6 fixed category taxonomy, and credential redaction.*
+- Before touching `src/**`, `tests/**`, or strategy/universe/accounting logic: read `.agents/rules/domain.md`
+- Before touching `tests/**`, test tooling, or fixtures: read `.agents/rules/testing.md`
+- Before touching any logging call, log format, or credential handling: read `.agents/rules/logging.md`
+- Before touching hot loops, bulk I/O, or parallelism: read `.agents/rules/performance.md`
+- Before touching docstrings, comments, or `docs/architecture/**`: read `.agents/rules/documentation.md`
 
 ## 6. Workflow Profile
 - verify: `uv run python tools/verify.py`

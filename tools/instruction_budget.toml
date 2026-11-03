@@ -2,7 +2,7 @@ agents_file = "AGENTS.md"
 rules_dir = ".agents/rules"
 agents_max_lines = 100
 always_loaded_max_bytes = 6000
-scoped_rules_max_bytes = 10000
+scoped_rules_max_bytes = 12000
 
 [[retention]]
 file = "AGENTS.md"

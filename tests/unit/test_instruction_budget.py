@@ -214,3 +214,28 @@ def test_main_exit_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
         first = capsys.readouterr().out
         assert budget.main(["--root", str(root)]) == expected
         assert capsys.readouterr().out == first
+
+
+def _repo_spec(budget: ModuleType) -> Any:
+    return budget.load_budget_spec(REPO_ROOT / "tools" / "instruction_budget.toml")
+
+
+def test_repo_instructions_within_budget() -> None:
+    budget = _load_budget()
+    spec = _repo_spec(budget)
+
+    assert budget.check_budget(budget.measure_instructions(REPO_ROOT, spec), spec) == []
+
+
+def test_repo_hard_boundaries_retained() -> None:
+    budget = _load_budget()
+
+    assert budget.check_retention(REPO_ROOT, _repo_spec(budget)) == []
+
+
+def test_every_rule_file_is_path_scoped() -> None:
+    budget = _load_budget()
+    measure = budget.measure_instructions(REPO_ROOT, _repo_spec(budget))
+
+    assert measure.rules
+    assert [rule.path for rule in measure.rules if not rule.scoped] == []
