@@ -11,7 +11,16 @@ from typing import Any, ClassVar
 
 import aiohttp
 
-from src.marketdata.toss_token_store import IssuedToken, TokenStoreLockTimeout, TossTokenStore
+from deploy.shared.host_broker_contract import (
+    IssuedToken,
+    TokenIssueThrottled,
+)
+from deploy.shared.host_broker_contract import (
+    TokenStoreLockTimeout as CanonicalLockTimeout,
+)
+from src.marketdata.host_token_store import AsyncRotatingTokenStore, TokenStoreFailureError
+from src.marketdata.toss_token_store import IssuedToken as TossIssuedToken
+from src.marketdata.toss_token_store import TokenStoreLockTimeout, TossTokenStore
 from src.realtime.contracts import L0Frame, VendorAck, VendorAuthRejected, VendorDisconnected
 
 
@@ -36,7 +45,7 @@ class JsonWsOAuthAdapter(ABC):
         app_key: str,
         app_secret: str,
         http: Any,
-        token_store: TossTokenStore,
+        token_store: TossTokenStore | AsyncRotatingTokenStore,
         streams: tuple[str, ...],
         capacity_pairs: int,
         token_url: str,
@@ -137,8 +146,15 @@ class JsonWsOAuthAdapter(ABC):
     async def connect(self) -> None:
         """Acquire a shared token and open the socket; raises VendorDisconnected / VendorAuthRejected."""
         try:
-            token = await self._token_store.aget_or_issue(self._issue_token)
-        except (TokenStoreLockTimeout, OSError) as exc:
+            if isinstance(self._token_store, AsyncRotatingTokenStore):
+                token = await self._token_store.aget_or_issue(self._issue_token)
+            else:
+                async def toss_issue() -> TossIssuedToken:
+                    issued = await self._issue_token()
+                    return TossIssuedToken(issued.access_token, issued.expires_in_seconds)
+
+                token = await self._token_store.aget_or_issue(toss_issue)
+        except (TokenStoreFailureError, CanonicalLockTimeout, TokenIssueThrottled, TokenStoreLockTimeout, OSError) as exc:
             raise VendorDisconnected(f"token_store_failed:{type(exc).__name__}") from exc
         self._token = token
         try:
@@ -163,8 +179,15 @@ class JsonWsOAuthAdapter(ABC):
 
     async def _replace_rejected_token(self, token: str) -> None:
         try:
-            await self._token_store.areplace_rejected(token, self._issue_token)
-        except (TokenStoreLockTimeout, OSError) as exc:
+            if isinstance(self._token_store, AsyncRotatingTokenStore):
+                await self._token_store.areplace_rejected(token, self._issue_token)
+            else:
+                async def toss_issue() -> TossIssuedToken:
+                    issued = await self._issue_token()
+                    return TossIssuedToken(issued.access_token, issued.expires_in_seconds)
+
+                await self._token_store.areplace_rejected(token, toss_issue)
+        except (TokenStoreFailureError, CanonicalLockTimeout, TokenIssueThrottled, TokenStoreLockTimeout, OSError) as exc:
             raise VendorDisconnected(f"token_store_failed:{type(exc).__name__}") from exc
 
     def _note_unparsable(self, frame_len: int) -> None:

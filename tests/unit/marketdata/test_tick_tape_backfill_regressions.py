@@ -98,11 +98,120 @@ def test_pacer_wait_rechecks_deadline_before_http(tmp_path, monkeypatch):
 
 def test_token_issuance_failure_aborts_instead_of_retrying_each_symbol(tmp_path, monkeypatch):
     _mute_sleep(monkeypatch)
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(tmp_path / "tokens"))
     session = _Session(token_behavior="deny")
     result = _run(DataPaths(tmp_path), session, targets=[module.TickTapeTarget(s, (DAY,), 1.0) for s in ("A", "B")])
     assert result.status == "FAIL"
     assert result.reason == "auth"
     assert session.token_calls == 1
+
+
+def test_token_store_failure_never_falls_back_to_issuance(tmp_path, monkeypatch):
+    from deploy.shared.host_broker_contract import TokenStoreLockTimeout
+
+    _mute_sleep(monkeypatch)
+
+    class _BrokenStore:
+        def get_or_issue(self, issue):
+            raise TokenStoreLockTimeout("lock timeout")
+
+    monkeypatch.setattr(module, "make_kiwoom_store", lambda *args, **kwargs: _BrokenStore())
+    session = _Session()
+    result = _run(DataPaths(tmp_path), session)
+    assert result.status == "FAIL"
+    assert result.reason == "auth"
+    assert session.token_calls == 0
+
+
+def test_rejected_token_store_failure_is_run_auth_failure(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from deploy.shared.host_broker_contract import TokenIssueThrottled
+
+    _mute_sleep(monkeypatch)
+    rejected = _ChartResp({"return_code": 3, "return_msg": "expired"}, cont="N")
+
+    class _BrokenStore:
+        def get_or_issue(self, issue):
+            return SimpleNamespace(access_token="cached")
+
+        def replace_rejected(self, rejected_token, issue):
+            assert rejected_token == "cached"
+            raise TokenIssueThrottled("host throttle")
+
+    monkeypatch.setattr(module, "make_kiwoom_store", lambda *args, **kwargs: _BrokenStore())
+    session = _Session(pages={"A": [rejected]})
+    result = _run(DataPaths(tmp_path), session)
+    assert result.status == "FAIL"
+    assert result.reason == "auth"
+    assert session.token_calls == 0
+
+
+def test_backfill_uses_peer_token_published_after_rejection(tmp_path, monkeypatch):
+    from deploy.shared.host_broker_contract import IssuedToken
+    from src.marketdata.host_token_store import make_kiwoom_store
+
+    _mute_sleep(monkeypatch)
+    cache_dir = tmp_path / "tokens"
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(cache_dir))
+    denied = _ChartResp({"return_code": 3, "return_msg": "expired"}, cont="N")
+
+    class _PeerRotatingSession(_Session):
+        def __init__(self):
+            super().__init__()
+            self.seen_tokens: list[str] = []
+            self.peer = make_kiwoom_store(cache_dir, "k", clock=lambda: dt.datetime.now(dt.UTC))
+
+        def post(self, url, **kwargs):
+            if url.endswith("/oauth2/token"):
+                return super().post(url, **kwargs)
+            bearer = kwargs.get("headers", {}).get("authorization", "")
+            self.seen_tokens.append(bearer)
+            if len(self.seen_tokens) == 1:
+                self.peer.replace_rejected("tok-1", lambda: IssuedToken("peer-token", None))
+                return denied
+            return _ChartResp([], cont="N")
+
+    session = _PeerRotatingSession()
+    result = _run(DataPaths(tmp_path / "data"), session, run_id="peer-replacement")
+    assert result.status == "OK"
+    assert session.token_calls == 1
+    assert session.seen_tokens == ["Bearer tok-1", "Bearer peer-token"]
+
+
+def test_lock_wait_past_deadline_prevents_token_issuance(tmp_path, monkeypatch):
+    from src.marketdata.host_token_store import make_kiwoom_store
+
+    _mute_sleep(monkeypatch)
+    cache_dir = tmp_path / "tokens"
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(cache_dir))
+    deadline = _deadline()
+    current = [_evening_now()]
+    real_factory = make_kiwoom_store
+
+    def delayed_lock_store(directory, app_key, *, clock):
+        store = real_factory(directory, app_key, clock=clock)
+        original_hold = store._hold_lock
+
+        def wait_until_after_deadline():
+            current[0] = deadline + dt.timedelta(seconds=1)
+            return original_hold()
+
+        store._hold_lock = wait_until_after_deadline
+        return store
+
+    monkeypatch.setattr(module, "make_kiwoom_store", delayed_lock_store)
+    session = _Session()
+    result = _run(
+        DataPaths(tmp_path / "data"),
+        session,
+        deadline=deadline,
+        now=lambda: current[0],
+        run_id="lock-deadline",
+    )
+    assert result.pages == 0
+    assert session.token_calls == 0
+    assert session.chart_calls == []
 
 
 def test_disabled_and_outside_window_never_issue_tokens(tmp_path):

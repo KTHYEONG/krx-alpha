@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from src.core.config import LS_MAX_SUBSCRIPTIONS_PER_SESSION
+from src.marketdata.host_token_store import AsyncRotatingTokenStore
 from src.marketdata.toss_token_store import TossTokenStore
 from src.realtime.adapters.json_ws import JsonWsOAuthAdapter
 from src.realtime.contracts import L0Frame, VendorAck, VendorAuthRejected, VendorDisconnected
@@ -48,7 +49,7 @@ class LsRealtimeAdapter(JsonWsOAuthAdapter):
         app_secret: str,
         http: Any,
         market_of: Mapping[str, str],
-        token_store: TossTokenStore,
+        token_store: TossTokenStore | AsyncRotatingTokenStore,
         streams: tuple[str, ...] = ("H0STCNT0", "H0STASP0"),
         capacity_pairs: int = LS_MAX_SUBSCRIPTIONS_PER_SESSION,
         token_url: str = LS_TOKEN_URL,

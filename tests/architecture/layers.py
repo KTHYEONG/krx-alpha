@@ -47,6 +47,7 @@ LAYER_RANK: dict[str, int] = {
 }
 LAYER_RANK["src/marketdata/toss_calendar.py"] = 1
 LAYER_RANK["src/marketdata/toss_token_store.py"] = 1
+LAYER_RANK["src/marketdata/host_token_store.py"] = 1
 LAYER_RANK["src/realtime/kis_sharding.py"] = 1
 LAYER_RANK["src/realtime/kis_lease.py"] = 1
 LAYER_RANK["src/storage/normalize_worker.py"] = 3

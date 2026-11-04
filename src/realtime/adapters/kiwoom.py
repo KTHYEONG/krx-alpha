@@ -176,6 +176,10 @@ class KiwoomRealtimeAdapter:
         except (VendorAuthRejected, VendorDisconnected):
             raise
         except Exception as exc:
+            from src.marketdata.host_token_store import store_failure_types
+
+            if isinstance(exc, store_failure_types()):
+                raise VendorDisconnected(f"token_store_failed:{type(exc).__name__}") from exc
             raise VendorDisconnected(f"connect_failed:{type(exc).__name__}") from exc
         try:
             self._ws = await self._http.ws_connect(

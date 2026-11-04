@@ -7,6 +7,7 @@ import time
 from collections.abc import Mapping
 from typing import Any, Final
 
+from src.marketdata.host_token_store import AsyncRotatingTokenStore
 from src.marketdata.toss_token_store import TossTokenStore
 from src.realtime.adapters.json_ws import JsonWsOAuthAdapter
 from src.realtime.contracts import (
@@ -50,7 +51,7 @@ class DbRealtimeAdapter(JsonWsOAuthAdapter):
         app_key: str,
         app_secret: str,
         http: Any,
-        token_store: TossTokenStore,
+        token_store: TossTokenStore | AsyncRotatingTokenStore,
         streams: tuple[str, ...] = ("H0STCNT0", "H0STASP0"),
         capacity_pairs: int = 50,
         token_url: str = DB_TOKEN_URL,

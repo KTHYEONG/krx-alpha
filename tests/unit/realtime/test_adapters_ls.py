@@ -1,3 +1,70 @@
+def test_ls_adapter_uses_async_rotating_store_for_issue_and_store_failure(tmp_path) -> None:
+    import asyncio
+    import datetime as dt
+
+    import pytest
+
+    from src.marketdata.host_token_store import AsyncRotatingTokenStore
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import VendorDisconnected
+
+    class _Resp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def json(self):
+            return {"access_token": "ls-token", "expires_in": 3600}
+
+    class _Ws:
+        async def close(self):
+            return None
+
+    class _WsContext:
+        async def __aenter__(self):
+            return _Ws()
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _Http:
+        def __init__(self):
+            self.posts = 0
+
+        def post(self, *args, **kwargs):
+            self.posts += 1
+            return _Resp()
+
+        def ws_connect(self, *args, **kwargs):
+            return _WsContext()
+
+    http = _Http()
+    store = AsyncRotatingTokenStore(
+        tmp_path / "token.json", vendor="ls", rotation_cooldown_s=0, clock=lambda: dt.datetime.now(dt.UTC)
+    )
+    adapter = LsRealtimeAdapter(
+        app_key="k", app_secret="s", http=http, market_of={"005930": "KOSPI"}, token_store=store
+    )
+    asyncio.run(adapter.connect())
+    assert adapter._token == "ls-token"
+    assert http.posts == 1
+
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("x")
+    failing = AsyncRotatingTokenStore(
+        blocked_parent / "token.json", vendor="ls", rotation_cooldown_s=0, clock=lambda: dt.datetime.now(dt.UTC)
+    )
+    failing_http = _Http()
+    failing_adapter = LsRealtimeAdapter(
+        app_key="k", app_secret="s", http=failing_http, market_of={"005930": "KOSPI"}, token_store=failing
+    )
+    with pytest.raises(VendorDisconnected, match="token_store_failed"):
+        asyncio.run(failing_adapter.connect())
+    assert failing_http.posts == 0
+
+
 def test_ls_adapter_connect_issues_token_and_opens_ws(tmp_path) -> None:
     from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio

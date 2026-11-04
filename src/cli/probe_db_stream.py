@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import datetime as dt
 import json
 import pathlib
 import time
@@ -12,8 +13,9 @@ from typing import Any
 
 import aiohttp
 
+from deploy.shared.host_broker_contract import token_record_path
 from src.core.config import CollectorSettings, DbCredentials, KisTokenSettings, load_credentials
-from src.marketdata.toss_token_store import TossTokenStore, db_token_path
+from src.marketdata.host_token_store import AsyncRotatingTokenStore
 from src.realtime.adapters.db import DB_TR_CD, DbRealtimeAdapter
 from src.realtime.contracts import VendorAuthRejected, VendorDisconnected
 
@@ -72,9 +74,11 @@ async def _run_probe(args: argparse.Namespace) -> int:
         print(json.dumps({"error": str(exc)}))  # noqa: T201 - gate result goes to stdout
         return 2
     creds = load_credentials(DbCredentials)
-    token_store = TossTokenStore(
-        db_token_path(KisTokenSettings().token_cache_dir, creds.db_app_key),
+    token_store = AsyncRotatingTokenStore(
+        token_record_path(KisTokenSettings().token_cache_dir, "dbsec", creds.db_app_key),
+        vendor="dbsec",
         rotation_cooldown_s=settings.db_token_rotation_cooldown_s,
+        clock=lambda: dt.datetime.now(dt.UTC),
     )
     http = aiohttp.ClientSession()
     tap: list[dict[str, Any]] = []

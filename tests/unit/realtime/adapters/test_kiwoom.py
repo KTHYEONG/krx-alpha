@@ -405,6 +405,8 @@ def test_ping_echo_failure_fails_closed() -> None:
 
 
 def test_connect_token_and_socket_failures() -> None:
+    from deploy.shared.host_broker_contract import TokenIssueThrottled
+
     async def _auth():
         raise VendorAuthRejected("nope")
 
@@ -416,6 +418,12 @@ def test_connect_token_and_socket_failures() -> None:
 
     with pytest.raises(VendorDisconnected, match="connect_failed"):
         asyncio.run(_connect(_FakeWs([]), issue_token=_boom))
+
+    async def _store_error():
+        raise TokenIssueThrottled("throttled")
+
+    with pytest.raises(VendorDisconnected, match="token_store_failed"):
+        asyncio.run(_connect(_FakeWs([]), issue_token=_store_error))
 
     class _BadHttp:
         async def ws_connect(self, *a, **k):

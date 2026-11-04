@@ -5,6 +5,7 @@ import aiohttp
 import pytest
 
 from src.marketdata.toss_token_store import TossTokenStore, db_token_path
+from src.marketdata.host_token_store import AsyncRotatingTokenStore
 from src.realtime.adapters.db import DbRealtimeAdapter
 from src.realtime.contracts import MarketSession, MarketVenue, VendorAuthRejected, VendorDisconnected
 
@@ -47,6 +48,97 @@ def test_db_subscribe_sends_spaced_krx_keys_and_matches_acks_by_order(tmp_path) 
     assert bodies[1] == {"tr_cd": "S01", "tr_key": "J 000660"}
     assert [a.accepted for a in out] == [True, False]
     assert [a.code for a in out] == ["00000", "10017"]
+
+
+def test_db_adapter_uses_async_rotating_store_for_issue_and_store_failure(tmp_path) -> None:
+    import datetime as dt
+
+    class _Resp:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def json(self):
+            return {"access_token": "db-token", "expires_in": 3600}
+
+    class _SocketContext:
+        async def __aenter__(self):
+            return _AckWS([])
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _Http:
+        posts = 0
+
+        def post(self, *args, **kwargs):
+            self.posts += 1
+            return _Resp()
+
+        def ws_connect(self, *args, **kwargs):
+            return _SocketContext()
+
+    http = _Http()
+    store = AsyncRotatingTokenStore(
+        tmp_path / "token.json", vendor="dbsec", rotation_cooldown_s=0, clock=lambda: dt.datetime.now(dt.UTC)
+    )
+    adapter = DbRealtimeAdapter(app_key="k", app_secret="s", http=http, token_store=store)
+    asyncio.run(adapter.connect())
+    assert adapter._token == "db-token"
+    assert http.posts == 1
+
+    blocked_parent = tmp_path / "not-a-directory"
+    blocked_parent.write_text("x")
+    failing = AsyncRotatingTokenStore(
+        blocked_parent / "token.json", vendor="dbsec", rotation_cooldown_s=0, clock=lambda: dt.datetime.now(dt.UTC)
+    )
+    failing_http = _Http()
+    failing_adapter = DbRealtimeAdapter(app_key="k", app_secret="s", http=failing_http, token_store=failing)
+    with pytest.raises(VendorDisconnected, match="token_store_failed"):
+        asyncio.run(failing_adapter.connect())
+    assert failing_http.posts == 0
+
+
+def test_db_adapter_shared_guard_blocks_peer_after_failed_issuance(tmp_path) -> None:
+    import datetime as dt
+
+    class _FailingHttp:
+        def __init__(self):
+            self.posts = 0
+
+        def post(self, *args, **kwargs):
+            self.posts += 1
+            raise aiohttp.ClientConnectionError("fake issuance failure")
+
+    path = tmp_path / "shared-db-token.json"
+
+    def now():
+        return dt.datetime(2026, 11, 4, tzinfo=dt.UTC)
+    first_http = _FailingHttp()
+    first = DbRealtimeAdapter(
+        app_key="k",
+        app_secret="s",
+        http=first_http,
+        token_store=AsyncRotatingTokenStore(path, vendor="dbsec", rotation_cooldown_s=0, clock=now),
+    )
+    with pytest.raises(VendorDisconnected, match="connect_failed:ClientConnectionError"):
+        asyncio.run(first.connect())
+    assert first_http.posts == 1
+
+    second_http = _FailingHttp()
+    second = DbRealtimeAdapter(
+        app_key="k",
+        app_secret="s",
+        http=second_http,
+        token_store=AsyncRotatingTokenStore(path, vendor="dbsec", rotation_cooldown_s=0, clock=now),
+    )
+    with pytest.raises(VendorDisconnected, match="token_store_failed:TokenStoreFailureError"):
+        asyncio.run(second.connect())
+    assert second_http.posts == 0
 
 
 def test_db_subscribe_stashes_data_frames_received_before_ack(tmp_path) -> None:

@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import polars as pl
 import requests
 
-from deploy.shared.host_broker_contract import AsyncHostPacer, admission_state_path, rate_for
+from deploy.shared.host_broker_contract import AsyncHostPacer, IssuedToken, admission_state_path, rate_for
 from src.brokers.kis.auth import KisAppAuth
 from src.brokers.kis.stack import build_kis_rest_stack
 from src.core.config import (
@@ -32,6 +32,7 @@ from src.core.observability import EVENT
 from src.core.paths import DataPaths
 from src.core.session_anchors import resolve_session_anchors
 from src.execution.contracts import KisApiError
+from src.marketdata.host_token_store import STORE_FAILURE_TYPES, kiwoom_issued, make_kiwoom_store
 from src.marketdata.kiwoom_ranking import KiwoomRankingRow, fetch_trade_amount_ranking
 from src.marketdata.kiwoom_ticks import KiwoomTickTapeError, issue_kiwoom_token
 from src.marketdata.partitioned_store import PartitionedStoreError, scan_month_partitions
@@ -429,12 +430,24 @@ def build_discovery(
         admission_state_path(token_settings.token_cache_dir, _KIWOOM_VENDOR, kiwoom.kiwoom_app_key, _KIWOOM_SCOPE),
         rate_for(_KIWOOM_VENDOR, _KIWOOM_SCOPE),
     )
-    token = issue_kiwoom_token(
-        app_key=kiwoom.kiwoom_app_key,
-        secret_key=kiwoom.kiwoom_secret_key,
-        session=requests,
-        timeout_s=timeout_s,
+    token_store = make_kiwoom_store(
+        token_settings.token_cache_dir, kiwoom.kiwoom_app_key, clock=lambda: dt.datetime.now(dt.UTC)
     )
+
+    def _issue_token() -> IssuedToken:
+        return kiwoom_issued(
+            issue_kiwoom_token(
+                app_key=kiwoom.kiwoom_app_key,
+                secret_key=kiwoom.kiwoom_secret_key,
+                session=requests,
+                timeout_s=timeout_s,
+            )
+        )
+
+    try:
+        token = token_store.get_or_issue(_issue_token).access_token
+    except STORE_FAILURE_TYPES as exc:
+        raise KiwoomTickTapeError("kiwoom token store failed") from exc
     store = SnapshotStore(paths=paths, session_date=session_date)
     kis_slot = cfg.kis_dynamic_slot if regular_kis.enabled else None
     kis_slot_symbols = (regular_kis.pair_capacity_per_connection or 0) // len(regular_kis.streams)

@@ -13,7 +13,7 @@ from src.cli import collect_intraday_discovery as discovery_cli
 from src.core.config import IntradayAdmissionSettings
 from src.core.errors import KrxAlphaError
 from src.marketdata.kiwoom_ranking import KiwoomRankingRow
-from src.marketdata.kiwoom_ticks import KiwoomTransientError
+from src.marketdata.kiwoom_ticks import KiwoomTickTapeError, KiwoomTransientError
 from src.universe.intraday import (
     AdmissionState,
     DynamicEntry,
@@ -502,6 +502,74 @@ def test_build_discovery_wires_real_boundaries_end_to_end(tmp_path, monkeypatch)
     assert len(fetches) == 3
     assert any(dataset.value == "ranking" for dataset, _ in _StubStore.appended)
     assert (tmp_path / "data" / "manifest" / "membership" / f"{_DAY}.dynamic.json").exists()
+
+
+def test_build_discovery_fails_closed_on_token_store_error(tmp_path, monkeypatch) -> None:
+    from deploy.shared.host_broker_contract import TokenIssueThrottled
+
+    _wire_env(monkeypatch, tmp_path)
+    _wire_boundaries(monkeypatch, tmp_path, [])
+
+    class _BrokenStore:
+        def get_or_issue(self, issue):
+            raise TokenIssueThrottled("host throttle")
+
+    monkeypatch.setattr(discovery_cli, "make_kiwoom_store", lambda *args, **kwargs: _BrokenStore())
+    with pytest.raises(KiwoomTickTapeError, match="token store failed"):
+        discovery_cli.build_discovery(
+            argparse.Namespace(session_date=_DAY), now=_FakeClock(_at(8, 59)).now, sleep=lambda _: None
+        )
+
+
+def test_kiwoom_callers_reuse_one_token_record(tmp_path, monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from src.core.config import CollectorSettings
+    from src.core.paths import DataPaths
+    from src.marketdata import kiwoom_ticks
+    from src.realtime.adapters.registry import AppCredentials, RegularAdapterContext, _build_kiwoom
+    from tests.unit.marketdata.test_tick_tape_backfill_regressions import _Session, _run
+
+    cache_dir = tmp_path / "tokens"
+    monkeypatch.setenv("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", str(cache_dir))
+    session = _Session()
+    backfill = _run(DataPaths(tmp_path / "tape"), session, run_id="shared-cache")
+    assert backfill.status == "OK"
+    assert session.token_calls == 1
+
+    def unexpected_issue(**kwargs):
+        pytest.fail("shared Kiwoom token cache unexpectedly missed")
+
+    monkeypatch.setattr(kiwoom_ticks, "issue_kiwoom_token", unexpected_issue)
+    registry_adapter = _build_kiwoom(
+        AppCredentials("k", "s"),
+        RegularAdapterContext(
+            http=object(),
+            settings=CollectorSettings(),
+            token_cache_dir=cache_dir,
+            market_of=None,
+        ),
+    )
+    token_from_realtime = asyncio.run(registry_adapter._issue_token())
+    assert token_from_realtime == "tok-1"
+
+    _wire_env(monkeypatch, tmp_path)
+    _wire_boundaries(monkeypatch, tmp_path, [[], [], []])
+    monkeypatch.setattr(discovery_cli, "KisTokenSettings", lambda: SimpleNamespace(token_cache_dir=cache_dir))
+    monkeypatch.setattr(discovery_cli, "issue_kiwoom_token", unexpected_issue)
+    ranking_tokens: list[str] = []
+
+    def capture_ranking(**kwargs):
+        ranking_tokens.append(kwargs["access_token"])
+        return ()
+
+    monkeypatch.setattr(discovery_cli, "fetch_trade_amount_ranking", capture_ranking)
+    clock = _FakeClock(_at(8, 59))
+    discovery = discovery_cli.build_discovery(argparse.Namespace(session_date=_DAY), now=clock.now, sleep=clock.sleep)
+    assert discovery.run() == 0
+    assert ranking_tokens
+    assert set(ranking_tokens) == {"tok-1"}
 
 
 def test_run_refuses_when_disabled(tmp_path, monkeypatch) -> None:

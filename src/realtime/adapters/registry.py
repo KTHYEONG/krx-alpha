@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import pathlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -10,9 +11,17 @@ from types import MappingProxyType
 
 import aiohttp
 
-from src.core.config import CollectorSettings, DbCredentials, KiwoomCredentials, LsCredentials, load_credentials
+from deploy.shared.host_broker_contract import token_record_path
+from src.core.config import (
+    CollectorSettings,
+    DbCredentials,
+    KisTokenSettings,
+    KiwoomCredentials,
+    LsCredentials,
+    load_credentials,
+)
 from src.core.errors import KrxAlphaError
-from src.marketdata.toss_token_store import TossTokenStore, db_token_path, ls_token_path
+from src.marketdata.host_token_store import AsyncRotatingTokenStore, kiwoom_issued, make_kiwoom_store
 from src.realtime.adapters.db import DbRealtimeAdapter
 from src.realtime.adapters.kiwoom import KiwoomRealtimeAdapter
 from src.realtime.adapters.ls import LsRealtimeAdapter
@@ -60,9 +69,11 @@ def _load_kiwoom_credentials() -> AppCredentials:
 def _build_ls(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAdapter:
     if ctx.market_of is None:
         raise ValueError("market_of is required for ls adapter")
-    store = TossTokenStore(
-        ls_token_path(ctx.token_cache_dir, creds.app_key),
+    store = AsyncRotatingTokenStore(
+        token_record_path(ctx.token_cache_dir, "ls", creds.app_key),
+        vendor="ls",
         rotation_cooldown_s=ctx.settings.ls_token_rotation_cooldown_s,
+        clock=lambda: dt.datetime.now(dt.UTC),
     )
     return LsRealtimeAdapter(
         app_key=creds.app_key,
@@ -75,9 +86,11 @@ def _build_ls(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAdapte
 
 
 def _build_db(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAdapter:
-    store = TossTokenStore(
-        db_token_path(ctx.token_cache_dir, creds.app_key),
+    store = AsyncRotatingTokenStore(
+        token_record_path(ctx.token_cache_dir, "dbsec", creds.app_key),
+        vendor="dbsec",
         rotation_cooldown_s=ctx.settings.db_token_rotation_cooldown_s,
+        clock=lambda: dt.datetime.now(dt.UTC),
     )
     return DbRealtimeAdapter(
         app_key=creds.app_key,
@@ -95,14 +108,20 @@ def _build_kiwoom(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAd
 
     app_key, secret_key, timeout_s = creds.app_key, creds.app_secret, ctx.settings.kiwoom_ack_timeout_s
 
+    store = make_kiwoom_store(KisTokenSettings().token_cache_dir, creds.app_key, clock=lambda: dt.datetime.now(dt.UTC))
+
     async def issue_token() -> str:
         def _call() -> str:
             import requests
 
             with requests.Session() as session:
-                return issue_kiwoom_token(
-                    app_key=app_key, secret_key=secret_key, session=session, timeout_s=timeout_s
-                )
+                return store.get_or_issue(
+                    lambda: kiwoom_issued(
+                        issue_kiwoom_token(
+                            app_key=app_key, secret_key=secret_key, session=session, timeout_s=timeout_s
+                        )
+                    )
+                ).access_token
 
         return await asyncio.to_thread(_call)
 

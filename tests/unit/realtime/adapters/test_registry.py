@@ -47,7 +47,7 @@ def test_credentials_repr_redacted() -> None:
 
 @pytest.mark.parametrize("vendor", ["ls", "db", "kiwoom"])
 def test_registry_patch_points_are_module_globals(monkeypatch, tmp_path, vendor) -> None:
-    from src.marketdata.toss_token_store import db_token_path, ls_token_path
+    from deploy.shared.host_broker_contract import token_record_path
 
     seen = {}
     adapter = object()
@@ -70,7 +70,7 @@ def test_registry_patch_points_are_module_globals(monkeypatch, tmp_path, vendor)
         seen["adapter"] = kwargs
         return adapter
 
-    monkeypatch.setattr(registry, "TossTokenStore", _store)
+    monkeypatch.setattr(registry, "AsyncRotatingTokenStore", _store)
     if vendor == "ls":
         monkeypatch.setattr(registry, "LsRealtimeAdapter", _adapter)
     elif vendor == "db":
@@ -96,10 +96,11 @@ def test_registry_patch_points_are_module_globals(monkeypatch, tmp_path, vendor)
         assert seen["adapter"]["ack_timeout_s"] == settings.kiwoom_ack_timeout_s
         assert seen["adapter"]["user_agent"] == settings.kiwoom_user_agent
         return
-    assert seen["store"] == (
-        (ls_token_path if vendor == "ls" else db_token_path)(tmp_path, "key"),
-        {"rotation_cooldown_s": 123 if vendor == "ls" else 456},
-    )
+    path, store_kwargs = seen["store"]
+    assert path == token_record_path(tmp_path, "ls" if vendor == "ls" else "dbsec", "key")
+    assert store_kwargs["vendor"] == ("ls" if vendor == "ls" else "dbsec")
+    assert store_kwargs["rotation_cooldown_s"] == (123 if vendor == "ls" else 456)
+    assert callable(store_kwargs["clock"])
     expected = {"app_key": "key", "app_secret": "secret", "http": http, "token_store": store}
     if vendor == "ls":
         expected["market_of"] = market_of

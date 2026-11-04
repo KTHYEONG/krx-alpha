@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 import polars as pl
 
+from deploy.shared.host_broker_contract import IssuedToken
 from src.brokers.kis.rate import HostPacedRateLimiter, host_state_path
 from src.core.config import (
     KisTokenSettings,
@@ -26,6 +27,7 @@ from src.core.config import (
     TickTapeOverflowSettings,
 )
 from src.core.paths import DataPaths
+from src.marketdata.host_token_store import STORE_FAILURE_TYPES, kiwoom_issued, make_kiwoom_store
 from src.marketdata.kiwoom_ticks import (
     KiwoomAuthRejected,
     KiwoomThrottled,
@@ -556,6 +558,9 @@ def run_tick_tape_backfill(
         host_state_path(KisTokenSettings().token_cache_dir, "kiwoom", credentials.kiwoom_app_key, "ka10079"),
         settings.rate_per_s,
     )
+    token_store = make_kiwoom_store(
+        KisTokenSettings().token_cache_dir, credentials.kiwoom_app_key, clock=lambda: dt.datetime.now(dt.UTC)
+    )
     token: str | None = None
     auth_retried = False
     pages_used = 0
@@ -600,17 +605,24 @@ def run_tick_tape_backfill(
         origin = settings.window_start_kst
         return _seconds_since(now().astimezone(_KST).time(), origin) >= _seconds_since(overflow.deadline, origin)
 
-    def _issue() -> str:
+    def _issue_bounded() -> IssuedToken:
         _boundary()
         try:
-            return issue_kiwoom_token(
-                app_key=credentials.kiwoom_app_key,
-                secret_key=credentials.kiwoom_secret_key,
-                session=session,
-                timeout_s=min(settings.request_timeout_s, (deadline - now()).total_seconds()),
+            token = issue_kiwoom_token(
+                    app_key=credentials.kiwoom_app_key,
+                    secret_key=credentials.kiwoom_secret_key,
+                    session=session,
+                    timeout_s=min(settings.request_timeout_s, (deadline - now()).total_seconds()),
             )
+            return kiwoom_issued(token)
         except KiwoomTickTapeError as exc:
             raise _RunAuthError("kiwoom token issuance failed") from exc
+
+    def _issue() -> str:
+        try:
+            return token_store.get_or_issue(_issue_bounded).access_token
+        except STORE_FAILURE_TYPES as exc:
+            raise _RunAuthError("kiwoom token store failed") from exc
 
     def _fetch(symbol: str, next_key: str | None) -> TickPage:
         nonlocal token, auth_retried, pages_used
@@ -650,7 +662,11 @@ def run_tick_tape_backfill(
                 if auth_retried:
                     raise _RunAuthError("kiwoom tape auth rejected twice") from exc
                 auth_retried = True
-                token = _issue()
+                assert token is not None
+                try:
+                    token = token_store.replace_rejected(token, _issue_bounded).access_token
+                except STORE_FAILURE_TYPES as store_exc:
+                    raise _RunAuthError("kiwoom token store failed") from store_exc
             except KiwoomTransientError as exc:
                 transients += 1
                 if transients > settings.transient_retries:

@@ -14,6 +14,10 @@ Initial SHA-256:
   `issue_throttle_policy` (`"wait"` or `"raise"`) at construction.
 - `get_or_issue(issue)` and `replace_rejected(rejected_token, issue)` return
   `TokenRecord`; policy is not a per-call argument.
+- `TokenStoreReadError` inherits `OSError`. Existing unreadable, malformed, or
+  schema-invalid token records and unreadable or malformed issuance guards
+  abort before issuance; only a missing file is treated as absent. Error
+  messages omit file contents and credential values.
 - `token_record_path(directory, vendor, app_key)` names token records.
 - `resolve_host_broker_dir` accepts `require_shared` and optional bool
   `in_container`; the directory is always caller-injected (no host-path default,
