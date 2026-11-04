@@ -570,6 +570,24 @@ def _session_source() -> _FakeSource:
     return source
 
 
+def test_session_logs_which_jobs_expired(tmp_path, caplog) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    settings = SnapshotSettings()
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    with caplog.at_level("INFO"):
+        run_snapshot_session(
+            settings=settings, session_date=SESSION_DATE, source=_session_source(), store=store,
+            symbols=("005930",), now_fn=lambda: _t(10, 0, 5), sleep_fn=lambda s: None,
+            wall_ns=_counter(), max_iterations=1,
+        )
+
+    line = next(r.getMessage() for r in caplog.records if "stage=snapshot_expired" in r.getMessage())
+    assert "jobs=" in line
+    assert "@" in line.split("jobs=", 1)[1]
+
+
 def test_session_expires_backlog_without_vendor_calls_after_late_start(tmp_path) -> None:
     from src.core.config import DataPaths
     from src.marketdata.snapshot_contracts import build_session_jobs, partition_due_jobs

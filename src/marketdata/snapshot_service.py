@@ -33,6 +33,7 @@ from src.storage.snapshot_store import SnapshotStore, SnapshotStoreError
 logger = logging.getLogger(__name__)
 
 _KST = ZoneInfo("Asia/Seoul")
+_EXPIRED_JOBS_LOGGED = 8
 
 SNAPSHOT_HEARTBEAT_S: float = 600.0
 
@@ -385,7 +386,11 @@ def run_snapshot_session(
             for job in expired_now:
                 completed.add(job.job_id)
             expired += len(expired_now)
-            logger.info("[DATA] stage=snapshot_expired count=%d", len(expired_now))
+            logger.info(
+                "[DATA] stage=snapshot_expired count=%d jobs=%s",
+                len(expired_now),
+                ",".join(job.job_id for job in expired_now[:_EXPIRED_JOBS_LOGGED]),
+            )
         due, _ = partition_due_jobs(jobs, completed=completed, now=now)
         stop = False
         for job in due:
