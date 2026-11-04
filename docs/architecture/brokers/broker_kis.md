@@ -1,3 +1,4 @@
+<!-- DEPRECATED_TOKENS: fhpst01720000, /uapi/domestic-stock/v1/ranking/trade-amount, tttc0802u, vttc0802u, tttc0801u, vttc0801u -->
 # Korea Investment & Securities (KIS) OpenAPI Specification
 
 > **AI Agent Technical Reference:**  
@@ -32,7 +33,7 @@
     "access_token_token_expired": "2026-09-10 20:50:00"
   }
   ```
-* **Lifecycle:** 24h validity. Stored in `settings.TOKEN_FILE`. Auto-refreshed if under 10m remains, or upon `EGW00121`/`EGW00123` errors.
+* **Lifecycle:** 24h validity. Auto-refreshed when under 10m remains, or upon `EGW00121`/`EGW00123` errors.
 
 ### 1.3 Common Request Headers
 ```http
@@ -46,26 +47,32 @@ custtype: P
 *(Inquire: `custtype: P`. Order TRs use exact live vs paper `tr_id` prefixes).*
 
 ### 1.4 Rate Limit & Concurrency Invariants
-* **Rate Limiter:** Every KIS REST request (data GET, order POST, token issuance) passes a
-  `HostPacedRateLimiter` (`src/brokers/kis/rate.py`) assembled by `build_kis_rest_stack`
-  (`src/brokers/kis/stack.py`). Admission is host-wide: the pacing ledger
-  `kis_state_path(cache_dir, app_key)` (`tps_<sha256(app_key)[:12]>.state` in the token cache dir) is a
-  protocol file shared with KCA under `fcntl` lock, so all host consumers of one app key share one
-  `KIS_REST_RATE_PER_S` = 18 req/s budget and must configure the same rate. In a container the cache dir
-  must carry `.host-admission`, else `HostPacingNotSharedError` (fail-closed).
-* **Caller Classes:** Critical order execution books without a lead bound
-  (`ExecutionSettings.rest_max_lead_s=None`); daemon data (`CollectorSettings.kis_rest_max_lead_s`) and
-  snapshot collection (`SnapshotSettings.rest_max_lead_s`) book only within their lead (default 1.0 s), so a
-  critical arrival waits at most that lead.
-* **Concurrency:** Synchronous; requests are serialized by the pacer (no in-process semaphore).
-* **Throttling Handling:** `msg_cd` `EGW00201` retries through the pacer up to `MAX_SAFE_RETRIES` (2)
-  (`classify_kis_retry`, `src/brokers/kis/http.py`); no fixed sleep.
+* **Rate Limiter:** Every KIS REST request passes a host-paced rate limiter at `KIS_REST_RATE_PER_S` (18.0 req/s) per AppKey. Admission is coordinated across host processes sharing token/limiter state under file locking.
+* **Concurrency:** Synchronous or bounded by call-site semaphores; requests are serialized through the rate limiter.
+* **Throttling Handling:** HTTP 429 or `msg_cd` `EGW00201` ("초당 거래건수 초과") triggers backoff retry up to safe retry limits.
 
 ### 1.5 Market Division Codes (`FID_COND_MRKT_DIV_CODE`)
 * `J`: KRX (KOSPI/KOSDAQ)
 * `NX`: Nextrade ATS
 * `UN`: Unified (Blended)
 * `U`: Index / Sector
+
+### 1.6 WebSocket Connection & Approval Key (`POST /oauth2/Approval`)
+* **Approval Key Endpoint:** `POST /oauth2/Approval`
+* **Body:** `{"grant_type": "client_credentials", "appkey": "<KIS_APP_KEY>", "secretkey": "<KIS_APP_SECRET>"}`
+* **Response:** `{"approval_key": "<APPROVAL_KEY>"}`
+* **WebSocket Streams:**
+  * `H0STCNT0`: KRX Real-Time Trade Execution Tick (실시간 체결가)
+  * `H0STASP0`: KRX Real-Time Level-10 Orderbook (실시간 10단계 호가)
+  * `H0NXCNT0`: Nextrade ATS Real-Time Trade Execution Tick (NXT 실시간 체결가)
+  * `H0NXASP0`: Nextrade ATS Real-Time Level-10 Orderbook (NXT 실시간 호가)
+
+### 1.7 Request Hashkey Generation (`POST /uapi/hashkey`)
+* **Endpoint:** `POST /uapi/hashkey`
+* **Headers:** `content-type: application/json`, `appKey: <KIS_APP_KEY>`, `appSecret: <KIS_APP_SECRET>`
+* **Body:** The exact JSON payload string of the target POST request (e.g. order-cash).
+* **Response:** `{"HASH": "<HASHKEY>"}`
+* **Header Usage:** Attached as `hashkey: <HASHKEY>` to order placement requests for payload integrity verification.
 
 ---
 
@@ -107,7 +114,38 @@ custtype: P
   * `cntg_vol` / `cnqn`: 체결수량
   * `acml_vol`: 누적체결수량 (고유 단조증가 키로 dedup에 사용)
   * `tday_rltv`: 체결강도
-* **Pagination:** Reverse cursor on `stck_cntg_hour`. Stall on duplicate ticks broken via 1s decrement (`_decrement_hour_one_second`). Forward-only (same-day).
+* **Pagination:** Reverse cursor on `stck_cntg_hour`. Stall on duplicate ticks broken via 1s decrement. Forward-only (same-day).
+
+### 2.5 `CTPF1002R` — 상품기본정보 / 주식 정보 조회 (Search Stock Info)
+* **Path:** `GET /uapi/domestic-stock/v1/quotations/search-stock-info`
+* **Params:** `PRDT_TYPE_CD` (`"300"`: 주식), `PDNO` (6-digit symbol code)
+* **Output (`output`):**
+  * `pdno`: 종목코드
+  * `prdt_type_cd`: 상품유형코드
+  * `prdt_name`: 종목 한글명
+  * `prdt_eng_name`: 종목 영문명
+  * `std_pdno`: 표준종목코드 (ISIN)
+  * `mkt_id_cd`: 시장구분코드 (`STK`: 코스피, `KSQ`: 코스닥)
+  * `scts_mkt_lstg_dt`: 상장일자 (`YYYYMMDD`)
+
+### 2.6 `FHPUP02100000` — 업종 / 지수 현재가 시세 (Inquire Index Price)
+* **Path:** `GET /uapi/domestic-stock/v1/quotations/inquire-index-price`
+* **Params:** `FID_COND_MRKT_DIV_CODE` (`"U"`), `FID_INPUT_ISCD` (`"0001"`: 코스피, `"1001"`: 코스닥, `"1028"`: 코스피200)
+* **Output (`output`):**
+  * `bstp_nmix_prpr`: 업종/지수 현재가
+  * `bstp_nmix_prdy_ctrt`: 전일대비율 (%)
+  * `bstp_nmix_prdy_vrss`: 전일대비
+  * `acml_vol`: 누적거래량
+  * `acml_tr_pbmn`: 누적거래대금 (백만원)
+
+### 2.7 `FHKST01011800` — 당일 뉴스 제목 조회 (News Title)
+* **Path:** `GET /uapi/domestic-stock/v1/quotations/news-title`
+* **Params:** `FID_NEWS_OFR_ENTP_CODE` (`""`), `FID_COND_MRKT_DIV_CODE` (`"J"`), `FID_INPUT_ISCD` (종목코드 또는 빈값)
+* **Output (`output` list):**
+  * `news_ofer_entp_code`: 뉴스제공업체코드
+  * `dorg`: 배포일시 (`YYYYMMDDHHMMSS`)
+  * `titl`: 뉴스 제목
+  * `news_lpad_yn`: 중요뉴스 여부
 
 ---
 
@@ -133,6 +171,11 @@ custtype: P
 * **Params:** `fid_cond_mrkt_div_code` (`"U"`), `fid_input_iscd` (`0001`: 코스피, `1001`: 코스닥, `1028`: 코스피200), `fid_input_date_1`, `fid_input_date_2`, `fid_period_div_code` (`D`), `fid_org_adj_prc` (`"0"`).
 * **Output:** `output1` (당일 지수 요약: `bstp_nmix_prpr`, `bstp_nmix_prdy_ctrt`), `output2` (일자별 지수 시계열).
 
+### 3.5 `FHKUP03500200` — 업종 / 지수 분봉 시세 (Index Intraday Minute Chart)
+* **Path:** `GET /uapi/domestic-stock/v1/quotations/inquire-time-indexchartprice`
+* **Params:** `FID_COND_MRKT_DIV_CODE` (`"U"`), `FID_INPUT_ISCD` (`"0001"`: 코스피, `"1001"`: 코스닥), `FID_INPUT_HOUR_1` (`HHMMSS`), `FID_PW_DATA_INCU_YN` (`"Y"`)
+* **Output (`output2` list):** `bsop_hour`, `bstp_nmix_prpr`, `bstp_nmix_oprc`, `bstp_nmix_hgpr`, `bstp_nmix_lwpr`, `acml_vol`, `acml_tr_pbmn`.
+
 ---
 
 ## 4. Market Microstructure & Flow TRs (수급 / 수량 / 공매도 / 신용)
@@ -151,8 +194,12 @@ custtype: P
 * **실시간 당일추이:** `FHPPG04650101` (`/uapi/domestic-stock/v1/quotations/program-trade-by-stock`)
   * Output: 시간대별 차익/비차익 매수/매도 수량 및 순매수금액.
 * **일별 추이:** `FHPPG04650201` (`/uapi/domestic-stock/v1/quotations/program-trade-by-stock-daily`)
-  * Params: `FID_INPUT_DATE_1` (커서일자)
+  * Params: `FID_COND_MRKT_DIV_CODE`, `FID_INPUT_ISCD`, `FID_INPUT_DATE_1` (커서일자)
   * Output: 일별 차익/비차익/전체 순매수 거래량 및 거래대금.
+* **종목별 투자자 일별 (`FHPTJ04160001`):** `GET /uapi/domestic-stock/v1/quotations/investor-trade-by-stock-daily`
+  * Params: `FID_COND_MRKT_DIV_CODE`, `FID_INPUT_ISCD`, `FID_INPUT_DATE_1` 커서, `FID_ORG_ADJ_PRC`="", `FID_ETC_CLS_CODE`=""
+  * Output (`output2`): `stck_bsop_date`, `frgn_ntby_tr_pbmn`, `orgn_ntby_tr_pbmn`.
+* 두 일별 수급 TR은 모두 `FID_INPUT_DATE_1` 커서로만 페이징한다 (`tr_cont` 없음).
 
 ### 4.4 `FHPST04830000` — 국내주식 공매도 일별추이 (Daily Short Selling)
 * **Path:** `GET /uapi/domestic-stock/v1/quotations/daily-short-sale`
@@ -170,24 +217,18 @@ custtype: P
 
 ### 5.1 `FHPST01700000` — 등락률 순위 (Fluctuation Ranking)
 > [!IMPORTANT]
-> 실측 정정(2026-09-17): 이 TR은 14개 필드가 전부 필수다. 이전 문서는 6개만
-> 기재해 나머지 7개(`FID_PRC_CLS_CODE` 등)가 누락된 채 배포됐고 KIS가
-> `OPSQ2001 ERROR INPUT FIELD NOT FOUND`로 거부했다(라이브 호출로 검증).
+> 실측 정정(2026-09-17): 이 TR은 14개 필드가 전부 필수다.
 * **Path:** `GET /uapi/domestic-stock/v1/ranking/fluctuation`
 * **Params:** `FID_COND_MRKT_DIV_CODE` (`J`), `FID_COND_SCR_DIV_CODE` (`20170`), `FID_INPUT_ISCD` (`0000`), `FID_RANK_SORT_CLS_CODE` (`0`: 상승률순), `FID_INPUT_CNT_1` (`200`), `FID_PRC_CLS_CODE` (`0`: 전체), `FID_INPUT_PRICE_1` (`""`), `FID_INPUT_PRICE_2` (`""`), `FID_VOL_CNT` (`""`), `FID_TRGT_CLS_CODE` (`0`), `FID_TRGT_EXLS_CLS_CODE` (`0`), `FID_DIV_CLS_CODE` (`0`), `FID_RSFL_RATE1` (min%), `FID_RSFL_RATE2` (max%).
-* **Output (`output`):** `stck_shrn_iscd`, `hts_kor_isnm`, `stck_prpr`, `prdy_ctrt`, `acml_vol`. `acml_tr_pbmn`(누적거래대금)은 이 TR에 없다 — 이전 문서 기재가 오류였다(실측 확인). 클라이언트는 미제공을 0으로 취급한다(선정 순위는 랭크 위치로 결정되고 이 값은 메타데이터 표시용이라 영향 없음).
+* **Output (`output`):** `stck_shrn_iscd`, `hts_kor_isnm`, `stck_prpr`, `prdy_ctrt`, `acml_vol`.
 
 ### 5.2 `FHPST01710000` — 거래량/거래대금 순위 (Volume/Trade-Amount Ranking, `FID_BLNG_CLS_CODE`로 정렬 기준 선택)
 > [!IMPORTANT]
-> 실측 정정(2026-09-17): 이 화면은 하나의 TR로 여러 정렬 기준을 제공하는 템플릿이다.
-> 이전 문서(구 5.3)가 "거래대금 순위"를 별도 TR `FHPST01720000`·경로
-> `/ranking/trade-amount`로 잘못 기재해 프로덕션에서 404(JSONDecodeError)가
-> 발생했다. `FHPST01720000`의 실제 정체는 "호가잔량 순위"이며 해당 경로는
-> KIS에 존재하지 않는다(공식 `koreainvestment/open-trading-api` 재확인, 라이브
-> 호출로 검증). 거래대금순위는 아래처럼 `FID_BLNG_CLS_CODE="3"`으로 조회한다.
+> 실측 정정: 이 화면은 하나의 TR로 여러 정렬 기준을 제공하는 템플릿이다.
+> 거래대금순위는 아래처럼 `FID_BLNG_CLS_CODE="3"`(거래금액순)으로 조회한다 (`FID_BLNG_CLS_CODE="0"`은 평균거래량순).
 * **Path:** `GET /uapi/domestic-stock/v1/quotations/volume-rank`
-* **Params:** `FID_COND_MRKT_DIV_CODE` (`J`), `FID_COND_SCR_DIV_CODE` (`20171`), `FID_INPUT_ISCD` (`0000`), `FID_DIV_CLS_CODE` (`0`), `FID_BLNG_CLS_CODE` (`0`: 평균거래량, `3`: 거래금액순), `FID_TRGT_CLS_CODE` (`0000000000`), `FID_TRGT_EXLS_CLS_CODE` (`0000001100`: ETF·ETN 제외 — 미제외 시 6자리 숫자가 아닌 종목코드가 섞여 스키마 검증 거부됨, 실측 확인), `FID_INPUT_PRICE_1` (`""`), `FID_INPUT_PRICE_2` (`""`), `FID_VOL_CNT` (`""`), `FID_INPUT_DATE_1` (`""`).
-* **Output (`output`):** `mksc_shrn_iscd` (종목코드 — 5.1의 `stck_shrn_iscd`와 필드명이 다름), `hts_kor_isnm`, `stck_prpr`, `prdy_ctrt`, `acml_vol`, `acml_tr_pbmn` (누적거래대금).
+* **Params:** `FID_COND_MRKT_DIV_CODE` (`J`), `FID_COND_SCR_DIV_CODE` (`20171`), `FID_INPUT_ISCD` (`0000`), `FID_DIV_CLS_CODE` (`0`), `FID_BLNG_CLS_CODE` (`0`: 평균거래량, `3`: 거래금액순), `FID_TRGT_CLS_CODE` (`0000000000`), `FID_TRGT_EXLS_CLS_CODE` (`0000001100`: ETF·ETN 제외), `FID_INPUT_PRICE_1` (`""`), `FID_INPUT_PRICE_2` (`""`), `FID_VOL_CNT` (`""`), `FID_INPUT_DATE_1` (`""`).
+* **Output (`output`):** `mksc_shrn_iscd` (종목코드), `hts_kor_isnm`, `stck_prpr`, `prdy_ctrt`, `acml_vol`, `acml_tr_pbmn` (누적거래대금).
 
 ### 5.4 `FHKST01010600` — 시가총액 순위 (Market Cap Ranking)
 * **Path:** `GET /uapi/domestic-stock/v1/ranking/market-cap`
@@ -212,7 +253,7 @@ custtype: P
 
 ### 6.1 `TTTC0012U` / `VTTC0012U` — 주식 현금 매수 주문 (Buy Order)
 > [!NOTE]
-> 2026-09-11 기준 공식 저장소(`koreainvestment/open-trading-api`) 재확인 결과 이 문서의 구 TR(`TTTC0802U` 등)은 최신 규격이 아니며, 실제 구현(`src/execution/kis_client.py`)은 `TTTC0012U`/`TTTC0011U`/`TTTC0013U`/`TTTC0081R`을 사용한다.
+> 공식 저장소(`koreainvestment/open-trading-api`) 기준 현행 TR 규격은 `TTTC0012U`/`TTTC0011U`/`TTTC0013U`/`TTTC0081R`을 사용한다.
 * **Path:** `POST /uapi/domestic-stock/v1/trading/order-cash`
 * **Headers:** `tr_id: "TTTC0012U"` (실전) / `"VTTC0012U"` (모의투자), `custtype: "P"`
 * **Body:**
@@ -237,7 +278,7 @@ custtype: P
   * `04`: 최우선지정가
   * `05`: 장전 시간외종가 (08:30~08:40)
   * `06`: 장후 시간외종가 (15:40~16:00)
-  * `07`: KRX 2026-09-14 세션 개편으로 대상 세션(16:00~18:00 단일가) 소멸 — 사용 금지. 애프터마켓(16:00~20:00)은 연속매매이며 본 코드와 무관.
+  * `07`: KRX 2026-09-14 세션 개편으로 대상 세션(16:00~18:00 단일가) 소멸 — 사용 금지.
 * **Response Body (`output`):**
   * `KRX_FWDG_ORD_ORGNO`: 한국거래소 전송 주문조직번호
   * `ODNO`: 주문번호 (Order Number)
@@ -327,7 +368,10 @@ custtype: P
 * **Query Params:** `CANO`, `ACNT_PRDT_CD`, `PDNO`, `ORD_UNPR`, `ORD_DVSN`, `CMA_EVLU_AMT_ICLD_YN`, `OVRS_ICLD_YN`.
 * **Output (`output`):**
   * `ord_psbl_cash`: 주문가능현금
-  * `nrcvb_buy_amt`: 미수없는매수금액
+  * `nrcv_buy_amt`: 미수없는매수금액
   * `max_buy_amt`: 최대매수금액
   * `dnca_tot_amt`: 예수금총금액 (D+2 예수금)
-* `TTTC8408R`은 `inquire-psbl-sell` 소속이며 매수가능금액 조회에 사용하지 않는다.
+
+> [!NOTE]
+> 주문/계좌 TR 전송 시 실측된 주문 거부 코드: `EGW02006` (주문 거부, `REJECTED`), `EGW00121`/`EGW00123` (토큰 무효, 재발급 후 1회 재시도),
+> `EGW00201` (초당 거래건수 초과 — 전송은 HTTP 500 본문의 `msg_cd`로 도착하므로 상태코드가 아닌 본문으로 판정한다).

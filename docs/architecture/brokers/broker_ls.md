@@ -15,18 +15,13 @@
 * **REST URL (Ranking):** `https://openapi.ls-sec.co.kr:8080/stock/ranking`
 * **REST URL (Item Search / Master):** `https://openapi.ls-sec.co.kr:8080/stock/item-search`
 * **OAuth Token URL:** `https://openapi.ls-sec.co.kr:8080/oauth2/token`
-* **WebSocket Live:** `wss://openapi.ls-sec.co.kr:9443`
+* **WebSocket Live (`/websocket`):** `wss://openapi.ls-sec.co.kr:9443/websocket`
 
-### 1.2 OAuth2 Token Issuance (`POST /oauth2/token`)
+### 1.2 OAuth2 Token Lifecycle (`POST /oauth2/token`)
 * **Headers:** `content-type: application/x-www-form-urlencoded`
-* **Payload:**
-  ```python
-  payload = {
-      "grant_type": "client_credentials",
-      "appkey": "<LS_APP_KEY>",
-      "appsecretkey": "<LS_APP_SECRET>",
-      "scope": "oob",
-  }
+* **Body:**
+  ```text
+  grant_type=client_credentials&appkey=<LS_APP_KEY>&appsecretkey=<LS_APP_SECRET>&scope=oob
   ```
 * **Response:**
   ```json
@@ -37,7 +32,7 @@
       "scope": "oob"
   }
   ```
-* **Lifecycle:** 86400s validity. Cached on `LsApiClient.token`.
+* **Lifecycle:** 86400s validity. Cached in a host-shared token store with file locking to ensure all processes share one active token.
 
 ### 1.3 Common Request Headers
 ```http
@@ -50,14 +45,25 @@ tr_cont_key: <CONTINUATION_KEY>
 
 ### 1.4 Rate Limit & Single-Flight Invariants
 * **Strict Server Limit:** Exceeding ~1 req/s triggers error `rsp_cd: "IGW00201"` (*"요청 제한 건수를 초과하였습니다"*).
-* **Architecture Invariant (Serialization Lock):**
-  * Guarded by `asyncio.Lock()` with `_min_interval = 1.05`s (~0.95 req/s).
-  * In-flight concurrency is strictly **1**.
-  * On `IGW00201`, sleep 1.2s and retry (up to 3 times).
+* **Architecture Invariant (Host-Paced Admission):**
+  * Host-paced bucket at ~0.95 req/s (1.05s spacing) per AppKey.
+  * `IGW00201` triggers exponential backoff retry.
+  * 401 / `IGW00101|IGW00102|IGW00123` triggers CAS token refresh.
 * **URL Path Segregation:**
   * Chart TRs (`t8410`, `t8411`, `t8412`, `t8413`) must target `/stock/chart`.
   * Market data TRs (`t1101`, `t1102`, `t8407`, `t1301`) must target `/stock/market-data`.
+  * Investor flow TRs (`t1404`, `t1405`, `t1471`, `t1702`) must target `/stock/investor`.
   * Mismatched paths return `IGW00215` (*"유효하지 않은 TR CD 입니다"*).
+
+### 1.5 WebSocket Real-Time Streaming (`/websocket`)
+* **Endpoint:** `wss://openapi.ls-sec.co.kr:9443/websocket`
+* **Connection & Handshake:** Connect with Bearer token authentication frame.
+* **Realtime TR Codes & Normalization:**
+  * `S3_`: KOSPI Real-Time Execution Tick (코스피 실시간 체결, canonical `H0STCNT0`)
+  * `K3_`: KOSDAQ Real-Time Execution Tick (코스닥 실시간 체결, canonical `H0STCNT0`)
+  * `H1_`: KOSPI Real-Time Level-10 Orderbook (코스피 실시간 호가, canonical `H0STASP0`)
+  * `HA_`: KOSDAQ Real-Time Level-10 Orderbook (코스닥 실시간 호가, canonical `H0STASP0`)
+* **Normalization Invariant:** Real-time adapters normalize LS vendor frames (`S3_`, `K3_` -> `H0STCNT0`, `H1_`, `HA_` -> `H0STASP0`) for cross-broker uniform event processing.
 
 ---
 
@@ -174,6 +180,27 @@ tr_cont_key: <CONTINUATION_KEY>
 * **공매도 추이 (`t1481`):** 일자별 공매도 체결수량, 공매도 거래대금, 공매도 비중(%).
 * **신용잔고 추이 (`t1482`):** 신용융자 잔고수량, 대주 잔고수량, 공여율, 잔고율(%).
 * **대차거래 추이 (`t1486`):** 일별 대차 체결수량, 대차 상환수량, 대차 잔고수량 및 잔고금액.
+
+### 4.5 `t1702` — 종목별 투자자 일별 매매추이 (Investor Flow Daily)
+* **Path:** `POST /stock/investor`
+* **Request Headers:** `tr_cd: "t1702"`, `tr_cont: "N"`, `tr_cont_key: ""`
+* **Request Body (`t1702InBlock`):**
+  ```json
+  {
+    "t1702InBlock": {
+      "shcode": "005930",
+      "fromdt": "YYYYMMDD",
+      "todt": "YYYYMMDD",
+      "volvalgb": "1",
+      "msmdgb": "0",
+      "gubun": "0",
+      "exchgubun": "K"
+    },
+    "tr_cd": "t1702"
+  }
+  ```
+* **Parameters:** `volvalgb: "1"` (수량 기준, shares), `msmdgb: "0"` (순매수), `gubun: "0"` (전체), `exchgubun: "K"` (통합).
+* **Output (`t1702OutBlock1` list):** `date`, `close`, `sign`, `change`, `diff`, `volume`, `tjjcode` 및 투자주체별 순매수 수량.
 
 ---
 

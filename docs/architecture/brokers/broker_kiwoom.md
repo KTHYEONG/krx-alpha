@@ -1,3 +1,4 @@
+<!-- DEPRECATED_TOKENS: ka10024 -->
 # Kiwoom Securities REST OpenAPI (Open API NEXT) Specification
 
 > **AI Agent Technical Reference:**  
@@ -10,16 +11,19 @@
 ### 1.1 Endpoints & Environments
 * **REST Base URL:** `https://api.kiwoom.com`
 * **OAuth Token URL:** `https://api.kiwoom.com/oauth2/token`
-* **Linux 64-Bit Native:** Operates entirely over standard HTTPS requests without ActiveX, COM, or 32-bit Windows dependencies.
+* **OAuth Revoke URL (`/oauth2/revoke`):** `https://api.kiwoom.com/oauth2/revoke`
+* **WebSocket URL (`/api/dostk/websocket`):** `wss://api.kiwoom.com:10000/api/dostk/websocket`
+* **Linux 64-Bit Native:** Operates entirely over standard HTTPS/WSS requests without ActiveX, COM, or 32-bit Windows dependencies.
 
-### 1.2 OAuth2 Token Issuance (`POST /oauth2/token`)
+### 1.2 OAuth2 Token Lifecycle (`POST /oauth2/token`)
+* **Endpoint:** `POST /oauth2/token`
 * **Headers:** `Content-Type: application/json;charset=UTF-8`
 * **Body:**
   ```json
   {
     "grant_type": "client_credentials",
-    "appkey": "<KIWOM_APP_KEY>",
-    "secretkey": "<KIWOM_SECRET_KEY>"
+    "appkey": "<KIWOOM_APP_KEY>",
+    "secretkey": "<KIWOOM_SECRET_KEY>"
   }
   ```
 * **Response:**
@@ -32,9 +36,23 @@
     "return_msg": "정상처리되었습니다."
   }
   ```
-* **Concurrency Lock:** `KiwoomApiClient` wraps issuance in `_token_lock = asyncio.Lock()` ensuring that concurrent tasks reuse a single in-flight token fetch.
+* **Concurrency Lock & CAS Refresh:** Token issuance uses single-flight concurrency locking ensuring concurrent tasks share an in-flight token fetch. Token refresh on code 8005 performs compare-and-swap (CAS) on the active token so peers do not overwrite valid tokens.
 
-### 1.3 Common Request Headers
+### 1.3 Token Revocation (`POST /oauth2/revoke` — `au10002`)
+* **Endpoint:** `POST /oauth2/revoke`
+* **Headers:** `Content-Type: application/json;charset=UTF-8`
+* **Body:**
+  ```json
+  {
+    "appkey": "<KIWOOM_APP_KEY>",
+    "secretkey": "<KIWOOM_SECRET_KEY>",
+    "token": "<ACTIVE_TOKEN>"
+  }
+  ```
+* **Response:** `{"return_code": 0, "return_msg": "정상처리되었습니다."}`
+* **Lifecycle:** Revoking an active token invalidates the 24h phase immediately and allows clean re-issuance without server-side stale session lockup.
+
+### 1.4 Common Request Headers
 ```http
 Content-Type: application/json;charset=UTF-8
 authorization: Bearer <access_token>
@@ -43,20 +61,21 @@ cont-yn: <Y|N>
 next-key: <CONTINUATION_KEY>
 ```
 
-### 1.4 Rate Limit, Concurrency, and Token Bucket Invariants
+### 1.5 Rate Limit, Concurrency, and Token Bucket Invariants
 * **TR-Level (api-id) Independent Buckets:**
   * Strict limit of **5.0 req/sec per `api-id`**.
   * Server Throttle Error: HTTP 429 with `{"return_code": 5, "return_msg": "허용된 API 요청 개수를 초과하였습니다. 유량=5, API ID=<api_id>"}`.
 * **Architecture Invariant (Inter-TR Parallelism):**
-  * `KiwoomApiClient` dynamically assigns an `AsyncRateLimiter(5.0, 1.0)` per distinct `api-id`.
-  * Inquiries to different TRs (e.g. `ka10027` ranking alongside `ka10080` minute chart) run in parallel without cross-blocking.
-  * On HTTP 429, back off 1.2s and retry up to 3 times.
+  * Rate limiting is tracked per distinct `api-id`. Inquiries to different TRs (e.g. `ka10027` ranking alongside `ka10080` minute chart) run in parallel without cross-blocking.
+  * On HTTP 429, wait exponential backoff (e.g. 1.2 s) and retry up to 3 attempts.
 
-### 1.5 Data Parsing & Nextrade Invariants
-* **Signed Numbers:** Prices and percentages return as signed strings (`"+69700"`, `"+8.40"`). Always apply `.abs()` or strip signs before float casting.
-* **Status Verification:** Check body `return_code == 0` (HTTP status is frequently 200 even on logical errors).
-* **Nextrade ATS Code Syntax:** Suffix `_NX` (e.g. `005930_NX`) accesses Nextrade session bars.
-* **Ranking Suffix:** Ranking tickers include exchange suffixes (e.g. `004490_AL`); strip via `.split('_')[0].zfill(6)`.
+### 1.6 WebSocket Real-Time Streaming (`/api/dostk/websocket`)
+* **Endpoint:** `wss://api.kiwoom.com:10000/api/dostk/websocket`
+* **Authentication:** Handshake frames with issued Bearer token (`LOGIN` frame).
+* **Stream Type Mapping to Canonical Streams:**
+  * `0B`: KRX Real-Time Trade Execution Tick (canonical `H0STCNT0`)
+  * `0D`: KRX Real-Time Level-10 Orderbook Depth (canonical `H0STASP0`)
+* **Protocol:** JSON frames with `tr_type`, `tr_key`, `tr_data`. Client sends PING keep-alive frames every 30s.
 
 ---
 
@@ -100,14 +119,13 @@ next-key: <CONTINUATION_KEY>
 * **Body:** `{"mrkt_tp": "000", "stex_tp": "3", "trde_qty_tp": "0", "prc_tp": "0"}`
 * **Output:** 당일 거래량 상위 100~200 종목 리스트 (`stk_cd`, `cur_prc`, `trde_qty`, `flu_rt`).
 
-### 2.3 `ka10032` — 거래대금 상위 요청 (Top Trade Amount)
+### 2.3 `ka10032` — 거래대금 상위 순위 (Top Trade Amount — Live Fix)
 * **Path:** `POST /api/dostk/rkinfo`
 * **Headers:** `api-id: "ka10032"`, `cont-yn`, `next-key`
-* **Request Body (accepted live, 2026-11-03 20:16 KST):** `{"mrkt_tp": "000", "mang_stk_incls": "0", "stex_tp": "1"}` (`stex_tp` `"1"` = KRX). Whether `mang_stk_incls` is required and what its values mean are unverified.
+* **Request Body (accepted live, 2026-11-03 20:16 KST):** `{"mrkt_tp": "000", "mang_stk_incls": "0", "stex_tp": "1"}` (`stex_tp` `"1"` = KRX).
 * **Output (`trde_prica_upper` array — 100 rows/page):** `cont-yn: Y` with an 8-character `next-key` pages onward (3 pages / 300 rows walked).
   * Fields: `now_rank`, `pred_rank`, `stk_cd` (6-char, alphanumeric codes such as `0147B0` occur; no `_AL`/`_NX` suffix under `stex_tp=1`), `stk_nm`, `cur_prc` (signed), `pred_pre_sig`, `pred_pre`, `flu_rt` (signed), `sel_bid`, `buy_bid`, `now_trde_qty` (may hold the 32-bit overflow value 4294967295), `pred_trde_qty`, `trde_prica` (백만원).
-  * `trde_prica` unit: consistent with 백만원 (top row 3,228,357 vs 2.30M shares × ~1.41M KRW ≈ 3.26T KRW). The ±1% reconciliation against `bars.daily` is pending (same-scope comparison needs the post-close bar).
-* **Note:** `ka10024` on this path returns `return_code=1` `[1504] 해당 URI에서는 지원하는 API ID가 아닙니다`.
+* **Note:** 구 거래대금 순위 TR 코드는 `[1504] 해당 URI에서는 지원하는 API ID가 아닙니다` 에러를 반환하므로 거래대금 순위 조회는 반드시 `ka10032`를 사용한다.
 
 ### 2.4 `ka10028` — 시가총액 상위 순위 (Market Cap Ranking)
 * **Path:** `POST /api/dostk/rkinfo`
@@ -115,10 +133,7 @@ next-key: <CONTINUATION_KEY>
 * **Body:** `{"mrkt_tp": "000"}`
 * **Output:** 시가총액 상위 종목 리스트 (`stk_cd`, `cur_prc`, `mkt_cap` 억원 단위).
 
-### 2.5 (removed)
-* The earlier `ka10032` new-high/low entry was unverified and contradicted live evidence (`ka10032` is the trade-amount ranking, §2.3).
-
-### 2.6 `ka10034` — 체결강도 상위 순위 (High Trade Strength)
+### 2.5 `ka10034` — 체결강도 상위 순위 (High Trade Strength)
 * **Path:** `POST /api/dostk/rkinfo`
 * **Headers:** `api-id: "ka10034"`
 * **Output:** 당일 체결강도(매수체결량/매도체결량) 상위 순위 종목.
@@ -224,3 +239,9 @@ next-key: <CONTINUATION_KEY>
 * **Headers:** `api-id: "ka10016"`
 * **Body:** `{"stk_cd": "005930"}`
 * **Output:** 당일 차익, 비차익, 전체 매도/매수 수량 및 순매수금액.
+
+### 5.4 `ka10059` — 종목별 투자자/기관 일별 순매수 금액 (Investor/Institution Daily)
+* **Path:** `POST /api/dostk/stkinfo`
+* **Headers:** `api-id: "ka10059"`
+* **Body:** `dt`, `stk_cd`, `amt_qty_tp`=1 (금액), `trde_tp`=0 (순매수), `unit_tp`=1000
+* **Output:** 일자별 행 (`dt`, `orgn`, `frgnr_invsr`, `natfor`); KIS 외국인 순매수 = `frgnr_invsr + natfor`.

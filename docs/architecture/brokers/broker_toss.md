@@ -35,7 +35,7 @@
 * **Token Lifecycle & Invariants:**
   * Validity is 86,400 seconds (24 hours).
   * Standard JWT RS256 token containing client claims.
-  * Token fetch should be guarded by an `asyncio.Lock()` to prevent redundant issuance across concurrent tasks.
+  * Issuance coordinates through a host-shared token store with file locking (Toss revokes the previous token on issue), and refresh uses compare-and-swap (CAS) to prevent concurrent overwrites.
   * Unlike domestic legacy brokers, token responses use standard OAuth2 schema without custom broker envelopes.
 
 ### 1.3 Common Request & Response Headers
@@ -60,7 +60,7 @@
   ```
 
 ### 1.4 Rate Limit Matrix by Group
-Toss Securities enforces strict token-bucket rate limits segmented by API group (`client_id × Group`). Exceeding limits returns `HTTP 429 Too Many Requests`.
+Toss Securities enforces strict token-bucket rate limits segmented by API group (`client_id × Group`). Exceeding limits returns `HTTP 429 Too Many Requests`. A 429 honours `Retry-After` header (capped at 5 s), otherwise applies backoff (1.2 s default), up to 3 retry attempts.
 
 | Rate Limits Group | General Limit | Peak Window Limit (09:00~09:10 KST) | Target Endpoints |
 | :--- | :--- | :--- | :--- |
