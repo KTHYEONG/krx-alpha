@@ -153,6 +153,38 @@ def test_compose_enables_snapshot_collection() -> None:
     assert "KRX_ALPHA_SNAPSHOT_ENABLED=true" in compose
 
 
+def test_compose_research_universe_flags_resolve_within_ls_capacity() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    from src.core.config import CollectorSettings
+
+    raw = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    env = dict(item.split("=", 1) for item in raw["services"]["krx-collector"]["environment"])
+    settings = CollectorSettings(
+        ls_active_sessions=int(env["KRX_ALPHA_LS_ACTIVE_SESSIONS"]),
+        ls_dynamic_reserve_symbols=int(env["KRX_ALPHA_LS_DYNAMIC_RESERVE_SYMBOLS"]),
+    )
+
+    assert settings.ls_active_sessions <= settings.ls_max_sessions - 1
+    assert settings.universe_slot_budget == settings.subscription_symbol_budget
+    assert env["KRX_ALPHA_UNIVERSE_DOWNSIDE_ENABLED"] == "true"
+    assert env["KRX_ALPHA_TICK_TAPE_C_ENABLED"] == "true"
+
+
+def test_compose_keeps_intraday_admission_off_until_live_subscribe_gate() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    raw = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    env = dict(item.split("=", 1) for item in raw["services"]["krx-collector"]["environment"])
+
+    assert env.get("KRX_ALPHA_INTRADAY_ENABLED", "false") == "false"
+    assert env["KRX_ALPHA_LS_DYNAMIC_RESERVE_SYMBOLS"] == "0"
+
+
 def test_compose_keeps_db_crosscheck_dormant() -> None:
     from pathlib import Path
 
@@ -383,6 +415,8 @@ def _accepted_typed_env_names() -> set[str]:
         config_module.RegularKisSettings,
         config_module.UniverseTierSettings,
         config_module.TickTapeBackfillSettings,
+        config_module.TickTapeOverflowSettings,
+        config_module.IntradayAdmissionSettings,
         config_module.RepairSettings,
         config_module.MinuteBackfillSettings,
         config_module.SnapshotSettings,

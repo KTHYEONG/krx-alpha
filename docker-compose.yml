@@ -37,6 +37,14 @@ services:
       # 2층 유니버스 (Part5; 2026-10-22 G-UNIVERSE 오프라인 20일 재현 PASS: 코어 65-71, 교체율 최대 4.2%).
       # 코어가 후보 앞쪽(거래대금 순)을 차지하므로 KIS 샤드 0이 최대 거래대금 20종목이 되어 G-KIS-HEAVY 조건을 충족한다.
       - KRX_ALPHA_UNIVERSE_CORE_ENABLED=true
+      # 연구 유니버스 확장 (53d303c Part 1·2·4; 2026-11-04 활성). 오프라인 40영업일 재현: 대칭 수요 평균 184·p90 229·최대 249종목,
+      # 용량 200에서 초과 평균 6.8(40일 중 10일, 최대 49)은 등급 C 야간 테이프(상한 60)로 체결 확보.
+      # G-LS3 PASS(11-03: LS 3세션×198쌍 수락, 4번째는 신규 거절만) → 세션 2개 수집 + 1개 샤드0 대기. G-MEM2 PASS(11-04 로컬: 11-03 호가 파티션 2배 8.59M행 정규화 피크 1.04GiB, 3GiB의 35%).
+      # 장중 동적 편입(INTRADAY)과 동적 예비는 G-LIVESUB 전까지 끔.
+      - KRX_ALPHA_UNIVERSE_DOWNSIDE_ENABLED=true
+      - KRX_ALPHA_LS_ACTIVE_SESSIONS=2
+      - KRX_ALPHA_LS_DYNAMIC_RESERVE_SYMBOLS=0
+      - KRX_ALPHA_TICK_TAPE_C_ENABLED=true
       # History backfill 야간 슬롯 23:30-05:30 (Part 2). 2026-10-22 G-TAPE-RUN PASS: 47 종목일 틱 거래량 합이 KRX 일봉과 ±0.5% 이내 전수 일치.
       # 키움 ka10079는 kca와 호스트 공유 페이서(~/.cache/kis admission_kiwoom_*_ka10079.state)로 예산을 나눈다.
       - KRX_ALPHA_TICK_TAPE_ENABLED=true
