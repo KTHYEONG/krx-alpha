@@ -73,6 +73,7 @@ class SnapshotSessionResult:
     expired: int
     failed_jobs: int
     rows_added: dict[str, int]
+    coalesced: int = 0
 
 
 _KIND_DATASET: dict[SnapshotJobKind, SnapshotDataset] = {
@@ -178,6 +179,7 @@ def run_snapshot_job(
     """Collect one bounded scheduled job and persist only validated rows."""
     session_date = store.session_date
     budget = _JobBudget(not_after=job.not_after, now_fn=now_fn, wall_ns=wall_ns)
+    cutoff_ns = int(dt.datetime.combine(session_date, settings.news_start, tzinfo=_KST).timestamp()) * 1_000_000_000
 
     def stamp(row: Mapping[str, object], observed: int) -> dict[str, object]:
         return {**row, "session_date": session_date, "observed_at_ns": observed}
@@ -264,6 +266,8 @@ def run_snapshot_job(
             rows.extend(stamp(row, observed) for row in fresh)
             new_ids.extend(cast(str, row["news_id"]) for row in fresh)
             if not page or any(cast(str, row["news_id"]) in news_seen for row in page) or not fresh:
+                break
+            if min(cast(int, row["published_at_ns"]) for row in page) <= cutoff_ns:
                 break
             if pages >= settings.news_max_pages:
                 budget.truncated = True
@@ -370,6 +374,7 @@ def run_snapshot_session(
     completed: set[str] = set()
     executed = 0
     expired = 0
+    coalesced = 0
     failed_jobs = 0
     rows_added: dict[str, int] = {}
     last_heartbeat: dt.datetime | None = None
@@ -385,12 +390,22 @@ def run_snapshot_session(
         if expired_now:
             for job in expired_now:
                 completed.add(job.job_id)
-            expired += len(expired_now)
-            logger.info(
-                "[DATA] stage=snapshot_expired count=%d jobs=%s",
-                len(expired_now),
-                ",".join(job.job_id for job in expired_now[:_EXPIRED_JOBS_LOGGED]),
-            )
+            news_expired = [job for job in expired_now if job.kind is SnapshotJobKind.NEWS_TITLE]
+            other_expired = [job for job in expired_now if job.kind is not SnapshotJobKind.NEWS_TITLE]
+            expired += len(other_expired)
+            coalesced += len(news_expired)
+            if other_expired:
+                logger.info(
+                    "[DATA] stage=snapshot_expired count=%d jobs=%s",
+                    len(other_expired),
+                    ",".join(job.job_id for job in other_expired[:_EXPIRED_JOBS_LOGGED]),
+                )
+            if news_expired:
+                logger.info(
+                    "[DATA] stage=snapshot_coalesced count=%d jobs=%s",
+                    len(news_expired),
+                    ",".join(job.job_id for job in news_expired[:_EXPIRED_JOBS_LOGGED]),
+                )
         due, _ = partition_due_jobs(jobs, completed=completed, now=now)
         stop = False
         for job in due:
@@ -466,19 +481,25 @@ def run_snapshot_session(
                 sleep_fn(delay)
         if last_heartbeat is None or (now - last_heartbeat).total_seconds() >= SNAPSHOT_HEARTBEAT_S:
             logger.info(
-                "[DATA] stage=snapshot_heartbeat executed=%d expired=%d rows=%s",
+                "[DATA] stage=snapshot_heartbeat executed=%d expired=%d rows=%s coalesced=%d",
                 executed,
                 expired,
                 rows_added,
+                coalesced,
             )
             last_heartbeat = now
     logger.info(
-        "[DATA] stage=snapshot_summary executed=%d expired=%d failed_jobs=%d rows=%s",
+        "[DATA] stage=snapshot_summary executed=%d expired=%d failed_jobs=%d rows=%s coalesced=%d",
         executed,
         expired,
         failed_jobs,
         rows_added,
+        coalesced,
     )
     return SnapshotSessionResult(
-        executed=executed, expired=expired, failed_jobs=failed_jobs, rows_added=rows_added
+        executed=executed,
+        expired=expired,
+        failed_jobs=failed_jobs,
+        rows_added=rows_added,
+        coalesced=coalesced,
     )

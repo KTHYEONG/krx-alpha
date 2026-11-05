@@ -5,7 +5,7 @@ from src.core.config import SnapshotSettings
 from src.execution.contracts import KisApiError
 from src.execution.kis_client import TR_FLUCTUATION, TR_TRADE_AMOUNT, KisRankingRow
 from src.marketdata.snapshot_contracts import SnapshotDataset, SnapshotJob, SnapshotJobKind
-from src.marketdata.snapshot_service import run_snapshot_job, run_snapshot_session
+from src.marketdata.snapshot_service import SnapshotSessionResult, run_snapshot_job, run_snapshot_session
 from src.storage.snapshot_store import SnapshotStoreError
 
 KST = ZoneInfo("Asia/Seoul")
@@ -380,6 +380,100 @@ def test_news_job_stops_on_failed_page_and_keeps_first_page(tmp_path) -> None:
     assert news_seen == {"a"}
 
 
+def test_news_first_poll_pages_back_to_session_start(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    source = _FakeSource()
+    source.news = {
+        None: (_news_row("a1", 10, 0), _news_row("a2", 9, 50)),
+        ("20260917", "095000"): (_news_row("b1", 9, 40), _news_row("b2", 9, 30)),
+        ("20260917", "093000"): (_news_row("c1", 9, 10), _news_row("c2", 9, 0)),
+        ("20260917", "090000"): (_news_row("d1", 8, 30), _news_row("d2", 7, 59)),
+        ("20260917", "075959"): (_news_row("e1", 7, 50),),
+        "*": (),
+    }
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    job = _job(SnapshotJobKind.NEWS_TITLE, _t(10, 2), _t(10, 2, 30))
+
+    result = run_snapshot_job(
+        job, source=source, store=store, settings=SnapshotSettings(news_max_pages=30), symbols=(),
+        news_seen=set(), now_fn=lambda: _t(10, 2, 5), wall_ns=_counter(),
+    )
+
+    assert [call[1] for call in source.calls] == [None, ("20260917", "095000"), ("20260917", "093000"), ("20260917", "090000")]
+    assert result.truncated is False
+    assert set(store.frame(SnapshotDataset.NEWS_TITLE)["news_id"].to_list()) == {"a1", "a2", "b1", "b2", "c1", "c2", "d1", "d2"}
+
+
+def test_news_walk_stops_at_cutoff_page_and_keeps_its_rows(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    source = _FakeSource()
+    source.news = {
+        None: (_news_row("a1", 10, 0), _news_row("a2", 8, 0, 0)),
+        ("20260917", "080000"): (_news_row("b1", 7, 59, 59),),
+        "*": (),
+    }
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    job = _job(SnapshotJobKind.NEWS_TITLE, _t(10, 2), _t(10, 2, 30))
+
+    result = run_snapshot_job(
+        job, source=source, store=store, settings=SnapshotSettings(news_max_pages=30), symbols=(),
+        news_seen=set(), now_fn=lambda: _t(10, 2, 5), wall_ns=_counter(),
+    )
+
+    assert [call[1] for call in source.calls] == [None]
+    assert result.truncated is False
+    assert set(store.frame(SnapshotDataset.NEWS_TITLE)["news_id"].to_list()) == {"a1", "a2"}
+
+
+def test_session_result_default_coalesced() -> None:
+    result = SnapshotSessionResult(executed=0, expired=0, failed_jobs=0, rows_added={})
+
+    assert result.coalesced == 0
+
+
+def test_session_logs_coalesced_jobs(tmp_path, caplog) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    with caplog.at_level("INFO"):
+        result = run_snapshot_session(
+            settings=SnapshotSettings(), session_date=SESSION_DATE, source=_session_source(), store=store,
+            symbols=("005930",), now_fn=lambda: _t(10, 0, 5), sleep_fn=lambda s: None,
+            wall_ns=_counter(), max_iterations=1,
+        )
+
+    messages = [r.getMessage() for r in caplog.records]
+    coalesced = [m for m in messages if "stage=snapshot_coalesced" in m]
+    assert len(coalesced) == 1
+    assert "jobs=news_title@" in coalesced[0]
+    summary = next(m for m in messages if "stage=snapshot_summary" in m)
+    assert f"coalesced={result.coalesced}" in summary
+
+
+def test_session_coalesces_expired_news_only(tmp_path, caplog) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    with caplog.at_level("INFO"):
+        result = run_snapshot_session(
+            settings=SnapshotSettings(), session_date=SESSION_DATE, source=_session_source(), store=store,
+            symbols=("005930",), now_fn=lambda: _t(10, 0, 5), sleep_fn=lambda s: None,
+            wall_ns=_counter(), max_iterations=1,
+        )
+
+    expired_lines = [r.getMessage() for r in caplog.records if "stage=snapshot_expired" in r.getMessage()]
+    assert expired_lines
+    assert all("news_title@" not in line for line in expired_lines)
+    assert result.expired > 0
+    assert result.coalesced > 0
+
+
 def _seed_ranking(store, rows: list) -> None:
     store.append(SnapshotDataset.RANKING, rows)
 
@@ -606,9 +700,12 @@ def test_session_expires_backlog_without_vendor_calls_after_late_start(tmp_path)
         wall_ns=_counter(), max_iterations=1,
     )
 
-    assert result.expired == len(expired)
+    news_expired = [job for job in expired if job.kind is SnapshotJobKind.NEWS_TITLE]
+    assert result.coalesced == len(news_expired)
+    assert result.expired == len(expired) - len(news_expired)
     assert result.executed == len(due)
     assert result.expired > 0
+    assert result.coalesced > 0
     assert not [call for call in source.calls if call[0] == "auction"]
     assert ("trade_amount", None) in source.calls
     assert ("fluctuation", None) in source.calls

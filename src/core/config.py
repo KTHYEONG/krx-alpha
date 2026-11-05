@@ -550,7 +550,7 @@ class SnapshotSettings(BaseSettings):
     index_codes: tuple[str, ...] = ("0001", "1001", "2001")
     news_start: dt.time = dt.time(8, 0)
     news_interval_s: int = 30
-    news_max_pages: int = 5
+    news_max_pages: int = 30
     investor_estimate_times: tuple[dt.time, ...] = (
         dt.time(9, 35),
         dt.time(10, 5),
