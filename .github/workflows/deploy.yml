@@ -17,10 +17,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           enable-cache: true
 
@@ -38,13 +38,13 @@ jobs:
       packages: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -52,7 +52,7 @@ jobs:
 
       # Oracle Ampere ARM64 네이티브 단일 아키텍처 빌드
       - name: Build and Push to GHCR
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/arm64
@@ -69,13 +69,15 @@ jobs:
     needs: [test, build-and-push]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # 배포 키(SSH_PRIVATE_KEY)는 production 환경 시크릿에만 있다: 소유자 승인 없이는 이 잡이 키를 받지 못한다.
+    environment: production
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       # Tailscale 가상 사설망 연결
       - name: Connect to Tailscale
-        uses: tailscale/github-action@v4
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
@@ -89,6 +91,8 @@ jobs:
           REMOTE_USER: ${{ secrets.USERNAME }}
           GHCR_USER: ${{ github.repository_owner }}
           GHCR_PAT: ${{ secrets.GHCR_PAT }}
+          # or-vps SSH host key (public): pinned so a host impersonating the VPS on the tailnet is refused.
+          VPS_HOST_KEY: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII444atEBxL7GUKeZS0hpR6M2QvL5H3GeBPLhNO/fTNq
         run: |
           set -euo pipefail
           STAGE=runner_init
@@ -97,7 +101,8 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh-keygen -l -f ~/.ssh/deploy_key
-          SSH_OPTS="-i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20"
+          printf '* %s\n' "$VPS_HOST_KEY" > ~/.ssh/known_hosts_vps
+          SSH_OPTS="-i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts_vps -o ConnectTimeout=20"
 
           # 1. Stage: live 경로에는 쓰지 않고 스테이징에만 적재한다.
           STAGING_DIR=".deploy/staging/$GITHUB_SHA"
@@ -113,6 +118,8 @@ jobs:
           scp $SSH_OPTS deploy/host/krx-host-backup.service deploy/host/krx-host-backup.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
           scp $SSH_OPTS deploy/host/krx-deferred-recreate.service deploy/host/krx-deferred-recreate.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
           scp $SSH_OPTS deploy/host/krx-deferred-verify.sh "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/krx-deferred-verify.sh"
+          # CI ops 키의 강제 명령(command=) 허용 목록 게이트 (kca watchdog, kse KIND relay)
+          scp $SSH_OPTS deploy/host/ci-ops-gate.sh "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/ci-ops-gate.sh"
 
           # 공유 VPS 배포 키트 스테이징 (원격은 스테이징된 lib를 source하므로 항상 배포 커밋과 일치한다)
           scp $SSH_OPTS deploy/host/vps-deploy-lib.sh "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/vps-deploy-lib.sh"
@@ -235,6 +242,8 @@ jobs:
           install -m 644 "\$STAGING_DIR/krx-deferred-recreate.service" ~/.config/systemd/user/krx-deferred-recreate.service.new && mv -f ~/.config/systemd/user/krx-deferred-recreate.service.new ~/.config/systemd/user/krx-deferred-recreate.service
           install -m 644 "\$STAGING_DIR/krx-deferred-recreate.timer" ~/.config/systemd/user/krx-deferred-recreate.timer.new && mv -f ~/.config/systemd/user/krx-deferred-recreate.timer.new ~/.config/systemd/user/krx-deferred-recreate.timer
           install -m 755 "\$STAGING_DIR/krx-deferred-verify.sh" ~/krx-alpha/deploy/host/krx-deferred-verify.sh.new && mv -f ~/krx-alpha/deploy/host/krx-deferred-verify.sh.new ~/krx-alpha/deploy/host/krx-deferred-verify.sh
+          mkdir -p ~/bin
+          install -m 755 "\$STAGING_DIR/ci-ops-gate.sh" ~/bin/ci-ops-gate.new && mv -f ~/bin/ci-ops-gate.new ~/bin/ci-ops-gate
           install -m 644 "\$STAGING_DIR/vps-deploy-lib.sh" ~/krx-alpha/deploy/host/vps-deploy-lib.sh.new && mv -f ~/krx-alpha/deploy/host/vps-deploy-lib.sh.new ~/krx-alpha/deploy/host/vps-deploy-lib.sh
           install -m 755 "\$STAGING_DIR/vps_image_gc.py" ~/krx-alpha/deploy/host/vps_image_gc.py.new && mv -f ~/krx-alpha/deploy/host/vps_image_gc.py.new ~/krx-alpha/deploy/host/vps_image_gc.py
           install -m 644 "\$STAGING_DIR/vps-image-gc.service" ~/.config/systemd/user/vps-image-gc.service.new && mv -f ~/.config/systemd/user/vps-image-gc.service.new ~/.config/systemd/user/vps-image-gc.service
