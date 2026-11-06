@@ -3,6 +3,8 @@ services:
     image: ghcr.io/kthyeong/krx-collector:latest
     container_name: krx-collector
     restart: unless-stopped
+    # uid matches host `ubuntu`, owner of rclone.conf and the shared token cache.
+    user: "1001:1001"
     # DB 토큰 발급 가드(분당 1회) 대기 최대 61초 + 정상 종료 여유. 짧으면 대기 중 SIGKILL.
     stop_grace_period: 95s
     env_file:
@@ -10,6 +12,8 @@ services:
       - /home/ubuntu/quant-secrets/kis-data.env
     environment:
       - TZ=Asia/Seoul
+      - HOME=/tmp
+      - RCLONE_CONFIG=/run/rclone/rclone.conf
       - POLARS_MAX_THREADS=2
       - OMP_NUM_THREADS=2
       - KRX_ALPHA_PERSISTENT_LOGS=true
@@ -56,7 +60,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - /home/ubuntu/.config/rclone:/root/.config/rclone:ro
+      - /home/ubuntu/.config/rclone:/run/rclone:ro
       - /home/ubuntu/.cache/kis:/run/kis-token-cache
       # 호스트 백업 스크립트만 쓰는 상태 디렉터리(컨테이너는 읽기 전용). 컨테이너 시작 전에 ubuntu 소유로 존재해야 하며, 없으면 Docker가 root 소유로 만든다.
       - /home/ubuntu/.local/state/krx-alpha:/run/host-backup:ro

@@ -60,6 +60,18 @@ def test_dockerfile_keeps_uv_cache_out_of_image_and_runs_venv_python() -> None:
     assert '"uv", "run"' not in dockerfile
 
 
+def test_compose_runs_collector_as_host_user() -> None:
+    from pathlib import Path
+
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+
+    assert 'user: "1001:1001"' in compose
+    assert "- HOME=/tmp" in compose
+    assert "- RCLONE_CONFIG=/run/rclone/rclone.conf" in compose
+    assert "- /home/ubuntu/.config/rclone:/run/rclone:ro" in compose
+    assert "/root/" not in compose
+
+
 def test_compose_enables_aftermarket_with_verified_kis_pair_capacity() -> None:
     from pathlib import Path
 
@@ -101,7 +113,7 @@ def test_compose_uses_absolute_secret_paths_without_shell_interpolation() -> Non
     assert "- .env" not in compose
     assert "- /home/ubuntu/.cache/kis:/run/kis-token-cache" in compose
     assert ":/run/kis-token-cache:ro" not in compose
-    assert "- /home/ubuntu/.config/rclone:/root/.config/rclone:ro" in compose
+    assert "- /home/ubuntu/.config/rclone:/run/rclone:ro" in compose
     assert "KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE=true" in compose
     assert "KRX_ALPHA_KIS_TOKEN_CACHE_DIR=/run/kis-token-cache" in compose
     assert '["/app/.venv/bin/python", "-m", "src.orchestration.daemon"]' in compose
@@ -292,6 +304,29 @@ def test_deferred_timer_matches_gate_constant() -> None:
     assert "OnCalendar=Mon..Fri 22:00:00 Asia/Seoul" in timer
     assert "Persistent=false" in timer
     assert f"{DEFERRED_RECREATE_KST.hour:02d}:{DEFERRED_RECREATE_KST.minute:02d}" in timer
+
+
+def test_deferred_unit_fixes_ownership_first() -> None:
+    from pathlib import Path
+
+    service = Path("deploy/host/krx-deferred-recreate.service").read_text(encoding="utf-8")
+
+    assert "ExecStartPre=" in service
+    assert "krx-ownership-fixup.sh" in service.split("ExecStartPre=", 1)[1].splitlines()[0]
+    assert service.index("ExecStartPre=") < service.index("ExecStart=/usr/bin/docker compose up -d")
+
+
+def test_deploy_fixes_ownership_before_force_recreate() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+
+    assert '"$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/krx-ownership-fixup.sh"' in workflow
+    assert 'install -m 755 "\\$STAGING_DIR/krx-ownership-fixup.sh"' in workflow
+    assert workflow.index("krx-ownership-fixup.sh") < workflow.index("up -d --force-recreate")
+    assert workflow.index("bash ~/krx-alpha/deploy/host/krx-ownership-fixup.sh") < workflow.index(
+        "up -d --force-recreate"
+    )
 
 
 def test_deferred_service_never_force_recreates() -> None:

@@ -118,6 +118,7 @@ jobs:
           scp $SSH_OPTS deploy/host/krx-host-backup.service deploy/host/krx-host-backup.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
           scp $SSH_OPTS deploy/host/krx-deferred-recreate.service deploy/host/krx-deferred-recreate.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
           scp $SSH_OPTS deploy/host/krx-deferred-verify.sh "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/krx-deferred-verify.sh"
+          scp $SSH_OPTS deploy/host/krx-ownership-fixup.sh "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/krx-ownership-fixup.sh"
           # CI ops 키의 강제 명령(command=) 허용 목록 게이트 (kca watchdog, kse KIND relay)
           scp $SSH_OPTS deploy/host/ci-ops-gate.sh "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/ci-ops-gate.sh"
 
@@ -242,6 +243,7 @@ jobs:
           install -m 644 "\$STAGING_DIR/krx-deferred-recreate.service" ~/.config/systemd/user/krx-deferred-recreate.service.new && mv -f ~/.config/systemd/user/krx-deferred-recreate.service.new ~/.config/systemd/user/krx-deferred-recreate.service
           install -m 644 "\$STAGING_DIR/krx-deferred-recreate.timer" ~/.config/systemd/user/krx-deferred-recreate.timer.new && mv -f ~/.config/systemd/user/krx-deferred-recreate.timer.new ~/.config/systemd/user/krx-deferred-recreate.timer
           install -m 755 "\$STAGING_DIR/krx-deferred-verify.sh" ~/krx-alpha/deploy/host/krx-deferred-verify.sh.new && mv -f ~/krx-alpha/deploy/host/krx-deferred-verify.sh.new ~/krx-alpha/deploy/host/krx-deferred-verify.sh
+          install -m 755 "\$STAGING_DIR/krx-ownership-fixup.sh" ~/krx-alpha/deploy/host/krx-ownership-fixup.sh.new && mv -f ~/krx-alpha/deploy/host/krx-ownership-fixup.sh.new ~/krx-alpha/deploy/host/krx-ownership-fixup.sh
           mkdir -p ~/bin
           install -m 755 "\$STAGING_DIR/ci-ops-gate.sh" ~/bin/ci-ops-gate.new && mv -f ~/bin/ci-ops-gate.new ~/bin/ci-ops-gate
           install -m 644 "\$STAGING_DIR/vps-deploy-lib.sh" ~/krx-alpha/deploy/host/vps-deploy-lib.sh.new && mv -f ~/krx-alpha/deploy/host/vps-deploy-lib.sh.new ~/krx-alpha/deploy/host/vps-deploy-lib.sh
@@ -288,6 +290,7 @@ jobs:
           if docker compose version >/dev/null 2>&1; then C="docker compose"; else C="docker-compose"; fi
           vps_stage recreate
           if [ "$RECREATE_NOW" = "1" ]; then
+            bash ~/krx-alpha/deploy/host/krx-ownership-fixup.sh
             \$C up -d --force-recreate --remove-orphans
             vps_stage verify
             running_revision="\$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' krx-collector)"
