@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # Pin base and tool images: an upstream release must not break an unrelated deploy.
-FROM python:3.11.16-slim-trixie AS base
+FROM python:3.15.0-slim-trixie AS base
 
 COPY --from=ghcr.io/astral-sh/uv:0.12.20 /uv /uvx /bin/
 
