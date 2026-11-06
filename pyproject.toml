@@ -6,9 +6,9 @@ requires-python = "==3.11.*"
 dependencies = [
     "numpy>=2.0.0",
     "pyarrow>=15.0.0",
-    "tenacity>=8.5.0",
-    "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
+    "tenacity>=9.2.1",
+    "pydantic>=2.14.2",
+    "pydantic-settings>=2.16.2",
     "aiohttp>=3.9.0",
     "requests>=2.31.0",
     "polars>=1.43.2",
@@ -133,10 +133,10 @@ filterwarnings = [
 
 [dependency-groups]
 dev = [
-    "mypy>=2.0.0",
+    "mypy>=2.4.1",
     "pytest-cov>=7.1.0",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
     "pyyaml>=6.0.2",
-    "ruff>=0.15.12",
+    "ruff>=0.17.3",
 ]
