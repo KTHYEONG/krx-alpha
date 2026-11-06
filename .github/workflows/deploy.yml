@@ -117,6 +117,8 @@ jobs:
           scp $SSH_OPTS deploy/host/krx-alpha.rclone-filter "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/krx-alpha.rclone-filter"
           scp $SSH_OPTS deploy/host/krx-host-backup.service deploy/host/krx-host-backup.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
           scp $SSH_OPTS deploy/host/krx-deferred-recreate.service deploy/host/krx-deferred-recreate.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
+          scp $SSH_OPTS deploy/host/krx-secrets-escrow.sh "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/krx-secrets-escrow.sh"
+          scp $SSH_OPTS deploy/host/krx-secrets-escrow.service deploy/host/krx-secrets-escrow.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
           scp $SSH_OPTS deploy/host/krx-deferred-verify.sh "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/krx-deferred-verify.sh"
           scp $SSH_OPTS deploy/host/krx-ownership-fixup.sh "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/krx-ownership-fixup.sh"
           # CI ops 키의 강제 명령(command=) 허용 목록 게이트 (kca watchdog, kse KIND relay)
@@ -250,6 +252,10 @@ jobs:
           install -m 755 "\$STAGING_DIR/vps_image_gc.py" ~/krx-alpha/deploy/host/vps_image_gc.py.new && mv -f ~/krx-alpha/deploy/host/vps_image_gc.py.new ~/krx-alpha/deploy/host/vps_image_gc.py
           install -m 644 "\$STAGING_DIR/vps-image-gc.service" ~/.config/systemd/user/vps-image-gc.service.new && mv -f ~/.config/systemd/user/vps-image-gc.service.new ~/.config/systemd/user/vps-image-gc.service
           install -m 644 "\$STAGING_DIR/vps-image-gc.timer" ~/.config/systemd/user/vps-image-gc.timer.new && mv -f ~/.config/systemd/user/vps-image-gc.timer.new ~/.config/systemd/user/vps-image-gc.timer
+          mkdir -p ~/.config/krx-secrets-escrow
+          install -m 755 "\$STAGING_DIR/krx-secrets-escrow.sh" ~/krx-alpha/deploy/host/krx-secrets-escrow.sh.new && mv -f ~/krx-alpha/deploy/host/krx-secrets-escrow.sh.new ~/krx-alpha/deploy/host/krx-secrets-escrow.sh
+          install -m 644 "\$STAGING_DIR/krx-secrets-escrow.service" ~/.config/systemd/user/krx-secrets-escrow.service.new && mv -f ~/.config/systemd/user/krx-secrets-escrow.service.new ~/.config/systemd/user/krx-secrets-escrow.service
+          install -m 644 "\$STAGING_DIR/krx-secrets-escrow.timer" ~/.config/systemd/user/krx-secrets-escrow.timer.new && mv -f ~/.config/systemd/user/krx-secrets-escrow.timer.new ~/.config/systemd/user/krx-secrets-escrow.timer
 
           # KCA owns its units: kca-run passes kis-data.env itself, so krx no longer writes into kca's unit tree.
           # Remove the drop-in earlier krx deploys created there.
@@ -263,6 +269,7 @@ jobs:
           vps_stage units
           systemctl --user daemon-reload
           systemctl --user enable --now krx-host-backup.timer
+          systemctl --user enable --now krx-secrets-escrow.timer
           systemctl --user enable --now krx-deferred-recreate.timer
           systemctl --user enable --now vps-image-gc.timer
           # 공용 quant-lake 타이머 폐기 가드: PROJECTS 항목이 krx-alpha뿐일 때만 폐기한다.

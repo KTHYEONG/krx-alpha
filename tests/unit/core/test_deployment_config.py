@@ -914,3 +914,25 @@ def test_lock_has_no_removed_roots() -> None:
     settings = next(p for p in raw["package"] if str(p["name"]).lower() == "pydantic-settings")
     transitive = {str(dep["name"]).lower() for dep in settings.get("dependencies", [])}
     assert "python-dotenv" in transitive
+
+
+def test_deploy_installs_secrets_escrow_timer() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    timer = Path("deploy/host/krx-secrets-escrow.timer").read_text(encoding="utf-8")
+    service = Path("deploy/host/krx-secrets-escrow.service").read_text(encoding="utf-8")
+
+    assert "deploy/host/krx-secrets-escrow.sh" in workflow
+    assert "deploy/host/krx-secrets-escrow.service deploy/host/krx-secrets-escrow.timer" in workflow
+    assert workflow.index("mkdir -p ~/.config/krx-secrets-escrow") < workflow.index(
+        'install -m 755 "\\$STAGING_DIR/krx-secrets-escrow.sh"'
+    )
+    assert workflow.index('install -m 644 "\\$STAGING_DIR/krx-secrets-escrow.timer"') < workflow.index(
+        "systemctl --user daemon-reload"
+    )
+    assert "systemctl --user enable --now krx-secrets-escrow.timer" in workflow
+    assert "OnCalendar=*-*-* 23:50:00 Asia/Seoul" in timer
+    assert "Persistent=true" in timer
+    assert "OnFailure=kca-alert@%n.service" in service
+    assert "EnvironmentFile" not in service
