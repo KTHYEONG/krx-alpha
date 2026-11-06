@@ -13,7 +13,13 @@ if [ -e "$IDENTITY" ]; then
   exit 1
 fi
 
-age-keygen -o "$IDENTITY" 2>/dev/null
+PARENT="$(dirname -- "$IDENTITY")"
+if [ ! -d "$PARENT" ]; then
+  echo "parent directory does not exist: $PARENT" >&2
+  exit 1
+fi
+# age-keygen prints only the public key on stderr; keep it visible so failures are not silent.
+age-keygen -o "$IDENTITY"
 chmod 600 "$IDENTITY"
 PUBLIC_KEY="$(age-keygen -y "$IDENTITY")"
 
