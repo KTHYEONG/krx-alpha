@@ -4,14 +4,60 @@ on:
   push:
     branches: [ main ]
 
-concurrency:
-  group: deploy-or-vps
-  cancel-in-progress: false
-
 env:
   IMAGE: ghcr.io/kthyeong/krx-collector
 
 jobs:
+  # Decides whether this push reaches the running system. Tests/docs/markdown/AI-config-only pushes
+  # still run the test job but skip build and deploy (no approval prompt).
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      runtime: ${{ steps.classify.outputs.runtime }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Classify runtime impact
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          runtime=true
+          if [ "$EVENT" = "push" ]; then
+            set +e
+            bash .github/scripts/runtime_changed.sh "$BEFORE" "$GITHUB_SHA"
+            rc=$?
+            set -e
+            if [ "$rc" -eq 1 ]; then runtime=false; fi
+          fi
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+          echo "runtime=$runtime"
+
+      # An older run parked at the production approval gate would hold the deploy concurrency slot and
+      # block this run. This push already contains those commits, so cancel only older runs still waiting.
+      - name: Cancel older runs waiting for approval
+        if: steps.classify.outputs.runtime == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          gh run list -R "$GITHUB_REPOSITORY" -w deploy.yml -s waiting -L 20 --json databaseId -q '.[].databaseId' |
+          while read -r id; do
+            if [ -n "$id" ] && [ "$id" -lt "$GITHUB_RUN_ID" ]; then
+              echo "cancel stale waiting run $id"
+              gh run cancel "$id" -R "$GITHUB_REPOSITORY" || echo "::warning::could not cancel run $id"
+            fi
+          done
+
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -31,6 +77,8 @@ jobs:
         run: uv run pytest -q -n auto
 
   build-and-push:
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
     permissions:
@@ -66,7 +114,12 @@ jobs:
           cache-to: type=gha,mode=max
 
   deploy:
-    needs: [test, build-and-push]
+    needs: [changes, test, build-and-push]
+    if: needs.changes.outputs.runtime == 'true'
+    # Only the deploy job is serialized; tests of a newer push no longer wait behind an approval gate.
+    concurrency:
+      group: deploy-or-vps
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # 배포 키(SSH_PRIVATE_KEY)는 production 환경 시크릿에만 있다: 소유자 승인 없이는 이 잡이 키를 받지 못한다.

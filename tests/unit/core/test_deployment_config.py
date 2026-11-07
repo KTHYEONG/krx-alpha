@@ -541,8 +541,11 @@ def test_deploy_runs_are_serialized() -> None:
     workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
     raw = yaml.safe_load(workflow)
 
-    assert raw["concurrency"]["group"] == "deploy-or-vps"
-    assert raw["concurrency"]["cancel-in-progress"] is False
+    # Only the deploy job is serialized, so a newer push's tests never wait behind an approval gate.
+    assert "concurrency" not in raw
+    deploy = raw["jobs"]["deploy"]
+    assert deploy["concurrency"]["group"] == "deploy-or-vps"
+    assert deploy["concurrency"]["cancel-in-progress"] is False
 
 
 def test_image_carries_commit_revision_label() -> None:
@@ -738,8 +741,11 @@ def test_deploy_waits_for_both_test_and_build() -> None:
 
     raw = yaml.safe_load(Path(".github/workflows/deploy.yml").read_text(encoding="utf-8"))
 
-    assert set(raw["jobs"]["deploy"]["needs"]) == {"test", "build-and-push"}
-    assert "needs" not in raw["jobs"]["build-and-push"]
+    assert set(raw["jobs"]["deploy"]["needs"]) == {"changes", "test", "build-and-push"}
+    # Build runs in parallel with tests; both build and deploy are gated on a runtime-path change.
+    assert raw["jobs"]["build-and-push"]["needs"] == "changes"
+    for job in ("build-and-push", "deploy"):
+        assert raw["jobs"][job]["if"] == "needs.changes.outputs.runtime == 'true'"
 
 
 def test_test_job_runs_full_suite_in_parallel_mode() -> None:
