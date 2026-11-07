@@ -784,7 +784,7 @@ def test_build_toolchain_refs_are_pinned() -> None:
 
     assert pinned
     assert all(":latest" not in line for line in pinned)
-    assert "python:3.11.16-slim-trixie" in dockerfile
+    assert "python:3.11.17-slim-trixie" in dockerfile
     assert "astral-sh/uv:0.12.20" in dockerfile
 
 
