@@ -1,0 +1,8 @@
+[Unit]
+Description=krx-alpha private strategy store sync
+OnFailure=kca-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash %h/krx-alpha/deploy/host/strategy-store-sync.sh
+TimeoutStartSec=5min

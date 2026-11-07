@@ -936,3 +936,21 @@ def test_deploy_installs_secrets_escrow_timer() -> None:
     assert "Persistent=true" in timer
     assert "OnFailure=kca-alert@%n.service" in service
     assert "EnvironmentFile" not in service
+
+
+def test_deploy_installs_strategy_store_sync_timer() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    timer = Path("deploy/host/strategy-store-sync.timer").read_text(encoding="utf-8")
+    service = Path("deploy/host/strategy-store-sync.service").read_text(encoding="utf-8")
+
+    assert "deploy/host/strategy-store-sync.sh" in workflow
+    assert "deploy/host/strategy-store-sync.service deploy/host/strategy-store-sync.timer" in workflow
+    assert workflow.index('install -m 644 "\\$STAGING_DIR/strategy-store-sync.timer"') < workflow.index(
+        "systemctl --user daemon-reload"
+    )
+    assert "systemctl --user enable --now strategy-store-sync.timer" in workflow
+    assert "OnCalendar=*:0/5" in timer
+    assert "Persistent=true" in timer
+    assert "OnFailure=kca-alert@%n.service" in service
