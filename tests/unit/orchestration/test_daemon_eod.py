@@ -2501,6 +2501,19 @@ def _eod_step_lines(caplog) -> list[tuple[str, str, str]]:
     return [m.groups() for m in matches if m is not None]
 
 
+def _assert_start_precedes_exit(caplog, steps) -> None:
+    """Every step persists a START record ahead of its exit record, both as events."""
+    timing = [r for r in caplog.records if "stage=eod_step_timing" in r.getMessage()]
+    for step in steps:
+        start = [i for i, r in enumerate(timing) if r.getMessage().endswith(f"step={step} status=START")]
+        exit_ = [i for i, r in enumerate(timing) if f"step={step} status=OK elapsed_s=" in r.getMessage()]
+        assert len(start) == 1
+        assert len(exit_) == 1
+        assert start[0] < exit_[0]
+        assert getattr(timing[start[0]], "krx_event", False) is True
+        assert getattr(timing[exit_[0]], "krx_event", False) is True
+
+
 def _staged_eod_clock(monkeypatch, daemon_mod, steps: int) -> None:
     """Step k spans k+1 seconds, so every step reports a distinct elapsed_s."""
     ticks = iter([value for k in range(steps) for value in (k * 10.0, k * 10.0 + k + 1)])
@@ -2539,6 +2552,7 @@ def test_run_collector_daemon_eod_logs_timing_for_every_business_step(tmp_path, 
     assert [step for step, _, _ in lines] == list(_BUSINESS_EOD_STEPS)
     assert {status for _, status, _ in lines} == {"OK"}
     assert [elapsed for _, _, elapsed in lines] == [f"{k + 1:.1f}" for k in range(len(_BUSINESS_EOD_STEPS))]
+    _assert_start_precedes_exit(caplog, _BUSINESS_EOD_STEPS)
 
 
 def test_run_collector_daemon_holiday_eod_logs_only_housekeeping_timing(tmp_path, monkeypatch, caplog) -> None:
@@ -2605,3 +2619,29 @@ def test_run_collector_daemon_eod_step_failure_logs_fail_and_reraises(tmp_path, 
 
     lines = _eod_step_lines(caplog)
     assert lines[-1] == ("reconcile_regular", "FAIL", "7.0")
+
+
+def test_eod_step_start_logged_before_body_and_fail_keeps_start(monkeypatch, caplog) -> None:
+    import logging
+
+    from src.orchestration import daemon as daemon_mod
+
+    ticks = iter([1.0, 4.0])
+    monkeypatch.setattr(daemon_mod, "_eod_clock", lambda: next(ticks))
+    seen_inside_body: list[str] = []
+
+    def _body() -> None:
+        with daemon_mod._eod_step("probe"):
+            seen_inside_body.extend(r.getMessage() for r in caplog.records if "status=START" in r.getMessage())
+            raise RuntimeError("body boom")
+
+    with caplog.at_level(logging.INFO), pytest.raises(RuntimeError, match="body boom"):
+        _body()
+
+    assert seen_inside_body == ["[DAEMON] stage=eod_step_timing step=probe status=START"]
+    timing = [r for r in caplog.records if "stage=eod_step_timing" in r.getMessage()]
+    assert [r.getMessage() for r in timing] == [
+        "[DAEMON] stage=eod_step_timing step=probe status=START",
+        "[DAEMON] stage=eod_step_timing step=probe status=FAIL elapsed_s=3.0",
+    ]
+    assert all(getattr(r, "krx_event", False) is True for r in timing)

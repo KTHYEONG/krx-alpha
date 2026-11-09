@@ -1888,3 +1888,63 @@ def test_build_kis_client_uses_host_pacing_with_configured_rate_and_lead(tmp_pat
     assert limiter._interval == 1.0 / execution.rest_rate_per_s
     assert limiter._max_lead_s == collector.kis_rest_max_lead_s
     assert limiter._state_path.parent == cache
+
+
+def test_kis_token_preflight_ok_lines_are_events(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+    import pathlib
+    from types import SimpleNamespace
+
+    from src.core.config import CollectorSettings
+    from src.execution.kis_client import TokenSource
+    from src.orchestration import daemon as daemon_mod
+
+    client = SimpleNamespace(_creds=SimpleNamespace(kis_app_key="ok-key"), ensure_token=lambda: TokenSource.CACHE)
+    monkeypatch.setattr(daemon_mod, "_build_kis_client", lambda paths: client)
+    monkeypatch.setattr(
+        daemon_mod, "_build_snapshot_preflight_client", lambda paths, *a, **k: (client, "snapfp000000")
+    )
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+
+    with caplog.at_level(logging.INFO):
+        daemon_mod._kis_token_preflight(settings.paths, dt.date(2026, 9, 14))
+
+    ok = [r for r in caplog.records if "stage=kis_token_preflight" in r.getMessage() and "result=cache" in r.getMessage()]
+    assert len(ok) == 2
+    assert all(getattr(r, "krx_event", False) is True for r in ok)
+    assert "ok-key" not in caplog.text
+
+
+def test_kis_token_preflight_generic_failure_has_traceback(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import hashlib
+    import logging
+    import pathlib
+    from types import SimpleNamespace
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    primary_key = "primary-key-traceback"
+    primary_fp = hashlib.sha256(primary_key.encode()).hexdigest()[:12]
+
+    def _boom():
+        raise RuntimeError("boom")
+
+    primary_client = SimpleNamespace(_creds=SimpleNamespace(kis_app_key=primary_key), ensure_token=_boom)
+    monkeypatch.setattr(daemon_mod, "_build_kis_client", lambda paths: primary_client)
+    snapshot_client = SimpleNamespace(ensure_token=_boom)
+    monkeypatch.setattr(
+        daemon_mod, "_build_snapshot_preflight_client", lambda paths, *a, **k: (snapshot_client, "snapfp123456")
+    )
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+
+    with caplog.at_level(logging.CRITICAL):
+        outcomes = daemon_mod._kis_token_preflight(settings.paths, dt.date(2026, 9, 14))
+
+    assert outcomes[primary_fp] == "fail:RuntimeError"
+    assert outcomes["snapfp123456"] == "fail:RuntimeError"
+    failures = [r for r in caplog.records if "result=fail reason=RuntimeError" in r.getMessage()]
+    assert len(failures) == 2
+    assert all(r.exc_info is not None for r in failures)

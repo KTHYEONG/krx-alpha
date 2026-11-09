@@ -142,6 +142,8 @@
         "last_supervisor_result": "running",
         "ls_shard_plan": [],
         "ls_shard_plan_day": null,
+        "ls_shard_stale_paged": [],
+        "ls_venue_wide_paged": [],
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_plan_retry_at": null,
         "next_aftermarket_refresh_at": null,
@@ -171,9 +173,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "ls_shard_stale_paged": [],
-        "ls_venue_wide_paged": []
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T08:25:00+09:00"
     },
@@ -230,6 +230,8 @@
         "last_supervisor_result": "running",
         "ls_shard_plan": [],
         "ls_shard_plan_day": null,
+        "ls_shard_stale_paged": [],
+        "ls_venue_wide_paged": [],
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_plan_retry_at": null,
         "next_aftermarket_refresh_at": null,
@@ -259,9 +261,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "ls_shard_stale_paged": [],
-        "ls_venue_wide_paged": []
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T08:26:00+09:00"
     },
@@ -400,6 +400,8 @@
           }
         ],
         "ls_shard_plan_day": "2026-09-16",
+        "ls_shard_stale_paged": [],
+        "ls_venue_wide_paged": [],
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_plan_retry_at": null,
         "next_aftermarket_refresh_at": null,
@@ -429,9 +431,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "ls_shard_stale_paged": [],
-        "ls_venue_wide_paged": []
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T08:31:00+09:00"
     },
@@ -531,6 +531,8 @@
           }
         ],
         "ls_shard_plan_day": "2026-09-16",
+        "ls_shard_stale_paged": [],
+        "ls_venue_wide_paged": [],
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_plan_retry_at": null,
         "next_aftermarket_refresh_at": null,
@@ -560,9 +562,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "ls_shard_stale_paged": [],
-        "ls_venue_wide_paged": []
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T09:10:00+09:00"
     },
@@ -679,6 +679,8 @@
           }
         ],
         "ls_shard_plan_day": "2026-09-16",
+        "ls_shard_stale_paged": [],
+        "ls_venue_wide_paged": [],
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_plan_retry_at": null,
         "next_aftermarket_refresh_at": null,
@@ -708,9 +710,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "ls_shard_stale_paged": [],
-        "ls_venue_wide_paged": []
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T15:32:00+09:00"
     },
@@ -879,6 +879,8 @@
           }
         ],
         "ls_shard_plan_day": "2026-09-16",
+        "ls_shard_stale_paged": [],
+        "ls_venue_wide_paged": [],
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_plan_retry_at": null,
         "next_aftermarket_refresh_at": null,
@@ -908,9 +910,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "ls_shard_stale_paged": [],
-        "ls_venue_wide_paged": []
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T15:45:00+09:00"
     },
@@ -1083,6 +1083,8 @@
           }
         ],
         "ls_shard_plan_day": "2026-09-16",
+        "ls_shard_stale_paged": [],
+        "ls_venue_wide_paged": [],
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_plan_retry_at": null,
         "next_aftermarket_refresh_at": null,
@@ -1112,9 +1114,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "ls_shard_stale_paged": [],
-        "ls_venue_wide_paged": []
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T16:05:00+09:00"
     },
@@ -1240,13 +1240,29 @@
         ],
         [
           "INFO",
+          "[DAEMON] stage=eod_step_timing step=%s status=START",
+          [
+            "session_audit_ls"
+          ],
+          true
+        ],
+        [
+          "INFO",
           "[DAEMON] stage=eod_step_timing step=%s status=%s elapsed_s=%.1f",
           [
             "session_audit_ls",
             "OK",
             0.0
           ],
-          false
+          true
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=eod_step_timing step=%s status=START",
+          [
+            "session_audit_kis"
+          ],
+          true
         ],
         [
           "INFO",
@@ -1256,7 +1272,15 @@
             "OK",
             0.0
           ],
-          false
+          true
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=eod_step_timing step=%s status=START",
+          [
+            "reconcile_regular"
+          ],
+          true
         ],
         [
           "INFO",
@@ -1266,7 +1290,15 @@
             "OK",
             0.0
           ],
-          false
+          true
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=eod_step_timing step=%s status=START",
+          [
+            "reconcile_crosscheck"
+          ],
+          true
         ],
         [
           "INFO",
@@ -1276,7 +1308,15 @@
             "OK",
             0.0
           ],
-          false
+          true
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=eod_step_timing step=%s status=START",
+          [
+            "backup_check"
+          ],
+          true
         ],
         [
           "INFO",
@@ -1286,7 +1326,15 @@
             "OK",
             0.0
           ],
-          false
+          true
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=eod_step_timing step=%s status=START",
+          [
+            "repair_summary"
+          ],
+          true
         ],
         [
           "INFO",
@@ -1296,7 +1344,7 @@
             "OK",
             0.0
           ],
-          false
+          true
         ],
         [
           "INFO",
@@ -1407,6 +1455,8 @@
           }
         ],
         "ls_shard_plan_day": "2026-09-16",
+        "ls_shard_stale_paged": [],
+        "ls_venue_wide_paged": [],
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_plan_retry_at": null,
         "next_aftermarket_refresh_at": null,
@@ -1436,9 +1486,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "ls_shard_stale_paged": [],
-        "ls_venue_wide_paged": []
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T20:05:00+09:00"
     },
@@ -1524,6 +1572,8 @@
           }
         ],
         "ls_shard_plan_day": "2026-09-16",
+        "ls_shard_stale_paged": [],
+        "ls_venue_wide_paged": [],
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_plan_retry_at": null,
         "next_aftermarket_refresh_at": null,
@@ -1553,9 +1603,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "ls_shard_stale_paged": [],
-        "ls_venue_wide_paged": []
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T20:06:00+09:00"
     },
@@ -1662,6 +1710,8 @@
           }
         ],
         "ls_shard_plan_day": "2026-09-16",
+        "ls_shard_stale_paged": [],
+        "ls_venue_wide_paged": [],
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_plan_retry_at": null,
         "next_aftermarket_refresh_at": null,
@@ -1691,9 +1741,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "ls_shard_stale_paged": [],
-        "ls_venue_wide_paged": []
+        "streamer_restarts": 0
       },
       "instant": "2026-09-16T22:00:00+09:00"
     },
@@ -1826,6 +1874,8 @@
           }
         ],
         "ls_shard_plan_day": "2026-09-16",
+        "ls_shard_stale_paged": [],
+        "ls_venue_wide_paged": [],
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_plan_retry_at": null,
         "next_aftermarket_refresh_at": null,
@@ -1855,9 +1905,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "ls_shard_stale_paged": [],
-        "ls_venue_wide_paged": []
+        "streamer_restarts": 0
       },
       "instant": "2026-09-17T09:00:00+09:00"
     },
@@ -1980,6 +2028,8 @@
           }
         ],
         "ls_shard_plan_day": "2026-09-16",
+        "ls_shard_stale_paged": [],
+        "ls_venue_wide_paged": [],
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_plan_retry_at": null,
         "next_aftermarket_refresh_at": null,
@@ -2009,9 +2059,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "ls_shard_stale_paged": [],
-        "ls_venue_wide_paged": []
+        "streamer_restarts": 0
       },
       "instant": "2026-09-17T20:05:00+09:00"
     },
@@ -2202,6 +2250,8 @@
           }
         ],
         "ls_shard_plan_day": "2026-09-18",
+        "ls_shard_stale_paged": [],
+        "ls_venue_wide_paged": [],
         "next_aftermarket_nxt_refresh_at": null,
         "next_aftermarket_plan_retry_at": null,
         "next_aftermarket_refresh_at": null,
@@ -2232,9 +2282,7 @@
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
-        "streamer_restarts": 0,
-        "ls_shard_stale_paged": [],
-        "ls_venue_wide_paged": []
+        "streamer_restarts": 0
       },
       "instant": "2026-09-18T08:25:00+09:00"
     }
@@ -2276,7 +2324,7 @@
     "[DAEMON] stage=kiwoom_crosscheck status=FAIL reason=circuit_open",
     "[DAEMON] stage=kiwoom_crosscheck status=RESTARTED exit_code=%s",
     "[DAEMON] stage=nightly_%s status=FAIL exit_code=launch reason=%s",
-    "[DAEMON] stage=nightly_%s status=STARTED deadline=%s",
+    "[DAEMON] stage=nightly_%s status=STARTED deadline=%s pid=%s",
     "[DAEMON] stage=program_trades_sync status=FAIL exit_code=%s",
     "[DAEMON] stage=program_trades_sync status=FAIL exit_code=launch reason=%s",
     "[DAEMON] stage=program_trades_sync status=FAIL reason=timeout",

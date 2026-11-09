@@ -627,3 +627,77 @@ def test_digest_of_another_day_does_not_open_the_gate(tmp_path, monkeypatch) -> 
     runner._maybe_launch_nightly(now)
 
     assert _FakePopen.instances == []
+
+
+def _launch_tick_tape(tmp_path, monkeypatch, *, pid_value: int | None):
+    from src.orchestration import daemon as daemon_mod
+
+    _FakePopen.instances.clear()
+    day = dt.date(2026, 9, 25)
+    launch_at = _at(day, 23, 45)
+    runner = _runner(tmp_path, monkeypatch, now=launch_at)
+    runner._state.eod_attempted_for = day
+    monkeypatch.setattr(runner._gate, "view", lambda today, at: _business_view(day))
+
+    def _popen(cmd, *, env=None):
+        proc = _FakePopen(cmd, env=env, exit_code=None)
+        if pid_value is not None:
+            proc.pid = pid_value
+        return proc
+
+    monkeypatch.setattr(daemon_mod.subprocess, "Popen", _popen)
+    return runner, launch_at
+
+
+def test_nightly_started_line_carries_pid_and_event(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    runner, launch_at = _launch_tick_tape(tmp_path, monkeypatch, pid_value=777)
+
+    with caplog.at_level(logging.INFO):
+        runner._maybe_launch_nightly(launch_at)
+        _FakePopen.instances[0]._exit_code = 0
+        runner._poll_nightly(_at(dt.date(2026, 9, 25), 23, 50))
+
+    started = [r for r in caplog.records if "status=STARTED" in r.getMessage()]
+    assert len(started) == 1
+    assert "pid=777" in started[0].getMessage()
+    assert started[0].krx_event is True
+    ok = [r for r in caplog.records if "stage=nightly_tick_tape status=OK" in r.getMessage()]
+    assert len(ok) == 1
+    assert ok[0].krx_event is True
+
+
+def test_nightly_missing_pid_tolerated(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    runner, launch_at = _launch_tick_tape(tmp_path, monkeypatch, pid_value=None)
+
+    with caplog.at_level(logging.INFO):
+        runner._maybe_launch_nightly(launch_at)
+
+    started = [r for r in caplog.records if "status=STARTED" in r.getMessage()]
+    assert len(started) == 1
+    assert "pid=None" in started[0].getMessage()
+
+
+def test_nightly_noop_and_stopped_lines_are_events(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    from src.orchestration.daemon import NightlyJob
+
+    runner, launch_at = _launch_tick_tape(tmp_path, monkeypatch, pid_value=None)
+    with caplog.at_level(logging.INFO):
+        runner._maybe_launch_nightly(launch_at)
+        _FakePopen.instances[0]._exit_code = 2
+        runner._poll_nightly(_at(dt.date(2026, 9, 25), 23, 50))
+        runner._children.nightly = _FakePopen(["backfill-tick-tape"], exit_code=None)
+        runner._children.nightly_job = NightlyJob.TICK_TAPE
+        runner._stop_nightly_child(reason="shutdown")
+
+    noop = [r for r in caplog.records if "stage=nightly_tick_tape status=NOOP" in r.getMessage()]
+    stopped = [r for r in caplog.records if "stage=nightly_tick_tape status=STOPPED reason=shutdown" in r.getMessage()]
+    assert len(noop) == 1
+    assert noop[0].krx_event is True
+    assert len(stopped) == 1
+    assert stopped[0].krx_event is True

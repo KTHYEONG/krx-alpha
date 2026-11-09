@@ -296,6 +296,7 @@ def _kis_token_preflight(
                 "[SYS] stage=kis_token_preflight key_id=%s result=fail reason=%s",
                 fingerprint,
                 type(exc).__name__,
+                exc_info=True,
             )
             outcomes[fingerprint] = f"fail:{type(exc).__name__}"
         else:
@@ -303,6 +304,7 @@ def _kis_token_preflight(
                 "[SYS] stage=kis_token_preflight key_id=%s result=%s reason=-",
                 fingerprint,
                 source.value,
+                extra=EVENT,
             )
             outcomes[fingerprint] = source.value
     try:
@@ -329,6 +331,7 @@ def _kis_token_preflight(
                 "[SYS] stage=kis_token_preflight key_id=%s result=fail reason=%s",
                 snapshot_fp,
                 type(exc).__name__,
+                exc_info=True,
             )
             outcomes[snapshot_fp] = f"fail:{type(exc).__name__}"
         else:
@@ -336,6 +339,7 @@ def _kis_token_preflight(
                 "[SYS] stage=kis_token_preflight key_id=%s result=%s reason=-",
                 snapshot_fp,
                 source.value,
+                extra=EVENT,
             )
             outcomes[snapshot_fp] = source.value
     return outcomes
@@ -648,6 +652,7 @@ def _eod_step(step: str) -> Iterator[None]:
     """Log one elapsed-time line for an EOD step; exceptions from the step propagate unchanged."""
     started = _eod_clock()
     status = "OK"
+    logger.info("[DAEMON] stage=eod_step_timing step=%s status=START", step, extra=EVENT)
     try:
         yield
     except BaseException:
@@ -659,6 +664,7 @@ def _eod_step(step: str) -> Iterator[None]:
             step,
             status,
             _eod_clock() - started,
+            extra=EVENT,
         )
 
 
@@ -1993,7 +1999,7 @@ class DaemonRunner:
         ch.nightly = None
         ch.nightly_job = None
         ch.nightly_started_at = None
-        logger.info("[DAEMON] stage=%s status=STOPPED reason=%s", stage, reason)
+        logger.info("[DAEMON] stage=%s status=STOPPED reason=%s", stage, reason, extra=EVENT)
 
     def _judge_repair_exhausted(self, identity: dt.date) -> None:
         st = self._state
@@ -2064,9 +2070,9 @@ class DaemonRunner:
         ch.nightly_job = None
         ch.nightly_started_at = None
         if code == 0:
-            logger.info("[DAEMON] stage=%s status=OK", stage)
+            logger.info("[DAEMON] stage=%s status=OK", stage, extra=EVENT)
         elif code == 2:
-            logger.info("[DAEMON] stage=%s status=NOOP", stage)
+            logger.info("[DAEMON] stage=%s status=NOOP", stage, extra=EVENT)
         else:
             logger.warning("[DAEMON] stage=%s status=FAIL exit_code=%s", stage, code)
         if reaped_job is not None and self._is_last_repair_job(reaped_job):
@@ -2121,7 +2127,13 @@ class DaemonRunner:
             ch.nightly_job = job
             ch.nightly_started_at = self._now()
             st.nightly_done[job] = identity
-            logger.info("[DAEMON] stage=nightly_%s status=STARTED deadline=%s", job.value, deadline.isoformat())
+            logger.info(
+                "[DAEMON] stage=nightly_%s status=STARTED deadline=%s pid=%s",
+                job.value,
+                deadline.isoformat(),
+                getattr(ch.nightly, "pid", None),
+                extra=EVENT,
+            )
             return
 
     def step(self, now: dt.datetime) -> float:
