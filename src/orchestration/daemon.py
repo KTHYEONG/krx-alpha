@@ -1223,6 +1223,10 @@ class DaemonState:
     last_kiwoom_crosscheck_result: str | None = None
     aftermarket_plan: tuple[AftermarketShard, ...] = ()
     aftermarket_plan_day: dt.date | None = None
+    aftermarket_plan_missing: frozenset[MarketVenue] = frozenset()
+    next_aftermarket_plan_retry_at: dt.datetime | None = None
+    aftermarket_plan_logged: set[tuple[dt.date, str]] = field(default_factory=set)
+    aftermarket_plan_paged: set[tuple[dt.date, str]] = field(default_factory=set)
     aftermarket_refresh_day: dt.date | None = None
     aftermarket_nxt_refresh_day: dt.date | None = None
     aftermarket_eligibility_day: dt.date | None = None
@@ -2744,17 +2748,20 @@ class DaemonRunner:
     ) -> None:
         """Refresh each venue's isolated aftermarket snapshot once per day after the shifted selection time.
 
-        Vendor or candidate-file failures schedule a per-venue 60 s retry with a CRITICAL alert instead of
-        reusing the regular-session universe; one venue's failure never blocks or re-triggers the other.
+        Vendor or candidate-file failures schedule a per-venue retry (``selection_retry_s``) with a CRITICAL
+        alert instead of reusing the regular-session universe; one venue's failure never blocks or re-triggers
+        the other. Retries continue through AFTER_MARKET_ACTIVE; a venue with a valid candidate file is reused
+        after a restart rather than re-selected.
         """
         st = self._state
         cfg = self._cfg
         paths = self._paths
         after_cfg = self._after_cfg
+        local_time = now.astimezone(_KST).time()
         if not (
-            state == SessionState.FULL_ACTIVE
+            state in (SessionState.FULL_ACTIVE, SessionState.AFTER_MARKET_ACTIVE)
             and cfg.after_market_enabled
-            and now.astimezone(_KST).time() >= anchors.shift_post_close(after_cfg.selection_time)
+            and anchors.shift_post_close(after_cfg.selection_time) <= local_time < anchors.after_market_end
         ):
             return
         due_venues = tuple(
@@ -2763,7 +2770,9 @@ class DaemonRunner:
                 (MarketVenue.KRX, st.aftermarket_refresh_day, st.next_aftermarket_refresh_at),
                 (MarketVenue.NXT, st.aftermarket_nxt_refresh_day, st.next_aftermarket_nxt_refresh_at),
             )
-            if refresh_day != today and (retry_at is None or now >= retry_at)
+            if refresh_day != today
+            and (retry_at is None or now >= retry_at)
+            and (state is SessionState.FULL_ACTIVE or not self._aftermarket_candidate_ready(venue, today))
         )
         if not due_venues:
             return
@@ -2781,10 +2790,10 @@ class DaemonRunner:
                 )
             except (MissingCredentialsError, KisApiError, AftermarketUniverseError, CandidateFileError) as exc:
                 if venue is MarketVenue.NXT:
-                    st.next_aftermarket_nxt_refresh_at = now + dt.timedelta(seconds=60.0)
+                    st.next_aftermarket_nxt_refresh_at = now + dt.timedelta(seconds=after_cfg.selection_retry_s)
                     retry_at = st.next_aftermarket_nxt_refresh_at
                 else:
-                    st.next_aftermarket_refresh_at = now + dt.timedelta(seconds=60.0)
+                    st.next_aftermarket_refresh_at = now + dt.timedelta(seconds=after_cfg.selection_retry_s)
                     retry_at = st.next_aftermarket_refresh_at
                 logger.critical(
                     "[DAEMON] stage=aftermarket_reselection status=FAIL venue=%s reason=%s next_retry=%s",
@@ -2804,6 +2813,19 @@ class DaemonRunner:
                 venue.value,
                 snapshot.selected_count,
             )
+
+    def _aftermarket_candidate_ready(self, venue: MarketVenue, today: dt.date) -> bool:
+        """True when ``venue`` already has a valid candidate file for ``today``; never raises."""
+        try:
+            read_candidate_snapshot(
+                self._paths.aftermarket_candidates(today, venue),
+                expected_session_date=today,
+                expected_session=aftermarket_candidate_session(venue),
+                max_candidates=self._after_cfg.max_symbols,
+            )
+        except (CandidateFileError, OSError):
+            return False
+        return True
 
     def _aftermarket_excluded_symbols(self, today: dt.date) -> frozenset[str]:
         """Return symbols ineligible for aftermarket selection from the latest daily-bar window.
@@ -2843,41 +2865,127 @@ class DaemonRunner:
         return excluded_symbols
 
     def _ensure_aftermarket_plan(self, today: dt.date) -> None:
+        """Plan each venue whose candidate file is valid; a running shard is never replanned or reassigned."""
         st = self._state
         paths = self._paths
         after_cfg = self._after_cfg
-        if st.aftermarket_plan_day != today:
-            venue_symbols: dict[MarketVenue, tuple[str, ...]] = {}
-            for venue in (MarketVenue.KRX, MarketVenue.NXT):
-                try:
-                    snapshot = read_candidate_snapshot(
-                        paths.aftermarket_candidates(today, venue),
-                        expected_session_date=today,
-                        expected_session=aftermarket_candidate_session(venue),
-                        max_candidates=after_cfg.max_symbols,
-                    )
-                except CandidateFileError as exc:
-                    logger.critical(
-                        "[DAEMON] stage=aftermarket_plan status=EMPTY venue=%s reason=%s",
-                        venue.value,
-                        str(exc),
-                    )
-                    venue_symbols[venue] = ()
-                else:
-                    venue_symbols[venue] = tuple(str(row["symbol"]) for row in snapshot.candidates)
+        venue_symbols: dict[MarketVenue, tuple[str, ...]] = {}
+        for venue in (MarketVenue.KRX, MarketVenue.NXT):
             try:
-                st.aftermarket_plan = plan_aftermarket_shards(
-                    krx_symbols=venue_symbols[MarketVenue.KRX],
-                    nxt_symbols=venue_symbols[MarketVenue.NXT],
-                    credentials=load_kis_data_credentials(),
-                    pair_capacity_per_connection=int(after_cfg.pair_capacity_per_connection or 0),
-                    krx_streams=after_cfg.krx_streams,
-                    nxt_streams=after_cfg.nxt_streams,
+                snapshot = read_candidate_snapshot(
+                    paths.aftermarket_candidates(today, venue),
+                    expected_session_date=today,
+                    expected_session=aftermarket_candidate_session(venue),
+                    max_candidates=after_cfg.max_symbols,
                 )
-            except (CandidateFileError, KrxAlphaError) as exc:
-                logger.critical("[DAEMON] stage=aftermarket_plan status=FAIL reason=%s", str(exc))
-                st.aftermarket_plan = ()
+            except CandidateFileError as exc:
+                self._log_aftermarket_plan_status(today, venue.value, "EMPTY", str(exc))
+                venue_symbols[venue] = ()
+            else:
+                venue_symbols[venue] = tuple(str(row["symbol"]) for row in snapshot.candidates)
+        installed = self._children.aftermarket
+        if not installed:
+            st.aftermarket_plan = self._plan_venues(
+                today,
+                krx_symbols=venue_symbols[MarketVenue.KRX],
+                nxt_symbols=venue_symbols[MarketVenue.NXT],
+                excluded_key_ids=frozenset(),
+            )
+        else:
+            installed_venues = {
+                shard.venue for shard in st.aftermarket_plan if f"{shard.venue.value}:{shard.shard_index}" in installed
+            }
+            kept = tuple(shard for shard in st.aftermarket_plan if shard.venue in installed_venues)
+            excluded_key_ids = frozenset(shard.credential_key_id for shard in kept)
+            added: tuple[AftermarketShard, ...] = ()
+            for venue in (MarketVenue.KRX, MarketVenue.NXT):
+                if venue in installed_venues or not venue_symbols[venue]:
+                    continue
+                added += self._plan_venues(
+                    today,
+                    krx_symbols=venue_symbols[MarketVenue.KRX] if venue is MarketVenue.KRX else (),
+                    nxt_symbols=venue_symbols[MarketVenue.NXT] if venue is MarketVenue.NXT else (),
+                    excluded_key_ids=excluded_key_ids,
+                )
+            st.aftermarket_plan = kept + added
+        planned_venues = {shard.venue for shard in st.aftermarket_plan}
+        st.aftermarket_plan_missing = frozenset(
+            venue for venue in (MarketVenue.KRX, MarketVenue.NXT) if venue not in planned_venues
+        )
+        if st.aftermarket_plan:
             st.aftermarket_plan_day = today
+
+    def _plan_venues(
+        self,
+        today: dt.date,
+        *,
+        krx_symbols: tuple[str, ...],
+        nxt_symbols: tuple[str, ...],
+        excluded_key_ids: frozenset[str],
+    ) -> tuple[AftermarketShard, ...]:
+        """Plan the given venue symbols on credentials outside ``excluded_key_ids``; a failure logs and yields ()."""
+        after_cfg = self._after_cfg
+        try:
+            credentials = tuple(cred for cred in load_kis_data_credentials() if cred.key_id not in excluded_key_ids)
+            return plan_aftermarket_shards(
+                krx_symbols=krx_symbols,
+                nxt_symbols=nxt_symbols,
+                credentials=credentials,
+                pair_capacity_per_connection=int(after_cfg.pair_capacity_per_connection or 0),
+                krx_streams=after_cfg.krx_streams,
+                nxt_streams=after_cfg.nxt_streams,
+            )
+        except (CandidateFileError, KrxAlphaError) as exc:
+            venue_key = "+".join(
+                venue.value
+                for venue, symbols in ((MarketVenue.KRX, krx_symbols), (MarketVenue.NXT, nxt_symbols))
+                if symbols
+            ) or "none"
+            self._log_aftermarket_plan_status(today, venue_key, "FAIL", str(exc))
+            return ()
+
+    def _log_aftermarket_plan_status(self, today: dt.date, venue_key: str, status: str, reason: str) -> None:
+        """Emit the first EMPTY/FAIL per day and venue as CRITICAL, later repeats as WARNING."""
+        st = self._state
+        key = (today, f"{venue_key}:{status}")
+        first = key not in st.aftermarket_plan_logged
+        st.aftermarket_plan_logged.add(key)
+        if status == "EMPTY":
+            if first:
+                logger.critical("[DAEMON] stage=aftermarket_plan status=EMPTY venue=%s reason=%s", venue_key, reason)
+            else:
+                logger.warning("[DAEMON] stage=aftermarket_plan status=EMPTY venue=%s reason=%s", venue_key, reason)
+        elif first:
+            logger.critical("[DAEMON] stage=aftermarket_plan status=FAIL reason=%s", reason)
+        else:
+            logger.warning("[DAEMON] stage=aftermarket_plan status=FAIL reason=%s", reason)
+
+    def _page_missing_aftermarket_plan(
+        self, now: dt.datetime, today: dt.date, anchors: SessionAnchors, prearm_lead_s: float
+    ) -> None:
+        """Page once per venue and day when one retry period after its arm instant it still has no planned shard.
+
+        The grace keeps a routine one-off vendor failure that the next retry resolves from paging.
+        """
+        st = self._state
+        grace = dt.timedelta(seconds=self._after_cfg.selection_retry_s)
+        missing = st.aftermarket_plan_missing or (
+            frozenset((MarketVenue.KRX, MarketVenue.NXT)) if not st.aftermarket_plan else frozenset()
+        )
+        for venue in (MarketVenue.NXT, MarketVenue.KRX):
+            arm_at = aftermarket_arm_at(today, venue, anchors=anchors, prearm_lead_s=prearm_lead_s)
+            if venue not in missing or now < arm_at + grace:
+                continue
+            key = (today, venue.value)
+            if key in st.aftermarket_plan_paged:
+                continue
+            st.aftermarket_plan_paged.add(key)
+            logger.critical(
+                "[DATA] stage=aftermarket_plan status=MISSING venue=%s date=%s",
+                venue.value,
+                today.isoformat(),
+                extra=page(PageKind.AFTERMARKET_PLAN_MISSING),
+            )
 
     def _watch_aftermarket_shards(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
         """Judge each running shard's journal freshness inside its window and stop a stale one."""
@@ -3076,12 +3184,27 @@ class DaemonRunner:
             for venue in (MarketVenue.NXT, MarketVenue.KRX)
             if now >= aftermarket_arm_at(today, venue, anchors=anchors, prearm_lead_s=prearm_lead_s)
         )
-        if due and not (
-            state is SessionState.FULL_ACTIVE
-            and (st.aftermarket_refresh_day != today or st.aftermarket_nxt_refresh_day != today)
+        local_time = now.astimezone(_KST).time()
+        plan_retry_due = (
+            (st.aftermarket_plan_day != today or bool(st.aftermarket_plan_missing))
+            and local_time < anchors.after_market_end
+            and (st.next_aftermarket_plan_retry_at is None or now >= st.next_aftermarket_plan_retry_at)
+        )
+        if (
+            due
+            and plan_retry_due
+            and not (
+                state is SessionState.FULL_ACTIVE
+                and (st.aftermarket_refresh_day != today or st.aftermarket_nxt_refresh_day != today)
+            )
         ):
             # A pending reselection in FULL_ACTIVE must not latch an empty plan for the day.
             self._ensure_aftermarket_plan(today)
+            retry_pending = bool(st.aftermarket_plan_missing) or st.aftermarket_plan_day != today
+            st.next_aftermarket_plan_retry_at = (
+                now + dt.timedelta(seconds=self._after_cfg.selection_retry_s) if retry_pending else None
+            )
+        self._page_missing_aftermarket_plan(now, today, anchors, prearm_lead_s)
         plan_slots = {f"krx-{s.shard_index:02d}": s.credential_slot for s in st.regular_kis_plan}
         live_regular_slots = {
             plan_slots[key]

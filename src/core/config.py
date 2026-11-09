@@ -181,6 +181,8 @@ class AftermarketSettings(BaseSettings):
     krx_streams: tuple[str, str] = ("H0STCNT0", "H0STASP0")
     nxt_streams: tuple[str, str] = ("H0NXCNT0", "H0NXASP0")
     selection_time: dt.time = dt.time(15, 31)
+    # Seconds between per-venue selection retries and plan re-evaluations.
+    selection_retry_s: float = Field(default=60.0, gt=0)
     prearm_lead_s: float = Field(default=60.0, gt=0)
     max_symbols: int = Field(default=40, ge=1)
     # 2026-09 probe: max normal intra-connection silence 3.84s over ~30 conn-hours; 10s (~2.6x)

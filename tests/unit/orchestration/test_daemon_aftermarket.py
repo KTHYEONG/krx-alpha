@@ -1047,7 +1047,7 @@ def test_pending_reselection_defers_plan_without_latching(tmp_path, monkeypatch)
     assert sorted(runner.children.aftermarket) == ["nxt:0"]
 
 
-def test_reselection_failing_through_open_keeps_existing_fail_path(tmp_path, monkeypatch, caplog) -> None:
+def test_reselection_failing_through_open_retries_without_latching_plan(tmp_path, monkeypatch, caplog) -> None:
     from src.execution.contracts import KisApiError
     from src.orchestration import daemon as daemon_mod
     from src.realtime.kis_sharding import plan_aftermarket_shards as _real_plan
@@ -1063,6 +1063,7 @@ def test_reselection_failing_through_open_keeps_existing_fail_path(tmp_path, mon
         _arm_at(runner, 15, 39, 35)
         assert runner.state.aftermarket_plan_day is None
         _arm_at(runner, 15, 40, 5)
+        assert runner.state.aftermarket_plan_day is None
 
     assert runner.children.aftermarket == {}
     assert _installed_venues(commands) == []
@@ -1473,3 +1474,268 @@ def test_holiday_performs_no_reselection(tmp_path, monkeypatch) -> None:
     _arm_at(runner, 15, 31, 0)
 
     assert refreshed == []
+
+
+def _real_plan_with_two_credentials(monkeypatch) -> None:
+    from src.orchestration import daemon as daemon_mod
+    from src.realtime.kis_sharding import KisDataCredential
+    from src.realtime.kis_sharding import plan_aftermarket_shards as real_plan
+
+    monkeypatch.setattr(daemon_mod, "plan_aftermarket_shards", real_plan)
+    monkeypatch.setattr(
+        daemon_mod,
+        "load_kis_data_credentials",
+        lambda: (KisDataCredential("0", "k0", "s0", "h0", "id0"), KisDataCredential("1", "k1", "s1", "h1", "id1")),
+    )
+
+
+def test_empty_plan_is_never_latched_and_retries_are_throttled(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import logging
+
+    from src.execution.contracts import KisApiError
+
+    def fail(**_kwargs):
+        raise KisApiError("SCHEMA", "ranking unavailable")
+
+    runner, commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=False, refresh=fail)
+    _real_plan_with_two_credentials(monkeypatch)
+
+    with caplog.at_level(logging.WARNING):
+        _arm_at(runner, 15, 40, 5)
+        assert runner.state.aftermarket_plan_day is None
+        assert runner.state.aftermarket_plan == ()
+        first_retry = runner.state.next_aftermarket_plan_retry_at
+        assert first_retry == dt.datetime(2026, 9, 16, 15, 41, 5, tzinfo=first_retry.tzinfo)
+        _arm_at(runner, 15, 41, 0)
+        assert runner.state.next_aftermarket_plan_retry_at == first_retry
+        _arm_at(runner, 15, 41, 10)
+        assert runner.state.next_aftermarket_plan_retry_at == dt.datetime(
+            2026, 9, 16, 15, 42, 10, tzinfo=first_retry.tzinfo
+        )
+        _arm_at(runner, 16, 10, 0)
+        _arm_at(runner, 16, 30, 0)
+
+    assert runner.state.aftermarket_plan_day is None
+    assert runner.state.aftermarket_plan == ()
+    assert runner.children.aftermarket == {}
+    assert _installed_venues(commands) == []
+    empty = [r for r in caplog.records if "stage=aftermarket_plan status=EMPTY" in r.getMessage()]
+    for venue in ("krx", "nxt"):
+        per_venue = [r for r in empty if f"venue={venue}" in r.getMessage()]
+        assert per_venue[0].levelno == logging.CRITICAL
+        assert len(per_venue) > 1
+        assert all(r.levelno == logging.WARNING for r in per_venue[1:])
+
+
+def test_missing_venue_is_planned_later_without_disturbing_running_shard(tmp_path, monkeypatch) -> None:
+    from src.execution.contracts import KisApiError
+    from src.realtime.contracts import MarketVenue
+    from src.universe.ipc import write_candidate_snapshot
+
+    def refresh(*, out_path, generated_at, venue, **_kwargs):
+        if venue is MarketVenue.KRX and generated_at.strftime("%H%M") < "1605":
+            raise KisApiError("SCHEMA", "krx ranking unavailable")
+        write_candidate_snapshot(out_path, _venue_snapshot(_ARM_DAY, venue, ("000660",)))
+        from types import SimpleNamespace
+
+        return SimpleNamespace(selected_count=1)
+
+    runner, commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=False, refresh=refresh)
+    _real_plan_with_two_credentials(monkeypatch)
+
+    _arm_at(runner, 15, 40, 5)
+    nxt_before = runner.children.aftermarket["nxt:0"]
+    assert _installed_venues(commands) == ["nxt"]
+    _arm_at(runner, 16, 0, 5)
+    assert runner.children.aftermarket["nxt:0"] is nxt_before
+    assert "krx:0" not in runner.children.aftermarket
+    _arm_at(runner, 16, 10, 0)
+    assert runner.children.aftermarket["nxt:0"] is nxt_before
+    assert "krx:0" in runner.children.aftermarket
+    krx_shard = next(shard for shard in runner.state.aftermarket_plan if shard.venue is MarketVenue.KRX)
+    nxt_shard = next(shard for shard in runner.state.aftermarket_plan if shard.venue is MarketVenue.NXT)
+    assert krx_shard.credential_key_id != nxt_shard.credential_key_id
+    assert runner.state.aftermarket_plan_missing == frozenset()
+
+
+def _aftermarket_plan_pages(caplog):
+    from src.core.alerts import PageKind, page_kind
+
+    return [r for r in caplog.records if page_kind(r) is PageKind.AFTERMARKET_PLAN_MISSING]
+
+
+def test_missing_venue_pages_once_at_its_arm_time(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    from src.execution.contracts import KisApiError
+    from src.realtime.contracts import MarketVenue
+    from src.universe.ipc import write_candidate_snapshot
+
+    def refresh(*, out_path, generated_at, venue, **_kwargs):
+        if venue is MarketVenue.KRX:
+            raise KisApiError("SCHEMA", "krx ranking unavailable")
+        write_candidate_snapshot(out_path, _venue_snapshot(_ARM_DAY, venue, ("005930",)))
+        from types import SimpleNamespace
+
+        return SimpleNamespace(selected_count=1)
+
+    runner, _commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=False, refresh=refresh)
+    _real_plan_with_two_credentials(monkeypatch)
+
+    with caplog.at_level(logging.CRITICAL):
+        _arm_at(runner, 15, 40, 5)
+        _arm_at(runner, 15, 58, 59)
+        assert _aftermarket_plan_pages(caplog) == []
+        _arm_at(runner, 15, 59, 5)
+        _arm_at(runner, 15, 59, 59)
+        assert _aftermarket_plan_pages(caplog) == []
+        _arm_at(runner, 16, 5, 0)
+        _arm_at(runner, 16, 20, 0)
+
+    pages = _aftermarket_plan_pages(caplog)
+    assert len(pages) == 1
+    assert "venue=krx" in pages[0].getMessage()
+    assert runner.state.aftermarket_plan_paged == {(_ARM_DAY, "krx")}
+
+
+def test_transient_selection_failure_resolved_by_next_retry_does_not_page(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    from src.execution.contracts import KisApiError
+    from src.universe.ipc import write_candidate_snapshot
+
+    attempts: list[object] = []
+
+    def refresh(*, out_path, generated_at, **kwargs):
+        attempts.append(generated_at)
+        if len(attempts) == 1:
+            raise KisApiError("SCHEMA", "temporary ranking failure")
+        snapshot = _arm_candidate_snapshot(venue=kwargs.get("venue"))
+        write_candidate_snapshot(out_path, snapshot)
+        return snapshot
+
+    runner, _commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=False, refresh=refresh)
+
+    with caplog.at_level(logging.CRITICAL):
+        _arm_at(runner, 15, 38, 30)
+        _arm_at(runner, 15, 39, 5)
+        _arm_at(runner, 15, 39, 35)
+        _arm_at(runner, 15, 40, 5)
+
+    assert sorted(runner.children.aftermarket) == ["nxt:0"]
+    assert _aftermarket_plan_pages(caplog) == []
+    assert runner.state.aftermarket_plan_paged == set()
+
+
+def test_planned_venues_never_page(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    from src.orchestration import daemon as daemon_mod
+
+    runner, commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None)
+    with caplog.at_level(logging.CRITICAL):
+        _arm_at(runner, 15, 31, 0)
+        _arm_at(runner, 15, 40, 5)
+        _arm_at(runner, 16, 5, 0)
+        _arm_at(runner, 16, 30, 0)
+
+    assert _aftermarket_plan_pages(caplog) == []
+    expected = [
+        daemon_mod._aftermarket_stream_cmd(_ARM_DAY, runner._paths, shard=shard)
+        for shard in runner.state.aftermarket_plan
+    ]
+    assert [cmd for cmd in commands if "collect-aftermarket" in cmd] == expected
+
+
+def test_restart_in_after_market_reuses_valid_candidates(tmp_path, monkeypatch) -> None:
+    from src.realtime.contracts import MarketVenue
+
+    refreshed: list = []
+
+    def refresh(**kwargs):
+        refreshed.append(kwargs)
+        raise AssertionError("must not refresh")
+
+    runner, _, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=True, refresh=refresh)
+    _real_plan_with_two_credentials(monkeypatch)
+    paths = [runner._paths.aftermarket_candidates(_ARM_DAY, venue) for venue in (MarketVenue.KRX, MarketVenue.NXT)]
+    before = [path.read_bytes() for path in paths]
+
+    _arm_at(runner, 16, 25, 0)
+
+    assert refreshed == []
+    assert [path.read_bytes() for path in paths] == before
+    assert {shard.venue for shard in runner.state.aftermarket_plan} == {MarketVenue.KRX, MarketVenue.NXT}
+
+
+def test_restart_in_after_market_selects_only_missing_venue(tmp_path, monkeypatch) -> None:
+    from src.realtime.contracts import MarketVenue
+    from src.universe.ipc import write_candidate_snapshot
+
+    selected: list[MarketVenue] = []
+
+    def refresh(*, out_path, generated_at, venue, **_kwargs):
+        selected.append(venue)
+        write_candidate_snapshot(out_path, _venue_snapshot(_ARM_DAY, venue, ("000660",)))
+        from types import SimpleNamespace
+
+        return SimpleNamespace(selected_count=1)
+
+    runner, _, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=True, refresh=refresh)
+    _real_plan_with_two_credentials(monkeypatch)
+    krx_path = runner._paths.aftermarket_candidates(_ARM_DAY, MarketVenue.KRX)
+    nxt_path = runner._paths.aftermarket_candidates(_ARM_DAY, MarketVenue.NXT)
+    krx_path.unlink()
+    nxt_before = nxt_path.read_bytes()
+
+    _arm_at(runner, 16, 25, 0)
+
+    assert selected == [MarketVenue.KRX]
+    assert nxt_path.read_bytes() == nxt_before
+    assert krx_path.exists()
+    assert {shard.venue for shard in runner.state.aftermarket_plan} == {MarketVenue.KRX, MarketVenue.NXT}
+
+
+def test_nxt_selection_retries_past_full_active_until_success(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+
+    from src.execution.contracts import KisApiError
+    from src.realtime.contracts import MarketVenue
+    from src.universe.ipc import write_candidate_snapshot
+
+    success_at = dt.datetime(2026, 9, 16, 15, 45, tzinfo=ZoneInfo("Asia/Seoul"))
+    nxt_attempts: list[dt.datetime] = []
+
+    def refresh(*, out_path, generated_at, venue, **_kwargs):
+        if venue is MarketVenue.NXT:
+            nxt_attempts.append(generated_at)
+            if generated_at < success_at:
+                raise KisApiError("SCHEMA", "nxt ranking unavailable")
+        write_candidate_snapshot(out_path, _venue_snapshot(_ARM_DAY, venue, ("000660",)))
+        return SimpleNamespace(selected_count=1)
+
+    runner, commands, _ = _arm_daemon(tmp_path, monkeypatch, refresh_day=None, candidate=False, refresh=refresh)
+    _real_plan_with_two_credentials(monkeypatch)
+
+    _arm_at(runner, 15, 38, 30)
+    _arm_at(runner, 15, 39, 35)
+    _arm_at(runner, 15, 40, 5)
+    _arm_at(runner, 15, 44, 0)
+    assert runner.state.aftermarket_nxt_refresh_day is None
+    assert _installed_venues(commands) == []
+    _arm_at(runner, 15, 45, 5)
+    _arm_at(runner, 15, 45, 40)
+
+    tz = ZoneInfo("Asia/Seoul")
+    assert nxt_attempts == [
+        dt.datetime(2026, 9, 16, 15, 38, 30, tzinfo=tz),
+        dt.datetime(2026, 9, 16, 15, 39, 35, tzinfo=tz),
+        dt.datetime(2026, 9, 16, 15, 44, 0, tzinfo=tz),
+        dt.datetime(2026, 9, 16, 15, 45, 5, tzinfo=tz),
+    ]
+    assert runner.state.aftermarket_nxt_refresh_day == _ARM_DAY
+    assert _installed_venues(commands) == ["nxt"]
+    assert runner.state.aftermarket_plan_missing == frozenset()

@@ -376,6 +376,7 @@ class PageKind(StrEnum):
     REPAIR_HOLD_EXPIRING = "repair_hold_expiring"
     DAEMON_CRASH_LOOP = "daemon_crash_loop"
     BACKUP_STALE = "backup_stale"
+    AFTERMARKET_PLAN_MISSING = "aftermarket_plan_missing"
 
 
 @dataclass(frozen=True)
@@ -401,6 +402,11 @@ PAGE_TEXTS: Mapping[PageKind, PageText] = MappingProxyType(
             "정규장 개장 후 첫 시세 미수신",
             "수집 프로세스는 재접속을 계속하나 원본이 저장되지 않음",
             "지금 증권사 접속 상태와 수집 로그를 확인 (장 마감 전)",
+        ),
+        PageKind.AFTERMARKET_PLAN_MISSING: PageText(
+            "애프터마켓 수집 대상 선정 실패 (시세 미수집)",
+            "선정을 계속 재시도 중이며 성공하는 즉시 해당 장 수집을 시작함",
+            "지금 KIS 키와 랭킹 API 상태를 확인 (애프터마켓 종료 전)",
         ),
         PageKind.STREAM_AUTH_REJECTED: PageText(
             "증권사 시세 인증 거부",
