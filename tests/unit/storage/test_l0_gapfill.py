@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import polars as pl
 import pytest
 
-from src.storage.l0_gapfill import GapfillSource, GapfillStatus, derive_gapfill, summarize_gapfill, write_gapfill
+from src.storage.l0_gapfill import (
+    GapfillSource,
+    GapfillStatus,
+    derive_gapfill,
+    summarize_gapfill,
+    sweep_stale_tmp,
+    write_gapfill,
+)
 
 
 def _src(tape: pl.DataFrame, vendor: str = "kiwoom", provenance: str = "p") -> list[GapfillSource]:
@@ -290,3 +299,98 @@ def test_single_surplus_row_is_the_one_that_explains_the_excess_volume() -> None
     rows, _ = derive_gapfill(_audit(no_match), _src(tape), {})
     assert rows["price"].to_list() == [1, 2]
     assert rows["volume"].to_list() == [5, 7]
+
+
+def _aged(path: Path, *, age_s: float, now: float) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"orphan")
+    os.utime(path, (now - age_s, now - age_s))
+    return path
+
+
+def test_sweep_removes_old_orphan_on_next_write(tmp_path: Path) -> None:
+    now = time.time()
+    directory = tmp_path / "gapfill" / "ls" / "regular"
+    orphan = _aged(directory / ".dt=2026-11-06.parquet.46.tmp", age_s=7200.0, now=now)
+    tape = _tape(("000001", 90100, 5, 7))
+    rows, outcomes = derive_gapfill(_audit(_interval(2)), _src(tape))
+    write_gapfill(rows, outcomes, rows_path=directory / "d.parquet", report_path=directory / "d.report.json")
+    assert not orphan.exists()
+    assert sorted(p.name for p in directory.iterdir()) == ["d.parquet", "d.report.json"]
+
+
+def test_sweep_keeps_fresh_tmp(tmp_path: Path) -> None:
+    now = time.time()
+    fresh = _aged(tmp_path / ".d.parquet.99.tmp", age_s=300.0, now=now)
+    assert sweep_stale_tmp(tmp_path, now=now) == ()
+    assert fresh.exists()
+
+
+def test_sweep_ignores_other_names(tmp_path: Path) -> None:
+    now = time.time()
+    kept = [
+        _aged(tmp_path / "dt=2026-11-06.parquet", age_s=7200.0, now=now),
+        _aged(tmp_path / "notes.tmp", age_s=7200.0, now=now),
+        _aged(tmp_path / ".hidden", age_s=7200.0, now=now),
+        _aged(tmp_path / ".x.tmp.bad", age_s=7200.0, now=now),
+    ]
+    subdir = tmp_path / ".d.parquet.1.tmp"
+    subdir.mkdir()
+    os.utime(subdir, (now - 7200.0, now - 7200.0))
+    assert sweep_stale_tmp(tmp_path, now=now) == ()
+    assert all(path.exists() for path in kept)
+    assert subdir.is_dir()
+
+
+def test_sweep_missing_directory_returns_empty(tmp_path: Path) -> None:
+    assert sweep_stale_tmp(tmp_path / "absent") == ()
+
+
+def test_sweep_swallows_unlink_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = time.time()
+    broken = _aged(tmp_path / ".a.parquet.1.tmp", age_s=7200.0, now=now)
+    ok = _aged(tmp_path / ".b.parquet.2.tmp", age_s=7200.0, now=now)
+    original_unlink = Path.unlink
+
+    def flaky_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == broken:
+            raise OSError("busy")
+        original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    assert sweep_stale_tmp(tmp_path, now=now) == (ok,)
+    assert broken.exists()
+    assert not ok.exists()
+
+
+def test_writer_exception_cleans_own_tmp_and_keeps_previous_target(tmp_path: Path) -> None:
+    directory = tmp_path / "gapfill"
+    directory.mkdir()
+    previous = directory / "d.parquet"
+    previous.write_bytes(b"previous")
+    tape = _tape(("000001", 90100, 5, 7))
+    rows, outcomes = derive_gapfill(_audit(_interval(2)), _src(tape))
+
+    def boom(self: pl.DataFrame, file: Path, **kwargs: object) -> None:
+        raise RuntimeError("writer died")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(pl.DataFrame, "write_parquet", boom)
+        with pytest.raises(RuntimeError):
+            write_gapfill(rows, outcomes, rows_path=previous, report_path=directory / "d.report.json")
+    assert previous.read_bytes() == b"previous"
+    assert sorted(p.name for p in directory.iterdir()) == ["d.parquet"]
+
+
+def test_oserror_propagates_and_leaves_no_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tape = _tape(("000001", 90100, 5, 7))
+    rows, outcomes = derive_gapfill(_audit(_interval(2)), _src(tape))
+
+    def disk_full(self: pl.DataFrame, file: Path, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pl.DataFrame, "write_parquet", disk_full)
+    with pytest.raises(OSError, match="disk full"):
+        write_gapfill(rows, outcomes, rows_path=tmp_path / "d.parquet", report_path=tmp_path / "d.report.json")
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert not (tmp_path / "d.parquet").exists()

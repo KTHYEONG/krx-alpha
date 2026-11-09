@@ -3,24 +3,31 @@
 from __future__ import annotations
 
 import bisect
+import contextlib
 import copy
 import datetime as dt
 import json
 import logging
 import os
 import pathlib
+import re
+import stat
+import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import asdict, dataclass
 from enum import StrEnum
-from typing import Any, NamedTuple, cast
+from typing import Any, Final, NamedTuple, cast
 
 import polars as pl
 
 from src.core.paths import DataPaths
 
 logger = logging.getLogger(__name__)
+
+STALE_TMP_MIN_AGE_S: Final[float] = 3600.0
+_WRITER_TMP_RE = re.compile(r"^\..+\.\d+\.tmp$")
 
 _TAPE_COLUMNS = ("symbol", "ts_hms", "price", "volume")
 _ROW_SCHEMA: dict[str, Any] = {
@@ -483,6 +490,35 @@ def summarize_gapfill(outcomes: Sequence[GapfillInterval]) -> dict[str, int]:
     }
 
 
+def sweep_stale_tmp(
+    directory: pathlib.Path, *, now: float | None = None, min_age_s: float = STALE_TMP_MIN_AGE_S
+) -> tuple[pathlib.Path, ...]:
+    """Unlink hidden writer temps in `directory` older than `min_age_s`; returns the removed paths and never raises."""
+    try:
+        entries = tuple(directory.iterdir())
+    except OSError:
+        return ()
+    current = time.time() if now is None else now
+    removed: list[pathlib.Path] = []
+    for path in entries:
+        if not _WRITER_TMP_RE.match(path.name):
+            continue
+        try:
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            age_s = current - info.st_mtime
+            if age_s < min_age_s:
+                continue
+            path.unlink()
+        except OSError:
+            logger.warning("[DATA] stage=gapfill_tmp_sweep status=WARN path=%s", path.name)
+            continue
+        logger.info("[DATA] stage=gapfill_tmp_sweep status=REMOVED path=%s age_s=%.1f", path.name, age_s)
+        removed.append(path)
+    return tuple(removed)
+
+
 def write_gapfill(
     rows: pl.DataFrame,
     outcomes: Sequence[GapfillInterval],
@@ -497,18 +533,23 @@ def write_gapfill(
         "notes": dict(notes or {}),
         "intervals": [asdict(item) for item in outcomes],
     }
+    for directory in dict.fromkeys((rows_path.parent, report_path.parent)):
+        sweep_stale_tmp(directory)
     for target, writer in (
         (rows_path, lambda tmp: rows.write_parquet(tmp, compression="zstd")),
         (report_path, lambda tmp: tmp.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")),
     ):
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.parent / f".{target.name}.{os.getpid()}.tmp"
+        replaced = False
         try:
             writer(tmp)
             os.replace(tmp, target)
-        except OSError:
-            tmp.unlink(missing_ok=True)
-            raise
+            replaced = True
+        finally:
+            if not replaced:
+                with contextlib.suppress(OSError):
+                    tmp.unlink(missing_ok=True)
 
 
 def received_trades_for_gaps(
