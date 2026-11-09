@@ -146,7 +146,7 @@ from src.universe.aftermarket import (
 )
 from src.universe.intraday import read_dynamic_admissions
 from src.universe.ipc import CandidateFileError, read_candidate_snapshot, read_candidates
-from src.universe.membership import MembershipRow, append_membership, read_membership
+from src.universe.membership import MembershipFileError, MembershipRow, append_membership, read_membership
 from src.universe.policy import ineligible_security_symbols
 from src.universe.premarket import premarket_pool_ready, refresh_premarket_pool
 from src.universe.service import UniversePlanResult as UniversePlanResult
@@ -435,6 +435,18 @@ def run_session_orchestration(
 def _candidates_ready(path: pathlib.Path) -> bool:
     data = read_candidates(path)
     return bool(data and data.get("candidates"))
+
+
+def _candidates_rev(decision_date: dt.date) -> int:
+    return int(decision_date.strftime("%Y%m%d"))
+
+
+def _ledger_ls_shard_symbols(rows: Iterable[MembershipRow]) -> dict[int, frozenset[str]]:
+    shards: dict[int, set[str]] = {}
+    for row in rows:
+        if row.source == "static" and row.ls_shard is not None:
+            shards.setdefault(row.ls_shard, set()).add(row.symbol)
+    return {index: frozenset(symbols) for index, symbols in shards.items()}
 
 
 def _degraded_candidates_rev(path: pathlib.Path, today: dt.date, *, max_age_days: int) -> int | None:
@@ -1176,6 +1188,16 @@ class StreamChildSpec:
             raise ValueError(f"{self.key.value} must not define journal_vendor or manifest_path")
 
 
+class ResumeRefusal(StrEnum):
+    CALENDAR_UNKNOWN = "calendar_unknown"
+    CANDIDATES_UNREADABLE = "candidates_unreadable"
+    CANDIDATES_REV_MISMATCH = "candidates_rev_mismatch"
+    MANIFEST_MISSING = "manifest_missing"
+    MEMBERSHIP_MISSING = "membership_missing"
+    PLAN_MISMATCH = "plan_mismatch"
+    CHILDREN_PRESENT = "children_present"
+
+
 @dataclass
 class DaemonState:
     cycle: int = 0
@@ -1227,6 +1249,7 @@ class DaemonState:
     aftermarket_deferred_slots: set[str] = field(default_factory=set)
     overdue_judged_for: dt.date | None = None
     repair_expiry_paged: set[str] = field(default_factory=set)
+    resume_logged: set[tuple[dt.date, str]] = field(default_factory=set)
 
     _CHILD_RESULT_FIELDS: ClassVar[Mapping[StreamChildKey, str]] = {
         StreamChildKey.REGULAR: "last_supervisor_result",
@@ -2279,6 +2302,8 @@ class DaemonRunner:
         paths = self._paths
         snapshot_cfg = self._snapshot_cfg
         today = day.date
+        if st.orchestrated_for != today and self._try_resume_session_children(state, day):
+            return
         if (
             state is not SessionState.AFTER_MARKET_ACTIVE
             and st.orchestrated_for != today
@@ -2309,6 +2334,94 @@ class DaemonRunner:
                 self._start_ready_children(today)
             else:
                 self._handle_orchestration_failure(now, today)
+
+    def _try_resume_session_children(self, state: SessionState, day: TradingDayView) -> bool:
+        """Install SESSION children from on-disk evidence that today's orchestration already ran; never runs orchestration."""
+        ch = self._children
+        if ch.get(StreamChildKey.REGULAR_LS_B) is not None or any(
+            ch.get(spec.key) is not None for spec in self._STREAM_SPECS if spec.lifecycle is ChildLifecycle.SESSION
+        ):
+            return False
+        today = day.date
+        st = self._state
+        if (today, self._resume_refusal_key(state, ResumeRefusal.PLAN_MISMATCH)) in st.resume_logged:
+            return False
+        trading_day = day.trading_day
+        if trading_day is None:
+            return self._refuse_resume(state, today, ResumeRefusal.CALENDAR_UNKNOWN)
+        expected_decision = trading_day.previous_business_day
+        refusal = self._resume_evidence_refusal(today, expected_decision)
+        if refusal is not None:
+            return self._refuse_resume(state, today, refusal)
+        self._start_ready_children(today)
+        ls_shards = sum(1 for shard in st.ls_shard_plan if shard.symbols)
+        logger.info(
+            "[DATA] stage=session_resume status=OK date=%s rev=%d ls_shards=%d",
+            today.isoformat(),
+            _candidates_rev(expected_decision),
+            ls_shards,
+            extra=EVENT,
+        )
+        return True
+
+    def _resume_evidence_refusal(self, today: dt.date, expected_decision: dt.date) -> ResumeRefusal | None:
+        """Check candidates, manifest, membership ledger and recomputed LS plan in that order; None means all match."""
+        paths = self._paths
+        try:
+            data = read_candidates(paths.candidates)
+        except (CandidateFileError, OSError, ValueError):
+            return ResumeRefusal.CANDIDATES_UNREADABLE
+        if not isinstance(data, dict) or not data.get("candidates"):
+            return ResumeRefusal.CANDIDATES_UNREADABLE
+        rev = data.get("rev")
+        if isinstance(rev, bool) or not isinstance(rev, int) or rev != _candidates_rev(expected_decision):
+            return ResumeRefusal.CANDIDATES_REV_MISMATCH
+        try:
+            manifest_present = paths.manifest_path(today).exists()
+        except OSError:
+            return ResumeRefusal.MANIFEST_MISSING
+        if not manifest_present:
+            return ResumeRefusal.MANIFEST_MISSING
+        try:
+            ledger = _ledger_ls_shard_symbols(read_membership(paths.membership_path(today)))
+        except (MembershipFileError, OSError, ValueError):
+            return ResumeRefusal.MEMBERSHIP_MISSING
+        if not ledger:
+            return ResumeRefusal.MEMBERSHIP_MISSING
+        plan = self._ensure_ls_shard_plan(today)
+        planned = {shard.shard_index: frozenset(shard.symbols) for shard in plan if shard.symbols}
+        if planned != ledger:
+            st = self._state
+            st.ls_shard_plan = ()
+            st.ls_shard_plan_day = None
+            return ResumeRefusal.PLAN_MISMATCH if planned else ResumeRefusal.CANDIDATES_UNREADABLE
+        return None
+
+    @staticmethod
+    def _resume_refusal_key(state: SessionState, refusal: ResumeRefusal) -> str:
+        return f"{state.value}:{refusal.value}"
+
+    def _refuse_resume(self, state: SessionState, today: dt.date, refusal: ResumeRefusal) -> bool:
+        """Log a resume refusal once per (date, state, reason); only AFTER_MARKET_ACTIVE pages because LS is due until EOD."""
+        key = (today, self._resume_refusal_key(state, refusal))
+        logged = self._state.resume_logged
+        if key not in logged:
+            logged.add(key)
+            if state is SessionState.AFTER_MARKET_ACTIVE:
+                logger.critical(
+                    "[DATA] stage=session_resume status=REFUSED reason=%s date=%s",
+                    refusal.value,
+                    today.isoformat(),
+                    extra=page(PageKind.REGULAR_FEED_DOWN),
+                )
+            else:
+                logger.info(
+                    "[DATA] stage=session_resume status=REFUSED reason=%s date=%s",
+                    refusal.value,
+                    today.isoformat(),
+                    extra=EVENT,
+                )
+        return False
 
     def _sync_degraded_mirror(self) -> None:
         self._state.degraded_active = self._children.regular_is_degraded

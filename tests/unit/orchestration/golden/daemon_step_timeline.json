@@ -35,6 +35,15 @@
           false
         ],
         [
+          "INFO",
+          "[DATA] stage=session_resume status=REFUSED reason=%s date=%s",
+          [
+            "manifest_missing",
+            "2026-09-16"
+          ],
+          true
+        ],
+        [
           "CRITICAL",
           "[DAEMON] stage=session status=FAIL reason=candidates_not_ready date=%s attempt=%d next_retry=%s",
           [
@@ -152,6 +161,9 @@
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
         "repair_expiry_paged": [],
+        "resume_logged": [
+          "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
+        ],
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
@@ -231,6 +243,9 @@
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
         "repair_expiry_paged": [],
+        "resume_logged": [
+          "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
+        ],
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
@@ -392,6 +407,9 @@
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
         "repair_expiry_paged": [],
+        "resume_logged": [
+          "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
+        ],
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
@@ -514,6 +532,9 @@
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
         "repair_expiry_paged": [],
+        "resume_logged": [
+          "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
+        ],
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
@@ -653,6 +674,9 @@
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
         "repair_expiry_paged": [],
+        "resume_logged": [
+          "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
+        ],
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
@@ -844,6 +868,9 @@
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
         "repair_expiry_paged": [],
+        "resume_logged": [
+          "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
+        ],
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
@@ -1039,6 +1066,9 @@
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
         "repair_expiry_paged": [],
+        "resume_logged": [
+          "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
+        ],
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
@@ -1294,6 +1324,9 @@
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
         "repair_expiry_paged": [],
+        "resume_logged": [
+          "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
+        ],
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
@@ -1402,6 +1435,9 @@
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
         "repair_expiry_paged": [],
+        "resume_logged": [
+          "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
+        ],
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
@@ -1531,6 +1567,9 @@
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
         "repair_expiry_paged": [],
+        "resume_logged": [
+          "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
+        ],
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
@@ -1686,6 +1725,9 @@
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
         "repair_expiry_paged": [],
+        "resume_logged": [
+          "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
+        ],
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
@@ -1831,6 +1873,9 @@
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
         "repair_expiry_paged": [],
+        "resume_logged": [
+          "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
+        ],
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
@@ -1879,6 +1924,15 @@
             "graceful"
           ],
           false
+        ],
+        [
+          "INFO",
+          "[DATA] stage=session_resume status=REFUSED reason=%s date=%s",
+          [
+            "candidates_rev_mismatch",
+            "2026-09-18"
+          ],
+          true
         ],
         [
           "INFO",
@@ -2035,6 +2089,10 @@
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
         "repair_expiry_paged": [],
+        "resume_logged": [
+          "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')",
+          "(datetime.date(2026, 9, 18), 'STREAMER_ACTIVE:candidates_rev_mismatch')"
+        ],
         "shard_budget_alerted": [],
         "shard_stale_restarts": 0,
         "shard_venue_wide_warned": [],
@@ -2087,6 +2145,9 @@
     "[DAEMON] stage=session status=FAIL reason=candidates_not_ready date=%s attempt=%d next_retry=%s",
     "[DAEMON] stage=session status=FAIL reason=orchestration_error error=%s",
     "[DAEMON] stage=session status=SKIP reason=market_holiday date=%s",
+    "[DATA] stage=session_resume status=OK date=%s rev=%d ls_shards=%d",
+    "[DATA] stage=session_resume status=REFUSED reason=%s date=%s",
+    "[DATA] stage=session_resume status=REFUSED reason=%s date=%s",
     "[DAEMON] stage=shutdown status=STOPPED signal=%s graceful=%d killed=%d not_running=%d",
     "[DAEMON] stage=snapshots status=FAIL reason=circuit_open",
     "[DAEMON] stage=snapshots status=RESTARTED exit_code=%s",
