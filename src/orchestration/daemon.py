@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import importlib
 import logging
@@ -13,11 +14,11 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Final
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -627,6 +628,40 @@ def _repair_overdue(
     return overdue
 
 
+_EOD_STEP_SESSION_AUDIT_LS: Final[str] = "session_audit_ls"
+_EOD_STEP_SESSION_AUDIT_KIS: Final[str] = "session_audit_kis"
+_EOD_STEP_HOUSEKEEPING_NORMALIZE: Final[str] = "housekeeping_normalize"
+_EOD_STEP_HOUSEKEEPING_OFFLOAD: Final[str] = "housekeeping_offload"
+_EOD_STEP_HOUSEKEEPING_VERIFIED_MAINTENANCE: Final[str] = "housekeeping_verified_maintenance"
+_EOD_STEP_HOUSEKEEPING_REMOTE_PURGE: Final[str] = "housekeeping_remote_purge"
+_EOD_STEP_RECONCILE_REGULAR: Final[str] = "reconcile_regular"
+_EOD_STEP_RECONCILE_CROSSCHECK: Final[str] = "reconcile_crosscheck"
+_EOD_STEP_BACKUP_CHECK: Final[str] = "backup_check"
+_EOD_STEP_REPAIR_SUMMARY: Final[str] = "repair_summary"
+
+
+_eod_clock: Callable[[], float] = time.monotonic
+
+
+@contextlib.contextmanager
+def _eod_step(step: str) -> Iterator[None]:
+    """Log one elapsed-time line for an EOD step; exceptions from the step propagate unchanged."""
+    started = _eod_clock()
+    status = "OK"
+    try:
+        yield
+    except BaseException:
+        status = "FAIL"
+        raise
+    finally:
+        logger.info(
+            "[DAEMON] stage=eod_step_timing step=%s status=%s elapsed_s=%.1f",
+            step,
+            status,
+            _eod_clock() - started,
+        )
+
+
 def _run_eod_housekeeping(
     cfg: CollectorSettings,
     paths: DataPaths,
@@ -661,17 +696,18 @@ def _run_eod_housekeeping(
     try:
         if disk_ok:
             _kw: dict[str, object] = {"hold": hold} if hold is not None else {}
-            deleted = run_eod_maintenance(
-                paths.journal_root,
-                retain_days=cfg.journal_retain_days,
-                today=ref_day,
-                archive_root=paths.archive_root,
-                quarantine_root=paths.quarantine_root,
-                work_root=paths.work_root,
-                verified_remote_l1=None,
-                progress=progress,
-                **_kw,  # type: ignore[arg-type]
-            )
+            with _eod_step(_EOD_STEP_HOUSEKEEPING_NORMALIZE):
+                deleted = run_eod_maintenance(
+                    paths.journal_root,
+                    retain_days=cfg.journal_retain_days,
+                    today=ref_day,
+                    archive_root=paths.archive_root,
+                    quarantine_root=paths.quarantine_root,
+                    work_root=paths.work_root,
+                    verified_remote_l1=None,
+                    progress=progress,
+                    **_kw,  # type: ignore[arg-type]
+                )
             if getattr(deleted, "failed", 0) > 0:
                 maintenance_ok = False
             held_paths.update(getattr(deleted, "held", frozenset()))
@@ -681,14 +717,15 @@ def _run_eod_housekeeping(
     offload: Any = {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
     offload_ok = True
     try:
-        offload = run_eod_offload(
-            paths.archive_root,
-            paths.manifest_dir,
-            retain_days=cfg.archive_retain_days,
-            reference_date=ref_day,
-            progress=progress,
-            journal_root=paths.journal_root,
-        )
+        with _eod_step(_EOD_STEP_HOUSEKEEPING_OFFLOAD):
+            offload = run_eod_offload(
+                paths.archive_root,
+                paths.manifest_dir,
+                retain_days=cfg.archive_retain_days,
+                reference_date=ref_day,
+                progress=progress,
+                journal_root=paths.journal_root,
+            )
     except RemoteArchiveError as e:
         offload_ok = False
         reason = classify_remote_failure(str(e))
@@ -707,19 +744,20 @@ def _run_eod_housekeeping(
             verified = offload.verified_remote_l1 if hasattr(offload, "verified_remote_l1") else frozenset()
             # 디스크 부족 시에도 원격 검증된 L0 는 정규화 없이 지워야 교착(수집 중단 + 공간 미확보)에서 스스로 회복한다.
             _kw2: dict[str, object] = {"hold": hold} if hold is not None else {}
-            post_deleted = run_eod_maintenance(
-                paths.journal_root,
-                retain_days=cfg.journal_retain_days,
-                today=ref_day,
-                archive_root=paths.archive_root,
-                quarantine_root=paths.quarantine_root,
-                work_root=paths.work_root,
-                verified_remote_l1=verified,
-                progress=progress,
-                normalize=disk_ok,
-                reuse_fresh_l1=True,
-                **_kw2,  # type: ignore[arg-type]
-            )
+            with _eod_step(_EOD_STEP_HOUSEKEEPING_VERIFIED_MAINTENANCE):
+                post_deleted = run_eod_maintenance(
+                    paths.journal_root,
+                    retain_days=cfg.journal_retain_days,
+                    today=ref_day,
+                    archive_root=paths.archive_root,
+                    quarantine_root=paths.quarantine_root,
+                    work_root=paths.work_root,
+                    verified_remote_l1=verified,
+                    progress=progress,
+                    normalize=disk_ok,
+                    reuse_fresh_l1=True,
+                    **_kw2,  # type: ignore[arg-type]
+                )
             if getattr(post_deleted, "failed", 0) > 0:
                 maintenance_ok = False
             deleted = int(deleted) + int(post_deleted)
@@ -727,12 +765,13 @@ def _run_eod_housekeeping(
             verified = verified - getattr(post_deleted, "invalidated_remote_l1", frozenset())
             verified = verified - getattr(post_deleted, "held", frozenset())
             try:
-                run_eod_remote_l0_purge(
-                    paths.journal_root,
-                    verified,
-                    progress=progress,
-                    quarantine_root=paths.quarantine_root,
-                )
+                with _eod_step(_EOD_STEP_HOUSEKEEPING_REMOTE_PURGE):
+                    run_eod_remote_l0_purge(
+                        paths.journal_root,
+                        verified,
+                        progress=progress,
+                        quarantine_root=paths.quarantine_root,
+                    )
             except Exception as exc:  # noqa: BLE001 - purge failure never fails EOD
                 logger.error("[DAEMON] stage=eod_l0_remote_purge status=FAIL error=%s", str(exc), exc_info=True)
         except (KrxAlphaError, OSError) as e:
@@ -4060,8 +4099,10 @@ class DaemonRunner:
         prearm_late = self._log_aftermarket_prearm(ref_day, anchors)
         zero_frame_symbols = self._log_aftermarket_coverage(ref_day)
         self._log_premarket_eod(ref_day)
-        audit = self._derive_session_audit(ref_day, day, anchors)
-        self._derive_kis_regular_audit(ref_day, day, anchors, ls_audit=audit)
+        with _eod_step(_EOD_STEP_SESSION_AUDIT_LS):
+            audit = self._derive_session_audit(ref_day, day, anchors)
+        with _eod_step(_EOD_STEP_SESSION_AUDIT_KIS):
+            self._derive_kis_regular_audit(ref_day, day, anchors, ls_audit=audit)
         repair_settings = getattr(self, "_repair_cfg", getattr(self._runtime, "repair", None))
         if repair_settings is not None and getattr(repair_settings, "hold_enabled", False):
             housekeeping = _run_eod_housekeeping(
@@ -4069,21 +4110,27 @@ class DaemonRunner:
             )
         else:
             housekeeping = _run_eod_housekeeping(cfg, paths, ref_day, progress=self._eod_progress)
-        reconcile_ok, reconciled = self._reconcile_regular_session(ref_day, day, anchors, audit=audit)
-        crosscheck = self._reconcile_crosscheck_sessions(ref_day, day, anchors)
-        backup_missing, backup_ok, host_backup = _check_backup(
-            cfg.host_backup_status_path,
-            paths,
-            ref_day,
-            now=now,
-            max_age=dt.timedelta(hours=cfg.host_backup_max_age_h),
-            page_after_days=cfg.backup_page_stale_days,
-        )
-        repair_days = _repair_days_summary(paths, ref_day, cfg, repair_settings)
-        overdue_days = _repair_overdue(paths, ref_day, cfg, repair_settings)
-        if overdue_days:
-            logger.critical("[DATA] stage=repair_overdue status=FAIL reason=stalled days=%s", ",".join(overdue_days))
-        self._page_repair_expiry(ref_day, repair_settings)
+        with _eod_step(_EOD_STEP_RECONCILE_REGULAR):
+            reconcile_ok, reconciled = self._reconcile_regular_session(ref_day, day, anchors, audit=audit)
+        with _eod_step(_EOD_STEP_RECONCILE_CROSSCHECK):
+            crosscheck = self._reconcile_crosscheck_sessions(ref_day, day, anchors)
+        with _eod_step(_EOD_STEP_BACKUP_CHECK):
+            backup_missing, backup_ok, host_backup = _check_backup(
+                cfg.host_backup_status_path,
+                paths,
+                ref_day,
+                now=now,
+                max_age=dt.timedelta(hours=cfg.host_backup_max_age_h),
+                page_after_days=cfg.backup_page_stale_days,
+            )
+        with _eod_step(_EOD_STEP_REPAIR_SUMMARY):
+            repair_days = _repair_days_summary(paths, ref_day, cfg, repair_settings)
+            overdue_days = _repair_overdue(paths, ref_day, cfg, repair_settings)
+            if overdue_days:
+                logger.critical(
+                    "[DATA] stage=repair_overdue status=FAIL reason=stalled days=%s", ",".join(overdue_days)
+                )
+            self._page_repair_expiry(ref_day, repair_settings)
         degraded_reasons = [
             name
             for name, failed in (

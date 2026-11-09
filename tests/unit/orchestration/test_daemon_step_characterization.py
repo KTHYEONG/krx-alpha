@@ -101,6 +101,7 @@ class _TimelineHarness:
             return _trading_day(day, business=True)
 
         monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", _resolve)
+        monkeypatch.setattr(daemon_mod, "_eod_clock", lambda: 0.0)
         monkeypatch.setattr(daemon_mod, "_kis_token_preflight", lambda *a, **k: {})
         monkeypatch.setattr(daemon_mod, "_build_kis_client", lambda *a, **k: object())
         monkeypatch.setattr(daemon_mod, "load_kis_data_credentials", lambda: ())

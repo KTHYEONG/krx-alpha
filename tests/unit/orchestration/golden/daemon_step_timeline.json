@@ -1240,6 +1240,66 @@
         ],
         [
           "INFO",
+          "[DAEMON] stage=eod_step_timing step=%s status=%s elapsed_s=%.1f",
+          [
+            "session_audit_ls",
+            "OK",
+            0.0
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=eod_step_timing step=%s status=%s elapsed_s=%.1f",
+          [
+            "session_audit_kis",
+            "OK",
+            0.0
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=eod_step_timing step=%s status=%s elapsed_s=%.1f",
+          [
+            "reconcile_regular",
+            "OK",
+            0.0
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=eod_step_timing step=%s status=%s elapsed_s=%.1f",
+          [
+            "reconcile_crosscheck",
+            "OK",
+            0.0
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=eod_step_timing step=%s status=%s elapsed_s=%.1f",
+          [
+            "backup_check",
+            "OK",
+            0.0
+          ],
+          false
+        ],
+        [
+          "INFO",
+          "[DAEMON] stage=eod_step_timing step=%s status=%s elapsed_s=%.1f",
+          [
+            "repair_summary",
+            "OK",
+            0.0
+          ],
+          false
+        ],
+        [
+          "INFO",
           "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=%s",
           [
             1,

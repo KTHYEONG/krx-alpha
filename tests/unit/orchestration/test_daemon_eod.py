@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import pytest
 from tests.unit.orchestration.daemon_fixtures import (
@@ -2472,3 +2473,135 @@ def test_nonbusiness_audit_derivation_skips_all_io(tmp_path, monkeypatch, status
     day = dt.date(2026, 9, 14)
     view = TradingDayView(date=day, status=TradingDayStatus[status], trading_day=None)
     assert runner._derive_session_audit(day, view, standard_session_anchors(day)) is None
+
+
+_BUSINESS_EOD_STEPS = (
+    "session_audit_ls",
+    "session_audit_kis",
+    "housekeeping_normalize",
+    "housekeeping_offload",
+    "housekeeping_verified_maintenance",
+    "housekeeping_remote_purge",
+    "reconcile_regular",
+    "reconcile_crosscheck",
+    "backup_check",
+    "repair_summary",
+)
+_HOLIDAY_EOD_STEPS = (
+    "housekeeping_normalize",
+    "housekeeping_offload",
+    "housekeeping_verified_maintenance",
+    "housekeeping_remote_purge",
+)
+_EOD_STEP_LINE = re.compile(r"stage=eod_step_timing step=(\S+) status=(\S+) elapsed_s=(\S+)")
+
+
+def _eod_step_lines(caplog) -> list[tuple[str, str, str]]:
+    matches = (_EOD_STEP_LINE.search(record.getMessage()) for record in caplog.records)
+    return [m.groups() for m in matches if m is not None]
+
+
+def _staged_eod_clock(monkeypatch, daemon_mod, steps: int) -> None:
+    """Step k spans k+1 seconds, so every step reports a distinct elapsed_s."""
+    ticks = iter([value for k in range(steps) for value in (k * 10.0, k * 10.0 + k + 1)])
+    monkeypatch.setattr(daemon_mod, "_eod_clock", lambda: next(ticks))
+
+
+def test_run_collector_daemon_eod_logs_timing_for_every_business_step(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    monkeypatch.setattr(
+        daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 14))
+    )
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(
+        daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
+    )
+    monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *a, **kw: 0)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **kw: ([], True, "ok"))
+    _staged_eod_clock(monkeypatch, daemon_mod, len(_BUSINESS_EOD_STEPS))
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(
+            settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time
+        )
+
+    lines = _eod_step_lines(caplog)
+    assert [step for step, _, _ in lines] == list(_BUSINESS_EOD_STEPS)
+    assert {status for _, status, _ in lines} == {"OK"}
+    assert [elapsed for _, _, elapsed in lines] == [f"{k + 1:.1f}" for k in range(len(_BUSINESS_EOD_STEPS))]
+
+
+def test_run_collector_daemon_holiday_eod_logs_only_housekeeping_timing(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", after_market_enabled=True)
+    holiday = _holiday_trading_day(dt.date(2026, 9, 24))
+    monkeypatch.setattr(daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: holiday)
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(
+        daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
+    )
+    monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *a, **kw: 0)
+    monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **kw: ([], True, "ok"))
+    _staged_eod_clock(monkeypatch, daemon_mod, len(_HOLIDAY_EOD_STEPS))
+    eod_time = dt.datetime(2026, 9, 24, 20, 5, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(
+            settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time
+        )
+
+    lines = _eod_step_lines(caplog)
+    assert [step for step, _, _ in lines] == list(_HOLIDAY_EOD_STEPS)
+    assert {status for _, status, _ in lines} == {"OK"}
+
+
+def test_run_collector_daemon_eod_step_failure_logs_fail_and_reraises(tmp_path, monkeypatch, caplog) -> None:
+    import datetime as dt
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    monkeypatch.setattr(
+        daemon_mod, "_resolve_trading_day_with_cache", lambda d, c, _a: _business_trading_day(dt.date(2026, 9, 14))
+    )
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", lambda *a, **kw: 0)
+    monkeypatch.setattr(
+        daemon_mod, "run_eod_offload", lambda *a, **kw: {"uploaded": 0, "skipped": 0, "failed": 0, "purged": 0}
+    )
+    monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *a, **kw: 0)
+
+    def _reconcile_boom(self, *a, **kw):
+        raise RuntimeError("reconcile boom")
+
+    monkeypatch.setattr(daemon_mod.DaemonRunner, "_reconcile_regular_session", _reconcile_boom)
+    _staged_eod_clock(monkeypatch, daemon_mod, len(_BUSINESS_EOD_STEPS))
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+
+    with caplog.at_level(logging.INFO), pytest.raises(RuntimeError, match="reconcile boom"):
+        daemon_mod.run_collector_daemon(
+            settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time
+        )
+
+    lines = _eod_step_lines(caplog)
+    assert lines[-1] == ("reconcile_regular", "FAIL", "7.0")
