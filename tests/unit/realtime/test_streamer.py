@@ -2419,3 +2419,122 @@ def test_regular_kis_silence_never_forces_reconnect_in_auctions() -> None:
         regular_kis_silence_limit_s(dt.datetime(2026, 10, 22, 10, 0, tzinfo=kst), anchors=anchors, limit_s=7.5)
         == 7.5
     )
+
+
+def _auth_rejected_streamer(clock: dict[str, int], slept: list[float]):
+    from src.realtime.contracts import VendorAuthRejected
+    from src.realtime.streamer import RealtimeStreamer
+
+    class _Adapter:
+        name = "ls"
+        capacity_pairs = 200
+
+        async def connect(self):
+            raise VendorAuthRejected("auth_rejected:403:IGW00103")
+
+        async def subscribe(self, pairs):
+            return []
+
+        async def recv(self):
+            raise AssertionError("unreachable")
+
+        async def aclose(self):
+            return None
+
+    class _Sink:
+        def record(self, f):
+            return None
+
+        def note_ack(self, v, a):
+            return None
+
+        def note_gap(self, symbol, start, end, reason):
+            return None
+
+        def flush(self):
+            return 0
+
+    async def _sleep(s):
+        slept.append(s)
+        clock["ns"] += int(s * 1e9)
+
+    streamer = RealtimeStreamer(
+        adapter=_Adapter(),
+        sink=_Sink(),
+        replay_pairs=[("005930", "H0STCNT0")],
+        backoff_max_s=60.0,
+        rng=lambda: 1.0,
+        wall_ns=lambda: clock["ns"],
+    )
+    return streamer, _sleep
+
+
+def test_outage_page_message_carries_lane_tags(caplog) -> None:
+    import asyncio
+    import logging
+
+    from src.core.alerts import PageKind, page_kind
+    from src.core.observability import set_process_identity
+
+    set_process_identity(vendor="kis", venue="nxt", shard="kis-nxt_after-1", slot="2", key_id="abcdef012345")
+    clock = {"ns": 0}
+    slept: list[float] = []
+    streamer, sleep = _auth_rejected_streamer(clock, slept)
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(streamer.run_forever(asyncio.Event(), max_cycles=1, backoff_s=100.0, sleep=sleep))
+
+    criticals = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert len(criticals) == 1
+    assert criticals[0].getMessage().endswith(" venue=nxt shard=kis-nxt_after-1 slot=2")
+    assert "key_id" not in caplog.text
+    assert "abcdef012345" not in caplog.text
+    assert page_kind(criticals[0]) is PageKind.STREAM_AUTH_REJECTED
+
+
+def test_other_stream_lines_carry_lane_tags(caplog) -> None:
+    import asyncio
+    import logging
+
+    from src.core.observability import set_process_identity
+
+    set_process_identity(vendor="kis", venue="nxt", shard="kis-nxt_after-1", slot="2")
+    clock = {"ns": 0}
+    slept: list[float] = []
+    streamer, sleep = _auth_rejected_streamer(clock, slept)
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(streamer.run_forever(asyncio.Event(), max_cycles=2, backoff_s=100.0, sleep=sleep))
+        streamer._outage = (0, "auth_rejected")
+        streamer._outage_alerted = True
+        streamer._close_outage(10**9, recovered=True)
+
+    suffix = " venue=nxt shard=kis-nxt_after-1 slot=2"
+    lane_lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "stage=stream_disconnect" in r.getMessage()
+        or "stage=stream_gap" in r.getMessage()
+        or "status=RECOVERED" in r.getMessage()
+    ]
+    assert any("stage=stream_disconnect" in m for m in lane_lines)
+    assert any("stage=stream_gap" in m for m in lane_lines)
+    assert any("status=RECOVERED" in m for m in lane_lines)
+    assert all(m.endswith(suffix) for m in lane_lines)
+
+
+def test_no_identity_leaves_stream_lines_unsuffixed(caplog) -> None:
+    import asyncio
+    import logging
+
+    clock = {"ns": 0}
+    slept: list[float] = []
+    streamer, sleep = _auth_rejected_streamer(clock, slept)
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(streamer.run_forever(asyncio.Event(), max_cycles=1, backoff_s=100.0, sleep=sleep))
+
+    criticals = [r.getMessage() for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert len(criticals) == 1
+    assert criticals[0].endswith("consecutive_failures=1")
+    assert "venue=" not in caplog.text

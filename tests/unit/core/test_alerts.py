@@ -718,3 +718,142 @@ def test_ls_shard_pages_reserve_per_shard_and_repeat_suppressed() -> None:
     assert len(calls) == 2
     assert "[ls-00]" in calls[0]
     assert "[ls-01]" in calls[1]
+
+
+_LANE_CRITICAL = (
+    "[DATA] stage=stream_outage status=CRITICAL reason=auth_rejected detail=auth_rejected:403 "
+    "outage_s={outage} consecutive_failures={failures} venue=nxt shard={shard} slot={slot}"
+)
+
+
+def _lane_record(shard: str, slot: str, *, outage: int = 300, failures: int = 5, resolved: bool = False):
+    import logging
+
+    from src.core.alerts import PageKind, page, page_resolved
+
+    if resolved:
+        message = (
+            f"[DATA] stage=stream_outage status=RECOVERED reason=auth_rejected outage_s={outage} "
+            f"venue=nxt shard={shard} slot={slot}"
+        )
+        level, extras = logging.WARNING, page_resolved(PageKind.STREAM_AUTH_REJECTED)
+    else:
+        message = _LANE_CRITICAL.format(outage=outage, failures=failures, shard=shard, slot=slot)
+        level, extras = logging.CRITICAL, page(PageKind.STREAM_AUTH_REJECTED)
+    record = logging.LogRecord("x", level, __file__, 1, message, (), None)
+    record.__dict__.update(extras)
+    return record
+
+
+def _lane_handler(calls: list[tuple[str, str]], ledger):
+    import datetime as dt
+
+    from src.core.alerts import EmailAlertHandler
+
+    return EmailAlertHandler(
+        component="daemon",
+        run_id="r",
+        sender=lambda s, b: calls.append((s, b)),
+        cooldown_s=0,
+        today=lambda: dt.date(2026, 11, 9),
+        sleep=lambda s: None,
+        per_key_daily_cap=1,
+        ledger=ledger,
+    )
+
+
+def test_two_shards_two_page_keys() -> None:
+    from src.core.alerts import InMemoryAlertLedger, alert_dedup_key
+
+    first = _lane_record("kis-nxt_after-0", "2")
+    second = _lane_record("kis-nxt_after-1", "3")
+    assert alert_dedup_key(first.getMessage()) != alert_dedup_key(second.getMessage())
+
+    calls: list[tuple[str, str]] = []
+    ledger = InMemoryAlertLedger()
+    _lane_handler(calls, ledger).handle(first)
+    _lane_handler(calls, ledger).handle(second)
+    assert len(calls) == 2
+
+
+def test_same_lane_repeat_suppressed() -> None:
+    from src.core.alerts import InMemoryAlertLedger
+
+    calls: list[tuple[str, str]] = []
+    handler = _lane_handler(calls, InMemoryAlertLedger())
+    handler.handle(_lane_record("kis-nxt_after-0", "2", outage=300, failures=5))
+    handler.handle(_lane_record("kis-nxt_after-0", "2", outage=600, failures=9))
+    assert len(calls) == 1
+
+
+def test_resolved_key_and_body_per_lane() -> None:
+    from src.core.alerts import InMemoryAlertLedger
+
+    calls: list[tuple[str, str]] = []
+    ledger = InMemoryAlertLedger()
+    first = _lane_handler(calls, ledger)
+    second = _lane_handler(calls, ledger)
+    first.handle(_lane_record("kis-nxt_after-0", "2"))
+    second.handle(_lane_record("kis-nxt_after-1", "3"))
+    first.handle(_lane_record("kis-nxt_after-0", "2", resolved=True))
+    second.handle(_lane_record("kis-nxt_after-1", "3", resolved=True))
+
+    resolved = [(s, b) for s, b in calls if s.startswith("[해결됨]")]
+    assert len(resolved) == 2
+    assert "[nxt kis-nxt_after-0 2]" in resolved[0][1]
+    assert "[nxt kis-nxt_after-1 3]" in resolved[1][1]
+    for _, body in resolved:
+        assert len(body.splitlines()) == 1
+        assert body.startswith("해결됨: ")
+
+
+def test_long_detail_keeps_lane_tags_in_dedup_key() -> None:
+    from src.core.alerts import alert_dedup_key
+
+    detail = "x" * 120
+    base = (
+        f"[DATA] stage=stream_outage status=CRITICAL reason=auth_rejected detail={detail} "
+        "outage_s=300 consecutive_failures=5 venue=nxt"
+    )
+    first = alert_dedup_key(f"{base} shard=kis-nxt_after-0 slot=2")
+    second = alert_dedup_key(f"{base} shard=kis-nxt_after-1 slot=3")
+    assert first != second
+    assert "shard=kis-nxt_after-0" in first
+    assert "shard=kis-nxt_after-1" in second
+
+
+def test_short_message_dedup_key_unchanged() -> None:
+    from src.core.alerts import alert_dedup_key
+
+    assert alert_dedup_key(
+        "[DATA] stage=stream_outage status=CRITICAL reason=auth_rejected detail=auth_rejected:403 "
+        "outage_s=300 consecutive_failures=5 venue=nxt shard=kis-nxt_after-0 slot=2"
+    ) == (
+        "[DATA] stage=stream_outage status=CRITICAL reason=auth_rejected detail=auth_rejected:# "
+        "outage_s=# consecutive_failures=# venue=nxt shard=kis-nxt_after-0 slot=2"
+    )
+    assert alert_dedup_key("[DATA] stage=x status=CRITICAL outage_s=300 shard=krx-1") == (
+        "[DATA] stage=x status=CRITICAL outage_s=# shard=krx-1"
+    )
+
+
+def test_dedup_key_never_exceeds_limit() -> None:
+    from src.core.alerts import alert_dedup_key
+
+    long_message = "[DATA] " + " ".join(f"f{i}=abc" for i in range(80)) + " shard=kis-nxt_after-1 slot=2"
+    key = alert_dedup_key(long_message)
+    assert len(key) <= 200
+    assert "shard=kis-nxt_after-1" in key
+    assert "slot=2" in key
+    crowded = " ".join(f"slot=s{i:02d}" for i in range(60))
+    crowded_key = alert_dedup_key(f"[DATA] stage=x {crowded}")
+    assert len(crowded_key) <= 200
+    assert crowded_key.startswith("slot=s00")
+
+
+def test_long_message_without_identifier_keeps_plain_cut() -> None:
+    from src.core.alerts import alert_dedup_key
+
+    message = "[DATA] " + " ".join(f"w{i}" for i in range(80))
+    key = alert_dedup_key(message)
+    assert key == message[:200]

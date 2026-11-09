@@ -38,6 +38,7 @@ _KST = ZoneInfo("Asia/Seoul")
 _NUMERIC_RE = re.compile(r"(?<![A-Za-z0-9_])[0-9][0-9\.,/:\-]*(?![A-Za-z0-9_])")
 _IDENTIFIER_RE = re.compile(r"(?<![A-Za-z0-9_])(?:shard|slot|venue)=[A-Za-z0-9:_-]{1,24}(?![A-Za-z0-9:_-])")
 _PAGE_IDENTIFIER_MAX_CHARS = 64
+_ALERT_KEY_MAX_CHARS = 200
 _ALERT_LEDGER_SCHEMA_VERSION = 2
 _DEGRADED_PID: int | None = None
 _DEGRADED_LOCK = threading.Lock()
@@ -52,16 +53,27 @@ def alert_dedup_key(message: str) -> str:
     over digits and the characters ``. , / : -``; each is replaced by ``#``. Identifiers that
     embed digits (``H0STCNT0``, ``0035S0``) are preserved so distinct streams keep distinct keys.
     ``shard=``, ``slot=`` and ``venue=`` values are kept verbatim so distinct lanes never share a key.
-    The result is truncated to 200 characters after substitution.
+    A key over 200 characters is cut, but all identifier tokens are re-appended after a ``|``
+    so a long message cannot push its lane tags out of the key.
     """
     parts: list[str] = []
+    identifiers: list[str] = []
     cursor = 0
     for match in _IDENTIFIER_RE.finditer(message):
         parts.append(_NUMERIC_RE.sub("#", message[cursor : match.start()]))
         parts.append(match.group())
+        identifiers.append(match.group())
         cursor = match.end()
     parts.append(_NUMERIC_RE.sub("#", message[cursor:]))
-    return "".join(parts)[:200]
+    key = "".join(parts)
+    if len(key) <= _ALERT_KEY_MAX_CHARS:
+        return key
+    ids = " ".join(identifiers)
+    if not ids:
+        return key[:_ALERT_KEY_MAX_CHARS]
+    if len(ids) >= _ALERT_KEY_MAX_CHARS - 1:
+        return ids[:_ALERT_KEY_MAX_CHARS]
+    return key[: _ALERT_KEY_MAX_CHARS - len(ids) - 1] + "|" + ids
 
 
 def page_identifier(message: str) -> str:
@@ -567,7 +579,9 @@ def format_resolved_subject(kind: PageKind, *, bot_name: str = PAGE_BOT_NAME) ->
 
 
 def format_resolved_body(kind: PageKind, record: logging.LogRecord) -> str:
-    return f"해결됨: {PAGE_TEXTS[kind].summary} 상태가 복구됨 ({_kst_clock(record)} KST)"
+    identifier = page_identifier(record.getMessage())
+    summary = f"{PAGE_TEXTS[kind].summary} [{identifier}]" if identifier else PAGE_TEXTS[kind].summary
+    return f"해결됨: {summary} 상태가 복구됨 ({_kst_clock(record)} KST)"
 
 
 class EmailAlertHandler(logging.Handler):
@@ -662,9 +676,9 @@ class EmailAlertHandler(logging.Handler):
         if cleared is None or cleared not in self._open_pages:
             return
         self._open_pages.discard(cleared)
-        self._deliver(
-            f"resolved:{cleared.value}", format_resolved_subject(cleared), format_resolved_body(cleared, record)
-        )
+        identifier = page_identifier(record.getMessage())
+        key = f"resolved:{cleared.value}:{identifier}" if identifier else f"resolved:{cleared.value}"
+        self._deliver(key, format_resolved_subject(cleared), format_resolved_body(cleared, record))
 
     def _deliver(self, key: str, subject: str, body: str) -> bool:
         day = self._today()

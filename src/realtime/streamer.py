@@ -14,7 +14,7 @@ from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from src.core.errors import KrxAlphaError
-from src.core.observability import EVENT, PageKind, page, page_resolved
+from src.core.observability import EVENT, PageKind, page, page_resolved, process_identity_tags
 from src.core.session_anchors import (
     STANDARD_KRX_AFTER_MARKET_OPEN,
     STANDARD_NXT_AFTER_MARKET_OPEN,
@@ -241,17 +241,19 @@ class RealtimeStreamer:
         for sym in symbols:
             self._sink.note_gap(sym, start_ns, end_ns, reason)
         logger.warning(
-            "[DATA] stage=stream_gap reason=%s gap_ms=%d symbols=%d",
+            "[DATA] stage=stream_gap reason=%s gap_ms=%d symbols=%d%s",
             reason,
             (end_ns - start_ns) // 1_000_000,
             len(symbols),
+            process_identity_tags(),
         )
         if self._outage_alerted:
             logger.warning(
-                "[DATA] stage=stream_outage status=%s reason=%s outage_s=%d",
+                "[DATA] stage=stream_outage status=%s reason=%s outage_s=%d%s",
                 "RECOVERED" if recovered else "UNRESOLVED",
                 reason,
                 (end_ns - start_ns) // 1_000_000_000,
+                process_identity_tags(),
                 extra=page_resolved(self._outage_page) if recovered and self._outage_page is not None else None,
             )
             self._outage_alerted = False
@@ -479,13 +481,14 @@ class RealtimeStreamer:
             delay = min(cap, backoff_s * 2 ** (self._failures - 1)) * (0.5 + self._rng() / 2)
             logger.warning(
                 "[DATA] stage=stream_disconnect reason=%s frames=%d consecutive_failures=%d backoff_s=%.2f "
-                "last_frame_age_s=%s last_pingpong_age_s=%s pingpongs=%s detail=%s",
+                "last_frame_age_s=%s last_pingpong_age_s=%s pingpongs=%s detail=%s%s",
                 stream_disconnect_reason(reason, self._last_disconnect_detail) if self._adapter.name == "ls" else reason,
                 self._last_pump_frames,
                 self._failures,
                 delay,
                 *self._disconnect_log_fields(),
                 self._last_disconnect_detail or "na",
+                process_identity_tags(),
             )
             if not self._outage_alerted:
                 outage_s = (self._wall_ns() - self._outage[0]) / 1e9
@@ -495,11 +498,12 @@ class RealtimeStreamer:
                         PageKind.STREAM_AUTH_REJECTED if reason == "auth_rejected" else PageKind.STREAM_OUTAGE
                     )
                     logger.critical(
-                        "[DATA] stage=stream_outage status=CRITICAL reason=%s detail=%s outage_s=%d consecutive_failures=%d",
+                        "[DATA] stage=stream_outage status=CRITICAL reason=%s detail=%s outage_s=%d consecutive_failures=%d%s",
                         reason,
                         self._last_disconnect_detail,
                         int(outage_s),
                         self._failures,
+                        process_identity_tags(),
                         extra=page(self._outage_page),
                     )
                     self._outage_alerted = True
