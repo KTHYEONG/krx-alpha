@@ -2538,3 +2538,149 @@ def test_no_identity_leaves_stream_lines_unsuffixed(caplog) -> None:
     assert len(criticals) == 1
     assert criticals[0].endswith("consecutive_failures=1")
     assert "venue=" not in caplog.text
+
+
+def _auth_rejected_adapter():
+    from src.realtime.contracts import VendorAuthRejected
+
+    class _Adapter:
+        name = "ls"
+        capacity_pairs = 200
+
+        async def connect(self):
+            raise VendorAuthRejected("auth_rejected:403:EGW00103")
+
+        async def subscribe(self, pairs):
+            return []
+
+        async def recv(self):
+            raise AssertionError("unreachable")
+
+        async def aclose(self):
+            return None
+
+    return _Adapter()
+
+
+def _recording_sink():
+    class _Sink:
+        def __init__(self):
+            self.gaps = []
+
+        def record(self, f):
+            return None
+
+        def note_ack(self, v, a):
+            return None
+
+        def note_gap(self, symbol, start, end, reason):
+            self.gaps.append((symbol, start, end, reason))
+
+        def flush(self):
+            return 0
+
+    return _Sink()
+
+
+def test_sigterm_during_auth_backoff_returns_promptly_with_single_unresolved_outage(caplog) -> None:
+    import asyncio
+    import logging
+
+    from src.realtime.streamer import RealtimeStreamer
+
+    sink = _recording_sink()
+    streamer = RealtimeStreamer(
+        adapter=_auth_rejected_adapter(),
+        sink=sink,
+        replay_pairs=[("005930", "H0STCNT0")],
+        rng=lambda: 1.0,
+        wall_ns=lambda: 0,
+    )
+    stop = asyncio.Event()
+
+    async def _stop_during_backoff() -> None:
+        await asyncio.sleep(0.05)
+        stop.set()
+
+    async def _main() -> None:
+        stopper = asyncio.create_task(_stop_during_backoff())
+        await asyncio.wait_for(streamer.run_forever(stop, backoff_s=100.0), timeout=3)
+        await stopper
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(_main())
+
+    assert len(sink.gaps) == 1
+    assert sink.gaps[0][0] == "005930"
+    assert sink.gaps[0][3] == "auth_rejected"
+    unresolved = [r for r in caplog.records if "stage=stream_outage status=UNRESOLVED" in r.getMessage()]
+    assert len(unresolved) == 1
+    assert unresolved[0].levelno == logging.WARNING
+
+
+def test_default_backoff_sleep_waits_full_delay_when_not_stopped() -> None:
+    import asyncio
+    import time
+
+    from src.realtime.streamer import _sleep_unless_stopped
+
+    async def _main() -> float:
+        started = time.monotonic()
+        await _sleep_unless_stopped(asyncio.Event(), 0.05)
+        return time.monotonic() - started
+
+    elapsed = asyncio.run(_main())
+    assert elapsed >= 0.04
+
+
+def test_backoff_sleep_helper_returns_immediately_when_stopped_or_nonpositive() -> None:
+    import asyncio
+
+    from src.realtime.streamer import _sleep_unless_stopped
+
+    async def _main() -> None:
+        stopped = asyncio.Event()
+        stopped.set()
+        await asyncio.wait_for(_sleep_unless_stopped(stopped, 5.0), timeout=1)
+        await asyncio.wait_for(_sleep_unless_stopped(asyncio.Event(), 0.0), timeout=1)
+        await asyncio.wait_for(_sleep_unless_stopped(asyncio.Event(), -1.0), timeout=1)
+
+    asyncio.run(_main())
+
+
+def test_backoff_sleep_helper_yields_once_for_nonpositive_delay() -> None:
+    import asyncio
+
+    from src.realtime.streamer import _sleep_unless_stopped
+
+    async def _main() -> bool:
+        stop = asyncio.Event()
+        asyncio.get_running_loop().call_soon(stop.set)
+        await _sleep_unless_stopped(asyncio.Event(), 0.0)
+        return stop.is_set()
+
+    assert asyncio.run(_main()) is True
+
+
+def test_injected_sleep_is_awaited_once_per_failed_cycle() -> None:
+    import asyncio
+
+    from src.realtime.streamer import RealtimeStreamer
+
+    slept: list[float] = []
+
+    async def _sleep(s):
+        slept.append(s)
+
+    streamer = RealtimeStreamer(
+        adapter=_auth_rejected_adapter(),
+        sink=_recording_sink(),
+        replay_pairs=[("005930", "H0STCNT0")],
+        backoff_max_s=60.0,
+        rng=lambda: 1.0,
+        wall_ns=lambda: 0,
+    )
+
+    asyncio.run(streamer.run_forever(asyncio.Event(), max_cycles=3, backoff_s=1.0, sleep=_sleep))
+
+    assert slept == [1.0, 2.0]

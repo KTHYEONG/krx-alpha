@@ -165,8 +165,8 @@ INGEST_WATCH_START_OFFSET: dt.timedelta = dt.timedelta(minutes=5)
 INGEST_WATCH_END_OFFSET: dt.timedelta = dt.timedelta(minutes=5)
 FIRST_FRAME_LEAD: dt.timedelta = dt.timedelta(minutes=30)
 FIRST_FRAME_GRACE: dt.timedelta = dt.timedelta(minutes=5)
-# 컴포즈 stop_grace_period(30s) 안에 자식 정상종료 + 로그 flush 를 끝내기 위한 공유 데드라인.
-SHUTDOWN_CHILD_DEADLINE_S: float = 20.0
+# Shared deadline for graceful child exit plus journal flush; must leave at least 45 s of the 95 s compose stop_grace_period for sync/nightly children and the final log flush.
+SHUTDOWN_CHILD_DEADLINE_S: float = 45.0
 HOLIDAY_SLEEP_CAP_S: float = 3600.0
 PROGRAM_SYNC_POLL_S: float = 60.0
 NIGHTLY_OVERRUN_GRACE_S: float = 120.0
@@ -1875,7 +1875,7 @@ class DaemonRunner:
             if self._children.nightly_job is not None
             else "nightly_unknown"
         )
-        # 모든 자식에 먼저 SIGTERM 을 보내 대기를 겹쳐야 compose 30s 유예 안에 끝난다 (순차 대기 시 최대 40s).
+        # 모든 자식에 먼저 SIGTERM 을 보내 대기를 겹쳐야 compose 유예(stop_grace_period) 안에 끝난다.
         started = time.monotonic()
         if sync_running:
             assert sync is not None

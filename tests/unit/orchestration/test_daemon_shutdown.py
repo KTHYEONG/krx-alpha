@@ -227,7 +227,7 @@ def test_shutdown_deadline_fits_compose_grace() -> None:
     raw = yaml.safe_load(pathlib.Path("docker-compose.yml").read_text(encoding="utf-8"))
     grace_raw = raw["services"]["krx-collector"]["stop_grace_period"]
     grace_s = float(str(grace_raw).rstrip("s"))
-    assert grace_s >= SHUTDOWN_CHILD_DEADLINE_S + 5
+    assert grace_s >= SHUTDOWN_CHILD_DEADLINE_S + 45
 
 
 def test_main_handler_falls_back_to_numeric_signal_name(monkeypatch) -> None:

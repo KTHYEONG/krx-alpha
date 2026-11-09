@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import logging
 import random
@@ -97,6 +98,14 @@ def regular_kis_silence_limit_s(
     if anchors.regular_open <= now.astimezone(_KST).time() < anchors.closing_auction_start:
         return limit_s
     return None
+
+
+async def _sleep_unless_stopped(stop: asyncio.Event, delay_s: float) -> None:
+    if delay_s <= 0:
+        await asyncio.sleep(0)
+        return
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(stop.wait(), timeout=delay_s)
 
 
 class FrameSink(Protocol):
@@ -509,5 +518,8 @@ class RealtimeStreamer:
                     self._outage_alerted = True
             if (max_cycles is not None and cycle >= max_cycles) or stop.is_set():
                 break
-            await (sleep or asyncio.sleep)(delay)
+            if sleep is not None:
+                await sleep(delay)
+            else:
+                await _sleep_unless_stopped(stop, delay)
         self._close_outage(self._wall_ns(), recovered=False)
