@@ -20,6 +20,7 @@ from src.core.alerts import (
     FileAlertLedger,
     InMemoryAlertLedger,
     alert_dedup_key,
+    page_identifier,
 )
 
 DAY = dt.date(2026, 10, 5)
@@ -100,6 +101,71 @@ def test_dedup_keeps_distinct_kinds_apart() -> None:
 
 def test_dedup_bounded() -> None:
     assert len(alert_dedup_key("x" * 5000)) <= 200
+
+
+def test_two_shards_two_keys() -> None:
+    base = "[DATA] stage=regular_kis_stream status=FAIL reason=circuit_open shard=krx-00 date=2026-11-09"
+    other = base.replace("krx-00", "krx-02")
+    assert alert_dedup_key(base) != alert_dedup_key(other)
+    assert alert_dedup_key(base) == alert_dedup_key(base.replace("2026-11-09", "2026-11-10"))
+    counted = base + " rows=123"
+    assert alert_dedup_key(counted) == alert_dedup_key(counted.replace("rows=123", "rows=4567"))
+
+
+def test_ls_shards_and_slots_split_keys() -> None:
+    shard0 = "[DATA] stage=ls_shard_stream status=FAIL reason=circuit_open shard=0 silent_s=61 limit_s=120"
+    shard1 = shard0.replace("shard=0", "shard=1")
+    slot1 = "[DATA] stage=regular_kis_dynamic status=FAIL reason=circuit_open slot=1 max_restarts=3"
+    slot2 = slot1.replace("slot=1", "slot=2")
+    assert alert_dedup_key(shard0) != alert_dedup_key(shard1)
+    assert alert_dedup_key(slot1) != alert_dedup_key(slot2)
+    assert alert_dedup_key(shard0) == alert_dedup_key(shard0.replace("silent_s=61", "silent_s=999"))
+
+
+def test_stale_budget_key_still_collapses_per_venue() -> None:
+    a = "[DATA] stage=shard_watchdog status=FAIL reason=stale_budget_exhausted key=nxt:0 silent_s=240"
+    b = "[DATA] stage=shard_watchdog status=FAIL reason=stale_budget_exhausted key=nxt:1 silent_s=980"
+    assert alert_dedup_key(a) == alert_dedup_key(b)
+    assert alert_dedup_key(a) != alert_dedup_key(a.replace("nxt:0", "krx:0"))
+
+
+def test_venue_identifier_kept_verbatim() -> None:
+    krx = "[DATA] stage=aftermarket_plan status=MISSING venue=krx date=2026-11-09"
+    nxt = krx.replace("venue=krx", "venue=nxt")
+    assert "venue=krx" in alert_dedup_key(krx)
+    assert alert_dedup_key(krx) != alert_dedup_key(nxt)
+
+
+def test_no_identifier_keys_unchanged() -> None:
+    assert alert_dedup_key("[DATA] stage=quality tr_id=H0STCNT0 rows=123 ratio=0.30 dt=2026-10-04") == (
+        "[DATA] stage=quality tr_id=H0STCNT0 rows=# ratio=# dt=#"
+    )
+    assert alert_dedup_key("[DATA] stage=x rows=123") == "[DATA] stage=x rows=#"
+
+
+def test_secret_like_fields_never_whitelisted() -> None:
+    msg = (
+        "[SYS] key=nxt:0 api_key=abc123 app_key=SECRETVALUE123 token=abc "
+        "credential_key_id=5f140fb8f656 shard=krx-00"
+    )
+    key = alert_dedup_key(msg)
+    assert "SECRETVALUE123" in key
+    assert "abc123" in key
+    assert "key=nxt:#" in key
+    assert page_identifier(msg) == "krx-00"
+    assert page_identifier("[SYS] api_key=abc123 token=abc key=nxt:0 credential_key_id=5f140fb8f656") == ""
+    assert page_identifier(f"[DATA] shard={'a' * 25}") == ""
+    assert page_identifier(f"[DATA] shard={'a' * 24}") == "a" * 24
+
+
+def test_page_identifier_extraction() -> None:
+    assert page_identifier("[DATA] stage=x shard=krx-00") == "krx-00"
+    assert page_identifier("[DATA] stage=x shard=krx-00 shard=krx-00 slot=3") == "krx-00 3"
+    assert page_identifier("[DATA] stage=x rows=123") == ""
+    assert page_identifier("shard=" + "k" * 30) == ""
+    long = " ".join(f"shard=id{i:03d}" for i in range(40))
+    assert len(page_identifier(long)) <= 64
+    assert page_identifier("") == ""
 
 
 def test_limits_validate() -> None:

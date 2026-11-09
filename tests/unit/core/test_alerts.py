@@ -465,6 +465,80 @@ def test_shard_dedup_key_by_venue_not_index_or_timing() -> None:
     assert a != c
 
 
+def test_handler_second_shard_reserves_its_own_mail() -> None:
+    import datetime as dt
+
+    from src.core.alerts import EmailAlertHandler, PageKind, page
+
+    calls: list[str] = []
+    handler = EmailAlertHandler(
+        component="daemon",
+        run_id="r",
+        sender=lambda s, b: calls.append(b),
+        cooldown_s=0,
+        today=lambda: dt.date(2026, 11, 9),
+        sleep=lambda s: None,
+        per_key_daily_cap=1,
+    )
+
+    def _shard(shard: str) -> None:
+        import logging
+
+        record = logging.LogRecord(
+            "x",
+            logging.CRITICAL,
+            __file__,
+            1,
+            f"[DATA] stage=regular_kis_stream status=FAIL reason=circuit_open shard={shard} date=2026-11-09",
+            (),
+            None,
+        )
+        record.__dict__.update(page(PageKind.REGULAR_FEED_DOWN))
+        handler.handle(record)
+
+    _shard("krx-00")
+    _shard("krx-02")
+    _shard("krx-00")
+    assert len(calls) == 2
+    assert "[krx-00]" in calls[0]
+    assert "[krx-02]" in calls[1]
+
+
+def test_body_names_identifier_and_stays_three_lines() -> None:
+    import logging
+
+    from src.core.alerts import PageKind, format_page_body, page
+
+    record = logging.LogRecord(
+        "x",
+        logging.CRITICAL,
+        __file__,
+        1,
+        "[DATA] stage=regular_kis_stream status=FAIL reason=circuit_open shard=krx-02 path=/srv/x",
+        (),
+        None,
+    )
+    record.__dict__.update(page(PageKind.REGULAR_FEED_DOWN))
+    lines = format_page_body(PageKind.REGULAR_FEED_DOWN, record).splitlines()
+    assert len(lines) == 3
+    assert [line.split(": ", 1)[0] for line in lines] == ["무슨 일", "자동 조치", "지금 할 일"]
+    assert "[krx-02] (" in lines[0]
+    assert lines[0].endswith(" KST)")
+    assert "/srv" not in "\n".join(lines)
+
+
+def test_body_without_identifier_is_unchanged() -> None:
+    import logging
+
+    from src.core.alerts import PAGE_TEXTS, PageKind, format_page_body, page
+
+    record = logging.LogRecord("x", logging.CRITICAL, __file__, 1, "[DATA] stage=x rows=123", (), None)
+    record.__dict__.update(page(PageKind.DISK_LOW))
+    lines = format_page_body(PageKind.DISK_LOW, record).splitlines()
+    assert lines[0].startswith(f"무슨 일: {PAGE_TEXTS[PageKind.DISK_LOW].summary} (")
+    assert "[" not in lines[0]
+
+
 def test_shard_budget_daily_cap_respected(caplog) -> None:
     import datetime as dt
     import logging

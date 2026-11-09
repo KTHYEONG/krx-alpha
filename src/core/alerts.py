@@ -36,6 +36,8 @@ ALERT_RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 8.0)
 
 _KST = ZoneInfo("Asia/Seoul")
 _NUMERIC_RE = re.compile(r"(?<![A-Za-z0-9_])[0-9][0-9\.,/:\-]*(?![A-Za-z0-9_])")
+_IDENTIFIER_RE = re.compile(r"(?<![A-Za-z0-9_])(?:shard|slot|venue)=[A-Za-z0-9:_-]{1,24}(?![A-Za-z0-9:_-])")
+_PAGE_IDENTIFIER_MAX_CHARS = 64
 _ALERT_LEDGER_SCHEMA_VERSION = 2
 _DEGRADED_PID: int | None = None
 _DEGRADED_LOCK = threading.Lock()
@@ -49,9 +51,27 @@ def alert_dedup_key(message: str) -> str:
     with a digit, is not immediately preceded by a letter, digit or underscore, and continues
     over digits and the characters ``. , / : -``; each is replaced by ``#``. Identifiers that
     embed digits (``H0STCNT0``, ``0035S0``) are preserved so distinct streams keep distinct keys.
+    ``shard=``, ``slot=`` and ``venue=`` values are kept verbatim so distinct lanes never share a key.
     The result is truncated to 200 characters after substitution.
     """
-    return _NUMERIC_RE.sub("#", message)[:200]
+    parts: list[str] = []
+    cursor = 0
+    for match in _IDENTIFIER_RE.finditer(message):
+        parts.append(_NUMERIC_RE.sub("#", message[cursor : match.start()]))
+        parts.append(match.group())
+        cursor = match.end()
+    parts.append(_NUMERIC_RE.sub("#", message[cursor:]))
+    return "".join(parts)[:200]
+
+
+def page_identifier(message: str) -> str:
+    """Return the distinct ``shard``/``slot``/``venue`` values of a message, space-joined, ``""`` if none."""
+    values: list[str] = []
+    for match in _IDENTIFIER_RE.finditer(message):
+        value = match.group().partition("=")[2]
+        if value not in values:
+            values.append(value)
+    return " ".join(values)[:_PAGE_IDENTIFIER_MAX_CHARS]
 
 
 @dataclass(frozen=True)
@@ -525,9 +545,11 @@ def format_page_body(kind: PageKind, record: logging.LogRecord) -> str:
     action = text.operator_action
     if isinstance(deadline, dt.date):
         action = f"{action} (기한: {deadline.isoformat()})"
+    identifier = page_identifier(record.getMessage())
+    summary = f"{text.summary} [{identifier}]" if identifier else text.summary
     return "\n".join(
         [
-            f"무슨 일: {text.summary} ({_kst_clock(record)} KST)",
+            f"무슨 일: {summary} ({_kst_clock(record)} KST)",
             f"자동 조치: {text.auto_action}",
             f"지금 할 일: {action}",
         ]
@@ -717,6 +739,7 @@ __all__ = [
     "gmail_sender",
     "is_alert_record",
     "page",
+    "page_identifier",
     "page_kind",
     "page_resolved",
     "resolved_kind",
