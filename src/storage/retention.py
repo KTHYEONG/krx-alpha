@@ -9,6 +9,7 @@ import re
 import shutil
 from collections.abc import Callable
 from collections.abc import Set as AbstractSet
+from typing import Final
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _KST = ZoneInfo("Asia/Seoul")
 _DT_RE = re.compile(r"dt=(\d{4})-(\d{2})-(\d{2})")
+HISTORY_MINUTE_RETAIN_DAYS: Final[int] = 400
 
 __all__ = [
     "_BATCH_BYTES",
@@ -292,14 +294,19 @@ def prune_local_l1(
         return 0
     ref = reference_date or dt.datetime.now(_KST).date()
     cutoff = ref - dt.timedelta(days=retain_days)
+    minute_cutoff = ref - dt.timedelta(days=max(retain_days, HISTORY_MINUTE_RETAIN_DAYS))
     root = pathlib.Path(archive_root)
+    minute_root = root / "history" / "minute"
     purged = 0
     for pq_file in sorted(root.rglob("*.parquet")):
         m = _DT_RE.search(pq_file.name)
         if m is None and pq_file.is_relative_to(root / "history" / "tick_tape" / "kiwoom"):
             m = _DT_RE.fullmatch(pq_file.parent.name)
+        is_minute = pq_file.is_relative_to(minute_root)
+        if m is None and is_minute:
+            m = _DT_RE.fullmatch(pq_file.parent.name)
         part_date = dt.date.fromisoformat(m.group(0)[3:]) if m else None
-        if part_date is None or part_date >= cutoff:
+        if part_date is None or part_date >= (minute_cutoff if is_minute else cutoff):
             continue
         rel = l1_repo_path(pq_file.relative_to(root))
         if rel not in confirmed_remote:

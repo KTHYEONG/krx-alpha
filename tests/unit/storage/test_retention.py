@@ -1840,3 +1840,105 @@ def test_prune_tick_tape_uses_parent_partition_date(tmp_path):
     assert not old.exists()
     assert recent.exists()
     assert unconfirmed.exists()
+
+
+def _history_minute_file(root, day, name='run-a.parquet'):
+    part = root / 'l1' / 'history' / 'minute' / 'kis' / f'dt={day.isoformat()}'
+    part.mkdir(parents=True, exist_ok=True)
+    pq_file = part / name
+    pq_file.write_bytes(b'x')
+    return pq_file
+
+
+def test_minute_history_kept_inside_400_days(tmp_path) -> None:
+    import datetime as dt
+    from src.storage.retention import prune_local_l1
+
+    ref = dt.date(2026, 9, 8)
+    pq_file = _history_minute_file(tmp_path, ref - dt.timedelta(days=100))
+    confirmed = {'l1/history/minute/kis/dt=' + (ref - dt.timedelta(days=100)).isoformat() + '/run-a.parquet'}
+
+    purged = prune_local_l1(tmp_path / 'l1', retain_days=30, reference_date=ref, confirmed_remote=confirmed)
+
+    assert purged == 0
+    assert pq_file.exists()
+
+
+def test_minute_history_older_than_400_days_purged_when_remote_confirmed(tmp_path) -> None:
+    import datetime as dt
+    from src.storage.retention import prune_local_l1
+
+    ref = dt.date(2026, 9, 8)
+    day = ref - dt.timedelta(days=401)
+    pq_file = _history_minute_file(tmp_path, day)
+    confirmed = {'l1/history/minute/kis/dt=' + day.isoformat() + '/run-a.parquet'}
+
+    purged = prune_local_l1(tmp_path / 'l1', retain_days=30, reference_date=ref, confirmed_remote=confirmed)
+
+    assert purged == 1
+    assert not pq_file.exists()
+
+
+def test_minute_history_unconfirmed_never_purged(tmp_path) -> None:
+    import datetime as dt
+    from src.storage.retention import prune_local_l1
+
+    ref = dt.date(2026, 9, 8)
+    pq_file = _history_minute_file(tmp_path, ref - dt.timedelta(days=500))
+
+    purged = prune_local_l1(tmp_path / 'l1', retain_days=30, reference_date=ref, confirmed_remote=set())
+
+    assert purged == 0
+    assert pq_file.exists()
+
+
+def test_confirmed_none_is_noop_for_history(tmp_path) -> None:
+    import datetime as dt
+    from src.storage.retention import prune_local_l1
+
+    ref = dt.date(2026, 9, 8)
+    pq_file = _history_minute_file(tmp_path, ref - dt.timedelta(days=500))
+
+    purged = prune_local_l1(tmp_path / 'l1', retain_days=30, reference_date=ref)
+
+    assert purged == 0
+    assert pq_file.exists()
+
+
+def test_other_l1_still_uses_retain_days(tmp_path) -> None:
+    import datetime as dt
+    from src.storage.retention import prune_local_l1
+
+    ref = dt.date(2026, 9, 8)
+    old_ls = tmp_path / 'l1' / 'ls' / 'quote' / f'dt={(ref - dt.timedelta(days=31)).isoformat()}.parquet'
+    old_ls.parent.mkdir(parents=True)
+    old_ls.write_bytes(b'x')
+    tape_dir = tmp_path / 'l1' / 'history' / 'tick_tape' / 'kiwoom' / f'dt={(ref - dt.timedelta(days=31)).isoformat()}'
+    tape_dir.mkdir(parents=True)
+    old_tape = tape_dir / 'part.parquet'
+    old_tape.write_bytes(b'x')
+    confirmed = {
+        'l1/ls/quote/dt=' + (ref - dt.timedelta(days=31)).isoformat() + '.parquet',
+        'l1/history/tick_tape/kiwoom/dt=' + (ref - dt.timedelta(days=31)).isoformat() + '/part.parquet',
+    }
+
+    purged = prune_local_l1(tmp_path / 'l1', retain_days=30, reference_date=ref, confirmed_remote=confirmed)
+
+    assert purged == 2
+    assert not old_ls.exists()
+    assert not old_tape.exists()
+
+
+def test_larger_retain_days_wins_for_minute(tmp_path) -> None:
+    import datetime as dt
+    from src.storage.retention import prune_local_l1
+
+    ref = dt.date(2026, 9, 8)
+    day = ref - dt.timedelta(days=450)
+    pq_file = _history_minute_file(tmp_path, day)
+    confirmed = {'l1/history/minute/kis/dt=' + day.isoformat() + '/run-a.parquet'}
+
+    purged = prune_local_l1(tmp_path / 'l1', retain_days=500, reference_date=ref, confirmed_remote=confirmed)
+
+    assert purged == 0
+    assert pq_file.exists()
