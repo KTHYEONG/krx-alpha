@@ -365,3 +365,82 @@ def test_state_read_failure_does_not_abort_later_day(tmp_path, monkeypatch) -> N
     assert summary.failed == 1
     assert summary.audited == 1
     assert paths.session_audit_path(DAY, "ls").exists()
+
+
+def test_per_day_failure_has_traceback_and_run_id(tmp_path, monkeypatch, caplog) -> None:
+    paths = DataPaths(tmp_path)
+    journal(paths)
+    audit(paths, status="UNAVAILABLE")
+    tape(paths)
+
+    def boom(**kwargs):
+        raise RuntimeError("x")
+
+    monkeypatch.setattr(job, "build_repaired_ticks", boom)
+    with caplog.at_level("INFO"):
+        summary = run(paths)
+    assert summary.status == "FAIL"
+    assert summary.failed == 1
+    assert summary.gapfilled == 1
+    errors = [r for r in caplog.records if r.levelname == "ERROR" and "status=FAIL" in r.getMessage()]
+    assert len(errors) == 1
+    assert "error=RuntimeError" in errors[0].getMessage()
+    assert "run_id=test" in errors[0].getMessage()
+    assert errors[0].exc_info is not None
+
+
+def test_outcome_lines_are_events(tmp_path, monkeypatch, caplog) -> None:
+    paths = DataPaths(tmp_path)
+    journal(paths)
+    audit(paths, status="UNAVAILABLE")
+    tape(paths)
+    received = threading.Event()
+    original = job.load_tape_for_symbols
+
+    class SignalHandler(__import__("logging").Handler):
+        def emit(self, record):
+            if "progress=heartbeat" in record.getMessage():
+                received.set()
+
+    def slow(*args):
+        assert received.wait(2), "heartbeat must be emitted during gap-fill"
+        return original(*args)
+
+    monkeypatch.setattr(job, "_HEARTBEAT_S", 0.001)
+    monkeypatch.setattr(job, "load_tape_for_symbols", slow)
+    handler = SignalHandler()
+    job.logger.addHandler(handler)
+    try:
+        with caplog.at_level("INFO"):
+            summary = run(paths)
+    finally:
+        job.logger.removeHandler(handler)
+    assert summary.status == "OK"
+    state_lines = [r for r in caplog.records if "stage=repair_ticks" in r.getMessage() and "state=" in r.getMessage()]
+    summary_lines = [r for r in caplog.records if "stage=repair_ticks status=OK" in r.getMessage()]
+    heartbeats = [r for r in caplog.records if "progress=heartbeat" in r.getMessage()]
+    assert state_lines
+    assert summary_lines
+    assert heartbeats
+    assert all(getattr(r, "krx_event", False) is True for r in state_lines + summary_lines)
+    assert not any(getattr(r, "krx_event", False) for r in heartbeats)
+
+
+def test_setup_failure_has_traceback(tmp_path, monkeypatch, caplog) -> None:
+    paths = DataPaths(tmp_path)
+    journal(paths)
+    paths.work_root.mkdir()
+    original = pathlib.Path.open
+
+    def fail_lock(self, *args, **kwargs):
+        if self.name == "repair.lock":
+            raise PermissionError("lock denied")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "open", fail_lock)
+    with caplog.at_level("INFO"):
+        assert run(paths).status == "FAIL"
+    errors = [r for r in caplog.records if r.levelname == "ERROR" and "reason=setup" in r.getMessage()]
+    assert len(errors) == 1
+    assert "run_id=test" in errors[0].getMessage()
+    assert errors[0].exc_info is not None

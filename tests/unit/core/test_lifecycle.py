@@ -57,3 +57,29 @@ def test_lifecycle_write_then_read_round_trips(tmp_path) -> None:
 
     assert read_lifecycle(path) == record
     assert list(path.parent.glob("*.tmp")) == []
+
+
+def test_missing_file_is_silent(tmp_path, caplog) -> None:
+    import logging
+
+    from src.core.lifecycle import read_lifecycle
+
+    with caplog.at_level(logging.WARNING):
+        assert read_lifecycle(tmp_path / "absent.json") is None
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_corrupt_file_warns_with_path(tmp_path, caplog) -> None:
+    import logging
+
+    from src.core.lifecycle import read_lifecycle
+
+    target = tmp_path / "lifecycle.json"
+    target.write_text("{not json", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        assert read_lifecycle(target) is None
+    records = [r for r in caplog.records if "status=UNREADABLE" in r.getMessage()]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert str(target) in records[0].getMessage()
+    assert records[0].exc_info is not None

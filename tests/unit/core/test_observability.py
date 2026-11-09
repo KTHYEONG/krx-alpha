@@ -476,3 +476,34 @@ def test_gmail_sender_sends_plain_text_only(monkeypatch) -> None:
     msg = seen["msg"]
     assert msg.is_multipart() is False
     assert msg.get_content().strip() == "plain-body"
+
+
+def test_once_per_day_first_true_then_false() -> None:
+    import datetime as dt
+
+    from src.core.observability import once_per_day, reset_once_per_day
+
+    reset_once_per_day()
+    day = dt.date(2026, 11, 9)
+    assert once_per_day("k", day) is True
+    assert once_per_day("k", day) is False
+    assert once_per_day("k", day) is False
+    assert once_per_day("other", day) is True
+    assert once_per_day("k", day + dt.timedelta(days=1)) is True
+    reset_once_per_day()
+
+
+def test_once_per_day_bounded() -> None:
+    import datetime as dt
+
+    from src.core import observability
+    from src.core.observability import once_per_day, reset_once_per_day
+
+    reset_once_per_day()
+    day = dt.date(2026, 11, 9)
+    assert once_per_day("key-0", day) is True
+    for index in range(1, 300):
+        assert once_per_day(f"key-{index}", day) is True
+        assert len(observability._ONCE_SEEN) <= 256
+    assert once_per_day("key-0", day) is True
+    reset_once_per_day()

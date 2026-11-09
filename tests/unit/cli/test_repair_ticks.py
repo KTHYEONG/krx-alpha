@@ -146,3 +146,36 @@ def test_main_dry_run_disables_persistent_log_writes(args, monkeypatch, capsys) 
     monkeypatch.setattr(main, "configure_logging", lambda *a, **kw: observed.append(kw["log_dir"]))
     assert main.main(["repair-ticks", "--dry-run"]) == 0
     assert observed == [None]
+
+
+def test_start_line_links_run_ids(args, monkeypatch, caplog) -> None:
+    import logging
+    import os
+    import re
+
+    from src.storage.l0_repair_job import RepairRunSummary
+
+    monkeypatch.setenv("KRX_ALPHA_RUN_ID", "daemon-123")
+    monkeypatch.setattr(cli, "run_repair", lambda **kwargs: RepairRunSummary("OK", 0, 0, 0, 0, 0, "x"))
+    with caplog.at_level(logging.INFO):
+        assert cli.run(args) == 0
+    starts = [r for r in caplog.records if "status=START" in r.getMessage()]
+    assert len(starts) == 1
+    message = starts[0].getMessage()
+    assert re.search(r"run_id=[0-9a-f]{12} parent_run_id=daemon-123", message)
+    assert f"pid={os.getpid()}" in message
+    assert starts[0].krx_event is True
+
+
+def test_setup_error_has_traceback(args, monkeypatch, caplog) -> None:
+    import logging
+
+    def broken():
+        raise RuntimeError("bad settings")
+
+    monkeypatch.setattr(cli, "RepairSettings", broken)
+    with caplog.at_level(logging.ERROR):
+        assert cli.run(args) == 4
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR and "reason=setup" in r.getMessage()]
+    assert len(errors) == 1
+    assert errors[0].exc_info is not None

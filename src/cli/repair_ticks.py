@@ -6,13 +6,21 @@ import argparse
 import datetime as dt
 import json
 import logging
+import os
 import pathlib
 import signal
 import threading
 import uuid
 from zoneinfo import ZoneInfo
 
-from src.core.config import AuditSettings, CollectorSettings, RepairSettings, TickTapeBackfillSettings
+from src.core.config import (
+    AuditSettings,
+    CollectorSettings,
+    ObservabilitySettings,
+    RepairSettings,
+    TickTapeBackfillSettings,
+)
+from src.core.observability import EVENT
 from src.core.paths import DataPaths
 from src.marketdata.tick_tape_backfill import read_ledger_done
 from src.storage.l0_repair import derive_day_repair
@@ -68,7 +76,7 @@ def run(args: argparse.Namespace) -> int:
     try:
         return _run(args)
     except Exception as exc:  # noqa: BLE001 - invalid configuration and I/O map to setup failure
-        logger.error("[DATA] stage=repair_ticks status=FAIL reason=setup error=%s", type(exc).__name__)
+        logger.error("[DATA] stage=repair_ticks status=FAIL reason=setup error=%s", type(exc).__name__, exc_info=True)
         return 4
 
 
@@ -108,6 +116,15 @@ def _run(args: argparse.Namespace) -> int:
         return 0
     audit_settings = AuditSettings()
     run_id = uuid.uuid4().hex[:12]
+    logger.info(
+        "[DATA] stage=repair_ticks status=START run_id=%s parent_run_id=%s pid=%d days_filter=%s deadline=%s",
+        run_id,
+        ObservabilitySettings().run_id or "-",
+        os.getpid(),
+        only_day.isoformat() if only_day else "-",
+        deadline.isoformat(),
+        extra=EVENT,
+    )
     stop_event = threading.Event()
 
     def _request_stop(signum: int, frame: object) -> None:

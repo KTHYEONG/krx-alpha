@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import polars as pl
 
 from src.core.config import AuditSettings, RepairSettings
+from src.core.observability import EVENT
 from src.core.paths import DataPaths
 from src.core.session_anchors import standard_session_anchors
 from src.marketdata.tick_tape_backfill import read_ledger_done
@@ -254,6 +255,7 @@ def _run_locked(
                         verdict.trades_observed,
                         verdict.ratio,
                         ",".join(verdict.reasons) if verdict.reasons else "-",
+                        extra=EVENT,
                     )
                     logger.info(
                         "[DATA] stage=xvendor_fill day=%s vendor=%s peers=%s intervals=%d recovered=%d rejected=%d",
@@ -263,6 +265,7 @@ def _run_locked(
                         len(original),
                         recovered_total,
                         rejected,
+                        extra=EVENT,
                     )
                     gapfilled += 1
                     repair = derive_day_repair(paths, day, vendor, settings=repair_settings, tape_done=tape_done)
@@ -285,17 +288,20 @@ def _run_locked(
                     except Exception as exc:  # noqa: BLE001 - isolate all per-day failures, not KeyboardInterrupt
                         failed += 1
                         logger.error(
-                            "[DATA] stage=repair_ticks status=FAIL day=%s vendor=%s error=%s",
+                            "[DATA] stage=repair_ticks status=FAIL day=%s vendor=%s error=%s run_id=%s",
                             day,
                             vendor,
                             type(exc).__name__,
+                            run_id,
+                            exc_info=True,
                         )
                     else:
                         if merge.status != "OK":
                             failed += 1
                             logger.error(
                                 "[DATA] stage=repair_ticks status=MISMATCH day=%s vendor=%s reason=%s "
-                                "live_rows=%d received=%s filled_rows=%d recovered=%s deduped=%d overfill_dropped=%d",
+                                "live_rows=%d received=%s filled_rows=%d recovered=%s deduped=%d overfill_dropped=%d "
+                                "run_id=%s",
                                 day,
                                 vendor,
                                 merge.mismatch_reason,
@@ -305,6 +311,7 @@ def _run_locked(
                                 merge.gapfill_recovered,
                                 merge.deduped_late_live,
                                 merge.overfill_dropped,
+                                run_id,
                             )
                         else:
                             merged += 1
@@ -315,10 +322,12 @@ def _run_locked(
         except Exception as exc:  # noqa: BLE001 - isolate all per-day failures, not KeyboardInterrupt
             failed += 1
             logger.error(
-                "[DATA] stage=repair_ticks status=FAIL day=%s vendor=%s error=%s",
+                "[DATA] stage=repair_ticks status=FAIL day=%s vendor=%s error=%s run_id=%s",
                 day,
                 vendor,
                 type(exc).__name__,
+                run_id,
+                exc_info=True,
             )
         finally:
             logger.info(
@@ -328,6 +337,7 @@ def _run_locked(
                 before_state,
                 after_state,
                 run_id,
+                extra=EVENT,
             )
     for day, vendor in units:
         try:
@@ -386,7 +396,12 @@ def run_repair(
                     should_stop=should_stop,
                 )
     except Exception as exc:  # noqa: BLE001 - setup failures fail closed; KeyboardInterrupt propagates
-        logger.error("[DATA] stage=repair_ticks status=FAIL reason=setup error=%s", type(exc).__name__)
+        logger.error(
+            "[DATA] stage=repair_ticks status=FAIL reason=setup error=%s run_id=%s",
+            type(exc).__name__,
+            run_id,
+            exc_info=True,
+        )
         summary = RepairRunSummary("FAIL", 0, 0, 0, 0, 1, run_id)
     logger.info(
         "[DATA] stage=repair_ticks status=%s run_id=%s days=%d audited=%d gapfilled=%d waiting_tape=%d failed=%d merged=%d",
@@ -398,5 +413,6 @@ def run_repair(
         summary.waiting_tape,
         summary.failed,
         summary.merged,
+        extra=EVENT,
     )
     return summary

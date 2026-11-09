@@ -1,10 +1,12 @@
 """Observability base: per-component logging, persistent JSONL events and operator page emails."""
 
 import atexit
+import datetime as dt
 import logging
 import pathlib
 import queue
 import sys
+import threading
 import time
 from collections.abc import Callable
 from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
@@ -35,6 +37,9 @@ from src.core.log_format import (
 )
 
 EVENT: dict[str, bool] = {"krx_event": True}
+_ONCE_MAX_KEYS: int = 256
+_ONCE_LOCK = threading.Lock()
+_ONCE_SEEN: dict[str, dt.date] = {}
 LOG_FILE_MAX_BYTES: int = 5 * 2**20
 LOG_FILE_BACKUPS: int = 5
 _MANAGED_ATTR = "_krx_alpha_managed"
@@ -57,13 +62,32 @@ __all__ = [
     "format_record_timestamp",
     "gmail_sender",
     "new_run_id",
+    "once_per_day",
     "page",
     "page_resolved",
     "process_identity",
     "process_identity_tags",
+    "reset_once_per_day",
     "set_process_identity",
     "shutdown_logging",
 ]
+
+
+def once_per_day(key: str, day: dt.date) -> bool:
+    """Return True the first time ``key`` is seen on ``day``; tracking is process-local and bounded."""
+    with _ONCE_LOCK:
+        if _ONCE_SEEN.get(key) == day:
+            return False
+        if key not in _ONCE_SEEN and len(_ONCE_SEEN) >= _ONCE_MAX_KEYS:
+            _ONCE_SEEN.clear()
+        _ONCE_SEEN[key] = day
+        return True
+
+
+def reset_once_per_day() -> None:
+    """Forget every tracked key (test isolation)."""
+    with _ONCE_LOCK:
+        _ONCE_SEEN.clear()
 
 
 def new_run_id(component: str, *, now_ns: int | None = None) -> str:

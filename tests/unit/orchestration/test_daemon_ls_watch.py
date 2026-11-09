@@ -87,6 +87,15 @@ def _watch(runner, now: dt.datetime, state: SessionState = SessionState.AFTER_MA
     runner._watch_ls_shards(now, state, DAY, standard_session_anchors(DAY))
 
 
+@pytest.fixture(autouse=True)
+def _reset_watchdog_dedupe():
+    from src.core.observability import reset_once_per_day
+
+    reset_once_per_day()
+    yield
+    reset_once_per_day()
+
+
 def _ls_records(caplog) -> list[logging.LogRecord]:
     return [r for r in caplog.records if "shard_watchdog" in r.getMessage()]
 
@@ -251,5 +260,66 @@ def test_error_contained(tmp_path, caplog, monkeypatch) -> None:
     monkeypatch.setattr(daemon_mod, "ls_shard_last_journal_wall", _boom)
     with caplog.at_level(logging.WARNING, logger=daemon_mod.logger.name):
         _watch(runner, now)
-    assert any("status=ERROR reason=OSError" in r.getMessage() for r in caplog.records)
+    assert any("status=ERROR scope=ls reason=disk gone" in r.getMessage() for r in caplog.records)
     assert not any(page_kind(r) is PageKind.LS_SHARD_STALE for r in caplog.records)
+
+
+def test_watchdog_oserror_logged_once_per_day_with_traceback(tmp_path, caplog, monkeypatch) -> None:
+    runner = _runner(tmp_path)
+    _install(runner, {0: _FakeSup(), 1: _FakeSup()})
+    probes: list[int] = []
+
+    def _denied(*a, **k):
+        probes.append(1)
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(daemon_mod, "ls_shard_last_journal_wall", _denied)
+    with caplog.at_level(logging.WARNING, logger=daemon_mod.logger.name):
+        for offset in range(100):
+            _watch(runner, _at(17) + dt.timedelta(seconds=offset))
+        assert len(probes) >= 100
+        errors = [r for r in _ls_records(caplog) if "status=ERROR" in r.getMessage()]
+        assert len(errors) == 1
+        assert "scope=ls reason=denied date=2026-11-09" in errors[0].getMessage()
+        assert errors[0].exc_info is not None
+        runner._log_watchdog_error("ls", PermissionError("denied"), dt.datetime(2026, 11, 10, 17, 0, tzinfo=KST))
+    errors = [r for r in _ls_records(caplog) if "status=ERROR" in r.getMessage()]
+    assert len(errors) == 2
+    assert "date=2026-11-10" in errors[1].getMessage()
+
+
+def test_different_scopes_log_independently(tmp_path, caplog, monkeypatch) -> None:
+    runner = _runner(tmp_path)
+    _install(runner, {0: _FakeSup(), 1: _FakeSup()})
+
+    def _ls_boom(*a, **k):
+        raise OSError("ls gone")
+
+    def _aftermarket_boom(self, *a, **k):
+        raise OSError("aftermarket gone")
+
+    monkeypatch.setattr(daemon_mod, "ls_shard_last_journal_wall", _ls_boom)
+    monkeypatch.setattr(daemon_mod.DaemonRunner, "_watch_aftermarket_shards_guarded", _aftermarket_boom)
+    with caplog.at_level(logging.WARNING, logger=daemon_mod.logger.name):
+        _watch(runner, _at(17))
+        runner._watch_aftermarket_shards(_at(17), DAY, standard_session_anchors(DAY))
+    errors = [r.getMessage() for r in _ls_records(caplog) if "status=ERROR" in r.getMessage()]
+    assert len(errors) == 2
+    assert any("scope=ls reason=ls gone" in m for m in errors)
+    assert any("scope=aftermarket reason=aftermarket gone" in m for m in errors)
+
+
+def test_watchdog_valueerror_same_path(tmp_path, caplog, monkeypatch) -> None:
+    runner = _runner(tmp_path)
+    _install(runner, {0: _FakeSup(), 1: _FakeSup()})
+
+    def _bad(*a, **k):
+        raise ValueError("bad clock")
+
+    monkeypatch.setattr(daemon_mod, "ls_shard_last_journal_wall", _bad)
+    with caplog.at_level(logging.WARNING, logger=daemon_mod.logger.name):
+        _watch(runner, _at(17))
+    errors = [r for r in _ls_records(caplog) if "status=ERROR" in r.getMessage()]
+    assert len(errors) == 1
+    assert "scope=ls reason=bad clock" in errors[0].getMessage()
+    assert errors[0].exc_info is not None

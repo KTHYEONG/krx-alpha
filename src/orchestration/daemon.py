@@ -56,7 +56,15 @@ from src.core.config import (
 from src.core.errors import KrxAlphaError, MissingCredentialsError
 from src.core.healthcheck import HealthcheckPinger, NoopPinger
 from src.core.lifecycle import DaemonLifecycleRecord, crash_alert_allowed, read_lifecycle, write_lifecycle
-from src.core.observability import EVENT, PageKind, configure_logging, page, page_resolved, shutdown_logging
+from src.core.observability import (
+    EVENT,
+    PageKind,
+    configure_logging,
+    once_per_day,
+    page,
+    page_resolved,
+    shutdown_logging,
+)
 from src.core.session_anchors import (
     STANDARD_NXT_PREMARKET_OPEN,
     AnchorSource,
@@ -847,7 +855,9 @@ def _archive_eod_digest(paths: DataPaths, ref_day: dt.date, subject: str, body: 
         tmp.write_text(f"{subject}\n\n{body}\n", encoding="utf-8")
         tmp.replace(target)
     except OSError as exc:
-        logger.warning("[DAEMON] stage=eod_digest_archive status=FAIL reason=%s", type(exc).__name__)
+        logger.warning(
+            "[DAEMON] stage=eod_digest_archive status=FAIL reason=%s path=%s", type(exc).__name__, target, exc_info=True
+        )
         return None
     return target
 
@@ -1131,7 +1141,10 @@ def _resolve_trading_day_with_cache(
             try:
                 write()
             except OSError as exc:
-                logger.warning("[DATA] stage=%s status=WRITE_FAIL reason=%s", stage, type(exc).__name__)
+                if once_per_day(f"anchors_write:{stage}", today):
+                    logger.warning(
+                        "[DATA] stage=%s status=WRITE_FAIL reason=%s", stage, type(exc).__name__, exc_info=True
+                    )
         if day.is_business_day and day.anchors is None:
             logger.warning(
                 "[DATA] stage=session_anchors status=DEFAULT date=%s reason=vendor_missing",
@@ -3046,12 +3059,23 @@ class DaemonRunner:
                 extra=page(PageKind.AFTERMARKET_PLAN_MISSING),
             )
 
+    def _log_watchdog_error(self, scope: str, exc: Exception, now: dt.datetime) -> None:
+        day = now.astimezone(_KST).date()
+        if once_per_day(f"shard_watchdog:{scope}:{type(exc).__name__}", day):
+            logger.warning(
+                "[DATA] stage=shard_watchdog status=ERROR scope=%s reason=%s date=%s",
+                scope,
+                str(exc) or type(exc).__name__,
+                day.isoformat(),
+                exc_info=True,
+            )
+
     def _watch_ls_shards(self, now: dt.datetime, state: SessionState, today: dt.date, anchors: SessionAnchors) -> None:
         """Page when an LS regular shard's journals go silent after the close; never restarts a child."""
         try:
             self._watch_ls_shards_guarded(now, state, today, anchors)
         except (OSError, ValueError) as exc:
-            logger.warning("[DATA] stage=shard_watchdog status=ERROR reason=%s", type(exc).__name__)
+            self._log_watchdog_error("ls", exc, now)
 
     def _watch_ls_shards_guarded(self, now: dt.datetime, state: SessionState, today: dt.date, anchors: SessionAnchors) -> None:
         wd = getattr(self._runtime, "shard_watchdog", None)
@@ -3139,7 +3163,7 @@ class DaemonRunner:
         try:
             self._watch_aftermarket_shards_guarded(now, today, anchors)
         except (OSError, ValueError) as exc:
-            logger.warning("[DATA] stage=shard_watchdog status=ERROR reason=%s", type(exc).__name__)
+            self._log_watchdog_error("aftermarket", exc, now)
 
     def _watch_aftermarket_shards_guarded(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
         wd = getattr(self._runtime, "shard_watchdog", None)
@@ -3209,7 +3233,7 @@ class DaemonRunner:
         try:
             self._watch_premarket_shard_guarded(now, today, anchors, shard)
         except (OSError, ValueError) as exc:
-            logger.warning("[DATA] stage=shard_watchdog status=ERROR reason=%s", type(exc).__name__)
+            self._log_watchdog_error("premarket", exc, now)
 
     def _watch_premarket_shard_guarded(
         self, now: dt.datetime, today: dt.date, anchors: SessionAnchors, shard: AftermarketShard
@@ -3883,7 +3907,7 @@ class DaemonRunner:
         try:
             self._watch_regular_kis_shards_guarded(now, today, anchors)
         except (OSError, ValueError) as exc:
-            logger.warning("[DATA] stage=shard_watchdog status=ERROR reason=%s", type(exc).__name__)
+            self._log_watchdog_error("regular_kis", exc, now)
 
     def _watch_regular_kis_shards_guarded(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
         wd = getattr(self._runtime, "shard_watchdog", None)
@@ -4562,7 +4586,12 @@ def run_collector_daemon(
         try:
             write_lifecycle(lifecycle_path, record)
         except OSError as exc:
-            logger.warning("[SYS] stage=daemon_lifecycle status=WRITE_FAIL reason=%s", type(exc).__name__)
+            logger.warning(
+                "[SYS] stage=daemon_lifecycle status=WRITE_FAIL reason=%s path=%s",
+                type(exc).__name__,
+                lifecycle_path,
+                exc_info=True,
+            )
 
     clock = now_fn if now_fn is not None else (lambda: dt.datetime.now(_KST))
     previous = read_lifecycle(lifecycle_path)

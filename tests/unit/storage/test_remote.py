@@ -1092,3 +1092,95 @@ def test_upload_verification_rejects_duplicate_name_and_md5_mismatch(tmp_path, c
             stats = arc.sync_l1_tree(tmp_path)
         assert (stats.uploaded, stats.failed_verification) == (0, 1)
         assert f"reason={reason}" in caplog.text
+
+
+def test_lsjson_transport_failure_is_not_absent() -> None:
+    from types import SimpleNamespace
+
+    import pytest
+
+    from src.storage.remote import RcloneArchiver, RemoteArchiveError, RemoteTransportError
+
+    def _failing(args, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="token expired")
+
+    arc = RcloneArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_failing)
+    with pytest.raises(RemoteTransportError, match="rc=1") as transport:
+        arc._remote_object("l1/x.parquet")
+    assert "token expired" in str(transport.value)
+
+    def _fixed(rc: int, stdout: str):
+        return lambda args, **kwargs: SimpleNamespace(returncode=rc, stdout=stdout, stderr="")
+
+    for rc, stdout in ((3, ""), (0, "[]")):
+        arc_absent = RcloneArchiver(
+            remote_name="gdrive",
+            remote_path="quant-lake/live/krx-alpha/data",
+            runner=_fixed(rc, stdout),
+        )
+        with pytest.raises(RemoteArchiveError, match="verify failed") as absent:
+            arc_absent._remote_object("l1/x.parquet")
+        assert type(absent.value) is RemoteArchiveError
+
+
+def test_upload_reason_distinguishes_transport(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from src.storage.remote import RcloneArchiver
+
+    pq = tmp_path / "dt=2026-09-01.parquet"
+    pq.write_bytes(b"x" * 10)
+    responses = iter(
+        [
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(returncode=1, stdout="", stderr="token expired"),
+        ]
+    )
+    arc = RcloneArchiver(
+        remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data",
+        runner=lambda args, **kwargs: next(responses),
+    )
+    assert arc._upload_verified(pq, "l1/kis/H0STCNT0/dt=2026-09-01.parquet", 10).startswith("verify_transport rc=1")
+
+    empty = RcloneArchiver(
+        remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data",
+        runner=lambda args, **kwargs: SimpleNamespace(returncode=0, stdout="[]", stderr="") if args[1] == "lsjson"
+        else SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    assert empty._upload_verified(pq, "l1/kis/H0STCNT0/dt=2026-09-01.parquet", 10) == "verify_missing"
+
+
+def test_purge_failure_logs_rc_and_stderr(tmp_path, caplog) -> None:
+    import logging
+    from types import SimpleNamespace
+
+    from src.storage.layout import l0_partition_for_l1
+    from src.storage.remote import RcloneArchiver
+
+    l1s = [f"l1/kis/H0STCNT0/dt=2026-09-0{day}.parquet" for day in (1, 2, 3)]
+    l0s = sorted({l0 for path in l1s if (l0 := l0_partition_for_l1(path)) is not None})
+    assert len(l0s) == 3
+    behavior = {l0s[0]: "probe", l0s[1]: "purge", l0s[2]: "raise"}
+
+    def _runner(args, **kwargs):
+        key = next(l0 for l0 in l0s if args[2].endswith(l0))
+        mode = behavior[key]
+        if mode == "raise":
+            raise RuntimeError("runner down")
+        if args[1] == "lsjson":
+            if mode == "probe":
+                return SimpleNamespace(returncode=5, stdout="", stderr="quota")
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+
+    arc = RcloneArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    with caplog.at_level(logging.CRITICAL):
+        stats = arc.purge_superseded_l0(set(l1s), tmp_path / "l0")
+    assert stats.failed == 3
+    messages = [r for r in caplog.records if r.levelno == logging.CRITICAL and "stage=l0_remote_purge" in r.getMessage()]
+    texts = [r.getMessage() for r in messages]
+    assert any("reason=probe rc=5 detail=quota" in t for t in texts)
+    assert any("reason=purge rc=1 detail=boom" in t for t in texts)
+    exc_records = [r for r in messages if "reason=exception" in r.getMessage()]
+    assert len(exc_records) == 1
+    assert exc_records[0].exc_info is not None

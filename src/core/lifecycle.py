@@ -52,8 +52,15 @@ def read_lifecycle(path: pathlib.Path) -> DaemonLifecycleRecord | None:
     """Return the persisted lifecycle record, or None when missing or invalid."""
     try:
         return _from_json(json.loads(pathlib.Path(path).read_text(encoding="utf-8")))
+    except FileNotFoundError:
+        return None
     except Exception as exc:
-        logger.debug("[SYS] stage=daemon_lifecycle status=UNREADABLE reason=%s", type(exc).__name__)
+        logger.warning(
+            "[SYS] stage=daemon_lifecycle status=UNREADABLE reason=%s path=%s",
+            type(exc).__name__,
+            path,
+            exc_info=True,
+        )
         return None
 
 

@@ -24,6 +24,15 @@ class RemoteArchiveError(KrxAlphaError):
     """원격 업로드/조회 실패 fail-closed 신호."""
 
 
+class RemoteTransportError(RemoteArchiveError):
+    """Remote listing failed for a transport or auth reason, not because the object is absent."""
+
+    def __init__(self, returncode: int, detail: str, repo_path: str) -> None:
+        self.returncode = returncode
+        self.detail = detail
+        super().__init__(f"verify failed: lsjson rc={returncode} detail={detail}: {repo_path}")
+
+
 @dataclass
 class SyncStats:
     """원격 동기화 검증 카운터."""
@@ -147,6 +156,8 @@ class GDriveArchiver:
     def _remote_object(self, repo_path: str) -> RemoteObject:
         dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
         result = self._run(["rclone", "lsjson", dest, *_HASH_FLAGS])
+        if result.returncode not in (0, 3):
+            raise RemoteTransportError(result.returncode, _brief(result.stderr), repo_path)
         entries = json.loads(result.stdout) if result.returncode == 0 else []
         if not entries:
             raise RemoteArchiveError(f"verify failed: {repo_path}")
@@ -225,6 +236,8 @@ class GDriveArchiver:
             return f"upload_failed rc={result.returncode} detail={_brief(result.stderr)}"
         try:
             remote = self._remote_object(repo_path)
+        except RemoteTransportError as exc:
+            return f"verify_transport rc={exc.returncode} detail={exc.detail}"
         except RemoteArchiveError:
             return "verify_missing"
         if remote.duplicate:
@@ -335,18 +348,28 @@ class GDriveArchiver:
                         continue
                     if probe.returncode != 0:
                         stats.failed += 1
-                        logger.critical("[DATA] stage=l0_remote_purge part=%s status=FAIL", l0_dir)
+                        logger.critical(
+                            "[DATA] stage=l0_remote_purge part=%s status=FAIL reason=probe rc=%d detail=%s",
+                            l0_dir, probe.returncode, _brief(probe.stderr),
+                        )
                         continue
                     purged = self._run(["rclone", "purge", dest])
                     if purged.returncode != 0:
                         stats.failed += 1
-                        logger.critical("[DATA] stage=l0_remote_purge part=%s status=FAIL", l0_dir)
+                        logger.critical(
+                            "[DATA] stage=l0_remote_purge part=%s status=FAIL reason=purge rc=%d detail=%s",
+                            l0_dir, purged.returncode, _brief(purged.stderr),
+                        )
                         continue
                     stats.purged += 1
                     logger.info("[DATA] stage=l0_remote_purge part=%s status=PURGED", l0_dir)
                 except Exception:
                     stats.failed += 1
-                    logger.critical("[DATA] stage=l0_remote_purge part=%s status=FAIL", l0_dir)
+                    logger.critical(
+                        "[DATA] stage=l0_remote_purge part=%s status=FAIL reason=exception",
+                        l0_dir,
+                        exc_info=True,
+                    )
                     continue
             finally:
                 if progress is not None:
