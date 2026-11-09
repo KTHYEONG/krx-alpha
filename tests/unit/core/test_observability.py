@@ -40,6 +40,7 @@ def test_key_value_formatter_escapes_traceback_into_one_line() -> None:
 
 def test_jsonl_event_formatter_parses_key_value_fields() -> None:
     import json
+    import os
     import logging
 
     from src.core.observability import JsonlEventFormatter
@@ -54,11 +55,84 @@ def test_jsonl_event_formatter_parses_key_value_fields() -> None:
         "level": "CRITICAL",
         "component": "normalize-worker",
         "run_id": "daemon-9",
+        "pid": os.getpid(),
         "logger": "src.storage.retention",
         "msg": "[DATA] stage=prune status=FAIL part=p1",
         "fields": {"stage": "prune", "status": "FAIL", "part": "p1"},
         "exc": None,
     }
+
+
+def test_jsonl_has_pid_and_no_ctx_by_default() -> None:
+    import json
+    import logging
+    import os
+
+    from src.core.observability import JsonlEventFormatter
+
+    record = logging.LogRecord("x", logging.WARNING, __file__, 1, "m", (), None)
+
+    payload = json.loads(JsonlEventFormatter(component="c", run_id="r").format(record))
+
+    assert payload["pid"] == os.getpid()
+    assert "ctx" not in payload
+
+
+def test_jsonl_ctx_present_after_set_and_msg_unchanged() -> None:
+    import json
+    import logging
+
+    from src.core.observability import JsonlEventFormatter, set_process_identity
+
+    set_process_identity(vendor="kis", venue="nxt", shard="kis-nxt_after-1", slot="2", key_id="abcdef012345")
+    record = logging.LogRecord("x", logging.WARNING, __file__, 1, "[SYS] stage=x", (), None)
+
+    payload = json.loads(JsonlEventFormatter(component="c", run_id="r").format(record))
+
+    assert payload["ctx"] == {
+        "vendor": "kis",
+        "venue": "nxt",
+        "shard": "kis-nxt_after-1",
+        "slot": "2",
+        "key_id": "abcdef012345",
+    }
+    assert payload["msg"] == "[SYS] stage=x"
+
+
+def test_identity_tags_only_dedup_keys() -> None:
+    from src.core.observability import clear_process_identity, process_identity_tags, set_process_identity
+
+    assert process_identity_tags() == ""
+    set_process_identity(vendor="kis", venue="nxt", shard="kis-nxt_after-1", slot="2", key_id="abcdef012345")
+
+    tags = process_identity_tags()
+
+    assert tags == " venue=nxt shard=kis-nxt_after-1 slot=2"
+    assert "vendor" not in tags
+    assert "abcdef012345" not in tags
+    clear_process_identity()
+
+
+def test_identity_rejects_bad_values_and_keeps_previous() -> None:
+    import pytest
+
+    from src.core.observability import process_identity, set_process_identity
+
+    set_process_identity(vendor="ls", venue="krx", shard="ls-regular-0")
+
+    for bad in ("bad slot", "a=b", "x" * 25):
+        with pytest.raises(ValueError, match="must match"):
+            set_process_identity(vendor="ls", venue="krx", shard=bad)
+    assert process_identity() == {"vendor": "ls", "venue": "krx", "shard": "ls-regular-0"}
+
+
+def test_identity_cleared() -> None:
+    from src.core.observability import clear_process_identity, process_identity, set_process_identity
+
+    set_process_identity(vendor="ls", venue="krx", shard="ls-regular-0")
+    clear_process_identity()
+
+    assert process_identity() == {}
 
 
 def test_event_file_filter_passes_warning_and_marked_events_only() -> None:

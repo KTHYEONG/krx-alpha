@@ -123,3 +123,11 @@ def _shutdown_managed_logging():
     from src.core.observability import shutdown_logging
 
     shutdown_logging()
+
+
+@pytest.fixture(autouse=True)
+def _reset_process_identity():
+    yield
+    from src.core.observability import clear_process_identity
+
+    clear_process_identity()

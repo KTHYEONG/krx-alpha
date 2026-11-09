@@ -26,8 +26,12 @@ from src.core.log_format import (
     EventFileFilter,
     JsonlEventFormatter,
     KeyValueFormatter,
+    clear_process_identity,
     format_record_exception,
     format_record_timestamp,
+    process_identity,
+    process_identity_tags,
+    set_process_identity,
 )
 
 EVENT: dict[str, bool] = {"krx_event": True}
@@ -47,6 +51,7 @@ __all__ = [
     "JsonlEventFormatter",
     "KeyValueFormatter",
     "PageKind",
+    "clear_process_identity",
     "configure_logging",
     "format_record_exception",
     "format_record_timestamp",
@@ -54,6 +59,9 @@ __all__ = [
     "new_run_id",
     "page",
     "page_resolved",
+    "process_identity",
+    "process_identity_tags",
+    "set_process_identity",
     "shutdown_logging",
 ]
 

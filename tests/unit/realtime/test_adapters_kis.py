@@ -1141,3 +1141,44 @@ def test_kis_gap_recorded_on_recovery_after_timeouts():
     assert gaps
     assert all(g[3] == "disconnect" for g in gaps)
     assert {g[0] for g in gaps} == {"005930"}
+
+
+def _approval_403(payload):
+    import asyncio
+
+    import pytest
+
+    from src.realtime.contracts import VendorAuthRejected
+
+    class Response:
+        status = 403
+
+        async def json(self):
+            return payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class Http:
+        def post(self, *a, **k):
+            return Response()
+
+        async def ws_connect(self, *a):
+            raise AssertionError("ws must not open after auth rejection")
+
+    with pytest.raises(VendorAuthRejected) as info:
+        asyncio.run(_kis_connect_adapter(Http()).connect())
+    return str(info.value)
+
+
+def test_kis_approval_403_includes_error_code() -> None:
+    assert _approval_403({"error_code": "EGW00103", "error_description": "x"}) == "auth_rejected:403:EGW00103"
+
+
+def test_kis_approval_403_without_or_with_bad_code_keeps_bare_reason() -> None:
+    assert _approval_403({}) == "auth_rejected:403"
+    assert _approval_403({"error_code": "has space"}) == "auth_rejected:403"
+    assert _approval_403([{"error_code": "EGW00103"}]) == "auth_rejected:403"

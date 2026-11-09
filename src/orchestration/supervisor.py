@@ -2,13 +2,63 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import re
 import subprocess
 import time
-from collections.abc import Callable, Iterable
-from typing import Any
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any, Final, Literal
+
+from src.core.observability import EVENT
+
+logger = logging.getLogger(__name__)
 
 PROBE_BASE_INTERVAL_S: float = 60.0
 PROBE_MAX_INTERVAL_S: float = 300.0
+CHILD_IDENTITY_FLAGS: Final[tuple[str, ...]] = (
+    "--session-date",
+    "--venue",
+    "--shard-index",
+    "--ls-shard-index",
+    "--credential-slot",
+    "--credential-key-id",
+    "--degraded-reason",
+    "--restart-reason",
+)
+_CHILD_VALUE_RE = re.compile(r"[A-Za-z0-9:_.-]{1,40}")
+_CLI_MODULE = "src.cli.main"
+
+
+def child_label(cmd: Sequence[str]) -> str:
+    """Return the sub-command label of a child argv, or its executable basename when none is found."""
+    if not cmd:
+        return "unknown"
+    if "-m" in cmd:
+        idx = cmd.index("-m")
+        if idx + 1 < len(cmd):
+            module = cmd[idx + 1]
+            if module == _CLI_MODULE:
+                if idx + 2 < len(cmd) and not cmd[idx + 2].startswith("-"):
+                    return cmd[idx + 2]
+                return module
+            return module
+    return os.path.basename(cmd[0]) or "unknown"
+
+
+def child_identity_fields(cmd: Sequence[str]) -> str:
+    """Render the allowlisted identity flags of a child argv as ``key=value`` fields; never raises."""
+    fields: list[str] = []
+    for flag in CHILD_IDENTITY_FLAGS:
+        if flag not in cmd:
+            continue
+        idx = cmd.index(flag)
+        if idx + 1 >= len(cmd):
+            continue
+        value = cmd[idx + 1]
+        rendered = value if _CHILD_VALUE_RE.fullmatch(value) else "?"
+        fields.append(f"{flag.lstrip('-').replace('-', '_')}={rendered}")
+    return " ".join(fields)
 
 
 class RestartCircuitBreaker:
@@ -92,6 +142,7 @@ class ProcessSupervisor:
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self._cmd = cmd
+        self._label = child_label(cmd)
         self._breaker = breaker
         self._popen = popen
         self._wall_clock = wall_clock
@@ -104,6 +155,14 @@ class ProcessSupervisor:
     @property
     def last_exit_code(self) -> int | None:
         return self._last_exit_code
+
+    @property
+    def pid(self) -> int | None:
+        return getattr(self._proc, "pid", None)
+
+    @property
+    def label(self) -> str:
+        return self._label
 
     @property
     def started_at_wall(self) -> float | None:
@@ -132,6 +191,19 @@ class ProcessSupervisor:
             return self._cmd
         return [*self._cmd, "--restart-reason", self._armed_reason]
 
+    def _spawn(self, cmd: list[str], kind: Literal["started", "restarted", "probe"]) -> None:
+        self._proc = self._popen(cmd)
+        fields = child_identity_fields(cmd)
+        logger.info(
+            "[SYS] stage=child_spawn kind=%s pid=%s label=%s prev_exit_code=%s%s",
+            kind,
+            self.pid,
+            self._label,
+            self._last_exit_code,
+            " " + fields if fields else "",
+            extra=EVENT,
+        )
+
     def is_running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
@@ -151,23 +223,23 @@ class ProcessSupervisor:
         if was_started_before:
             self._last_exit_code = self._proc.poll()
         if not was_started_before:
-            self._proc = self._popen(self._cmd)
+            self._spawn(self._cmd, "started")
             self._started_at_wall = self._wall_clock()
             return "started"
         if self._breaker is None:
-            self._proc = self._popen(self._next_cmd())
+            self._spawn(self._next_cmd(), "restarted")
             self._armed_reason = None
             self._started_at_wall = self._wall_clock()
             return "restarted"
         if self._breaker.allow_restart(now=now):
             self._breaker.record_restart(now=now)
-            self._proc = self._popen(self._next_cmd())
+            self._spawn(self._next_cmd(), "restarted")
             self._armed_reason = None
             self._started_at_wall = self._wall_clock()
             return "restarted"
         if self._breaker.allow_probe(now=now):
             self._breaker.record_restart(now=now)
-            self._proc = self._popen(self._next_cmd())
+            self._spawn(self._next_cmd(), "probe")
             self._armed_reason = None
             self._started_at_wall = self._wall_clock()
             return "restarted"
@@ -221,6 +293,13 @@ class ProcessSupervisor:
             ret = proc.wait()
             code = proc.poll()
             self._last_exit_code = code if code is not None else ret
+            logger.warning(
+                "[SYS] stage=child_stop status=KILLED pid=%s label=%s timeout_s=%.1f exit_code=%s",
+                getattr(proc, "pid", None),
+                self._label,
+                timeout_s,
+                self._last_exit_code,
+            )
             return "killed"
 
     def stop(self, *, timeout_s: float = 15.0) -> str:

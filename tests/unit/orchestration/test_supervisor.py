@@ -798,3 +798,195 @@ def test_stale_reason_survives_circuit_until_probe(monkeypatch):
     clock["now"] = 60.0
     assert sup.ensure_running() == "restarted"
     assert spawn.call_args.args[0] == ["run", "--restart-reason", "stale_child"]
+
+
+def test_spawn_logs_event_with_pid_and_label_without_secrets_or_symbols(caplog) -> None:
+    import logging
+
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    class _Proc:
+        pid = 4242
+
+        def poll(self):
+            return None
+
+    cmd = [
+        "py", "-m", "src.cli.main", "collect-aftermarket",
+        "--venue", "nxt", "--shard-index", "1", "--credential-slot", "2",
+        "--credential-key-id", "abcdef012345", "--symbols", "005930,000660",
+    ]
+    sup = ProcessSupervisor(cmd=cmd, popen=lambda c: _Proc())
+
+    with caplog.at_level(logging.INFO, logger="src.orchestration.supervisor"):
+        sup.ensure_running()
+
+    spawns = [r for r in caplog.records if "stage=child_spawn" in r.getMessage()]
+    assert len(spawns) == 1
+    msg = spawns[0].getMessage()
+    assert spawns[0].krx_event is True
+    assert "kind=started pid=4242 label=collect-aftermarket" in msg
+    assert "venue=nxt shard_index=1 credential_slot=2 credential_key_id=abcdef012345" in msg
+    assert "005930" not in msg
+    assert "--symbols" not in msg
+    assert "/" not in msg
+
+
+def test_restart_logs_kind_prev_exit_code_and_reason(caplog) -> None:
+    import logging
+
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    class _Proc:
+        def __init__(self, pid, code):
+            self.pid = pid
+            self.code = code
+
+        def poll(self):
+            return self.code
+
+    procs = [_Proc(1, 3), _Proc(2, None)]
+    sup = ProcessSupervisor(cmd=["py", "-m", "src.cli.main", "collect-stream"], popen=lambda c: procs.pop(0))
+    sup.ensure_running()
+    sup.arm_restart_reason("stale_child")
+
+    with caplog.at_level(logging.INFO, logger="src.orchestration.supervisor"):
+        assert sup.ensure_running() == "restarted"
+
+    msg = [r.getMessage() for r in caplog.records if "stage=child_spawn" in r.getMessage()][-1]
+    assert "kind=restarted pid=2 label=collect-stream prev_exit_code=3 restart_reason=stale_child" in msg
+
+
+def test_probe_spawn_logs_probe_kind(caplog, monkeypatch) -> None:
+    import logging
+    import time as real_time
+    import types
+
+    import src.orchestration.supervisor as sup_mod
+    from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker
+
+    class _Proc:
+        def __init__(self, pid):
+            self.pid = pid
+            self.code = None
+
+        def poll(self):
+            return self.code
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(
+        sup_mod, "time", types.SimpleNamespace(monotonic=lambda: clock["t"], time=real_time.time)
+    )
+    procs = [_Proc(1), _Proc(2), _Proc(3)]
+    breaker = RestartCircuitBreaker(
+        max_restarts=1, window_s=1800.0, probe_base_interval_s=1.0, probe_max_interval_s=1.0
+    )
+    sup = ProcessSupervisor(cmd=["x"], breaker=breaker, popen=lambda c: procs.pop(0))
+    with caplog.at_level(logging.INFO, logger="src.orchestration.supervisor"):
+        sup.ensure_running()
+        sup._proc.code = 1
+        assert sup.ensure_running() == "restarted"
+        sup._proc.code = 1
+        assert sup.ensure_running() == "circuit_open"
+        clock["t"] = 10.0
+        assert sup.ensure_running() == "restarted"
+
+    kinds = [r.getMessage() for r in caplog.records if "stage=child_spawn" in r.getMessage()]
+    assert "kind=probe pid=3" in kinds[-1]
+
+
+def test_fake_process_without_pid_is_tolerated(caplog) -> None:
+    import logging
+
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    class _Proc:
+        def poll(self):
+            return None
+
+    sup = ProcessSupervisor(cmd=["echo", "hi"], popen=lambda c: _Proc())
+
+    with caplog.at_level(logging.INFO, logger="src.orchestration.supervisor"):
+        assert sup.ensure_running() == "started"
+
+    assert any("pid=None label=echo" in r.getMessage() for r in caplog.records)
+
+
+def test_kill_logs_warning_with_pid(caplog) -> None:
+    import logging
+    import subprocess
+
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    class _Proc:
+        pid = 777
+        code = None
+
+        def poll(self):
+            return self.code
+
+        def terminate(self):
+            return None
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
+            self.code = -9
+            return -9
+
+        def kill(self):
+            return None
+
+    sup = ProcessSupervisor(cmd=["py", "-m", "src.cli.main", "collect-regular-kis"], popen=lambda c: _Proc())
+    sup.ensure_running()
+
+    with caplog.at_level(logging.WARNING, logger="src.orchestration.supervisor"):
+        assert sup.wait_stopped(0.01) == "killed"
+
+    warnings = [r for r in caplog.records if "stage=child_stop status=KILLED" in r.getMessage()]
+    assert len(warnings) == 1
+    assert warnings[0].levelno == logging.WARNING
+    assert "pid=777 label=collect-regular-kis" in warnings[0].getMessage()
+
+
+def test_child_label_and_fields_are_pure_and_allowlisted() -> None:
+    from src.orchestration.supervisor import child_identity_fields, child_label
+
+    assert child_label(["/usr/bin/python3", "-X", "foo"]) == "python3"
+    assert child_label([]) == "unknown"
+    assert child_label(["py", "-m", "src.realtime.worker"]) == "src.realtime.worker"
+    assert child_label(["py", "-m", "src.cli.main", "--help"]) == "src.cli.main"
+
+    fields = child_identity_fields(
+        ["py", "-m", "src.cli.main", "collect-stream", "--venue", "a b", "--symbols", "x,y", "--secret", "k"]
+    )
+    assert fields == "venue=?"
+    assert "secret" not in fields
+    assert child_identity_fields(["py", "--venue"]) == ""
+    assert "symbols" not in fields
+
+
+def test_label_property_reports_child_subcommand() -> None:
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    sup = ProcessSupervisor(cmd=["py", "-m", "src.cli.main", "collect-premarket"], popen=lambda c: None)
+
+    assert sup.label == "collect-premarket"
+
+
+def test_spawn_failure_propagates_without_spawn_line(caplog) -> None:
+    import logging
+
+    import pytest
+
+    from src.orchestration.supervisor import ProcessSupervisor
+
+    def _boom(cmd):
+        raise OSError("no such file")
+
+    sup = ProcessSupervisor(cmd=["x"], popen=_boom)
+
+    with caplog.at_level(logging.INFO, logger="src.orchestration.supervisor"), pytest.raises(OSError, match="no such file"):
+        sup.ensure_running()
+
+    assert not any("stage=child_spawn" in r.getMessage() for r in caplog.records)

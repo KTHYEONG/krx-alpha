@@ -1078,3 +1078,142 @@ def test_shard_rows_report_candidates_missing_from_the_candidate_file(caplog) ->
 
     assert kept == [{"symbol": "005930", "tier": "A"}]
     assert "status=MISSING_CANDIDATES missing=1" in caplog.text
+
+
+def _identity_cfg(tmp_path, **overrides):
+    import datetime as dt
+
+    from src.realtime.session import SessionConfig
+    from src.universe.ipc import write_candidates
+
+    cand_path = tmp_path / "candidates.json"
+    write_candidates(cand_path, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
+    fields = {
+        "session_date": dt.date(2026, 9, 14),
+        "journal_root": tmp_path / "l0",
+        "manifest_path": tmp_path / "session.json",
+        "candidates_path": cand_path,
+        "ntp_host": "ntp",
+        "slot_budget": 2,
+        "max_clock_offset_ns": 2_000_000_000,
+        "desired_streams": ("H0STCNT0",),
+        "vendor": "ls",
+        **overrides,
+    }
+    return SessionConfig(**fields)
+
+
+def _zero_ntp(monkeypatch) -> None:
+    import src.realtime.session as session_mod
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", lambda host, *, client=None: 0)
+
+
+def test_bootstrap_ok_line_is_event_with_restart_fields(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    from src.realtime.session import bootstrap_session
+
+    _zero_ntp(monkeypatch)
+    cfg = _identity_cfg(tmp_path)
+    from dataclasses import replace
+
+    with caplog.at_level(logging.INFO, logger="src.realtime.session"):
+        bootstrap_session(cfg, now_ns=1_000)
+        bootstrap_session(replace(cfg, restart_reason="stale_child"), now_ns=2_000)
+
+    ok = [r for r in caplog.records if "stage=bootstrap" in r.getMessage() and "status=OK" in r.getMessage()]
+    assert len(ok) == 2
+    assert ok[-1].krx_event is True
+    assert "status=OK restart_reason=stale_child degraded_reason=- boots=2" in ok[-1].getMessage()
+
+
+def test_bootstrap_sets_lane_identity_for_kis_shard(tmp_path, monkeypatch) -> None:
+    from src.core.observability import process_identity
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+    from src.realtime.session import StreamRoute, bootstrap_session
+
+    _zero_ntp(monkeypatch)
+    shard = AftermarketShard(MarketVenue.NXT, 1, ("005930",), ("H0NXCNT0", "H0NXASP0"), "2", "abcdef012345")
+    cfg = _identity_cfg(
+        tmp_path,
+        vendor="kis",
+        route=StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER),
+        shard=shard,
+    )
+
+    bootstrap_session(cfg, now_ns=1_000)
+
+    assert process_identity() == {
+        "vendor": "kis",
+        "venue": "nxt",
+        "shard": "kis-nxt_after-1",
+        "slot": "2",
+        "key_id": "abcdef012345",
+    }
+
+
+def test_bootstrap_sets_lane_identity_for_ls_shard(tmp_path, monkeypatch) -> None:
+    from src.core.observability import process_identity
+    from src.realtime.session import bootstrap_session
+
+    _zero_ntp(monkeypatch)
+    bootstrap_session(_identity_cfg(tmp_path, ls_shard_index=1), now_ns=1_000)
+
+    identity = process_identity()
+    assert identity["shard"] == "ls-regular-1"
+    assert identity["venue"] == "krx"
+    assert "slot" not in identity
+    assert "key_id" not in identity
+
+
+def test_bootstrap_survives_invalid_identity(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    from src.core.observability import process_identity
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+    from src.realtime.session import StreamRoute, bootstrap_session
+
+    _zero_ntp(monkeypatch)
+    shard = AftermarketShard(MarketVenue.KRX, 0, ("005930",), ("H0UNCNT0", "H0UNASP0"), "bad slot", "abcdef012345")
+    cfg = _identity_cfg(
+        tmp_path,
+        vendor="kis",
+        route=StreamRoute(MarketVenue.KRX, MarketSession.KRX_AFTER),
+        shard=shard,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="src.realtime.session"):
+        session = bootstrap_session(cfg, now_ns=1_000)
+
+    assert session is not None
+    assert process_identity() == {}
+    warnings = [r for r in caplog.records if "stage=process_identity status=INVALID" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+def test_invalid_identity_clears_previously_set_identity(tmp_path, monkeypatch, caplog) -> None:
+    import logging
+
+    from src.core.observability import process_identity, set_process_identity
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+    from src.realtime.session import StreamRoute, bootstrap_session
+
+    _zero_ntp(monkeypatch)
+    set_process_identity(vendor="kis", venue="krx", shard="kis-krx_after-0", slot="1", key_id="111111111111")
+    shard = AftermarketShard(MarketVenue.KRX, 0, ("005930",), ("H0UNCNT0", "H0UNASP0"), "bad slot", "abcdef012345")
+    cfg = _identity_cfg(
+        tmp_path,
+        vendor="kis",
+        route=StreamRoute(MarketVenue.KRX, MarketSession.KRX_AFTER),
+        shard=shard,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="src.realtime.session"):
+        bootstrap_session(cfg, now_ns=1_000)
+
+    assert process_identity() == {}
+    assert any("stage=process_identity status=INVALID" in r.getMessage() for r in caplog.records)

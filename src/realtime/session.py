@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from src.core.calendar import SessionSchedule, SessionState, calc_sleep_seconds, get_target_state
 from src.core.config import DataPaths
+from src.core.observability import EVENT, clear_process_identity, set_process_identity
 from src.core.session_anchors import STANDARD_NXT_PREMARKET_END, resolve_session_anchors
 from src.realtime.clock import ClockUnsyncedError, measure_ntp_offset_ns
 from src.realtime.contracts import LiveSubscribable, MarketSession, MarketVenue, VendorAck
@@ -184,6 +185,23 @@ def _rows_for_symbols(rows: list[dict[str, Any]], symbols: tuple[str, ...]) -> l
     return kept
 
 
+def _apply_process_identity(cfg: SessionConfig) -> None:
+    session_name = cfg.route.session.value if cfg.route is not None else MarketSession.REGULAR.value
+    venue = cfg.route.venue.value if cfg.route is not None else MarketVenue.KRX.value
+    index = cfg.shard.shard_index if cfg.shard is not None else cfg.ls_shard_index
+    try:
+        set_process_identity(
+            vendor=cfg.vendor,
+            venue=venue,
+            shard=f"{cfg.vendor}-{session_name}-{index}",
+            slot=cfg.shard.credential_slot if cfg.shard is not None else None,
+            key_id=cfg.shard.credential_key_id if cfg.shard is not None else None,
+        )
+    except ValueError as exc:
+        clear_process_identity()
+        logger.warning("[SYS] stage=process_identity status=INVALID reason=%s", exc)
+
+
 def bootstrap_session(
     cfg: SessionConfig, *, ntp_client: object | None = None, now_ns: int | None = None
 ) -> CollectorSession:
@@ -211,6 +229,7 @@ def bootstrap_session(
         raise ValueError(f"ls_shard_index {cfg.ls_shard_index} must be non-negative")
     if cfg.restart_reason not in (None, "restart", "stale_child"):
         raise ValueError(f"restart_reason {cfg.restart_reason!r} must be None, 'restart' or 'stale_child'")
+    _apply_process_identity(cfg)
     hosts = (cfg.ntp_host, *cfg.ntp_fallback_hosts)
     offset_ns: int | None = None
     for host in hosts:
@@ -351,10 +370,14 @@ def bootstrap_session(
     )
     session.persist()
     logger.info(
-        "[DATA] stage=bootstrap pairs=%d offset_ns=%d state=%s status=OK",
+        "[DATA] stage=bootstrap pairs=%d offset_ns=%d state=%s status=OK restart_reason=%s degraded_reason=%s boots=%d",
         len(session.replay_pairs()),
         manifest.clock_offset_ns,
         session.current_state(),
+        cfg.restart_reason or "-",
+        cfg.degraded_reason or "-",
+        len(manifest.boots),
+        extra=EVENT,
     )
     return session
 

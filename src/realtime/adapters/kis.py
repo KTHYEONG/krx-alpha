@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -53,6 +54,17 @@ def _is_pingpong(raw: str) -> bool:
 
 def _expected_streams(route: StreamRoute) -> tuple[str, str]:
     return NXT_STREAMS if route.venue == MarketVenue.NXT else KRX_STREAMS
+
+
+_KIS_ERROR_CODE_RE = re.compile(r"[A-Za-z0-9_]{1,24}")
+
+
+def _auth_rejected_reason(status: int, data: object) -> str:
+    if isinstance(data, dict) and "error_code" in data:
+        code = str(data["error_code"])
+        if _KIS_ERROR_CODE_RE.fullmatch(code):
+            return f"auth_rejected:{status}:{code}"
+    return f"auth_rejected:{status}"
 
 
 class KisRealtimeAdapter:
@@ -110,7 +122,7 @@ class KisRealtimeAdapter:
                 data = await resp.json()
                 status = getattr(resp, "status", 200)
                 if status != 200:
-                    raise VendorAuthRejected(f"auth_rejected:{status}")
+                    raise VendorAuthRejected(_auth_rejected_reason(status, data))
                 approval = data.get("approval_key") if isinstance(data, dict) else None
                 if not approval:
                     raise VendorAuthRejected(f"auth_rejected:{status}:no_approval_key")
