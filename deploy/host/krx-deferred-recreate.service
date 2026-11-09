@@ -6,6 +6,8 @@ OnFailure=kca-alert@%n.service
 Type=oneshot
 WorkingDirectory=%h/krx-alpha
 ExecStartPre=/bin/bash %h/krx-alpha/deploy/host/krx-ownership-fixup.sh
+ExecStartPre=-/bin/bash %h/krx-alpha/deploy/host/krx-wait-repair-idle.sh
+Environment=KRX_REPAIR_WAIT_MAX_S=240
 ExecStart=/usr/bin/docker compose up -d --remove-orphans
 ExecStartPost=/bin/bash %h/krx-alpha/deploy/host/krx-deferred-verify.sh
 TimeoutStartSec=10min

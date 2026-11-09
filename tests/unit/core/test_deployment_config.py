@@ -971,3 +971,33 @@ def test_deploy_installs_strategy_store_sync_timer() -> None:
     assert "OnCalendar=*:0/5" in timer
     assert "Persistent=true" in timer
     assert "OnFailure=kca-alert@%n.service" in service
+
+
+def test_deploy_waits_for_repair_before_force_recreate() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    call = "KRX_REPAIR_WAIT_MAX_S=900 bash ~/krx-alpha/deploy/host/krx-wait-repair-idle.sh"
+
+    assert '"$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/krx-wait-repair-idle.sh"' in workflow
+    assert 'install -m 755 "\\$STAGING_DIR/krx-wait-repair-idle.sh"' in workflow
+    branch = workflow.index('if [ "$RECREATE_NOW" = "1" ]; then')
+    assert branch < workflow.index(call) < workflow.index("up -d --force-recreate")
+    assert workflow.index(call) < workflow.index("krx-ownership-fixup.sh\n            \\$C up")
+
+
+def test_deferred_unit_waits_after_ownership_fix() -> None:
+    from pathlib import Path
+    import re
+
+    service = Path("deploy/host/krx-deferred-recreate.service").read_text(encoding="utf-8")
+    pre = [line for line in service.splitlines() if line.startswith("ExecStartPre=")]
+
+    assert len(pre) == 2
+    assert "krx-ownership-fixup.sh" in pre[0]
+    assert "krx-wait-repair-idle.sh" in pre[1]
+    assert service.index(pre[1]) < service.index("ExecStart=/usr/bin/docker compose up -d")
+    max_wait = int(re.search(r"^Environment=KRX_REPAIR_WAIT_MAX_S=(\d+)$", service, re.M).group(1))
+    timeout = re.search(r"^TimeoutStartSec=(\d+)min$", service, re.M)
+    assert max_wait < int(timeout.group(1)) * 60
+    assert "--force-recreate" not in service
