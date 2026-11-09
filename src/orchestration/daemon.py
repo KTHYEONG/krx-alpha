@@ -115,6 +115,8 @@ from src.orchestration.shard_watchdog import (
     ShardObservation,
     ShardVerdict,
     ShardWatchdog,
+    ls_after_close_window,
+    ls_shard_last_journal_wall,
     shard_last_journal_wall,
     shard_window,
 )
@@ -1239,6 +1241,8 @@ class DaemonState:
     shard_stale_restarts: int = 0
     shard_venue_wide_warned: set[tuple[str, dt.date]] = field(default_factory=set)
     shard_budget_alerted: set[tuple[str, dt.date]] = field(default_factory=set)
+    ls_shard_stale_paged: set[tuple[str, dt.date]] = field(default_factory=set)
+    ls_venue_wide_paged: set[tuple[str, dt.date]] = field(default_factory=set)
     premarket_pool_day: dt.date | None = None
     next_premarket_pool_at: dt.datetime | None = None
     premarket_pool_failed_day: dt.date | None = None
@@ -1743,6 +1747,9 @@ class DaemonRunner:
         self._regular_kis_watchdog = ShardWatchdog(
             limit_s=_wd.aftermarket_stale_limit_s, max_restarts_per_day=_wd.max_restarts_per_day
         )
+        self._ls_watchdog = ShardWatchdog(
+            limit_s=_wd.ls_after_close_stale_limit_s, max_restarts_per_day=_wd.max_restarts_per_day
+        )
         self._program_sync_cfg = (
             program_sync_settings if program_sync_settings is not None else TossProgramTradesSettings()
         )
@@ -2240,6 +2247,7 @@ class DaemonRunner:
         self._supervise_session_children(now, anchors)
         self._supervise_regular_kis(now, anchors)
         self._supervise_regular_ls_shard(today)
+        self._watch_ls_shards(now, state, today, anchors)
         self._run_ingest_watchdog(now, state, day, anchors)
         self._run_first_frame_watchdog(now, state, day, anchors)
         self._run_crosscheck_watchdogs(now, state, day, anchors)
@@ -2985,6 +2993,94 @@ class DaemonRunner:
                 venue.value,
                 today.isoformat(),
                 extra=page(PageKind.AFTERMARKET_PLAN_MISSING),
+            )
+
+    def _watch_ls_shards(self, now: dt.datetime, state: SessionState, today: dt.date, anchors: SessionAnchors) -> None:
+        """Page when an LS regular shard's journals go silent after the close; never restarts a child."""
+        try:
+            self._watch_ls_shards_guarded(now, state, today, anchors)
+        except (OSError, ValueError) as exc:
+            logger.warning("[DATA] stage=shard_watchdog status=ERROR reason=%s", type(exc).__name__)
+
+    def _watch_ls_shards_guarded(self, now: dt.datetime, state: SessionState, today: dt.date, anchors: SessionAnchors) -> None:
+        wd = getattr(self._runtime, "shard_watchdog", None)
+        if wd is None or not wd.enabled or not wd.ls_after_close_enabled:
+            return
+        if self._runtime.collector.vendor != "ls" or state not in (
+            SessionState.FULL_ACTIVE,
+            SessionState.AFTER_MARKET_ACTIVE,
+        ):
+            return
+        st = self._state
+        if st.ls_shard_plan_day != today:
+            return
+        open_dt, end_dt = ls_after_close_window(today, anchors=anchors)
+        if not open_dt <= now < end_dt:
+            return
+        ch = self._children
+        supervisors: dict[int, Any] = {0: ch.regular, 1: ch.get(StreamChildKey.REGULAR_LS_B)}
+        observations = tuple(
+            ShardObservation(
+                key=f"ls-{shard.shard_index:02d}",
+                venue=MarketVenue.KRX.value,
+                running=bool(sup.is_running()),
+                started_at_wall=getattr(sup, "started_at_wall", None),
+                last_journal_wall=ls_shard_last_journal_wall(
+                    self._paths.journal_root,
+                    streams=shard.streams,
+                    day=today,
+                    shard_index=shard.shard_index,
+                ),
+            )
+            for shard in st.ls_shard_plan
+            if shard.symbols and (sup := supervisors.get(shard.shard_index)) is not None and hasattr(sup, "is_running")
+        )
+        if not observations:
+            return
+        decisions = self._ls_watchdog.evaluate(
+            observations,
+            now_wall=now.timestamp(),
+            window_open_wall=open_dt.timestamp(),
+            in_window=True,
+            day=today,
+        )
+        self._page_ls_decisions(decisions, today=today, venue_wide_page_s=wd.ls_after_close_venue_wide_page_s)
+
+    def _page_ls_decisions(
+        self, decisions: tuple[ShardDecision, ...], *, today: dt.date, venue_wide_page_s: float
+    ) -> None:
+        st = self._state
+        wide = [d for d in decisions if d.verdict is ShardVerdict.VENUE_WIDE_SILENCE]
+        if wide:
+            peak = max(d.silent_s or 0.0 for d in wide)
+            if ("ls", today) not in st.shard_venue_wide_warned:
+                st.shard_venue_wide_warned.add(("ls", today))
+                logger.warning(
+                    "[DATA] stage=shard_watchdog status=WARN reason=venue_wide_silence venue=krx shards=%d silent_s=%.0f limit_s=%.0f",
+                    len(wide),
+                    peak,
+                    wide[0].limit_s,
+                )
+            if peak >= venue_wide_page_s and ("krx", today) not in st.ls_venue_wide_paged:
+                st.ls_venue_wide_paged.add(("krx", today))
+                logger.critical(
+                    "[DATA] stage=shard_watchdog status=FAIL reason=ls_venue_wide_silent venue=krx silent_s=%.0f limit_s=%.0f date=%s",
+                    peak,
+                    wide[0].limit_s,
+                    today.isoformat(),
+                    extra=page(PageKind.LS_SHARD_STALE),
+                )
+        for d in decisions:
+            if d.verdict is not ShardVerdict.STALE or (d.key, today) in st.ls_shard_stale_paged:
+                continue
+            st.ls_shard_stale_paged.add((d.key, today))
+            logger.critical(
+                "[DATA] stage=shard_watchdog status=FAIL reason=ls_shard_silent shard=%s silent_s=%.0f limit_s=%.0f date=%s",
+                d.key,
+                d.silent_s or 0.0,
+                d.limit_s,
+                today.isoformat(),
+                extra=page(PageKind.LS_SHARD_STALE),
             )
 
     def _watch_aftermarket_shards(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:

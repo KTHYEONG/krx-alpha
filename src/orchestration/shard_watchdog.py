@@ -167,7 +167,15 @@ def shard_window(
     )
 
 
-def shard_last_journal_wall(
+def ls_after_close_window(day: dt.date, *, anchors: SessionAnchors) -> tuple[dt.datetime, dt.datetime]:
+    """KST `[regular_close, after_market_end)` of `day`."""
+    return (
+        dt.datetime.combine(day, anchors.regular_close, tzinfo=_KST),
+        dt.datetime.combine(day, anchors.after_market_end, tzinfo=_KST),
+    )
+
+
+def _journal_wall_for_tag(
     journal_root: pathlib.Path,
     *,
     vendor: str,
@@ -175,19 +183,17 @@ def shard_last_journal_wall(
     session: str,
     streams: Sequence[str],
     day: dt.date,
-    shard_index: int,
+    file_tag: str | None,
 ) -> float | None:
-    """Newest mtime over the shard's own tagged journal files for `day`, or None."""
     latest: float | None = None
     root = pathlib.Path(journal_root)
-    tag = f"s{shard_index}"
     for stream in streams:
         key = l0_partition_key(vendor, venue, session, stream, day)
         if key is None:
             continue
         part = root / l0_partition_relpath(key)
         try:
-            files = list(part.glob(l0_journal_file_glob(tag)))
+            files = list(part.glob(l0_journal_file_glob(file_tag)))
         except OSError:
             continue
         for path in files:
@@ -200,11 +206,50 @@ def shard_last_journal_wall(
     return latest
 
 
+def shard_last_journal_wall(
+    journal_root: pathlib.Path,
+    *,
+    vendor: str,
+    venue: str,
+    session: str,
+    streams: Sequence[str],
+    day: dt.date,
+    shard_index: int,
+) -> float | None:
+    """Newest mtime over the shard's own tagged journal files for `day`, or None."""
+    return _journal_wall_for_tag(
+        journal_root,
+        vendor=vendor,
+        venue=venue,
+        session=session,
+        streams=streams,
+        day=day,
+        file_tag=f"s{shard_index}",
+    )
+
+
+def ls_shard_last_journal_wall(
+    journal_root: pathlib.Path, *, streams: Sequence[str], day: dt.date, shard_index: int
+) -> float | None:
+    """Newest mtime over the LS regular shard's journals for `day`; shard 0 is untagged, others `s{index}`."""
+    return _journal_wall_for_tag(
+        journal_root,
+        vendor="ls",
+        venue=MarketVenue.KRX.value,
+        session=MarketSession.REGULAR.value,
+        streams=streams,
+        day=day,
+        file_tag=None if shard_index == 0 else f"s{shard_index}",
+    )
+
+
 __all__ = [
     "ShardDecision",
     "ShardObservation",
     "ShardVerdict",
     "ShardWatchdog",
+    "ls_after_close_window",
+    "ls_shard_last_journal_wall",
     "shard_last_journal_wall",
     "shard_window",
 ]

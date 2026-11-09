@@ -86,3 +86,24 @@ def test_backward_compatibility(monkeypatch) -> None:
     runtime = resolve_collector_runtime(collector=CollectorSettings())
     assert runtime.shard_watchdog.aftermarket_stale_limit_s == 120.0
     assert runtime.collector.kis_ack_timeout_s == 10.0
+
+
+def test_ls_after_close_defaults(monkeypatch) -> None:
+    _clean_env(monkeypatch)
+    from src.core.config import ShardWatchdogSettings
+
+    wd = ShardWatchdogSettings()
+    assert wd.ls_after_close_enabled is True
+    assert wd.ls_after_close_stale_limit_s == 900.0
+    assert wd.ls_after_close_venue_wide_page_s == 1800.0
+
+
+def test_venue_wide_page_below_stale_limit_rejected(monkeypatch) -> None:
+    _clean_env(monkeypatch)
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import ShardWatchdogSettings
+
+    with pytest.raises(ValidationError):
+        ShardWatchdogSettings(ls_after_close_stale_limit_s=900.0, ls_after_close_venue_wide_page_s=600.0)

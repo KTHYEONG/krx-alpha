@@ -644,3 +644,77 @@ def test_default_policy_mails_each_failure_kind_once_per_day() -> None:
     now["day"] = dt.date(2026, 9, 26)
     handler.handle(_record("repeat-key"))
     assert len(calls) == 3
+
+
+def _ls_shard_record(msg):
+    from src.core.alerts import PageKind
+
+    return _record(msg, kind=PageKind.LS_SHARD_STALE)
+
+
+def test_ls_shard_stale_page_text_present() -> None:
+    from src.core.alerts import PAGE_TEXTS, PageKind
+
+    text = PAGE_TEXTS[PageKind.LS_SHARD_STALE]
+    assert "시간외" not in " ".join([text.summary, text.auto_action, text.operator_action])
+
+
+def test_ls_shard_pages_dedup_per_shard() -> None:
+    from src.core.alerts import alert_dedup_key
+
+    base = "[DATA] stage=shard_watchdog status=FAIL reason=ls_shard_silent shard=%s silent_s=%d limit_s=900 date=2026-11-09"
+    a = alert_dedup_key(base % ("ls-00", 1000))
+    b = alert_dedup_key(base % ("ls-01", 1100))
+    assert a != b
+    assert alert_dedup_key(base % ("ls-01", 1100)) == alert_dedup_key(base % ("ls-01", 2400))
+
+
+def test_ls_venue_wide_key_distinct() -> None:
+    from src.core.alerts import alert_dedup_key
+
+    venue = alert_dedup_key(
+        "[DATA] stage=shard_watchdog status=FAIL reason=ls_venue_wide_silent venue=krx silent_s=2000 limit_s=900 date=2026-11-09"
+    )
+    shard = alert_dedup_key(
+        "[DATA] stage=shard_watchdog status=FAIL reason=ls_shard_silent shard=ls-01 silent_s=1000 limit_s=900 date=2026-11-09"
+    )
+    assert venue != shard
+
+
+
+def test_ls_shard_pages_reserve_per_shard_and_repeat_suppressed() -> None:
+    import datetime as dt
+    import logging
+
+    from src.core.alerts import EmailAlertHandler, PageKind, page
+
+    calls: list[str] = []
+    handler = EmailAlertHandler(
+        component="daemon",
+        run_id="r",
+        sender=lambda s, b: calls.append(b),
+        cooldown_s=0,
+        today=lambda: dt.date(2026, 11, 9),
+        sleep=lambda s: None,
+        per_key_daily_cap=1,
+    )
+
+    def _page(shard: str, silent: int) -> None:
+        record = logging.LogRecord(
+            "x",
+            logging.CRITICAL,
+            __file__,
+            1,
+            f"[DATA] stage=shard_watchdog status=FAIL reason=ls_shard_silent shard={shard} silent_s={silent} limit_s=900 date=2026-11-09",
+            (),
+            None,
+        )
+        record.__dict__.update(page(PageKind.LS_SHARD_STALE))
+        handler.handle(record)
+
+    _page("ls-00", 1000)
+    _page("ls-01", 1100)
+    _page("ls-01", 2400)
+    assert len(calls) == 2
+    assert "[ls-00]" in calls[0]
+    assert "[ls-01]" in calls[1]

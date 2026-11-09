@@ -766,6 +766,15 @@ class ShardWatchdogSettings(BaseSettings):
     aftermarket_stale_limit_s: float = Field(default=120.0, gt=0)
     premarket_stale_limit_s: float = Field(default=120.0, gt=0)
     max_restarts_per_day: int = Field(default=3, ge=0)
+    ls_after_close_enabled: bool = True
+    ls_after_close_stale_limit_s: float = Field(default=900.0, gt=0)
+    ls_after_close_venue_wide_page_s: float = Field(default=1800.0, gt=0)
+
+    @model_validator(mode="after")
+    def check_ls_after_close(self) -> ShardWatchdogSettings:
+        if self.ls_after_close_venue_wide_page_s < self.ls_after_close_stale_limit_s:
+            raise ValueError("ls_after_close_venue_wide_page_s must be >= ls_after_close_stale_limit_s")
+        return self
 
 
 class AuditMode(StrEnum):

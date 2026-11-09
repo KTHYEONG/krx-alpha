@@ -419,3 +419,51 @@ def test_journal_scan_skips_vanished_files(tmp_path, monkeypatch) -> None:
         streams=("H0NXCNT0",), day=DAY, shard_index=0,
     )
     assert got is None
+
+
+def test_ls_after_close_window_is_close_to_end() -> None:
+    from src.orchestration.shard_watchdog import ls_after_close_window
+
+    anchors = standard_session_anchors(DAY)
+    open_dt, end_dt = ls_after_close_window(DAY, anchors=anchors)
+    assert open_dt.timetz().replace(tzinfo=None) == anchors.regular_close
+    assert end_dt.timetz().replace(tzinfo=None) == anchors.after_market_end
+    assert open_dt.date() == end_dt.date() == DAY
+
+
+def test_ls_journal_wall_shard_zero_untagged(tmp_path) -> None:
+    import os
+
+    from src.orchestration.shard_watchdog import ls_shard_last_journal_wall
+
+    part = tmp_path / "ls" / "krx" / "regular" / "S3_" / f"dt={DAY.isoformat()}"
+    part.mkdir(parents=True)
+    untagged = part / "15.jsonl.zst"
+    tagged = part / "15.s1.jsonl.zst"
+    untagged.write_bytes(b"x")
+    tagged.write_bytes(b"x")
+    os.utime(untagged, (1000.0, 1000.0))
+    os.utime(tagged, (2000.0, 2000.0))
+    assert ls_shard_last_journal_wall(tmp_path, streams=("S3_",), day=DAY, shard_index=0) == 1000.0
+    assert ls_shard_last_journal_wall(tmp_path, streams=("S3_",), day=DAY, shard_index=1) == 2000.0
+    assert ls_shard_last_journal_wall(tmp_path / "missing", streams=("S3_",), day=DAY, shard_index=0) is None
+
+
+def test_kis_journal_wall_unchanged(tmp_path) -> None:
+    import os
+
+    part = tmp_path / "kis" / "krx" / "krx_after" / "H0STCNT0" / f"dt={DAY.isoformat()}"
+    part.mkdir(parents=True)
+    path = part / "16.s0.jsonl.zst"
+    path.write_bytes(b"x")
+    os.utime(path, (3000.0, 3000.0))
+    wall = shard_last_journal_wall(
+        tmp_path,
+        vendor="kis",
+        venue="krx",
+        session="krx_after",
+        streams=("H0STCNT0",),
+        day=DAY,
+        shard_index=0,
+    )
+    assert wall == 3000.0
