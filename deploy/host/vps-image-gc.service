@@ -4,7 +4,7 @@ OnFailure=kca-alert@%n.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 %h/krx-alpha/deploy/host/vps_image_gc.py --repo ghcr.io/kthyeong/krx-collector --repo ghcr.io/kthyeong/crypto-pilot-live --repo ghcr.io/kthyeong/k-closing-alpha
+ExecStart=/usr/bin/python3 %h/krx-alpha/deploy/host/vps_image_gc.py --repo ghcr.io/kthyeong/krx-collector --repo ghcr.io/kthyeong/crypto-pilot-live --repo ghcr.io/kthyeong/k-closing-alpha --repo ghcr.io/kthyeong/k-stock-engine
 TimeoutStartSec=45min
 
 [Install]

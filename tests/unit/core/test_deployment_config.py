@@ -679,8 +679,19 @@ def test_gc_service_covers_all_repositories_and_alerts() -> None:
     assert "--repo ghcr.io/kthyeong/krx-collector" in service
     assert "--repo ghcr.io/kthyeong/crypto-pilot-live" in service
     assert "--repo ghcr.io/kthyeong/k-closing-alpha" in service
+    assert "--repo ghcr.io/kthyeong/k-stock-engine" in service
     assert "OnFailure=kca-alert@%n.service" in service
     assert "Type=oneshot" in service
+
+
+def test_gc_service_has_no_destructive_extras() -> None:
+    from pathlib import Path
+
+    service = Path("deploy/host/vps-image-gc.service").read_text(encoding="utf-8")
+    tokens = set(service.split())
+
+    assert "--keep 0" not in service
+    assert not {"--dry-run", "-f", "rmi"} & tokens
 
 
 def test_deploy_uses_verified_pull_and_promotion() -> None:
