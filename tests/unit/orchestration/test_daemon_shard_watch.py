@@ -417,6 +417,7 @@ def test_premarket_stale_stop_and_window_end_inert(monkeypatch, tmp_path, caplog
     assert fake.stop_restart_calls[0]["reason"] == "stale_child"
     assert any("key=premarket" in r.getMessage() and "child_restart" in r.getMessage() for r in caplog.records)
     assert runner.state.shard_stale_restarts == 1
+    assert runner._daily_counters.snapshot(DAY)[daemon_mod.DailyCounter.SHARD_STALE_RESTARTS] == 1
     caplog.clear()
     late = _at(DAY, 8, 51)
     with caplog.at_level(logging.WARNING, logger=daemon_mod.logger.name):
@@ -442,10 +443,59 @@ def test_digest_counts_stale_restarts(monkeypatch, tmp_path) -> None:
     from tests.unit.orchestration.daemon_fixtures import _business_trading_day
 
     view = TradingDayView(date=DAY, status=TradingDayStatus.BUSINESS, trading_day=_business_trading_day(DAY))
-    runner.state.shard_stale_restarts = 1
+    runner._daily_counters.bump(daemon_mod.DailyCounter.SHARD_STALE_RESTARTS, DAY)
     runner._run_business_eod(_at(DAY, 20, 5), DAY, view, _anchors(DAY))
     assert "shard_stale_restarts=1" in digests[0].splitlines()
     assert runner.state.shard_stale_restarts == 0
+
+
+def test_digest_reports_restarts_that_predate_this_process(monkeypatch, tmp_path) -> None:
+    runner = _am_runner(monkeypatch, tmp_path)
+    earlier = daemon_mod.DailyCounters(runner._paths.daily_counters)
+    for _ in range(3):
+        earlier.bump(daemon_mod.DailyCounter.AFTERMARKET_RESTARTS, DAY)
+        earlier.bump(daemon_mod.DailyCounter.SHARD_STALE_RESTARTS, DAY)
+    runner._daily_counters = daemon_mod.DailyCounters(runner._paths.daily_counters)
+    digests: list = []
+    monkeypatch.setattr(
+        daemon_mod, "_run_eod_housekeeping",
+        lambda *a, **k: daemon_mod._EodHousekeeping(deleted=1, uploaded=2, purged=3, maintenance_ok=True, offload_ok=True),
+    )
+    monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "ok"))
+    monkeypatch.setattr(daemon_mod, "record_eod_digest", lambda subject, body: digests.append(body) or True)
+    monkeypatch.setattr(runner, "_aftermarket_eod_blocked", lambda *a, **k: False)
+    monkeypatch.setattr(runner, "_log_aftermarket_prearm", lambda *a, **k: 0)
+    monkeypatch.setattr(runner, "_log_aftermarket_coverage", lambda *a, **k: 0)
+    monkeypatch.setattr(runner, "_log_premarket_eod", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_reconcile_regular_session", lambda *a, **k: (True, True))
+    monkeypatch.setattr(runner, "_reconcile_crosscheck_sessions", lambda *a, **k: {})
+    from tests.unit.orchestration.daemon_fixtures import _business_trading_day
+
+    view = TradingDayView(date=DAY, status=TradingDayStatus.BUSINESS, trading_day=_business_trading_day(DAY))
+    runner._run_business_eod(_at(DAY, 20, 5), DAY, view, _anchors(DAY))
+    lines = digests[0].splitlines()
+    assert "aftermarket_restarts=3" in lines
+    assert "shard_stale_restarts=3" in lines
+    assert "degraded_reasons=none" in lines
+
+
+def test_counter_write_failure_does_not_block_stale_restart(monkeypatch, tmp_path, caplog) -> None:
+    runner = _pm_runner(monkeypatch, tmp_path)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    runner._daily_counters = daemon_mod.DailyCounters(blocker / "daily_counters.json")
+    now = _at(DAY, 8, 20)
+    fake = _FakeSup(running=True, started_at=now.timestamp() - 1000)
+    _pm_install(runner, fake)
+    _write_shard_journal(
+        runner._paths.journal_root, venue="nxt", session="nxt_pre", stream="H0NXCNT0",
+        day=DAY, shard_index=0, hour=8, age_s=200, now=now,
+    )
+    with caplog.at_level(logging.WARNING, logger=daemon_mod.logger.name):
+        runner._supervise_premarket(now, _anchors(DAY))
+    assert len(fake.stop_restart_calls) == 1
+    assert runner.state.shard_stale_restarts == 1
+    assert any("child_restart" in r.getMessage() for r in caplog.records)
 
 
 def test_gap_lands_under_new_reason_end_to_end(tmp_path, monkeypatch) -> None:

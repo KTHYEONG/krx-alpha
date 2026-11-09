@@ -592,6 +592,9 @@ def test_aftermarket_restart_logged_and_counted(tmp_path, monkeypatch, caplog) -
 
     assert runner.state.aftermarket_results == {"nxt:0": "restarted"}
     assert runner.state.aftermarket_restarts == 1
+    from src.orchestration.daily_counters import DailyCounter
+
+    assert runner._daily_counters.snapshot(now.date())[DailyCounter.AFTERMARKET_RESTARTS] == 1
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert warnings.count("[DAEMON] stage=aftermarket_stream status=RESTARTED key=nxt:0 exit_code=-9") == 1
 
@@ -1175,6 +1178,9 @@ def test_existing_aftermarket_children_supervised_while_plan_gate_closed(tmp_pat
 
     assert runner.state.aftermarket_results == {"nxt:0": "restarted"}
     assert runner.state.aftermarket_restarts == 1
+    from src.orchestration.daily_counters import DailyCounter
+
+    assert runner._daily_counters.snapshot(now.date())[DailyCounter.AFTERMARKET_RESTARTS] == 1
     assert runner.state.aftermarket_plan_day is None
     assert _installed_venues(commands) == []
 

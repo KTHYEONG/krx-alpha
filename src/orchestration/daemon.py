@@ -93,6 +93,7 @@ from src.marketdata.toss_calendar import (
     save_trading_day_cache,
     trading_day_from_cache,
 )
+from src.orchestration.daily_counters import DailyCounter, DailyCounters
 from src.orchestration.eod import (
     PrearmVerdict,
     aftermarket_eod_ready,
@@ -1788,6 +1789,7 @@ class DaemonRunner:
         self._last_heartbeat_mono: float | None = None
         self._cfg = runtime.collector
         self._paths = runtime.paths
+        self._daily_counters = DailyCounters(self._paths.daily_counters)
         self._after_cfg = runtime.aftermarket
         self._snapshot_cfg = runtime.snapshot
         self._premarket_cfg = runtime.premarket
@@ -2630,6 +2632,7 @@ class DaemonRunner:
         elif result == "restarted":
             if spec.role is StreamRole.PRIMARY:
                 self._state.streamer_restarts += 1
+                self._daily_counters.bump(DailyCounter.STREAMER_RESTARTS, now.astimezone(_KST).date())
                 logger.warning(logs.restarted, sup.last_exit_code, self._state.streamer_restarts)
             else:
                 logger.warning(logs.restarted, sup.last_exit_code)
@@ -3327,6 +3330,7 @@ class DaemonRunner:
             stop_result = sup.stop_for_restart(reason="stale_child", timeout_s=CHILD_STOP_TIMEOUT_S)
             restarts_today = watchdog.record_restart(d.key, day=today)
             st.shard_stale_restarts += 1
+            self._daily_counters.bump(DailyCounter.SHARD_STALE_RESTARTS, today)
             logger.warning(
                 "[SYS] stage=child_restart status=STALE reason=stale_child key=%s silent_s=%.0f limit_s=%.0f stop_result=%s restarts_today=%d",
                 d.key,
@@ -3411,6 +3415,7 @@ class DaemonRunner:
             st.aftermarket_results[supervisor_key] = result
             if result == "restarted":
                 st.aftermarket_restarts += 1
+                self._daily_counters.bump(DailyCounter.AFTERMARKET_RESTARTS, today)
                 logger.warning(
                     "[DAEMON] stage=aftermarket_stream status=RESTARTED key=%s exit_code=%s",
                     supervisor_key,
@@ -4180,6 +4185,7 @@ class DaemonRunner:
             if failed
         ]
         eod_status = "DEGRADED" if degraded_reasons else "OK"
+        counts = self._daily_counters.snapshot(ref_day)
         logger.info(
             "[DAEMON] stage=eod_maintenance deleted_partitions=%d uploaded=%d purged=%d status=%s",
             housekeeping.deleted,
@@ -4219,9 +4225,9 @@ class DaemonRunner:
                 f"aftermarket_prearm_late={prearm_late}",
                 f"backup_missing={len(backup_missing)}",
                 f"host_backup={host_backup}",
-                f"streamer_restarts={st.streamer_restarts}",
-                f"aftermarket_restarts={st.aftermarket_restarts}",
-                f"shard_stale_restarts={st.shard_stale_restarts}",
+                f"streamer_restarts={counts[DailyCounter.STREAMER_RESTARTS]}",
+                f"aftermarket_restarts={counts[DailyCounter.AFTERMARKET_RESTARTS]}",
+                f"shard_stale_restarts={counts[DailyCounter.SHARD_STALE_RESTARTS]}",
                 f"orchestration_attempts={st.orchestration_attempts}",
                 *[f"crosscheck_{k.value}={v}" for k, v in crosscheck.items()],
                 f"repair_held={getattr(housekeeping, 'held', 0)}",

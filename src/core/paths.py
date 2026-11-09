@@ -124,6 +124,10 @@ class DataPaths:
     def alert_ledger_file(self) -> pathlib.Path:
         return self.work_root / "alert_ledger.json"
 
+    @property
+    def daily_counters(self) -> pathlib.Path:
+        return self.work_root / "daily_counters.json"
+
     def eod_digest_path(self, day: dt.date) -> pathlib.Path:
         return self.logs_dir / "eod_digests" / f"{day.isoformat()}.txt"
 

@@ -1667,6 +1667,7 @@ def _prearm_daemon_runner(tmp_path, plan, *, enabled=True):
         backup_page_stale_days=2,
     )
     runner._paths = DataPaths(tmp_path / "data")
+    runner._daily_counters = daemon_mod.DailyCounters(runner._paths.daily_counters)
     runner._premarket_cfg = SimpleNamespace(enabled=False)
     st = daemon_mod.DaemonState()
     st.aftermarket_plan = tuple(plan)

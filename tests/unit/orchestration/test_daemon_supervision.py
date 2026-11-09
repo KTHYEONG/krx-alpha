@@ -899,6 +899,9 @@ def test_regular_circuit_alert_once_per_episode_with_probes(tmp_path, monkeypatc
 
     assert [page_kind(r) for r in caplog.records if r.levelno == logging.CRITICAL] == [PageKind.REGULAR_FEED_DOWN]
     assert runner.state.streamer_restarts == 2
+    from src.orchestration.daily_counters import DailyCounter
+
+    assert runner._daily_counters.snapshot(now.date())[DailyCounter.STREAMER_RESTARTS] == 2
 
 
 def test_snapshot_circuit_alert_once_per_episode_with_probes(tmp_path, monkeypatch, caplog) -> None:

@@ -92,6 +92,7 @@ def test_business_eod_emits_overdue_critical(tmp_path, monkeypatch, caplog) -> N
     runner = object.__new__(daemon_mod.DaemonRunner)
     runner._cfg = cfg
     runner._paths = paths
+    runner._daily_counters = daemon_mod.DailyCounters(paths.daily_counters)
     runner._runtime = SimpleNamespace(repair=repair, audit=None)
     runner._state = daemon_mod.DaemonState()
     runner._run_id = "test"
@@ -290,6 +291,7 @@ def _judge_runner(tmp_path, *, repair_job: bool, tape: bool):
     runner = object.__new__(daemon_mod.DaemonRunner)
     runner._cfg = cfg
     runner._paths = paths
+    runner._daily_counters = daemon_mod.DailyCounters(paths.daily_counters)
     runner._runtime = SimpleNamespace(repair=repair)
     runner._repair_cfg = repair
     runner._tick_tape_cfg = TickTapeBackfillSettings(enabled=tape)
