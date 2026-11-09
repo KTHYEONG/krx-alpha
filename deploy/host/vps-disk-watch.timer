@@ -1,0 +1,10 @@
+[Unit]
+Description=VPS disk forecast watcher daily
+
+[Timer]
+OnCalendar=*-*-* 06:10:00 Asia/Seoul
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

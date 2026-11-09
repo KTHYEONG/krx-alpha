@@ -185,6 +185,8 @@ jobs:
           scp $SSH_OPTS deploy/host/vps-deploy-lib.sh "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/vps-deploy-lib.sh"
           scp $SSH_OPTS deploy/host/vps_image_gc.py "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/vps_image_gc.py"
           scp $SSH_OPTS deploy/host/vps-image-gc.service deploy/host/vps-image-gc.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
+          scp $SSH_OPTS deploy/host/vps_disk_watch.py "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/vps_disk_watch.py"
+          scp $SSH_OPTS deploy/host/vps-disk-watch.service deploy/host/vps-disk-watch.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
 
           # 런타임 환경 키 매니페스트 생성/스테이징: 키 이름만 담고 값은 담지 않는다
           # (단일 소스: src/core/runtime_env_provisioning.py). 검증기는 스테이징 전용.
@@ -310,6 +312,9 @@ jobs:
           install -m 755 "\$STAGING_DIR/vps_image_gc.py" ~/krx-alpha/deploy/host/vps_image_gc.py.new && mv -f ~/krx-alpha/deploy/host/vps_image_gc.py.new ~/krx-alpha/deploy/host/vps_image_gc.py
           install -m 644 "\$STAGING_DIR/vps-image-gc.service" ~/.config/systemd/user/vps-image-gc.service.new && mv -f ~/.config/systemd/user/vps-image-gc.service.new ~/.config/systemd/user/vps-image-gc.service
           install -m 644 "\$STAGING_DIR/vps-image-gc.timer" ~/.config/systemd/user/vps-image-gc.timer.new && mv -f ~/.config/systemd/user/vps-image-gc.timer.new ~/.config/systemd/user/vps-image-gc.timer
+          install -m 755 "\$STAGING_DIR/vps_disk_watch.py" ~/krx-alpha/deploy/host/vps_disk_watch.py.new && mv -f ~/krx-alpha/deploy/host/vps_disk_watch.py.new ~/krx-alpha/deploy/host/vps_disk_watch.py
+          install -m 644 "\$STAGING_DIR/vps-disk-watch.service" ~/.config/systemd/user/vps-disk-watch.service.new && mv -f ~/.config/systemd/user/vps-disk-watch.service.new ~/.config/systemd/user/vps-disk-watch.service
+          install -m 644 "\$STAGING_DIR/vps-disk-watch.timer" ~/.config/systemd/user/vps-disk-watch.timer.new && mv -f ~/.config/systemd/user/vps-disk-watch.timer.new ~/.config/systemd/user/vps-disk-watch.timer
           mkdir -p ~/.config/krx-secrets-escrow
           install -m 755 "\$STAGING_DIR/krx-secrets-escrow.sh" ~/krx-alpha/deploy/host/krx-secrets-escrow.sh.new && mv -f ~/krx-alpha/deploy/host/krx-secrets-escrow.sh.new ~/krx-alpha/deploy/host/krx-secrets-escrow.sh
           install -m 644 "\$STAGING_DIR/krx-secrets-escrow.service" ~/.config/systemd/user/krx-secrets-escrow.service.new && mv -f ~/.config/systemd/user/krx-secrets-escrow.service.new ~/.config/systemd/user/krx-secrets-escrow.service
@@ -334,6 +339,7 @@ jobs:
           systemctl --user enable --now strategy-store-sync.timer
           systemctl --user enable --now krx-deferred-recreate.timer
           systemctl --user enable --now vps-image-gc.timer
+          systemctl --user enable --now vps-disk-watch.timer
           # 공용 quant-lake 타이머 폐기 가드: PROJECTS 항목이 krx-alpha뿐일 때만 폐기한다.
           # 원격 셸에서 평가되도록 \$ 이스케이프(비인용 heredoc은 러너에서 먼저 확장된다).
           # QUANT_LAKE_RETIRE_GUARD_BEGIN

@@ -1001,3 +1001,22 @@ def test_deferred_unit_waits_after_ownership_fix() -> None:
     timeout = re.search(r"^TimeoutStartSec=(\d+)min$", service, re.M)
     assert max_wait < int(timeout.group(1)) * 60
     assert "--force-recreate" not in service
+
+
+def test_disk_watch_units_and_wiring() -> None:
+    from pathlib import Path
+
+    timer = Path("deploy/host/vps-disk-watch.timer").read_text(encoding="utf-8")
+    service = Path("deploy/host/vps-disk-watch.service").read_text(encoding="utf-8")
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    tokens = set(service.split())
+
+    assert "OnCalendar=*-*-* 06:10:00 Asia/Seoul" in timer
+    assert "Persistent=true" in timer
+    assert "OnFailure=kca-alert@%n.service" in service
+    assert "Type=oneshot" in service
+    assert "Nice=19" in service
+    assert not {"rm", "rmi", "--force"} & tokens
+    assert "deploy/host/vps_disk_watch.py" in workflow
+    assert "vps-disk-watch.timer" in workflow
+    assert "enable --now vps-disk-watch.timer" in workflow

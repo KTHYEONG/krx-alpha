@@ -1,0 +1,13 @@
+[Unit]
+Description=VPS disk forecast watcher
+OnFailure=kca-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/krx-alpha/deploy/host/vps_disk_watch.py
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=30min
+
+[Install]
+WantedBy=default.target
