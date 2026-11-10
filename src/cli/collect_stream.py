@@ -294,6 +294,9 @@ async def run_regular_stream(
             alert_after_s=settings.regular_open_alert_after_s,
             standby_lead_s=settings.regular_open_standby_lead_s,
             standby_hold_s=settings.regular_open_standby_hold_s,
+            after_close_limit_s=settings.after_close_silence_limit_s
+            if profile.vendor == "ls" and settings.after_close_silence_enabled
+            else None,
         )
         swap_request = SwapRequest()
         if shard_symbols is not None:

@@ -1431,3 +1431,12 @@ def test_two_active_sessions_still_require_a_spare_session(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="ls_max_sessions - 1"):
         CollectorSettings()
+
+
+def test_after_close_silence_limit_validator_when_enabled() -> None:
+    from src.core.config import CollectorSettings
+
+    with pytest.raises(ValueError, match="after_close_silence_limit_s"):
+        CollectorSettings(after_close_silence_enabled=True, after_close_silence_limit_s=100.0)
+    assert CollectorSettings(after_close_silence_enabled=True, after_close_silence_limit_s=900.0).after_close_silence_limit_s == 900.0
+    assert CollectorSettings(after_close_silence_enabled=False, after_close_silence_limit_s=100.0).after_close_silence_limit_s == 100.0

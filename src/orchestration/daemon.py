@@ -1798,6 +1798,13 @@ class DaemonRunner:
         _wd = getattr(runtime, "shard_watchdog", None)
         if _wd is None:
             _wd = ShardWatchdogSettings()
+        if self._cfg.after_close_silence_enabled:
+            required_s = self._cfg.after_close_silence_limit_s + _wd.ls_after_close_recovery_margin_s
+            if _wd.ls_after_close_stale_limit_s < required_s:
+                raise ValueError(
+                    f"ls_after_close_stale_limit_s {_wd.ls_after_close_stale_limit_s} must be >= child limit "
+                    f"{self._cfg.after_close_silence_limit_s} + recovery margin {_wd.ls_after_close_recovery_margin_s}"
+                )
         self._aftermarket_watchdog = ShardWatchdog(
             limit_s=_wd.aftermarket_stale_limit_s, max_restarts_per_day=_wd.max_restarts_per_day
         )

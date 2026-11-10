@@ -38,9 +38,12 @@ class RegularOpenWatch:
         standby_lead_s: float,
         standby_hold_s: float,
         now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+        after_close_limit_s: float | None = None,
     ) -> None:
         if silence_limit_s <= 0 or alert_after_s <= 0:
             raise ValueError("silence_limit_s and alert_after_s must be positive")
+        if after_close_limit_s is not None and after_close_limit_s <= 0:
+            raise ValueError("after_close_limit_s must be positive when set")
         if open_grace_s < alert_after_s:
             raise ValueError("open_grace_s must be >= alert_after_s")
         if standby_lead_s <= 0 or standby_hold_s <= 0:
@@ -52,6 +55,7 @@ class RegularOpenWatch:
         self._standby_lead_s = standby_lead_s
         self._standby_hold_s = standby_hold_s
         self._now = now
+        self._after_close_limit_s = after_close_limit_s
         self._first_trade_seen = False
         self._alerted = False
 
@@ -84,6 +88,11 @@ class RegularOpenWatch:
         moment = self._now()
         local = moment.astimezone(_KST).time()
         if not (self._anchors.regular_open <= local < self._anchors.regular_close):
+            if (
+                self._after_close_limit_s is not None
+                and self._anchors.regular_close <= local < self._anchors.after_market_end
+            ):
+                return self._after_close_limit_s
             return None
         if self._first_trade_seen:
             return self._silence_limit_s

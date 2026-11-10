@@ -94,7 +94,7 @@ def test_ls_after_close_defaults(monkeypatch) -> None:
 
     wd = ShardWatchdogSettings()
     assert wd.ls_after_close_enabled is True
-    assert wd.ls_after_close_stale_limit_s == 900.0
+    assert wd.ls_after_close_stale_limit_s == 1200.0
     assert wd.ls_after_close_venue_wide_page_s == 1800.0
 
 

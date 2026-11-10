@@ -37,6 +37,8 @@ RUN_ID_ENV: str = "KRX_ALPHA_RUN_ID"
 # Single source for the defaults; env may only override via the settings fields below.
 LS_MAX_SESSIONS: int = 3
 LS_MAX_SUBSCRIPTIONS_PER_SESSION: int = 200
+# 2026-09-14 L0 measurement: off-regular silence reached 450 s on normal days.
+OFF_REGULAR_MAX_NORMAL_SILENCE_S: float = 450.0
 
 
 class KisVenue(StrEnum):
@@ -119,6 +121,9 @@ class CollectorSettings(BaseSettings):
     normalize_timeout_s: float = 900.0
     schedule: SessionSchedule = SessionSchedule()
     after_market_enabled: bool = False
+    # LS child reconnects on silence after the regular close; the in-window limit stays 30 s.
+    after_close_silence_enabled: bool = True
+    after_close_silence_limit_s: float = Field(default=900.0, gt=0)
     # Host-wide KIS pacing reservation lead for daemon data usage (standard work).
     # Critical execution work books without bound; this only bounds the daemon's
     # own data-slot bookings so a critical arrival waits at most this lead.
@@ -154,6 +159,16 @@ class CollectorSettings(BaseSettings):
         if self.subscription_symbol_budget < 0:
             raise ValueError(
                 f"ls_dynamic_reserve_symbols {self.ls_dynamic_reserve_symbols} exceeds LS static symbol capacity"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def check_after_close_silence_limit(self) -> CollectorSettings:
+        # The enabled limit must exceed the 30 s in-window limit, which the 450 s floor already implies.
+        if self.after_close_silence_enabled and self.after_close_silence_limit_s < OFF_REGULAR_MAX_NORMAL_SILENCE_S:
+            raise ValueError(
+                f"after_close_silence_limit_s {self.after_close_silence_limit_s} must be >= "
+                f"{OFF_REGULAR_MAX_NORMAL_SILENCE_S} when after_close_silence_enabled"
             )
         return self
 
@@ -767,7 +782,8 @@ class ShardWatchdogSettings(BaseSettings):
     premarket_stale_limit_s: float = Field(default=120.0, gt=0)
     max_restarts_per_day: int = Field(default=3, ge=0)
     ls_after_close_enabled: bool = True
-    ls_after_close_stale_limit_s: float = Field(default=900.0, gt=0)
+    ls_after_close_stale_limit_s: float = Field(default=1200.0, gt=0)
+    ls_after_close_recovery_margin_s: float = Field(default=300.0, gt=0)
     ls_after_close_venue_wide_page_s: float = Field(default=1800.0, gt=0)
 
     @model_validator(mode="after")

@@ -443,7 +443,7 @@ PAGE_TEXTS: Mapping[PageKind, PageText] = MappingProxyType(
         ),
         PageKind.LS_SHARD_STALE: PageText(
             "LS 정규장 수집 샤드 시세 정지 (15:30 이후)",
-            "경보만 발송하며 자동 재시작은 하지 않음",
+            "수집 프로세스가 침묵을 감지하면 스스로 재접속을 시도함. 이 알림은 재접속 뒤에도 시세가 오지 않는 경우",
             "지금 VPS에서 해당 샤드 로그와 L0 최신 파일 시각을 확인 (애프터마켓 종료 전)",
         ),
         PageKind.STREAM_AUTH_REJECTED: PageText(

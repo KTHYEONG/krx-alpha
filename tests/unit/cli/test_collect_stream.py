@@ -665,3 +665,79 @@ def test_only_shard_zero_requests_lag_standbys(tmp_path, monkeypatch, index, req
     assert rc == 0
     assert len(seen) == 1
     assert (seen[0] is not None) is requests_standby
+
+
+def _pin_watch_clock(monkeypatch, at) -> None:
+    from src.cli import collect_stream
+
+    real_watch = collect_stream.RegularOpenWatch
+
+    def _watch(**kw):
+        return real_watch(**kw, now=lambda: at)
+
+    monkeypatch.setattr(collect_stream, "RegularOpenWatch", _watch)
+
+
+def test_ls_collect_stream_arms_after_close_limit(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    _pin_watch_clock(monkeypatch, dt.datetime(2026, 9, 14, 17, 0, tzinfo=ZoneInfo("Asia/Seoul")))
+
+    captured = _run_with_captured_streamer(tmp_path, monkeypatch, {})
+
+    assert captured["silence_limit"]() == 900.0
+
+
+@pytest.mark.parametrize(
+    "env",
+    [{"KRX_ALPHA_AFTER_CLOSE_SILENCE_ENABLED": "false"}],
+)
+def test_ls_collect_stream_after_close_kill_switch_disarms_limit(tmp_path, monkeypatch, env) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    _pin_watch_clock(monkeypatch, dt.datetime(2026, 9, 14, 17, 0, tzinfo=ZoneInfo("Asia/Seoul")))
+
+    captured = _run_with_captured_streamer(tmp_path, monkeypatch, env)
+
+    assert captured["silence_limit"]() is None
+
+
+def test_non_ls_collect_stream_never_arms_after_close_limit(tmp_path, monkeypatch) -> None:
+    import argparse
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.cli import collect_stream
+    from src.realtime.adapters import registry
+    from src.universe.ipc import write_candidates
+
+    _pin_watch_clock(monkeypatch, dt.datetime(2026, 9, 8, 17, 0, tzinfo=ZoneInfo("Asia/Seoul")))
+    monkeypatch.setenv("KRX_ALPHA_VENDOR", "db")
+    monkeypatch.setenv("DB_APP_KEY", "k")
+    monkeypatch.setenv("DB_APP_SECRET", "s")
+    monkeypatch.setattr("src.realtime.session.measure_ntp_offset_ns", lambda *a, **k: 0)
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
+    seen: dict[str, object] = {}
+
+    class _FakeHttp:
+        async def close(self):
+            return None
+
+    class _FakeStreamer:
+        def __init__(self, **kw):
+            seen.update(kw)
+
+        async def run_forever(self, stop, *, max_cycles=None):
+            return None
+
+    monkeypatch.setattr(collect_stream, "RealtimeStreamer", _FakeStreamer)
+    monkeypatch.setattr(registry, "DbRealtimeAdapter", lambda **kw: object())
+    monkeypatch.setattr("aiohttp.ClientSession", lambda *a, **k: _FakeHttp())
+    args = argparse.Namespace(session_date="2026-09-08", journal_root=str(tmp_path / "l0"),
+                              manifest_path=str(tmp_path / "s.json"), candidates_path=str(cp),
+                              ntp_host="h", max_clock_offset_ns=2_000_000_000, max_cycles=1)
+    assert collect_stream.run(args) == 0
+    assert seen["silence_limit"]() is None

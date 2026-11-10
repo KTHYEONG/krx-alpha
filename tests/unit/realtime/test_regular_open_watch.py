@@ -107,3 +107,43 @@ def test_standby_window_opens_before_the_open_and_closes_after_the_hold() -> Non
     assert _watch(_Clock(8, 58, 0)).standby_window()
     assert _watch(_Clock(9, 4, 59)).standby_window()
     assert not _watch(_Clock(9, 5, 0)).standby_window()
+
+
+def _after_close_watch(clock: _Clock, after_close_limit_s: float | None = 900.0) -> RegularOpenWatch:
+    return RegularOpenWatch(
+        anchors=standard_session_anchors(_DAY), silence_limit_s=30.0, open_grace_s=600.0, alert_after_s=30.0,
+        standby_lead_s=120.0, standby_hold_s=300.0, now=clock, after_close_limit_s=after_close_limit_s,
+    )
+
+
+def test_in_window_limit_unchanged_with_after_close_limit() -> None:
+    assert _after_close_watch(_Clock(9, 0, 10)).silence_limit() == 590.0
+    assert _after_close_watch(_Clock(15, 29, 59)).silence_limit() == 30.0
+
+
+@pytest.mark.parametrize(("hh", "mm", "ss"), [(15, 30, 0), (17, 0, 0), (19, 59, 59)])
+def test_after_close_limit_applies_from_regular_close_to_after_market_end(hh: int, mm: int, ss: int) -> None:
+    assert _after_close_watch(_Clock(hh, mm, ss)).silence_limit() == 900.0
+
+
+@pytest.mark.parametrize(("hh", "mm", "ss"), [(20, 0, 0), (8, 0, 0)])
+def test_after_close_limit_is_none_outside_after_close_window(hh: int, mm: int, ss: int) -> None:
+    assert _after_close_watch(_Clock(hh, mm, ss)).silence_limit() is None
+
+
+def test_after_close_limit_disabled_is_none_after_close() -> None:
+    assert _after_close_watch(_Clock(17, 0, 0), after_close_limit_s=None).silence_limit() is None
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0])
+def test_after_close_limit_must_be_positive_when_set(bad: float) -> None:
+    with pytest.raises(ValueError, match="after_close_limit_s"):
+        _after_close_watch(_Clock(17, 0, 0), after_close_limit_s=bad)
+
+
+def test_in_window_limit_after_first_trade_unchanged_with_after_close_limit() -> None:
+    clock = _Clock(9, 10, 0)
+    watch = _after_close_watch(clock)
+    watch.observe(_frame(clock.at))
+    clock.advance(600)
+    assert watch.silence_limit() == 30.0

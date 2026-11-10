@@ -50,7 +50,8 @@ class _FakeSup:
 
 
 def _runner(tmp_path, *, wd: ShardWatchdogSettings | None = None) -> daemon_mod.DaemonRunner:
-    collector = CollectorSettings(data_root=tmp_path / "data")
+    # Child limit at its 450 s floor keeps LIMIT_S above child limit + recovery margin.
+    collector = CollectorSettings(data_root=tmp_path / "data", after_close_silence_limit_s=450.0)
     runtime = resolve_collector_runtime(
         collector=collector,
         shard_watchdog=wd or ShardWatchdogSettings(ls_after_close_stale_limit_s=LIMIT_S),
@@ -323,3 +324,25 @@ def test_watchdog_valueerror_same_path(tmp_path, caplog, monkeypatch) -> None:
     assert len(errors) == 1
     assert "scope=ls reason=bad clock" in errors[0].getMessage()
     assert errors[0].exc_info is not None
+
+
+@pytest.mark.parametrize(
+    ("stale_s", "child_s", "enabled", "raises"),
+    [(1000.0, 900.0, True, True), (1200.0, 900.0, True, False), (1000.0, 900.0, False, False)],
+)
+def test_daemon_rejects_stale_limit_without_recovery_margin_over_child_limit(
+    tmp_path, stale_s: float, child_s: float, enabled: bool, raises: bool
+) -> None:
+    collector = CollectorSettings(
+        data_root=tmp_path / "data", after_close_silence_enabled=enabled, after_close_silence_limit_s=child_s
+    )
+    runtime = resolve_collector_runtime(
+        collector=collector,
+        shard_watchdog=ShardWatchdogSettings(ls_after_close_stale_limit_s=stale_s, ls_after_close_recovery_margin_s=300.0),
+    )
+    build = lambda: daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: _at(17), sleep=lambda s: None)  # noqa: E731
+    if raises:
+        with pytest.raises(ValueError, match="recovery margin"):
+            build()
+    else:
+        build()

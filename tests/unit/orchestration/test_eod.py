@@ -3032,3 +3032,26 @@ def test_log_session_audit_reports_event_holes_and_truncated_intervals(caplog) -
     assert "stage=event_holes" in caplog.text
     assert "holes=2 hole_seconds=25 longest_s=14 longest_from=090126" in caplog.text
     assert "stage=session_audit_intervals status=TRUNCATED date=2026-10-15 truncated=7 cap=500" in caplog.text
+
+
+def test_after_close_quiet_gap_is_clipped_out_of_regular_gap_budget() -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.orchestration.eod import evaluate_session_gap_budget
+
+    # Given: a manifest gap recorded by the after-close silence reconnect (15:31-17:00 KST)
+    day = dt.date(2026, 11, 9)
+    kst = ZoneInfo("Asia/Seoul")
+    start = int(dt.datetime(2026, 11, 9, 15, 31, tzinfo=kst).timestamp() * 1_000_000_000)
+    end = int(dt.datetime(2026, 11, 9, 17, 0, tzinfo=kst).timestamp() * 1_000_000_000)
+    gaps = [{"symbol": "005930", "gap_start_ns": start, "gap_end_ns": end, "reason": "watchdog"}]
+
+    # When
+    verdict = evaluate_session_gap_budget(
+        gaps=gaps, date=day, regular_open=dt.time(9, 0), regular_close=dt.time(15, 30),
+        audit=None, settings=None,
+    )
+
+    # Then: outside the regular session, so it never counts against the regular gap budget
+    assert verdict.legacy_gap_s == 0.0
