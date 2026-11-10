@@ -6,7 +6,8 @@
 #   exit 2  the range cannot be determined (missing base, force push, fetch failure)
 # Callers decide the safe direction for exit 2; the build/deploy gate treats it as runtime.
 set -uo pipefail
-NON_RUNTIME='^(tests/|docs/|\.agents/|\.claude/|\.codex/|\.serena/)|\.md$'
+# tools/verify.py and tools/instruction_budget.* are developer gates; nothing at runtime imports or runs them.
+NON_RUNTIME='^(tests/|docs/|\.agents/|\.claude/|\.codex/|\.serena/|tools/verify\.py$|tools/instruction_budget\.(py|toml)$)|\.md$'
 base="${1:-}"
 head="${2:-}"
 if [ -z "$base" ] || [ -z "$head" ] || [ -z "${base//0/}" ]; then
