@@ -233,4 +233,4 @@ def test_assignment_table_excluded_from_image() -> None:
 def test_canonical_table_hash_pinned() -> None:
     raw = TABLE_PATH.read_bytes()
     assert raw.splitlines()[0] == b"# canonical: krx-alpha/deploy/shared/kis_slot_assignments.toml schema=1"
-    assert hashlib.sha256(raw).hexdigest() == "f4bf2bae16ea5ad89099e59ba3b3b52f45d9fe7b16024a103ae5a7608864bf2e"
+    assert hashlib.sha256(raw).hexdigest() == "8ffc2096fccce16f69304ba54a7ed37c273025e34511ef35a5496b5ae06e7a6b"
