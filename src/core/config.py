@@ -503,6 +503,7 @@ class KisTokenSettings(BaseSettings):
         default=DEFAULT_KIS_TOKEN_CACHE_DIR,
         validation_alias=AliasChoices("KRX_ALPHA_KIS_TOKEN_CACHE_DIR", "token_cache_dir"),
     )
+    # kca 07:05 warm-up is the first token issuer; krx issues only when the shared cache has no valid token, under the shared lock and day guard.
     allow_issue: bool = True
 
 

@@ -114,9 +114,27 @@ def test_compose_uses_absolute_secret_paths_without_shell_interpolation() -> Non
     assert "- /home/ubuntu/.cache/kis:/run/kis-token-cache" in compose
     assert ":/run/kis-token-cache:ro" not in compose
     assert "- /home/ubuntu/.config/rclone:/run/rclone:ro" in compose
-    assert "KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE=true" in compose
     assert "KRX_ALPHA_KIS_TOKEN_CACHE_DIR=/run/kis-token-cache" in compose
     assert '["/app/.venv/bin/python", "-m", "src.orchestration.daemon"]' in compose
+
+
+def test_compose_does_not_override_token_issue_default() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    raw = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+    env_keys = {item.split("=", 1)[0] for item in raw["services"]["krx-collector"]["environment"]}
+
+    assert "KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE" not in env_keys
+
+
+def test_token_issue_default_stays_on(monkeypatch) -> None:
+    from src.core.config import KisTokenSettings
+
+    monkeypatch.delenv("KRX_ALPHA_KIS_TOKEN_ALLOW_ISSUE", raising=False)
+
+    assert KisTokenSettings().allow_issue is True
 
 
 def test_deploy_workflow_builds_native_arm64_and_tags_commit_sha() -> None:
