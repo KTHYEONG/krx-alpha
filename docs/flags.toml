@@ -1,0 +1,182 @@
+# Config toggle registry enforced by tests/unit/test_flag_policy.py. Rules: .agents/rules/config-flags.md
+
+[[flag]]
+name = "SnapshotSettings.enabled"
+kind = "legacy_rollout"
+default = false
+reason = "REST snapshot collection; production enables it through compose and the harness tests use disabled as baseline."
+exit_condition = "daemon test harness no longer uses the disabled baseline: flip the default to True and delete the compose line, or delete the toggle"
+review_by = "2026-12-31"
+
+[[flag]]
+name = "UniverseTierSettings.core_enabled"
+kind = "legacy_rollout"
+default = false
+reason = "Two-tier universe core layer; production enables it through compose."
+exit_condition = "daemon test harness no longer uses the disabled baseline: flip the default to True and delete the compose line, or delete the toggle"
+review_by = "2026-12-31"
+
+[[flag]]
+name = "UniverseTierSettings.downside_enabled"
+kind = "legacy_rollout"
+default = false
+reason = "Research universe downside expansion; production enables it through compose."
+exit_condition = "daemon test harness no longer uses the disabled baseline: flip the default to True and delete the compose line, or delete the toggle"
+review_by = "2026-12-31"
+
+[[flag]]
+name = "TickTapeBackfillSettings.enabled"
+kind = "legacy_rollout"
+default = false
+reason = "History tick-tape backfill night slot; production enables it through compose."
+exit_condition = "daemon test harness no longer uses the disabled baseline: flip the default to True and delete the compose line, or delete the toggle"
+review_by = "2026-12-31"
+
+[[flag]]
+name = "TickTapeOverflowSettings.enabled"
+kind = "legacy_rollout"
+default = false
+reason = "Tier C overnight tape overflow; production enables it through compose."
+exit_condition = "daemon test harness no longer uses the disabled baseline: flip the default to True and delete the compose line, or delete the toggle"
+review_by = "2026-12-31"
+
+[[flag]]
+name = "RepairSettings.hold_enabled"
+kind = "legacy_rollout"
+default = false
+reason = "L0 deletion hold before repair; production enables it through compose."
+exit_condition = "daemon test harness no longer uses the disabled baseline: flip the default to True and delete the compose line, or delete the toggle"
+review_by = "2026-12-31"
+
+[[flag]]
+name = "RepairSettings.job_enabled"
+kind = "legacy_rollout"
+default = false
+reason = "L0 repair and merge job; production enables it through compose."
+exit_condition = "daemon test harness no longer uses the disabled baseline: flip the default to True and delete the compose line, or delete the toggle"
+review_by = "2026-12-31"
+
+[[flag]]
+name = "CollectorSettings.lag_handover_enabled"
+kind = "component"
+default = true
+reason = "Lag handover between collector shards; ON in production."
+exit_condition = ""
+review_by = ""
+
+[[flag]]
+name = "CollectorSettings.lag_handover_standby_refresh_enabled"
+kind = "component"
+default = true
+reason = "Standby refresh during lag handover; ON in production."
+exit_condition = ""
+review_by = ""
+
+[[flag]]
+name = "CollectorSettings.after_close_silence_enabled"
+kind = "component"
+default = true
+reason = "LS child reconnect on silence after the regular close; ON in production."
+exit_condition = ""
+review_by = ""
+
+[[flag]]
+name = "ShardWatchdogSettings.enabled"
+kind = "component"
+default = true
+reason = "Shard stale watchdog; ON in production."
+exit_condition = ""
+review_by = ""
+
+[[flag]]
+name = "ShardWatchdogSettings.ls_after_close_enabled"
+kind = "component"
+default = true
+reason = "Watchdog coverage of LS after-close silence; ON in production."
+exit_condition = ""
+review_by = ""
+
+[[flag]]
+name = "TossProgramTradesSettings.auto_backfill_enabled"
+kind = "component"
+default = true
+reason = "Automatic Toss program-trade backfill throttling; ON in production."
+exit_condition = ""
+review_by = ""
+
+[[flag]]
+name = "KisTokenSettings.allow_issue"
+kind = "safety_interlock"
+default = true
+reason = "A token re-issue invalidates other holders' tokens; shared lock and day guard apply."
+exit_condition = ""
+review_by = ""
+
+[[flag]]
+name = "CollectorSettings.after_market_enabled"
+kind = "deployed_component"
+default = false
+reason = "Aftermarket collection; the collector flag is the single source, resolved into AftermarketSettings."
+exit_condition = "consolidate the three after_market copies (AftermarketSettings.enabled, SessionSchedule.after_market_enabled) into one source"
+review_by = ""
+couples = ["AftermarketSettings.pair_capacity_per_connection"]
+
+[[flag]]
+name = "AftermarketSettings.enabled"
+kind = "deployed_component"
+default = false
+derived_from = "CollectorSettings.after_market_enabled"
+reason = "Derived from the collector flag in resolve_collector_runtime; never read from its own env name."
+exit_condition = "consolidate the three after_market copies (AftermarketSettings.enabled, SessionSchedule.after_market_enabled) into one source"
+review_by = ""
+couples = ["AftermarketSettings.pair_capacity_per_connection"]
+
+[[flag]]
+name = "PremarketSettings.enabled"
+kind = "deployed_component"
+default = false
+reason = "NXT premarket collection; needs a credential slot and verified pair capacity from compose."
+exit_condition = ""
+review_by = ""
+couples = ["PremarketSettings.credential_slot", "PremarketSettings.pair_capacity_per_connection"]
+
+[[flag]]
+name = "RegularKisSettings.enabled"
+kind = "deployed_component"
+default = false
+reason = "KRX regular-session KIS co-primary shards; needs credential slots and verified pair capacity from compose."
+exit_condition = ""
+review_by = ""
+couples = ["RegularKisSettings.credential_slots", "RegularKisSettings.pair_capacity_per_connection"]
+
+[[flag]]
+name = "CollectorSettings.kiwoom_crosscheck_enabled"
+kind = "experiment"
+default = false
+reason = "Kiwoom cross-check of tape data; added 2026-10-29, never enabled."
+exit_condition = "enable on the VPS with credentials, or delete the feature"
+review_by = "2026-12-11"
+
+[[flag]]
+name = "CollectorSettings.db_crosscheck_enabled"
+kind = "experiment"
+default = false
+reason = "DB cross-check of collected data; added 2026-10-29, never enabled."
+exit_condition = "enable on the VPS with credentials, or delete the feature"
+review_by = "2026-12-11"
+
+[[flag]]
+name = "MinuteBackfillSettings.enabled"
+kind = "experiment"
+default = false
+reason = "Minute bar backfill; blocked because the Toss source failed the minute gate."
+exit_condition = "KIS-source conversion (Part 5) lands and passes the minute gate, or delete"
+review_by = "2026-12-11"
+
+[[flag]]
+name = "IntradayAdmissionSettings.enabled"
+kind = "experiment"
+default = false
+reason = "Intraday dynamic admission into the universe; disabled until the live subscription gate."
+exit_condition = "G-LIVESUB passes, or delete"
+review_by = "2026-12-11"

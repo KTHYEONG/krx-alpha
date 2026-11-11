@@ -103,3 +103,7 @@ phrase = "Test Integrity"
 [[retention]]
 file = ".agents/rules/testing.md"
 phrase = "Diff-Coverage"
+
+[[retention]]
+file = ".agents/rules/config-flags.md"
+phrase = "ships ON"
