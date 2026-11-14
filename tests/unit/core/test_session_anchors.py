@@ -163,7 +163,7 @@ def test_load_returns_none_for_invalid_anchor_order(tmp_path) -> None:
 
     from src.core.session_anchors import AnchorSource, load_session_anchors, resolve_session_anchors
 
-    day = dt.date(2026, 11, 19)
+    day = dt.date(2026, 11, 20)  # not in VERIFIED_SHIFTED_SESSIONS, so the fallback is the standard schedule
     (tmp_path / f"dt={day.isoformat()}.json").write_text(
         json.dumps(
             {
@@ -234,3 +234,79 @@ def test_premarket_boundaries_shift_with_open_shift() -> None:
 
     assert anchors.shift_pre_open(STANDARD_NXT_PREMARKET_OPEN) == dt.time(9, 0)
     assert anchors.shift_pre_open(STANDARD_NXT_PREMARKET_END) == dt.time(9, 50)
+
+
+_CSAT_2026 = dt.date(2026, 11, 19)
+
+
+def test_verified_shift_overrides_missing_or_standard_vendor(tmp_path) -> None:
+    from src.core.session_anchors import VERIFIED_SHIFTED_SESSIONS, reconcile_verified_shift
+
+    shift = VERIFIED_SHIFTED_SESSIONS[_CSAT_2026]
+    for vendor in (None, standard_session_anchors(_CSAT_2026)):
+        out = reconcile_verified_shift(_CSAT_2026, vendor)
+        assert out is not None
+        assert (out.regular_open, out.closing_auction_start, out.regular_close) == (
+            shift.regular_open,
+            shift.closing_auction_start,
+            shift.regular_close,
+        )
+        assert out.source is AnchorSource.VERIFIED
+        assert out.open_shift == dt.timedelta(hours=1)
+        assert out.close_shift == dt.timedelta(hours=1)
+    late_end = SessionAnchors(
+        date=_CSAT_2026,
+        regular_open=dt.time(9, 0),
+        closing_auction_start=dt.time(15, 20),
+        regular_close=dt.time(15, 30),
+        after_market_end=dt.time(20, 30),
+        source=AnchorSource.VENDOR,
+    )
+    kept = reconcile_verified_shift(_CSAT_2026, late_end)
+    assert kept is not None
+    assert kept.after_market_end == dt.time(20, 30)
+
+
+def test_verified_shift_keeps_agreeing_vendor_and_unlisted_days() -> None:
+    from src.core.session_anchors import reconcile_verified_shift
+
+    agreeing = SessionAnchors(
+        date=_CSAT_2026,
+        regular_open=dt.time(10, 0),
+        closing_auction_start=dt.time(16, 20),
+        regular_close=dt.time(16, 30),
+        after_market_end=dt.time(20, 0),
+        source=AnchorSource.VENDOR,
+    )
+    assert reconcile_verified_shift(_CSAT_2026, agreeing) is agreeing
+    plain = standard_session_anchors(dt.date(2026, 11, 18))
+    assert reconcile_verified_shift(dt.date(2026, 11, 18), plain) is plain
+    assert reconcile_verified_shift(dt.date(2026, 11, 18), None) is None
+
+
+def test_resolve_applies_verified_shift_and_round_trips_source(tmp_path) -> None:
+    missing = resolve_session_anchors(tmp_path, _CSAT_2026)
+    assert (missing.regular_open, missing.regular_close, missing.source) == (dt.time(10, 0), dt.time(16, 30), AnchorSource.VERIFIED)
+    save_session_anchors(tmp_path, standard_session_anchors(_CSAT_2026))
+    stale = resolve_session_anchors(tmp_path, _CSAT_2026)
+    assert stale.regular_open == dt.time(10, 0)
+    save_session_anchors(tmp_path, stale)
+    assert load_session_anchors(tmp_path, _CSAT_2026) == stale
+    assert resolve_session_anchors(tmp_path, dt.date(2026, 11, 18)).source is AnchorSource.DEFAULT
+
+
+def test_verified_shift_replaces_vendor_after_market_end_that_precedes_shifted_close() -> None:
+    from src.core.session_anchors import STANDARD_AFTER_MARKET_END, reconcile_verified_shift
+
+    early_end = SessionAnchors(
+        date=_CSAT_2026,
+        regular_open=dt.time(9, 0),
+        closing_auction_start=dt.time(15, 20),
+        regular_close=dt.time(15, 30),
+        after_market_end=dt.time(16, 0),
+        source=AnchorSource.VENDOR,
+    )
+    out = reconcile_verified_shift(_CSAT_2026, early_end)
+    assert out is not None
+    assert out.regular_close == dt.time(16, 30)
+    assert out.after_market_end == STANDARD_AFTER_MARKET_END

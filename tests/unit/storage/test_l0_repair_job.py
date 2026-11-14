@@ -444,3 +444,24 @@ def test_setup_failure_has_traceback(tmp_path, monkeypatch, caplog) -> None:
     assert len(errors) == 1
     assert "run_id=test" in errors[0].getMessage()
     assert errors[0].exc_info is not None
+
+
+def test_reaudit_uses_saved_session_anchors(tmp_path, monkeypatch) -> None:
+    from src.core.session_anchors import AnchorSource, SessionAnchors, save_session_anchors
+
+    paths = DataPaths(tmp_path)
+    journal(paths)
+    audit(paths, status="UNAVAILABLE")
+    shifted = SessionAnchors(date=DAY, regular_open=dt.time(10, 0), closing_auction_start=dt.time(16, 20),
+                             regular_close=dt.time(16, 30), after_market_end=dt.time(20, 0), source=AnchorSource.VENDOR)
+    save_session_anchors(paths.session_calendar_dir, shifted)
+    seen: list[object] = []
+    original = job.derive_session_audit
+
+    def capture(*args, **kwargs):
+        seen.append(kwargs["anchors"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(job, "derive_session_audit", capture)
+    run(paths)
+    assert seen == [shifted]

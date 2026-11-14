@@ -18,7 +18,7 @@ import polars as pl
 from src.core.config import AuditSettings, RepairSettings
 from src.core.observability import EVENT
 from src.core.paths import DataPaths
-from src.core.session_anchors import standard_session_anchors
+from src.core.session_anchors import resolve_session_anchors
 from src.marketdata.tick_tape_backfill import read_ledger_done
 from src.storage.l0_audit import AuditStatus, derive_session_audit, write_session_audit
 from src.storage.l0_gapfill import (
@@ -163,7 +163,7 @@ def _run_locked(
                         venue="krx",
                         session="regular",
                         day=day,
-                        anchors=standard_session_anchors(day),
+                        anchors=resolve_session_anchors(paths.session_calendar_dir, day),
                         settings=audit_settings,
                         manifest_frame_counts=None,
                     )

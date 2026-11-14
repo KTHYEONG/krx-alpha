@@ -21,6 +21,7 @@ from src.core.session_anchors import (
     AnchorSource,
     SessionAnchorError,
     SessionAnchors,
+    reconcile_verified_shift,
 )
 from src.marketdata.krx_bars import retry_wait_seconds
 from src.marketdata.toss_auth import is_auth_rejection, is_client_error, is_invalid_token_envelope
@@ -179,14 +180,20 @@ def _fetch_with_token(sess: Any, ref_date: dt.date, token: str) -> TradingDay:
     except (KeyError, TypeError, ValueError) as exc:
         raise TossCalendarError(f"toss calendar envelope invalid for {ref_date}: {exc}") from exc
     next_integrated = nxt.get("integrated") if isinstance(nxt, dict) else None
+    is_business_day = integrated is not None
+    today_anchors = parse_session_anchors(date, integrated if isinstance(integrated, Mapping) or integrated is None else None)
     return TradingDay(
         date=date,
-        is_business_day=integrated is not None,
+        is_business_day=is_business_day,
         previous_business_day=previous_business_day,
         next_business_day=next_business_day,
-        anchors=parse_session_anchors(date, integrated if isinstance(integrated, Mapping) or integrated is None else None),
-        next_anchors=parse_session_anchors(
-            next_business_day, next_integrated if isinstance(next_integrated, Mapping) or next_integrated is None else None
+        anchors=reconcile_verified_shift(date, today_anchors) if is_business_day else None,
+        next_anchors=reconcile_verified_shift(
+            next_business_day,
+            parse_session_anchors(
+                next_business_day,
+                next_integrated if isinstance(next_integrated, Mapping) or next_integrated is None else None,
+            ),
         ),
     )
 

@@ -7,8 +7,10 @@ import json
 import logging
 import os
 import pathlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any
 
 from src.core.errors import KrxAlphaError
@@ -34,6 +36,7 @@ _BASE_DATE: dt.date = dt.date(2000, 1, 1)
 class AnchorSource(StrEnum):
     VENDOR = "vendor"
     DEFAULT = "default"
+    VERIFIED = "verified"
 
 
 class SessionAnchorError(KrxAlphaError):
@@ -105,6 +108,57 @@ def standard_session_anchors(day: dt.date) -> SessionAnchors:
     )
 
 
+@dataclass(frozen=True)
+class VerifiedShift:
+    """KRX-announced regular-session clock of one shifted day (after-market end is not asserted)."""
+
+    regular_open: dt.time
+    closing_auction_start: dt.time
+    regular_close: dt.time
+    provenance: str
+
+
+# The vendor calendar is the only other source of shifted clocks and has never been observed on a shifted day;
+# a missing or standard vendor answer would otherwise drop the shifted hour silently (DEFAULT/standard anchors).
+VERIFIED_SHIFTED_SESSIONS: Mapping[dt.date, VerifiedShift] = MappingProxyType(
+    {
+        dt.date(2026, 11, 19): VerifiedShift(
+            regular_open=dt.time(10, 0),
+            closing_auction_start=dt.time(16, 20),
+            regular_close=dt.time(16, 30),
+            provenance="KRX 2026 CSAT-day session notice",
+        ),
+    }
+)
+
+
+def reconcile_verified_shift(day: dt.date, anchors: SessionAnchors | None) -> SessionAnchors | None:
+    """Return ``anchors`` with ``VERIFIED_SHIFTED_SESSIONS`` enforced for ``day``; unlisted days pass through unchanged."""
+    shift = VERIFIED_SHIFTED_SESSIONS.get(day)
+    if shift is None:
+        return anchors
+    expected = (shift.regular_open, shift.closing_auction_start, shift.regular_close)
+    if anchors is not None and (anchors.regular_open, anchors.closing_auction_start, anchors.regular_close) == expected:
+        return anchors
+    logger.warning(
+        "[DATA] stage=session_anchors status=VERIFIED_OVERRIDE date=%s vendor=%s",
+        day.isoformat(),
+        "missing" if anchors is None else f"{anchors.source.value}:{anchors.regular_open}-{anchors.regular_close}",
+    )
+    return SessionAnchors(
+        date=day,
+        regular_open=shift.regular_open,
+        closing_auction_start=shift.closing_auction_start,
+        regular_close=shift.regular_close,
+        after_market_end=(
+            anchors.after_market_end
+            if anchors is not None and anchors.after_market_end > shift.regular_close
+            else STANDARD_AFTER_MARKET_END
+        ),
+        source=AnchorSource.VERIFIED,
+    )
+
+
 def _anchor_file(directory: pathlib.Path, day: dt.date) -> pathlib.Path:
     return pathlib.Path(directory) / f"dt={day.isoformat()}.json"
 
@@ -145,7 +199,7 @@ def load_session_anchors(directory: pathlib.Path, day: dt.date) -> SessionAnchor
 
 
 def resolve_session_anchors(directory: pathlib.Path, day: dt.date) -> SessionAnchors:
-    loaded = load_session_anchors(directory, day)
+    loaded = reconcile_verified_shift(day, load_session_anchors(directory, day))
     if loaded is not None:
         return loaded
     if _anchor_file(directory, day).exists():

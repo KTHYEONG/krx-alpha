@@ -338,6 +338,46 @@ def test_fetch_trading_day_parses_next_business_day_anchors() -> None:
     assert out.next_anchors.regular_open == dt.time(10, 0)
 
 
+def test_fetch_trading_day_enforces_verified_csat_shift_on_next_day() -> None:
+    import datetime as dt
+
+    from src.core.session_anchors import AnchorSource
+    from src.marketdata.toss_calendar import fetch_trading_day
+
+    payload = {
+        "result": {
+            "today": {"date": "2026-11-18", "integrated": _integrated("2026-11-18", "0900", "1520", "1530", "2000")},
+            "previousBusinessDay": {"date": "2026-11-17", "integrated": {}},
+            "nextBusinessDay": {"date": "2026-11-19", "integrated": _integrated("2026-11-19", "0900", "1520", "1530", "2000")},
+        }
+    }
+    out = fetch_trading_day(dt.date(2026, 11, 18), app_key="k", app_secret="s", session=_calendar_session(payload))
+
+    assert out.anchors is not None
+    assert out.anchors.source is AnchorSource.VENDOR
+    assert out.next_anchors is not None
+    assert (out.next_anchors.regular_open, out.next_anchors.regular_close) == (dt.time(10, 0), dt.time(16, 30))
+    assert out.next_anchors.source is AnchorSource.VERIFIED
+
+
+def test_fetch_trading_day_vendor_holiday_on_verified_day_keeps_no_anchors() -> None:
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import fetch_trading_day
+
+    payload = {
+        "result": {
+            "today": {"date": "2026-11-19", "integrated": None},
+            "previousBusinessDay": {"date": "2026-11-18"},
+            "nextBusinessDay": {"date": "2026-11-20"},
+        }
+    }
+    out = fetch_trading_day(dt.date(2026, 11, 19), app_key="k", app_secret="s", session=_calendar_session(payload))
+
+    assert out.is_business_day is False
+    assert out.anchors is None
+
+
 def test_fetch_trading_day_malformed_time_degrades_to_none() -> None:
     import datetime as dt
 
