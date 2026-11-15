@@ -121,9 +121,10 @@ class CollectorSettings(BaseSettings):
     normalize_timeout_s: float = 900.0
     schedule: SessionSchedule = SessionSchedule()
     after_market_enabled: bool = False
-    # LS child reconnects on silence after the regular close; the in-window limit stays 30 s.
+    # LS child reconnects on silence after the regular close; the in-window limit is regular_silence_limit_s.
     after_close_silence_enabled: bool = True
     after_close_silence_limit_s: float = Field(default=900.0, gt=0)
+    regular_silence_limit_s: float = Field(default=10.0, gt=0)
     # Host-wide KIS pacing reservation lead for daemon data usage (standard work).
     # Critical execution work books without bound; this only bounds the daemon's
     # own data-slot bookings so a critical arrival waits at most this lead.
@@ -169,6 +170,15 @@ class CollectorSettings(BaseSettings):
             raise ValueError(
                 f"after_close_silence_limit_s {self.after_close_silence_limit_s} must be >= "
                 f"{OFF_REGULAR_MAX_NORMAL_SILENCE_S} when after_close_silence_enabled"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def check_regular_silence_limit_below_after_close(self) -> CollectorSettings:
+        if self.after_close_silence_enabled and self.regular_silence_limit_s >= self.after_close_silence_limit_s:
+            raise ValueError(
+                f"regular_silence_limit_s {self.regular_silence_limit_s} must be below "
+                f"after_close_silence_limit_s {self.after_close_silence_limit_s}"
             )
         return self
 

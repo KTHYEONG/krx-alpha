@@ -1433,6 +1433,36 @@ def test_two_active_sessions_still_require_a_spare_session(monkeypatch) -> None:
         CollectorSettings()
 
 
+def test_regular_silence_limit_default_env_override_and_bounds(monkeypatch) -> None:
+    from src.core.config import CollectorSettings
+
+    monkeypatch.delenv("KRX_ALPHA_REGULAR_SILENCE_LIMIT_S", raising=False)
+    assert CollectorSettings().regular_silence_limit_s == 10.0
+
+    monkeypatch.setenv("KRX_ALPHA_REGULAR_SILENCE_LIMIT_S", "12")
+    assert CollectorSettings().regular_silence_limit_s == 12.0
+
+    with pytest.raises(ValueError, match="regular_silence_limit_s"):
+        CollectorSettings(regular_silence_limit_s=0)
+
+
+def test_regular_silence_limit_must_be_below_after_close_limit() -> None:
+    from src.core.config import CollectorSettings
+
+    with pytest.raises(ValueError, match="regular_silence_limit_s"):
+        CollectorSettings(regular_silence_limit_s=900.0, after_close_silence_limit_s=900.0)
+
+
+def test_regular_silence_limit_ignores_unused_after_close_limit() -> None:
+    from src.core.config import CollectorSettings
+
+    settings = CollectorSettings(
+        regular_silence_limit_s=900.0, after_close_silence_enabled=False, after_close_silence_limit_s=900.0
+    )
+
+    assert settings.regular_silence_limit_s == 900.0
+
+
 def test_after_close_silence_limit_validator_when_enabled() -> None:
     from src.core.config import CollectorSettings
 

@@ -32,7 +32,7 @@ from src.realtime.session import (
     StreamRoute,
     bootstrap_session,
 )
-from src.realtime.streamer import SILENCE_LIMIT_S, RealtimeStreamer
+from src.realtime.streamer import RealtimeStreamer
 from src.realtime.streaming_child import HandoverSettings, resolve_clock_overrides, run_streaming_child
 from src.realtime.ws_lease import Lease, LeaseRole, LeaseUnavailable, WsLeaseLedger
 from src.universe.intraday import read_dynamic_admissions
@@ -289,7 +289,7 @@ async def run_regular_stream(
             market_of = json.loads(pathlib.Path(str(raw_map)).read_text(encoding="utf-8"))  # noqa: ASYNC240 - one-shot startup read
         open_watch = RegularOpenWatch(
             anchors=anchors,
-            silence_limit_s=SILENCE_LIMIT_S,
+            silence_limit_s=settings.regular_silence_limit_s,
             open_grace_s=settings.regular_open_grace_s,
             alert_after_s=settings.regular_open_alert_after_s,
             standby_lead_s=settings.regular_open_standby_lead_s,

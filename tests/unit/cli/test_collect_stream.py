@@ -217,7 +217,7 @@ def test_collect_stream_wires_watchdog_ntp_fallback_and_shutdown_event(tmp_path,
     silence_limit = captured["streamer_kwargs"]["silence_limit"]
     assert callable(silence_limit)
     limit = silence_limit()
-    assert limit is None or limit >= 30.0
+    assert limit is None or limit >= captured["cfg"].regular_silence_limit_s
     assert captured["max_cycles"] == 1
     assert "[DATA] stage=stream_shutdown" in caplog.text
     assert (tmp_path / "s.json").exists()
@@ -687,6 +687,28 @@ def test_ls_collect_stream_arms_after_close_limit(tmp_path, monkeypatch) -> None
     captured = _run_with_captured_streamer(tmp_path, monkeypatch, {})
 
     assert captured["silence_limit"]() == 900.0
+
+
+def test_open_watch_uses_regular_silence_setting(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    _pin_watch_clock(monkeypatch, dt.datetime(2026, 9, 14, 9, 30, tzinfo=ZoneInfo("Asia/Seoul")))
+
+    captured = _run_with_captured_streamer(tmp_path, monkeypatch, {"KRX_ALPHA_REGULAR_SILENCE_LIMIT_S": "7"})
+
+    assert captured["silence_limit"]() == 7.0
+
+
+def test_open_grace_still_applies_before_first_trade(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    _pin_watch_clock(monkeypatch, dt.datetime(2026, 9, 14, 9, 0, 40, tzinfo=ZoneInfo("Asia/Seoul")))
+
+    captured = _run_with_captured_streamer(tmp_path, monkeypatch, {"KRX_ALPHA_REGULAR_SILENCE_LIMIT_S": "7"})
+
+    assert captured["silence_limit"]() == pytest.approx(max(7.0, 600.0 - 40.0))
 
 
 @pytest.mark.parametrize(
