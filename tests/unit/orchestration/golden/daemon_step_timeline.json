@@ -2374,6 +2374,7 @@
     "[DATA] stage=regular_kis_compare date=%s kis_loss_ratio=%.6g ls_loss_ratio=%.6g kis_open_max_lag_s=%s ls_open_max_lag_s=%s kis_symbols=%d",
     "[DATA] stage=regular_kis_dynamic status=FAIL reason=circuit_open slot=%s date=%s",
     "[DATA] stage=regular_kis_dynamic status=RESTARTED slot=%s exit_code=%s",
+    "[DATA] stage=regular_kis_dynamic status=SUPERVISE_FAIL slot=%s reason=%s",
     "[DATA] stage=regular_kis_plan status=SKIP reason=%s date=%s",
     "[DATA] stage=regular_kis_plan status=SKIP reason=degraded_candidates date=%s",
     "[DATA] stage=regular_kis_stream status=FAIL reason=circuit_open shard=%s date=%s",

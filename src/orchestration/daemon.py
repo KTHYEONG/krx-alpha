@@ -1340,7 +1340,7 @@ class DaemonChildren:
     streams: dict[StreamChildKey, ProcessSupervisor] = field(default_factory=dict)
     aftermarket: dict[str, ProcessSupervisor] = field(default_factory=dict)
     regular_kis: dict[str, ProcessSupervisor] = field(default_factory=dict)
-    regular_kis_dynamic: ProcessSupervisor | None = None
+    regular_kis_dynamic: dict[str, ProcessSupervisor] = field(default_factory=dict)
     program_sync: Any | None = None
     program_sync_started_at: dt.datetime | None = None
     nightly: subprocess.Popen[bytes] | None = None
@@ -1883,8 +1883,7 @@ class DaemonRunner:
             targets.append(regular)
         targets.extend(ch.aftermarket.values())
         targets.extend(ch.regular_kis.values())
-        if ch.regular_kis_dynamic is not None:
-            targets.append(ch.regular_kis_dynamic)
+        targets.extend(ch.regular_kis_dynamic.values())
         ls_b = ch.get(StreamChildKey.REGULAR_LS_B)
         if ls_b is not None:
             targets.append(ls_b)
@@ -3597,9 +3596,14 @@ class DaemonRunner:
         """Plan KIS coverage of LS omissions before overlapping the priority universe."""
         intraday = self._runtime.intraday
         regular_slots = tuple(getattr(getattr(self._runtime, "regular_kis", None), "credential_slots", ()))
-        if intraday.enabled and intraday.kis_dynamic_slot in regular_slots:
+        overlap = sorted(set(intraday.kis_dynamic_slots) & set(regular_slots))
+        if intraday.enabled and overlap:
+            raise KrxAlphaError(f"intraday kis_dynamic_slots {overlap} must not be a regular_kis credential slot")
+        # Dynamic shards name their manifest by slot number and static shards by plan index 0..N-1; equal numbers share a file.
+        index_clash = sorted(slot for slot in intraday.kis_dynamic_slots if int(slot) < len(regular_slots))
+        if intraday.enabled and index_clash:
             raise KrxAlphaError(
-                f"intraday kis_dynamic_slot {intraday.kis_dynamic_slot} must not be a regular_kis credential slot"
+                f"intraday kis_dynamic_slots {index_clash} collide with regular_kis shard indices 0..{len(regular_slots) - 1}"
             )
         st = self._state
         if st.regular_kis_plan_day == today:
@@ -3876,11 +3880,20 @@ class DaemonRunner:
     def _supervise_regular_kis_dynamic(self, today: dt.date) -> None:
         """Run the intraday KIS dynamic shard once its slot lease is free and the slot holds an admission."""
         intraday = self._runtime.intraday
-        if not intraday.enabled or intraday.kis_dynamic_slot is None:
+        if not intraday.enabled or not intraday.kis_dynamic_slots:
             return
-        slot = intraday.kis_dynamic_slot
+        for slot in intraday.kis_dynamic_slots:
+            try:
+                self._supervise_one_dynamic_kis_shard(today, slot)
+            except (KrxAlphaError, KisApiError, OSError, ValueError) as exc:
+                logger.warning(
+                    "[DATA] stage=regular_kis_dynamic status=SUPERVISE_FAIL slot=%s reason=%s", slot, str(exc)
+                )
+
+    def _supervise_one_dynamic_kis_shard(self, today: dt.date, slot: str) -> None:
+        """Start or keep one slot's dynamic shard; a failure here must not stop the other slots."""
         ch = self._children
-        sup = ch.regular_kis_dynamic
+        sup = ch.regular_kis_dynamic.get(slot)
         if sup is None:
             if not read_dynamic_admissions(self._paths.dynamic_admissions(today)).symbols_for(f"kis:{slot}"):
                 return
@@ -3894,7 +3907,7 @@ class DaemonRunner:
                 cmd=regular_kis_dynamic_stream_cmd(today, self._paths, slot=slot, key_id=cred.key_id),
                 breaker=RestartCircuitBreaker(),
             )
-            ch.regular_kis_dynamic = sup
+            ch.regular_kis_dynamic[slot] = sup
         result = sup.ensure_running()
         if result == "restarted":
             logger.warning(
@@ -3909,10 +3922,9 @@ class DaemonRunner:
             )
 
     def _stop_regular_kis_dynamic(self) -> None:
-        sup = self._children.regular_kis_dynamic
-        if sup is not None:
+        for sup in self._children.regular_kis_dynamic.values():
             sup.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
-            self._children.regular_kis_dynamic = None
+        self._children.regular_kis_dynamic.clear()
 
     def _watch_regular_kis_shards(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
         """Judge each running regular shard's journal freshness inside its window and stop a stale one."""

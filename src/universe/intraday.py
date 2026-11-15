@@ -104,11 +104,11 @@ def decide_admissions(
     return AdmissionDecision(admitted=tuple(admitted), rejected=tuple(rejected))
 
 
-def feed_capacities(*, ls_reserve_symbols: int, kis_slot_symbols: int, kis_slot: str | None) -> dict[str, int]:
-    """Free-symbol capacity per dynamic feed in fill order: LS shard 1 reserve, then the KIS dynamic slot."""
+def feed_capacities(*, ls_reserve_symbols: int, kis_slot_symbols: int, kis_slots: tuple[str, ...]) -> dict[str, int]:
+    """Free-symbol capacity per dynamic feed in fill order: LS shard 1 reserve, then each KIS dynamic slot in order."""
     capacity: dict[str, int] = {"ls:1": ls_reserve_symbols}
-    if kis_slot is not None:
-        capacity[f"kis:{kis_slot}"] = kis_slot_symbols
+    for slot in kis_slots:
+        capacity[f"kis:{slot}"] = kis_slot_symbols
     return {feed: max(0, count) for feed, count in capacity.items()}
 
 

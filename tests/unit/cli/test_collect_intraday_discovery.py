@@ -241,6 +241,25 @@ def test_status_excluded_rows_are_rejected_and_warning_level_recorded(tmp_path) 
     assert dynamic == [("001000", "none")]
 
 
+def test_kis_left_sums_all_dynamic_slots() -> None:
+    capacity = {"ls:1": 0, "kis:3": 5, "kis:4": 7}
+
+    assert discovery_cli._kis_left(capacity, ("3", "4")) == 12
+    assert discovery_cli._kis_left(capacity, ()) == 0
+
+
+def test_status_check_without_dynamic_slots_builds_no_client(tmp_path, monkeypatch) -> None:
+    _wire_env(monkeypatch, tmp_path, KRX_ALPHA_INTRADAY_STATUS_CHECK="true", KRX_ALPHA_INTRADAY_KIS_DYNAMIC_SLOTS="[]")
+    _wire_boundaries(monkeypatch, tmp_path, [[_row(1, "001500")], [], []])
+    built: list[dict] = []
+    monkeypatch.setattr(discovery_cli, "build_kis_rest_stack", lambda **kwargs: built.append(kwargs))
+    clock = _FakeClock(_at(8, 59))
+
+    assert discovery_cli.build_discovery(argparse.Namespace(session_date=_DAY), now=clock.now, sleep=clock.sleep).run() == 0
+
+    assert built == []
+
+
 def test_feed_fields_map_ls_and_kis_feeds() -> None:
     assert discovery_cli._feed_fields("ls:1") == (1, None)
     assert discovery_cli._feed_fields("kis:5") == (None, "5")
@@ -489,10 +508,30 @@ class _StubStore:
         return pl.DataFrame()
 
 
+def _credentials(*slots: str):
+    from src.realtime.kis_sharding import KisDataCredential
+
+    return tuple(KisDataCredential(slot, f"app-{slot}", f"secret-{slot}", f"hts-{slot}", f"kid{slot}") for slot in slots)
+
+
+def test_build_discovery_grants_capacity_only_to_slots_with_credentials(tmp_path, monkeypatch, caplog) -> None:
+    _wire_env(monkeypatch, tmp_path)
+    caplog.set_level(logging.WARNING)
+    _StubStore.appended = []
+    _wire_boundaries(monkeypatch, tmp_path, [[], [], []])
+    monkeypatch.setattr(discovery_cli, "load_kis_data_credentials", lambda: _credentials("3"))
+    clock = _FakeClock(_at(8, 59))
+
+    discovery_cli.build_discovery(argparse.Namespace(session_date=_DAY), now=clock.now, sleep=clock.sleep)
+
+    assert "stage=intraday_capacity status=SLOT_CREDENTIAL_MISSING configured=('3', '4') usable=('3',)" in caplog.text
+
+
 def test_build_discovery_wires_real_boundaries_end_to_end(tmp_path, monkeypatch) -> None:
     _wire_env(monkeypatch, tmp_path)
     _StubStore.appended = []
     fetches = _wire_boundaries(monkeypatch, tmp_path, [[_row(1, "001200")], [], []])
+    monkeypatch.setattr(discovery_cli, "load_kis_data_credentials", lambda: _credentials("3", "4"))
     clock = _FakeClock(_at(8, 59))
     args = argparse.Namespace(session_date=_DAY)
 
@@ -629,7 +668,7 @@ def test_status_path_wires_slot_client_and_persists_observations(tmp_path, monke
     monkeypatch.setattr(
         discovery_cli,
         "load_kis_data_credentials",
-        lambda: (KisDataCredential("5", "app-5", "secret-5", "hts-5", "kid5"),),
+        lambda: (KisDataCredential("3", "app-3", "secret-3", "hts-3", "kid3"),),
     )
     built: list[dict] = []
 
@@ -643,7 +682,7 @@ def test_status_path_wires_slot_client_and_persists_observations(tmp_path, monke
     assert discovery_cli.build_discovery(argparse.Namespace(session_date=_DAY), now=clock.now, sleep=clock.sleep).run() == 0
 
     assert len(built) == 1
-    assert built[0]["auth"].app_key == "app-5"
+    assert built[0]["auth"].app_key == "app-3"
     assert any(dataset.value == "security_status" for dataset, _ in _StubStore.appended)
     dynamic = [(r.symbol, r.warning_level) for r in read_membership(tmp_path / "data" / "manifest" / "membership" / f"{_DAY}.jsonl") if r.source == "dynamic"]
     assert dynamic == [("001400", "none")]
@@ -666,7 +705,7 @@ def test_status_persistence_failure_is_logged_not_raised(tmp_path, monkeypatch, 
     monkeypatch.setattr(
         discovery_cli,
         "load_kis_data_credentials",
-        lambda: (KisDataCredential("5", "app-5", "secret-5", "hts-5", "kid5"),),
+        lambda: (KisDataCredential("3", "app-3", "secret-3", "hts-3", "kid3"),),
     )
     monkeypatch.setattr(
         discovery_cli,

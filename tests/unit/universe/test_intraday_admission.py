@@ -107,12 +107,38 @@ def test_duplicate_symbols_keep_first_row() -> None:
     assert [(a.symbol, a.direction) for a in decision.admitted] == [("000001", "up")]
 
 
-def test_feed_capacities_orders_ls_reserve_before_kis_slot() -> None:
-    capacity = feed_capacities(ls_reserve_symbols=40, kis_slot_symbols=20, kis_slot="5")
+def test_feed_capacities_orders_ls_then_kis_slots_in_order() -> None:
+    capacity = feed_capacities(ls_reserve_symbols=40, kis_slot_symbols=20, kis_slots=("3", "4"))
 
-    assert list(capacity) == ["ls:1", "kis:5"]
-    assert capacity == {"ls:1": 40, "kis:5": 20}
-    assert feed_capacities(ls_reserve_symbols=0, kis_slot_symbols=20, kis_slot=None) == {"ls:1": 0}
+    assert list(capacity) == ["ls:1", "kis:3", "kis:4"]
+    assert capacity == {"ls:1": 40, "kis:3": 20, "kis:4": 20}
+
+
+def test_feed_capacities_without_kis_slots() -> None:
+    assert feed_capacities(ls_reserve_symbols=40, kis_slot_symbols=20, kis_slots=()) == {"ls:1": 40}
+
+
+def test_feed_capacities_clamps_negative() -> None:
+    capacity = feed_capacities(ls_reserve_symbols=-1, kis_slot_symbols=-5, kis_slots=("3",))
+
+    assert capacity == {"ls:1": 0, "kis:3": 0}
+
+
+def test_admission_spills_to_second_kis_feed() -> None:
+    rows = [
+        _row(1, "000001", 6.0, trade_value=30_000_000_000),
+        _row(2, "000002", 6.0, trade_value=20_000_000_000),
+        _row(3, "000003", 6.0, trade_value=10_000_000_000),
+    ]
+    state = AdmissionState(
+        collected=frozenset(),
+        ineligible=frozenset(),
+        capacity_left={"ls:1": 0, "kis:3": 1, "kis:4": 1},
+    )
+    decision = decide_admissions(rows, state, _cfg(min_trade_value_krw=10_000_000_000))
+
+    assert [(a.symbol, a.feed) for a in decision.admitted] == [("000001", "kis:3"), ("000002", "kis:4")]
+    assert decision.rejected == (("000003", "capacity"),)
 
 
 def test_state_from_ledger_reduces_capacity_by_dynamic_rows_only() -> None:
@@ -163,7 +189,13 @@ def test_settings_defaults_are_inert() -> None:
     assert settings.enabled is False
     assert settings.admission_cutoff == dt.time(15, 15)
     assert settings.post_close_screen_at == dt.time(15, 31)
-    assert settings.kis_dynamic_slot == "5"
+    assert settings.kis_dynamic_slots == ("3", "4")
+
+
+@pytest.mark.parametrize("slots", [("3", "3"), ("6",)])
+def test_settings_reject_invalid_kis_dynamic_slots(slots) -> None:
+    with pytest.raises(ValidationError):
+        IntradayAdmissionSettings(kis_dynamic_slots=slots)
 
 
 def test_settings_cutoff_must_precede_closing_auction() -> None:

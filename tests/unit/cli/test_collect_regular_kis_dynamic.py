@@ -27,21 +27,25 @@ class _Session:
 
 
 def _env(
-    monkeypatch, *, intraday: bool = True, slot: str = "5", regular_slots=("1", "2", "3", "4"), regular: bool = True
+    monkeypatch, *, intraday: bool = True, slots=("3", "4"), regular_slots=("1", "2"), regular: bool = True
 ) -> None:
     monkeypatch.setenv("KRX_ALPHA_INTRADAY_ENABLED", "true" if intraday else "false")
-    monkeypatch.setenv("KRX_ALPHA_INTRADAY_KIS_DYNAMIC_SLOT", slot)
+    monkeypatch.setenv("KRX_ALPHA_INTRADAY_KIS_DYNAMIC_SLOTS", json.dumps(list(slots)))
     monkeypatch.setenv("KRX_ALPHA_REGULAR_KIS_ENABLED", "true" if regular else "false")
     monkeypatch.setenv("KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS", json.dumps(list(regular_slots)))
     monkeypatch.setenv("KRX_ALPHA_REGULAR_KIS_PAIR_CAPACITY_PER_CONNECTION", "41")
     monkeypatch.setattr(
         crk,
         "load_kis_data_credentials",
-        lambda: (KisDataCredential("5", "app-5", "secret-5", "hts-5", "kid5"),),
+        lambda: (
+            KisDataCredential("3", "app-3", "secret-3", "hts-3", "kid3"),
+            KisDataCredential("4", "app-4", "secret-4", "hts-4", "kid4"),
+            KisDataCredential("5", "app-5", "secret-5", "hts-5", "kid5"),
+        ),
     )
 
 
-def _args(tmp_path: pathlib.Path, *, slot: str = "5", key_id: str = "kid5") -> argparse.Namespace:
+def _args(tmp_path: pathlib.Path, *, slot: str = "3", key_id: str = "kid3") -> argparse.Namespace:
     data = tmp_path / "data"
     return argparse.Namespace(
         session_date=_DAY,
@@ -66,15 +70,15 @@ def test_disabled_intraday_is_refused(monkeypatch, tmp_path) -> None:
         _run(_args(tmp_path))
 
 
-def test_slot_other_than_configured_dynamic_slot_is_refused(monkeypatch, tmp_path) -> None:
-    _env(monkeypatch, slot="5")
+def test_slot_outside_dynamic_slots_is_refused(monkeypatch, tmp_path) -> None:
+    _env(monkeypatch, slots=("3", "4"))
 
-    with pytest.raises(KrxAlphaError, match="not the configured kis_dynamic_slot"):
-        _run(_args(tmp_path, slot="4"))
+    with pytest.raises(KrxAlphaError, match="not a configured kis_dynamic_slots entry"):
+        _run(_args(tmp_path, slot="5", key_id="kid5"))
 
 
 def test_dynamic_slot_inside_regular_slots_is_refused(monkeypatch, tmp_path) -> None:
-    _env(monkeypatch, slot="5", regular_slots=("1", "2", "3", "5"))
+    _env(monkeypatch, slots=("3", "4"), regular_slots=("1", "2", "3", "5"))
 
     with pytest.raises(KrxAlphaError, match="must not be a regular_kis credential slot"):
         _run(_args(tmp_path))
@@ -102,7 +106,7 @@ def test_open_window_streams_dynamic_pairs_with_live_watch(monkeypatch, tmp_path
     data = tmp_path / "data"
     write_dynamic_admissions(
         data / "manifest" / "membership" / f"{_DAY}.dynamic.json",
-        DynamicPlan(rev=1, entries=(DynamicEntry("005930", "kis:5", 1), DynamicEntry("000660", "kis:5", 1))),
+        DynamicPlan(rev=1, entries=(DynamicEntry("005930", "kis:3", 1), DynamicEntry("000660", "kis:3", 1))),
     )
     monkeypatch.setattr(crk, "bootstrap_session", lambda cfg: _Session(expected_close_ns=_FAR_FUTURE_NS))
     captured: dict[str, object] = {}

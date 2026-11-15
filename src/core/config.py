@@ -306,6 +306,9 @@ class RegularKisSettings(BaseSettings):
         return len(self.credential_slots) * (self.pair_capacity_per_connection // len(self.streams))
 
 
+_KIS_CREDENTIAL_SLOTS: frozenset[str] = frozenset({"1", "2", "3", "4", "5"})
+
+
 class IntradayAdmissionSettings(BaseSettings):
     """Intraday discovery/admission (env_prefix='KRX_ALPHA_INTRADAY_'); inert when disabled."""
 
@@ -319,7 +322,7 @@ class IntradayAdmissionSettings(BaseSettings):
     min_abs_change_pct: float = Field(default=5.0, gt=0)
     min_trade_value_krw: int = Field(default=10_000_000_000, gt=0)
     max_pages: int = Field(default=3, ge=1)
-    kis_dynamic_slot: str | None = "5"
+    kis_dynamic_slots: tuple[str, ...] = ("3", "4")
     status_check: bool = True
 
     @model_validator(mode="after")
@@ -331,6 +334,16 @@ class IntradayAdmissionSettings(BaseSettings):
             )
         if not self.admission_cutoff < self.post_close_screen_at:
             raise ValueError("post_close_screen_at must follow admission_cutoff")
+        return self
+
+    @model_validator(mode="after")
+    def check_kis_dynamic_slots(self) -> IntradayAdmissionSettings:
+        """Each dynamic KIS shard needs its own distinct credential slot 1..5."""
+        if len(set(self.kis_dynamic_slots)) != len(self.kis_dynamic_slots):
+            raise ValueError(f"kis_dynamic_slots must be unique: {self.kis_dynamic_slots}")
+        invalid = [slot for slot in self.kis_dynamic_slots if slot not in _KIS_CREDENTIAL_SLOTS]
+        if invalid:
+            raise ValueError(f"kis_dynamic_slots entries must be within '1'..'5': {invalid}")
         return self
 
 

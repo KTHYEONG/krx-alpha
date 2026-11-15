@@ -218,7 +218,7 @@ class IntradayDiscovery:
                 ineligible_new,
                 status_new,
                 state.admission.capacity_left.get(_LS_RESERVE_FEED, 0),
-                _kis_left(state.admission.capacity_left, self._cfg.kis_dynamic_slot),
+                _kis_left(state.admission.capacity_left, self._cfg.kis_dynamic_slots),
                 extra=EVENT,
             )
 
@@ -310,8 +310,8 @@ def _feed_fields(feed: str) -> tuple[int | None, str | None]:
     return None, index
 
 
-def _kis_left(capacity: Mapping[str, int], kis_slot: str | None) -> int:
-    return capacity.get(f"kis:{kis_slot}", 0) if kis_slot is not None else 0
+def _kis_left(capacity: Mapping[str, int], kis_slots: tuple[str, ...]) -> int:
+    return sum(capacity.get(f"kis:{slot}", 0) for slot in kis_slots)
 
 
 def _admitted_row(admission: Admission, decided: int, warning_levels: Mapping[str, str]) -> MembershipRow:
@@ -449,17 +449,27 @@ def build_discovery(
     except STORE_FAILURE_TYPES as exc:
         raise KiwoomTickTapeError("kiwoom token store failed") from exc
     store = SnapshotStore(paths=paths, session_date=session_date)
-    kis_slot = cfg.kis_dynamic_slot if regular_kis.enabled else None
+    kis_credentials = load_kis_data_credentials()
+    credentialed_slots = {cred.slot for cred in kis_credentials}
+    kis_slots = tuple(slot for slot in cfg.kis_dynamic_slots if slot in credentialed_slots) if regular_kis.enabled else ()
+    if regular_kis.enabled and len(kis_slots) != len(cfg.kis_dynamic_slots):
+        # An admission to a feed whose collector cannot start would be recorded as collected without any data.
+        logger.warning(
+            "[DATA] stage=intraday_capacity status=SLOT_CREDENTIAL_MISSING configured=%s usable=%s",
+            cfg.kis_dynamic_slots,
+            kis_slots,
+            extra=EVENT,
+        )
     kis_slot_symbols = (regular_kis.pair_capacity_per_connection or 0) // len(regular_kis.streams)
     ls_reserve = collector.ls_dynamic_reserve_symbols if collector.ls_active_sessions >= 2 else 0
-    capacity = feed_capacities(ls_reserve_symbols=ls_reserve, kis_slot_symbols=kis_slot_symbols, kis_slot=kis_slot)
+    capacity = feed_capacities(ls_reserve_symbols=ls_reserve, kis_slot_symbols=kis_slot_symbols, kis_slots=kis_slots)
     ineligible = _bars_ineligible(paths, session_date)
     if cfg.status_check:
         ineligible = ineligible | _today_status_excluded(store)
     initial = state_from_ledger(read_membership(membership_path), ineligible=ineligible, capacity=capacity)
     status_of: Callable[[str], Mapping[str, object]] | None = None
-    if cfg.status_check and cfg.kis_dynamic_slot is not None:
-        cred = _slot_credential(cfg.kis_dynamic_slot, load_kis_data_credentials())
+    if cfg.status_check and cfg.kis_dynamic_slots:
+        cred = _slot_credential(cfg.kis_dynamic_slots[0], kis_credentials)
         stack = build_kis_rest_stack(
             auth=KisAppAuth(cred.app_key, cred.app_secret),
             cache_dir=token_settings.token_cache_dir,

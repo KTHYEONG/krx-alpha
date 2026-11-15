@@ -242,8 +242,8 @@ async def _run_dynamic_stream(args: argparse.Namespace) -> int:
     if not regular_kis.enabled:
         raise KrxAlphaError("regular_kis collection is disabled")
     slot = str(args.credential_slot)
-    if intraday.kis_dynamic_slot != slot:
-        raise KrxAlphaError(f"credential slot {slot} is not the configured kis_dynamic_slot")
+    if slot not in intraday.kis_dynamic_slots:
+        raise KrxAlphaError(f"credential slot {slot} is not a configured kis_dynamic_slots entry")
     if slot in regular_kis.credential_slots:
         raise KrxAlphaError(f"kis dynamic slot {slot} must not be a regular_kis credential slot")
     cred = next((c for c in load_kis_data_credentials() if c.slot == slot), None)
