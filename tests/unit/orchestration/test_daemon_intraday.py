@@ -373,3 +373,107 @@ def _anchors():
     from src.core.session_anchors import standard_session_anchors
 
     return standard_session_anchors(_DAY)
+
+
+def _nxt_dynamic_runner(
+    monkeypatch, tmp_path, *, nxt_slots=("3", "4"), regular_slots=("1", "2"), dynamic_slots=("5",)
+):
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+    monkeypatch.setattr(
+        daemon_mod,
+        "load_kis_data_credentials",
+        lambda: (KisDataCredential("5", "app-5", "secret-5", "hts-5", "kid5"),),
+    )
+    regular = RegularKisSettings(
+        enabled=True,
+        credential_slots=regular_slots,
+        pair_capacity_per_connection=41,
+        nxt_credential_slots=nxt_slots,
+    )
+    intraday = IntradayAdmissionSettings(enabled=True, kis_dynamic_slots=dynamic_slots)
+    runtime = resolve_collector_runtime(
+        collector=CollectorSettings(data_root=tmp_path / "data"), regular_kis=regular, intraday=intraday
+    )
+    return daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda s: None)
+
+
+def _nxt_entry_plan(runner) -> None:
+    write_dynamic_admissions(
+        runner._paths.dynamic_admissions(_DAY),
+        DynamicPlan(rev=1, entries=(DynamicEntry("005930", "kis:5", 1, venue="nxt"),)),
+    )
+
+
+_KST = ZoneInfo("Asia/Seoul")
+
+
+def test_nxt_dynamic_child_builds_venue_cmd_and_starts_only_in_nxt_window(monkeypatch, tmp_path) -> None:
+    from src.core.session_anchors import standard_session_anchors
+
+    runner = _nxt_dynamic_runner(monkeypatch, tmp_path)
+    _nxt_entry_plan(runner)
+    anchors = standard_session_anchors(_DAY)
+    before_open = dt.datetime(2026, 11, 3, 7, 0, tzinfo=_KST)
+    in_window = dt.datetime(2026, 11, 3, 10, 0, tzinfo=_KST)
+
+    runner._supervise_regular_kis_dynamic(_DAY, before_open, anchors)
+    assert runner.children.regular_kis_dynamic == {}
+
+    runner._supervise_regular_kis_dynamic(_DAY, in_window, anchors)
+    cmd = runner.children.regular_kis_dynamic["5"].cmd
+    assert cmd[cmd.index("--venue") + 1] == "nxt"
+    assert cmd[cmd.index("--manifest-path") + 1].endswith("2026-11-03.nxt.shard-05.json")
+
+    runner._supervise_regular_kis_dynamic(_DAY, dt.datetime(2026, 11, 3, 16, 0, tzinfo=_KST), anchors)
+    assert runner.children.regular_kis_dynamic == {}
+
+
+def test_nxt_dynamic_child_waits_while_slot_lease_is_held(monkeypatch, tmp_path) -> None:
+    from src.core.session_anchors import standard_session_anchors
+
+    runner = _nxt_dynamic_runner(monkeypatch, tmp_path)
+    _nxt_entry_plan(runner)
+    monkeypatch.setattr(daemon_mod.KisWebSocketLease, "is_free", lambda self: False)
+
+    runner._supervise_regular_kis_dynamic(
+        _DAY, dt.datetime(2026, 11, 3, 10, 0, tzinfo=_KST), standard_session_anchors(_DAY)
+    )
+
+    assert runner.children.regular_kis_dynamic == {}
+
+
+def test_nxt_dynamic_child_without_now_is_never_started(monkeypatch, tmp_path) -> None:
+    runner = _nxt_dynamic_runner(monkeypatch, tmp_path)
+    _nxt_entry_plan(runner)
+
+    runner._supervise_regular_kis_dynamic(_DAY)
+
+    assert runner.children.regular_kis_dynamic == {}
+
+
+def test_krx_dynamic_cmd_argv_is_unchanged(tmp_path) -> None:
+    from src.core.paths import DataPaths
+    from src.orchestration.regular_kis import regular_kis_dynamic_stream_cmd
+
+    cmd = regular_kis_dynamic_stream_cmd(_DAY, DataPaths(tmp_path / "data"), slot="5", key_id="kid5")
+
+    assert "--venue" not in cmd
+    assert cmd[cmd.index("--manifest-path") + 1].endswith("2026-11-03.krx.shard-05.json")
+
+
+def test_dynamic_nxt_manifest_path_does_not_collide_with_static_or_krx(tmp_path) -> None:
+    from src.core.paths import DataPaths
+
+    paths = DataPaths(tmp_path / "data")
+    nxt_dynamic = paths.regular_kis_manifest_path(_DAY, 5, "nxt")
+    assert nxt_dynamic not in {paths.regular_kis_manifest_path(_DAY, i, "nxt") for i in (0, 1)}
+    assert nxt_dynamic != paths.regular_kis_manifest_path(_DAY, 5, "krx")
+
+
+def test_dynamic_slot_colliding_with_nxt_static_index_fails_at_plan_time(monkeypatch, tmp_path) -> None:
+    runner = _nxt_dynamic_runner(
+        monkeypatch, tmp_path, nxt_slots=("3", "4", "5"), regular_slots=("2",), dynamic_slots=("1",)
+    )
+
+    with pytest.raises(KrxAlphaError, match=r"collide with regular_nxt shard indices 0\.\.2"):
+        runner._ensure_regular_kis_plan(_DAY)

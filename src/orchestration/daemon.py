@@ -160,7 +160,7 @@ from src.universe.aftermarket import (
     aftermarket_candidate_session,
     refresh_aftermarket_candidates,
 )
-from src.universe.intraday import read_dynamic_admissions
+from src.universe.intraday import DynamicPlan, read_dynamic_admissions
 from src.universe.ipc import CandidateFileError, read_candidate_snapshot, read_candidates
 from src.universe.membership import MembershipFileError, MembershipRow, append_membership, read_membership
 from src.universe.policy import ineligible_security_symbols
@@ -185,6 +185,11 @@ HOLIDAY_SLEEP_CAP_S: float = 3600.0
 PROGRAM_SYNC_POLL_S: float = 60.0
 NIGHTLY_OVERRUN_GRACE_S: float = 120.0
 CHILD_STOP_TIMEOUT_S: float = 15.0
+
+
+def _dynamic_venue(plan: DynamicPlan, feed: str) -> str | None:
+    """Venue of the first admission held by a dynamic feed; entries are append-only, so it is stable for the day."""
+    return next((entry.venue for entry in plan.entries if entry.feed == feed), None)
 
 
 def _shifted_time(base: dt.time, offset: dt.timedelta) -> dt.time:
@@ -3719,6 +3724,11 @@ class DaemonRunner:
         nxt_overlap = sorted(set(intraday.kis_dynamic_slots) & set(nxt_slots))
         if intraday.enabled and nxt_overlap:
             raise KrxAlphaError(f"intraday kis_dynamic_slots {nxt_overlap} must not be a regular_nxt credential slot")
+        nxt_index_clash = sorted(slot for slot in intraday.kis_dynamic_slots if int(slot) < len(nxt_slots))
+        if (intraday.enabled or self._feed_control.secondary_feeds) and nxt_index_clash:
+            raise KrxAlphaError(
+                f"kis_dynamic_slots {nxt_index_clash} collide with regular_nxt shard indices 0..{len(nxt_slots) - 1}"
+            )
         st = self._state
         if st.regular_kis_plan_day == today:
             return
@@ -4041,7 +4051,7 @@ class DaemonRunner:
                         today.isoformat(),
                         extra=page(PageKind.REGULAR_FEED_DOWN),
                     )
-            self._supervise_regular_kis_dynamic(today)
+            self._supervise_regular_kis_dynamic(today, now, anchors)
             self._watch_regular_kis_shards(now, today, anchors)
         except (KrxAlphaError, KisApiError, OSError, ValueError) as exc:
             logger.warning("[DATA] stage=regular_kis_supervise status=FAIL reason=%s", str(exc))
@@ -4158,26 +4168,43 @@ class DaemonRunner:
             budget_page=PageKind.REGULAR_SHARD_STALE,
         )
 
-    def _supervise_regular_kis_dynamic(self, today: dt.date) -> None:
-        """Run the intraday KIS dynamic shard once its slot lease is free and the slot holds an admission."""
+    def _supervise_regular_kis_dynamic(
+        self, today: dt.date, now: dt.datetime | None = None, anchors: SessionAnchors | None = None
+    ) -> None:
+        """Run the KIS dynamic shard once its slot lease is free and the slot holds an admission; NXT needs now and anchors."""
         intraday = self._runtime.intraday
         secondary_feeds = self._feed_control.secondary_feeds
         for slot in intraday.kis_dynamic_slots:
             if not (intraday.enabled or f"kis:{slot}" in secondary_feeds):
                 continue
             try:
-                self._supervise_one_dynamic_kis_shard(today, slot)
+                self._supervise_one_dynamic_kis_shard(today, slot, now, anchors)
             except (KrxAlphaError, KisApiError, OSError, ValueError) as exc:
                 logger.warning(
                     "[DATA] stage=regular_kis_dynamic status=SUPERVISE_FAIL slot=%s reason=%s", slot, str(exc)
                 )
 
-    def _supervise_one_dynamic_kis_shard(self, today: dt.date, slot: str) -> None:
+    def _supervise_one_dynamic_kis_shard(
+        self, today: dt.date, slot: str, now: dt.datetime | None = None, anchors: SessionAnchors | None = None
+    ) -> None:
         """Start or keep one slot's dynamic shard; a failure here must not stop the other slots."""
         ch = self._children
+        cfg = getattr(self._runtime, "regular_kis", None) or RegularKisSettings()
+        nxt_due = (
+            now is not None
+            and anchors is not None
+            and regular_nxt_collection_due(
+                now, anchors=anchors, start_lead_s=cfg.nxt_start_lead_s, close_grace_s=cfg.close_grace_s
+            )
+        )
         sup = ch.regular_kis_dynamic.get(slot)
+        venue = _dynamic_venue(read_dynamic_admissions(self._paths.dynamic_admissions(today)), f"kis:{slot}")
+        if sup is not None and venue == "nxt" and not nxt_due:
+            sup.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
+            del ch.regular_kis_dynamic[slot]
+            return
         if sup is None:
-            if not read_dynamic_admissions(self._paths.dynamic_admissions(today)).symbols_for(f"kis:{slot}"):
+            if venue is None or (venue == "nxt" and not nxt_due):
                 return
             cred = next((c for c in load_kis_data_credentials() if c.slot == slot), None)
             if cred is None:
@@ -4186,7 +4213,7 @@ class DaemonRunner:
             if not lease.is_free():
                 return
             sup = ProcessSupervisor(
-                cmd=regular_kis_dynamic_stream_cmd(today, self._paths, slot=slot, key_id=cred.key_id),
+                cmd=regular_kis_dynamic_stream_cmd(today, self._paths, slot=slot, key_id=cred.key_id, venue=venue),
                 breaker=RestartCircuitBreaker(),
             )
             ch.regular_kis_dynamic[slot] = sup

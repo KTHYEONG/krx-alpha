@@ -484,3 +484,154 @@ def test_secondary_without_supervisor_is_never_admitted(paths) -> None:
         wall += 10
     assert not paths.dynamic_admissions(DAY).exists()
     assert _state(paths).groups["ls:0"].admitted == {}
+
+
+def _write_nxt_pool(paths: DataPaths, symbols: tuple[str, ...]) -> None:
+    path = paths.regular_nxt_candidates(DAY)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"rev": 1, "candidates": [{"symbol": s} for s in symbols]}), encoding="utf-8")
+
+
+def _tick_mixed(sup, paths, clock, wall, *, ls_alive: bool, nxt_alive: bool) -> None:
+    clock.t = wall
+    _write_health(paths, "ls:0", wall, last_frame=wall if ls_alive else wall - 40)
+    _write_health(paths, "kis-nxt:0", wall, last_frame=wall if nxt_alive else wall - 60)
+    _write_health(paths, "kis:5", wall, last_frame=wall)
+    sup.tick(
+        now=dt.datetime.fromtimestamp(wall, KST),
+        today=DAY,
+        anchors=ANCHORS,
+        ls_plan=LS_PLAN,
+        kis_plan=(),
+        nxt_plan=NXT_PLAN,
+        primaries={
+            "ls:0": ALIVE["ls:0"],
+            "kis-nxt:0": PrimaryView(True, False, False),
+            "kis:5": ALIVE["kis:5"],
+        },
+    )
+
+
+def _run_mixed(sup, paths, clock, start: float, seconds: float, *, ls_alive: bool, nxt_alive: bool) -> None:
+    wall = start
+    while wall <= start + seconds:
+        _tick_mixed(sup, paths, clock, wall, ls_alive=ls_alive, nxt_alive=nxt_alive)
+        wall += 10
+
+
+_MIXED = ("ls:0", "kis-nxt:0")
+
+
+def test_nxt_group_failover_admits_nxt_venue_on_slot5(paths, monkeypatch) -> None:
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.storage.layout import L0PartitionKey, l0_partition_relpath
+
+    clock = _Clock(T0)
+    sup = _supervisor(paths, _settings(watch_groups=("kis-nxt:0",)), clock, _Stops())
+    _write_nxt_pool(paths, ("005930",))
+    wall = T0
+    while wall <= T0 + 60:
+        clock.t = wall
+        _write_health(paths, "kis-nxt:0", wall, last_frame=wall - 60)
+        _write_health(paths, "kis:5", wall, last_frame=wall)
+        sup.tick(
+            now=dt.datetime.fromtimestamp(wall, KST),
+            today=DAY,
+            anchors=ANCHORS,
+            ls_plan=(),
+            kis_plan=(),
+            nxt_plan=NXT_PLAN,
+            primaries={"kis-nxt:0": PrimaryView(True, False, False), "kis:5": ALIVE["kis:5"]},
+        )
+        wall += 10
+
+    plan = read_dynamic_admissions(paths.dynamic_admissions(DAY))
+    assert [(e.symbol, e.feed, e.venue) for e in plan.entries] == [("005930", "kis:5", "nxt")]
+    assert plan.pairs_for("kis:5", "nxt") == ("005930",)
+    assert _state(paths).groups["kis-nxt:0"].state is GroupState.SECONDARY_ACTIVE
+    rel = l0_partition_relpath(
+        L0PartitionKey("kis", MarketVenue.NXT, MarketSession.REGULAR, "H0NXCNT0", DAY)
+    )
+    assert str(rel).startswith("kis/nxt/regular/H0NXCNT0")
+
+
+def test_krx_locked_slot5_refuses_failing_nxt_group(paths) -> None:
+    write_dynamic_admissions(
+        paths.dynamic_admissions(DAY),
+        DynamicPlan(rev=1, entries=(DynamicEntry("000660", "kis:5", 1, venue="krx"),)),
+    )
+    _write_nxt_pool(paths, ("005930",))
+    clock = _Clock(T0)
+    sup = _supervisor(paths, _settings(watch_groups=_MIXED), clock, _Stops())
+    _run_mixed(sup, paths, clock, T0, 60, ls_alive=True, nxt_alive=False)
+
+    plan = read_dynamic_admissions(paths.dynamic_admissions(DAY))
+    assert plan.rev == 1
+    assert {e.venue for e in plan.entries} == {"krx"}
+    group = _state(paths).groups["kis-nxt:0"]
+    assert group.state is GroupState.SECONDARY_ACTIVE
+    assert group.admitted == {}
+
+
+def test_nxt_locked_slot5_refuses_failing_krx_group(paths) -> None:
+    write_dynamic_admissions(
+        paths.dynamic_admissions(DAY),
+        DynamicPlan(rev=1, entries=(DynamicEntry("005930", "kis:5", 1, venue="nxt"),)),
+    )
+    _write_nxt_pool(paths, ("005930",))
+    clock = _Clock(T0)
+    sup = _supervisor(paths, _settings(watch_groups=_MIXED), clock, _Stops())
+    _run_mixed(sup, paths, clock, T0, 60, ls_alive=False, nxt_alive=True)
+
+    plan = read_dynamic_admissions(paths.dynamic_admissions(DAY))
+    assert plan.rev == 1
+    assert [e.venue for e in plan.entries] == ["nxt"]
+
+
+def test_same_tick_venue_conflict_admits_only_the_first_venue(paths, caplog) -> None:
+    _write_nxt_pool(paths, ("005930",))
+    clock = _Clock(T0)
+    sup = _supervisor(paths, _settings(watch_groups=_MIXED), clock, _Stops())
+    with caplog.at_level(logging.INFO):
+        _run_mixed(sup, paths, clock, T0, 60, ls_alive=False, nxt_alive=False)
+
+    plan = read_dynamic_admissions(paths.dynamic_admissions(DAY))
+    assert plan.entries
+    assert {e.venue for e in plan.entries} == {"krx"}
+    assert "status=REFUSED group=kis-nxt:0" in caplog.text
+
+
+def test_nxt_symbols_outside_pool_are_dropped_and_logged(paths, caplog) -> None:
+    _write_nxt_pool(paths, ("000660",))
+    clock = _Clock(T0)
+    sup = _supervisor(paths, _settings(watch_groups=("kis-nxt:0",)), clock, _Stops())
+    with caplog.at_level(logging.INFO):
+        wall = T0
+        while wall <= T0 + 60:
+            clock.t = wall
+            _write_health(paths, "kis-nxt:0", wall, last_frame=wall - 60)
+            _write_health(paths, "kis:5", wall, last_frame=wall)
+            sup.tick(
+                now=dt.datetime.fromtimestamp(wall, KST),
+                today=DAY,
+                anchors=ANCHORS,
+                ls_plan=(),
+                kis_plan=(),
+                nxt_plan=NXT_PLAN,
+                primaries={"kis-nxt:0": PrimaryView(True, False, False), "kis:5": ALIVE["kis:5"]},
+            )
+            wall += 10
+    assert not paths.dynamic_admissions(DAY).exists()
+    assert "reason=outside_nxt_pool dropped_n=1 dropped=005930" in caplog.text
+
+
+def test_corrupt_nxt_pool_admits_nothing_and_never_raises(paths) -> None:
+    path = paths.regular_nxt_candidates(DAY)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{broken", encoding="utf-8")
+    clock = _Clock(T0)
+    sup = _supervisor(paths, _settings(watch_groups=("kis-nxt:0",)), clock, _Stops())
+    _run_mixed(sup, paths, clock, T0, 60, ls_alive=True, nxt_alive=False)
+
+    assert not paths.dynamic_admissions(DAY).exists()
+    assert _state(paths).groups["kis-nxt:0"].admitted == {}

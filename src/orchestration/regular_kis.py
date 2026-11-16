@@ -81,8 +81,11 @@ def regular_kis_stream_cmd(today: dt.date, paths: DataPaths, *, shard: Aftermark
     ]
 
 
-def regular_kis_dynamic_stream_cmd(today: dt.date, paths: DataPaths, *, slot: str, key_id: str) -> list[str]:
-    """argv for ``collect-regular-kis-dynamic`` on the intraday KIS dynamic slot."""
+def regular_kis_dynamic_stream_cmd(
+    today: dt.date, paths: DataPaths, *, slot: str, key_id: str, venue: str = "krx"
+) -> list[str]:
+    """argv for ``collect-regular-kis-dynamic`` on a KIS dynamic slot; the default KRX argv omits ``--venue``."""
+    venue_args = ["--venue", venue] if venue != "krx" else []
     return [
         sys.executable,
         "-m",
@@ -93,9 +96,10 @@ def regular_kis_dynamic_stream_cmd(today: dt.date, paths: DataPaths, *, slot: st
         "--journal-root",
         str(paths.journal_root),
         "--manifest-path",
-        str(paths.regular_kis_manifest_path(today, int(slot))),
+        str(paths.regular_kis_manifest_path(today, int(slot), venue)),
         "--credential-slot",
         slot,
         "--credential-key-id",
         key_id,
+        *venue_args,
     ]

@@ -55,6 +55,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     dynamic.add_argument("--ntp-host", default=None)
     dynamic.add_argument("--max-clock-offset-ns", type=int, default=None)
     dynamic.add_argument("--max-cycles", type=int, default=None)
+    dynamic.add_argument("--venue", choices=["krx", "nxt"], default="krx")
     dynamic.set_defaults(handler=lambda args: asyncio.run(_run_dynamic_stream(args)))
 
 
@@ -262,14 +263,14 @@ async def _run_stream(args: argparse.Namespace) -> int:
 
 
 async def _run_dynamic_stream(args: argparse.Namespace) -> int:
-    """Collect KRX regular trades for the symbols the intraday plan assigns to the dynamic KIS slot until window end.
+    """Collect the regular trades the intraday plan assigns to one KIS dynamic slot and venue until window end.
 
     Returns:
         0 after a graceful stop, or when started after the window already closed (no socket opened).
 
     Raises:
         KrxAlphaError: Neither intraday admission nor this slot's failover secondary is enabled, regular KIS is
-            disabled, or the slot is a regular credential slot.
+            disabled, the slot is a regular credential slot, or NXT is requested on a shifted session.
         MissingCredentialsError: Dynamic slot credential fingerprint mismatch.
     """
     runtime = resolve_collector_runtime()
@@ -288,12 +289,17 @@ async def _run_dynamic_stream(args: argparse.Namespace) -> int:
     cred = next((c for c in load_kis_data_credentials() if c.slot == slot), None)
     if cred is None or cred.key_id != str(args.credential_key_id):
         raise MissingCredentialsError(f"credential fingerprint mismatch for slot {slot}")
+    venue = MarketVenue(str(getattr(args, "venue", "krx")))
     capacity = int(regular_kis.pair_capacity_per_connection or 0)
-    streams: tuple[str, str] = tuple(regular_kis.streams)  # type: ignore[assignment]
-    route = StreamRoute(MarketVenue.KRX, MarketSession.REGULAR)
+    streams: tuple[str, str] = tuple(
+        regular_kis.nxt_streams if venue is MarketVenue.NXT else regular_kis.streams
+    )  # type: ignore[assignment]
+    route = StreamRoute(venue, MarketSession.REGULAR)
     session_date = dt.date.fromisoformat(str(args.session_date))
     paths = DataPaths(pathlib.Path(str(args.journal_root)).parent)
     anchors = resolve_session_anchors(paths.session_calendar_dir, session_date)
+    if venue is MarketVenue.NXT and anchors.open_shift != dt.timedelta(0):
+        raise KrxAlphaError(f"nxt regular collection is not verified for shifted session {session_date.isoformat()}")
     overrides = resolve_clock_overrides(getattr(args, "ntp_host", None), getattr(args, "max_clock_offset_ns", None), settings)
     if not 0 < overrides.max_clock_offset_ns <= 2_000_000_000:
         raise ValueError("max_clock_offset_ns must be positive and at most 2 seconds")
@@ -301,15 +307,15 @@ async def _run_dynamic_stream(args: argparse.Namespace) -> int:
     ipc_path = paths.dynamic_admissions(session_date)
     initial = [
         (symbol, stream)
-        for symbol in dict.fromkeys(read_dynamic_admissions(ipc_path).symbols_for(feed))
+        for symbol in dict.fromkeys(read_dynamic_admissions(ipc_path).pairs_for(feed, venue.value))
         for stream in streams
     ]
-    shard = AftermarketShard(MarketVenue.KRX, int(slot), (), streams, cred.slot, cred.key_id)
+    shard = AftermarketShard(venue, int(slot), (), streams, cred.slot, cred.key_id)
     cfg = SessionConfig(
         session_date=session_date,
         journal_root=pathlib.Path(str(args.journal_root)),
         manifest_path=pathlib.Path(str(args.manifest_path)),
-        candidates_path=paths.candidates,
+        candidates_path=paths.regular_nxt_candidates(session_date) if venue is MarketVenue.NXT else paths.candidates,
         ntp_host=overrides.ntp_host,
         slot_budget=capacity,
         max_clock_offset_ns=overrides.max_clock_offset_ns,
@@ -345,6 +351,7 @@ async def _run_dynamic_stream(args: argparse.Namespace) -> int:
             ipc_path=ipc_path,
             membership_path=paths.membership_path(session_date),
             kis_slot=slot,
+            venue=venue.value,
         ),
         session=session,
         static_pairs=(),

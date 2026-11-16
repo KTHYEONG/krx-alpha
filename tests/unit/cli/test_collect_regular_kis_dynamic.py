@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime as dt
 import json
 import pathlib
 import types
@@ -10,7 +11,9 @@ import pytest
 
 import src.cli.collect_regular_kis as crk
 from src.core.errors import KrxAlphaError, MissingCredentialsError
+from src.realtime.contracts import MarketSession, MarketVenue
 from src.realtime.kis_sharding import KisDataCredential
+from src.realtime.session import StreamRoute
 from src.universe.intraday import DynamicEntry, DynamicPlan, write_dynamic_admissions
 
 _DAY = "2026-11-03"
@@ -172,3 +175,61 @@ def test_dynamic_child_still_gated_by_default_for_slot5(monkeypatch, tmp_path) -
 
     with pytest.raises(KrxAlphaError, match="intraday admission is disabled"):
         _run(_args(tmp_path, slot="5", key_id="kid5"))
+
+
+def test_dynamic_nxt_child_routes_nxt_streams_and_nxt_entries_only(monkeypatch, tmp_path) -> None:
+    _env(monkeypatch, intraday=False, slots=("5",), regular_slots=("1", "2"))
+    monkeypatch.setenv("KRX_ALPHA_FEED_CONTROL_WATCH_GROUPS", json.dumps(["kis-nxt:0"]))
+    monkeypatch.setenv("KRX_ALPHA_FEED_CONTROL_SECONDARY_FEEDS", json.dumps(["kis:5"]))
+    write_dynamic_admissions(
+        tmp_path / "data" / "manifest" / "membership" / f"{_DAY}.dynamic.json",
+        DynamicPlan(
+            rev=1,
+            entries=(
+                DynamicEntry("005930", "kis:5", 1, venue="nxt"),
+                DynamicEntry("000660", "kis:5", 1, venue="krx"),
+            ),
+        ),
+    )
+    captured_cfg: dict[str, object] = {}
+
+    def _bootstrap(cfg):
+        captured_cfg["cfg"] = cfg
+        return _Session(expected_close_ns=_FAR_FUTURE_NS)
+
+    monkeypatch.setattr(crk, "bootstrap_session", _bootstrap)
+    captured: dict[str, object] = {}
+
+    async def fake_child(**kwargs) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(crk, "run_streaming_child", fake_child)
+
+    assert _run(_nxt_args(tmp_path)) == 0
+
+    cfg = captured_cfg["cfg"]
+    assert cfg.route == StreamRoute(MarketVenue.NXT, MarketSession.REGULAR)  # type: ignore[attr-defined]
+    assert cfg.shard.venue is MarketVenue.NXT  # type: ignore[attr-defined]
+    assert cfg.desired_streams == ("H0NXCNT0", "H0NXASP0")  # type: ignore[attr-defined]
+    assert cfg.candidates_path == tmp_path / "data" / "universe" / "regular_nxt" / f"{_DAY}.json"  # type: ignore[attr-defined]
+    replay = captured["replay_pairs"]
+    assert ("005930", "H0NXCNT0") in replay  # type: ignore[operator]
+    assert ("005930", "H0NXASP0") in replay  # type: ignore[operator]
+    assert not [pair for pair in replay if pair[0] == "000660"]  # type: ignore[union-attr]
+
+
+def test_dynamic_nxt_child_refused_on_shifted_session(monkeypatch, tmp_path) -> None:
+    _env(monkeypatch, intraday=False, slots=("5",), regular_slots=("1", "2"))
+    monkeypatch.setenv("KRX_ALPHA_FEED_CONTROL_WATCH_GROUPS", json.dumps(["kis-nxt:0"]))
+    monkeypatch.setenv("KRX_ALPHA_FEED_CONTROL_SECONDARY_FEEDS", json.dumps(["kis:5"]))
+    shifted = types.SimpleNamespace(open_shift=dt.timedelta(minutes=10))
+    monkeypatch.setattr(crk, "resolve_session_anchors", lambda *a, **k: shifted)
+
+    with pytest.raises(KrxAlphaError, match="not verified for shifted session"):
+        _run(_nxt_args(tmp_path))
+
+
+def _nxt_args(tmp_path: pathlib.Path) -> argparse.Namespace:
+    args = _args(tmp_path, slot="5", key_id="kid5")
+    args.venue = "nxt"
+    return args

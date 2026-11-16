@@ -19,6 +19,7 @@ Direction = Literal["up", "down"]
 
 _COLLECTED_TIERS: frozenset[str] = frozenset({"A", "B"})
 _ADMITTED_SOURCES: frozenset[str] = frozenset({"static", "dynamic"})
+_VENUES: frozenset[str] = frozenset({"krx", "nxt"})
 
 
 class DynamicAdmissionsFileError(KrxAlphaError):
@@ -52,6 +53,7 @@ class DynamicEntry:
     symbol: str
     feed: str
     decided_at_ns: int
+    venue: str = "krx"
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,9 @@ class DynamicPlan:
 
     def symbols_for(self, feed: str) -> tuple[str, ...]:
         return tuple(entry.symbol for entry in self.entries if entry.feed == feed)
+
+    def pairs_for(self, feed: str, venue: str) -> tuple[str, ...]:
+        return tuple(entry.symbol for entry in self.entries if entry.feed == feed and entry.venue == venue)
 
 
 def qualifies(row: KiwoomRankingRow, cfg: IntradayAdmissionSettings) -> bool:
@@ -159,13 +164,16 @@ def read_dynamic_admissions(path: pathlib.Path) -> DynamicPlan:
                 symbol=str(item["symbol"]),
                 feed=str(item["feed"]),
                 decided_at_ns=int(item["decided_at_ns"]),
+                venue=str(item.get("venue", "krx")),
             )
             for item in raw_entries
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise DynamicAdmissionsFileError(f"invalid dynamic admissions file {path}: {exc}") from exc
     if any(not is_krx_short_code(entry.symbol) for entry in entries):
         raise DynamicAdmissionsFileError(f"invalid symbol in dynamic admissions file {path}")
+    if any(entry.venue not in _VENUES for entry in entries):
+        raise DynamicAdmissionsFileError(f"invalid venue in dynamic admissions file {path}")
     return DynamicPlan(rev=rev, entries=entries)
 
 
@@ -179,7 +187,12 @@ def write_dynamic_admissions(path: pathlib.Path, plan: DynamicPlan) -> None:
     payload = {
         "rev": plan.rev,
         "entries": [
-            {"symbol": entry.symbol, "feed": entry.feed, "decided_at_ns": entry.decided_at_ns}
+            {
+                "symbol": entry.symbol,
+                "feed": entry.feed,
+                "decided_at_ns": entry.decided_at_ns,
+                "venue": entry.venue,
+            }
             for entry in plan.entries
         ],
     }

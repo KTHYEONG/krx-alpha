@@ -396,6 +396,7 @@ class DynamicFeed:
     membership_path: pathlib.Path
     ls_shard: int | None = None
     kis_slot: str | None = None
+    venue: str = "krx"
 
 
 class DynamicPairWatcher:
@@ -465,7 +466,9 @@ class DynamicPairWatcher:
             return 0
         self._rev = plan.rev
         wanted = dict.fromkeys(
-            (symbol, stream) for symbol in plan.symbols_for(self._feed.feed) for stream in self._feed.streams
+            (symbol, stream)
+            for symbol in plan.pairs_for(self._feed.feed, self._feed.venue)
+            for stream in self._feed.streams
         )
         held = set(adapter.subscribed_pairs())
         new = [pair for pair in wanted if pair not in held and pair not in self._rejected]

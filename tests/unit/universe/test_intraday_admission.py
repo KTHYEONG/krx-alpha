@@ -241,3 +241,40 @@ def test_kis_dynamic_rows_reduce_only_the_kis_feed() -> None:
 
     assert state.capacity_left == {"ls:1": 40, "kis:5": 19}
     assert "005930" in state.collected
+
+
+def test_dynamic_entry_venue_roundtrip_and_default(tmp_path) -> None:
+    path = tmp_path / "dyn.json"
+    write_dynamic_admissions(
+        path,
+        DynamicPlan(
+            rev=3,
+            entries=(
+                DynamicEntry("005930", "kis:5", 1, venue="nxt"),
+                DynamicEntry("000660", "kis:5", 2),
+            ),
+        ),
+    )
+    plan = read_dynamic_admissions(path)
+    assert [entry.venue for entry in plan.entries] == ["nxt", "krx"]
+    assert plan.pairs_for("kis:5", "nxt") == ("005930",)
+    assert plan.pairs_for("kis:5", "krx") == ("000660",)
+    assert plan.symbols_for("kis:5") == ("005930", "000660")
+
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(
+        json.dumps({"rev": 1, "entries": [{"symbol": "005930", "feed": "kis:5", "decided_at_ns": 1}]}),
+        encoding="utf-8",
+    )
+    assert read_dynamic_admissions(legacy).entries == (DynamicEntry("005930", "kis:5", 1, venue="krx"),)
+
+
+@pytest.mark.parametrize("venue", ["KRX", "kosdaq", ""])
+def test_dynamic_plan_rejects_unknown_venue(tmp_path, venue) -> None:
+    path = tmp_path / "dyn.json"
+    path.write_text(
+        json.dumps({"rev": 1, "entries": [{"symbol": "005930", "feed": "kis:5", "decided_at_ns": 1, "venue": venue}]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(DynamicAdmissionsFileError, match="invalid venue"):
+        read_dynamic_admissions(path)
