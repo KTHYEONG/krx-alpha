@@ -430,3 +430,10 @@ def test_merge_accepts_xvendor_rows(tmp_path) -> None:
     filled = frame.filter(pl.col("source") != "live").sort("cum")
     assert filled["source"].to_list() == ["gapfill:xvendor_kis", "gapfill:kiwoom_tape"]
     assert filled["cum"].to_list() == [11, 12]
+
+
+def test_gapfill_unsupported_peer_skipped_with_log(tmp_path, caplog) -> None:
+    audit = _audit(_interval(missing=2, acml_prev=100, acml_next_before=110))
+    with caplog.at_level(logging.WARNING, logger="src.storage.l0_gapfill"):
+        assert peer_trades_for_gaps(audit, tmp_path, peer="db", day=dt.date(2026, 10, 20)) == {}
+    assert "reason=unsupported_peer" in caplog.text

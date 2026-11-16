@@ -1184,3 +1184,25 @@ def test_purge_failure_logs_rc_and_stderr(tmp_path, caplog) -> None:
     exc_records = [r for r in messages if "reason=exception" in r.getMessage()]
     assert len(exc_records) == 1
     assert exc_records[0].exc_info is not None
+
+
+def test_feed_derived_and_manifest_paths_are_offloaded(tmp_path, fake_rclone):
+    from src.storage.remote import GDriveArchiver
+
+    derived = tmp_path / "l1" / "derived" / "feed_selection" / "dt=2026-11-16.parquet"
+    derived.parent.mkdir(parents=True)
+    derived.write_bytes(b"PAR1")
+    assert GDriveArchiver(fake_rclone.config).sync_l1_tree(tmp_path / "l1").uploaded == 1
+    assert "l1/derived/feed_selection/dt=2026-11-16.parquet" in fake_rclone.remote_sizes
+
+    manifest = tmp_path / "manifest"
+    feed_control = manifest / "feed_control" / "2026-11-16.jsonl"
+    feed_control.parent.mkdir(parents=True)
+    feed_control.write_text('{"kind": "ADMIT"}\n', encoding="utf-8")
+    health = manifest / "feed_quality" / "2026-11-16.health" / "ls__0.json"
+    health.parent.mkdir(parents=True)
+    health.write_text("{}", encoding="utf-8")
+    stats = GDriveArchiver(fake_rclone.config).sync_manifest_tree(manifest)
+    assert stats.uploaded == 2
+    assert "manifests/feed_control/2026-11-16.jsonl" in fake_rclone.remote_sizes
+    assert "manifests/feed_quality/2026-11-16.health/ls__0.json" in fake_rclone.remote_sizes

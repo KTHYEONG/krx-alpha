@@ -89,12 +89,22 @@ class PeerTrade(NamedTuple):
     qty: int
 
 
+_PEER_TICK_VENDORS: frozenset[str] = frozenset({"ls", "kis", "kiwoom"})
+
+
 def peer_trades_for_gaps(
     audit: Mapping[str, Any], journal_root: pathlib.Path, *, peer: str, day: dt.date
 ) -> dict[str, list[PeerTrade]]:
-    """Peer vendor's regular-session trades per symbol inside any audited interval's cum-volume span, sorted by acml; read-only."""
+    """Peer vendor's regular-session trades per symbol inside any audited interval's cum-volume span, sorted by acml; read-only.
+
+    A peer without a tick decoder is skipped with a log line and contributes no trades.
+    """
     from src.storage.l0_audit import _BATCH_BYTES, _decode_envelope, _iter_line_batches, _tick_body
     from src.storage.layout import L0_JOURNAL_GLOB, l0_partition_key, l0_partition_relpath
+
+    if peer not in _PEER_TICK_VENDORS:
+        logger.warning("[DATA] stage=xvendor_fill status=SKIP reason=unsupported_peer peer=%s day=%s", peer, day.isoformat())
+        return {}
 
     spans: dict[str, list[tuple[int, int]]] = {}
     for ledger in audit.get("symbols", ()):

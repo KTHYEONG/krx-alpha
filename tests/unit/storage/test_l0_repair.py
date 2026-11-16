@@ -902,3 +902,26 @@ def test_peer_hold_inert_when_hold_disabled(tmp_path) -> None:
     sym = {"symbol": "005930", "confirmed_missing": 2, "intervals_truncated": 0, "intervals": []}
     _write_audit(paths, day, "ls", _audit_doc(day, "ls", confirmed=2, symbols=[sym]))
     assert _kis_hold(paths, day, dt.date(2026, 9, 14), hold_enabled=False) is None
+
+
+def test_peer_hold_all_configured_peers(tmp_path) -> None:
+    import pathlib
+
+    from src.storage.l0_repair import l0_hold_reason
+
+    paths = _paths(tmp_path)
+    day = dt.date(2026, 9, 12)
+    sym = {"symbol": "005930", "confirmed_missing": 2, "intervals_truncated": 0, "intervals": []}
+    _write_audit(paths, day, "ls", _audit_doc(day, "ls", confirmed=2, symbols=[sym]))
+    _write_audit(paths, day, "db", _audit_doc(day, "db"))
+    settings = _settings(gate_vendors=("ls", "kis", "db"), xvendor_peers=("kis", "db"))
+    rel = pathlib.PurePath("db/krx/regular/H0STCNT0/dt=2026-09-12")
+    out = l0_hold_reason(
+        rel,
+        day,
+        paths=paths,
+        settings=settings,
+        tape_done=frozenset({("005930", day)}),
+        cutoff=dt.date(2026, 9, 14),
+    )
+    assert out == "db:peer_of_ls:gapfill_pending"

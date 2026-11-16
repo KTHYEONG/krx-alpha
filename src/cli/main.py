@@ -19,6 +19,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
         backfill_minute_bars,
         backfill_tick_tape,
         bars_refresh,
+        build_feed_selection,
         collect_aftermarket,
         collect_init,
         collect_intraday_discovery,
@@ -50,6 +51,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
     backfill_tick_tape.add_parser(subparsers)
     backfill_minute_bars.add_parser(subparsers)
     repair_ticks.add_parser(subparsers)
+    build_feed_selection.add_parser(subparsers)
     collect_aftermarket.add_parser(subparsers)
     collect_premarket.add_parser(subparsers)
     collect_regular_kis.add_parser(subparsers)

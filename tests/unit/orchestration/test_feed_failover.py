@@ -635,3 +635,55 @@ def test_corrupt_nxt_pool_admits_nothing_and_never_raises(paths) -> None:
 
     assert not paths.dynamic_admissions(DAY).exists()
     assert _state(paths).groups["kis-nxt:0"].admitted == {}
+
+
+def test_journal_rows_carry_full_symbols_and_group_plan(paths) -> None:
+    many = tuple(f"{index:06d}" for index in range(1, 8))
+    plan = (
+        LsShard(
+            shard_index=0,
+            symbols=many,
+            streams=("H0STCNT0", "H0STASP0"),
+            dynamic_reserve_symbols=0,
+            window_standby=True,
+        ),
+    )
+    clock = _Clock(T0)
+    sup = _supervisor(paths, _settings(), clock, _Stops())
+    wall = T0
+    while wall <= T0 + 40:
+        clock.t = wall
+        _write_health(paths, "ls:0", wall, last_frame=wall - 40)
+        _write_health(paths, "kis:5", wall, last_frame=wall)
+        sup.tick(
+            now=dt.datetime.fromtimestamp(wall, KST),
+            today=DAY,
+            anchors=ANCHORS,
+            ls_plan=plan,
+            kis_plan=(),
+            nxt_plan=(),
+            primaries=ALIVE,
+        )
+        wall += 10
+    journal = _journal(paths)
+    admits = [row for row in journal if row["kind"] == "ADMIT"]
+    assert admits
+    assert all(row["symbols"] == list(many) for row in admits)
+    assert admits[0]["symbols_n"] == len(many)
+    assert admits[0]["symbols_head"] == list(many[:5])
+    plan_rows = [row for row in journal if row["kind"] == "group_plan"]
+    assert [row["group"] for row in plan_rows] == ["ls:0"]
+    assert plan_rows[0]["symbols"] == list(many)
+
+
+def test_group_plan_rewritten_on_change_and_each_day(paths) -> None:
+    clock = _Clock(T0)
+    sup = _supervisor(paths, _settings(), clock, _Stops())
+    _run_silent_ls(sup, paths, clock, T0, 20)
+    _run_silent_ls(sup, paths, clock, T0 + 30, 20)
+    assert len([row for row in _journal(paths) if row["kind"] == "group_plan"]) == 1
+
+    _tick(sup, paths, clock, T0 + 60, ls_frame=T0 + 60, kis_frame=T0 + 60, today=DAY2)
+    day2 = paths.feed_control_log_path(DAY2)
+    rows = [json.loads(line) for line in day2.read_text(encoding="utf-8").splitlines()]
+    assert [row["kind"] for row in rows if row["kind"] == "group_plan"] == ["group_plan"]

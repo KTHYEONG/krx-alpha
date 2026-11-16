@@ -150,6 +150,8 @@ class FeedFailoverSupervisor:
         self._failures = 0
         self._last_fail_log_wall: float | None = None
         self._stuck_paged_day: dt.date | None = None
+        self._plan_day: dt.date | None = None
+        self._written_plans: dict[str, tuple[str, ...]] = {}
 
     def tick(
         self,
@@ -224,7 +226,10 @@ class FeedFailoverSupervisor:
         if result.transitions or result.actions or new_state.day != self._saved_day or self._persist_due(now_wall):
             self._save_state(new_state)
             self._last_persist_wall = now_wall
-        rows = self._journal_rows(result, mode, new_state.plan_rev, now_wall)
+        if self._plan_day != today:
+            self._plan_day = today
+            self._written_plans = {}
+        rows = self._group_plan_rows(groups, mode, now_wall) + self._journal_rows(result, mode, new_state.plan_rev, now_wall)
         if rows:
             self._append_journal(today, rows)
         for action in result.actions:
@@ -521,11 +526,37 @@ class FeedFailoverSupervisor:
                 "feed": action.feed_id,
                 "symbols_n": len(action.symbols),
                 "symbols_head": list(action.symbols[:_HEAD_SYMBOLS]),
+                "symbols": list(action.symbols) if action.kind is ActionKind.ADMIT else None,
                 "plan_rev": plan_rev,
             }
             for action in result.actions
         ]
         return transitions + actions
+
+    def _group_plan_rows(self, groups: Sequence[GroupSpec], mode: str, now_wall: float) -> list[dict[str, Any]]:
+        """One `group_plan` row per watched group whenever its symbol list changes; the list is re-emitted on each new day."""
+        rows: list[dict[str, Any]] = []
+        for spec in groups:
+            if self._written_plans.get(spec.group_id) == spec.symbols:
+                continue
+            self._written_plans[spec.group_id] = spec.symbols
+            rows.append(
+                {
+                    "wall": now_wall,
+                    "mode": mode,
+                    "kind": "group_plan",
+                    "group": spec.group_id,
+                    "old": None,
+                    "new": None,
+                    "reason": "plan",
+                    "feed": None,
+                    "symbols_n": len(spec.symbols),
+                    "symbols_head": list(spec.symbols[:_HEAD_SYMBOLS]),
+                    "symbols": list(spec.symbols),
+                    "plan_rev": None,
+                }
+            )
+        return rows
 
     def _append_journal(self, today: dt.date, rows: Sequence[dict[str, Any]]) -> None:
         path = self._paths.feed_control_log_path(today)

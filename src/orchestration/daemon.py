@@ -149,6 +149,8 @@ from src.realtime.ls_limits import prioritize_ls_pairs
 from src.realtime.ls_sharding import LsShard, plan_ls_shards
 from src.realtime.manifest import SessionManifest
 from src.realtime.streamer import aftermarket_open_time
+from src.storage.feed_quality import digest_lines as feed_digest_lines
+from src.storage.feed_quality import feed_health_archive_dir
 from src.storage.l0_audit import AuditStatus, SessionAudit, derive_session_audit, write_session_audit
 from src.storage.l0_repair import RepairState, derive_day_repair, l0_hold_reason
 from src.storage.layout import L0_VENDOR_DB, L0_VENDOR_KIWOOM, l0_day_journal_glob
@@ -661,6 +663,7 @@ _EOD_STEP_RECONCILE_REGULAR: Final[str] = "reconcile_regular"
 _EOD_STEP_RECONCILE_CROSSCHECK: Final[str] = "reconcile_crosscheck"
 _EOD_STEP_BACKUP_CHECK: Final[str] = "backup_check"
 _EOD_STEP_REPAIR_SUMMARY: Final[str] = "repair_summary"
+_EOD_STEP_FEED_HEALTH_ARCHIVE: Final[str] = "feed_health_archive"
 
 
 _eod_clock: Callable[[], float] = time.monotonic
@@ -1462,10 +1465,16 @@ def _stop_sync_child(
 class NightlyJob(StrEnum):
     TICK_TAPE = "tick_tape"
     REPAIR = "repair"
+    FEED_SELECTION = "feed_selection"
     MINUTE_BARS = "minute_bars"
 
 
-_NIGHTLY_JOB_ORDER: tuple[NightlyJob, ...] = (NightlyJob.TICK_TAPE, NightlyJob.REPAIR, NightlyJob.MINUTE_BARS)
+_NIGHTLY_JOB_ORDER: tuple[NightlyJob, ...] = (
+    NightlyJob.TICK_TAPE,
+    NightlyJob.REPAIR,
+    NightlyJob.FEED_SELECTION,
+    NightlyJob.MINUTE_BARS,
+)
 _NIGHTLY_BLOCKED_STATES: tuple[SessionState, ...] = (
     SessionState.STREAMER_ACTIVE,
     SessionState.FULL_ACTIVE,
@@ -1501,6 +1510,7 @@ def _nightly_job_cmd(job: NightlyJob, *, deadline: dt.datetime) -> list[str]:
     modules = {
         NightlyJob.TICK_TAPE: "backfill-tick-tape",
         NightlyJob.REPAIR: "repair-ticks",
+        NightlyJob.FEED_SELECTION: "build-feed-selection",
         NightlyJob.MINUTE_BARS: "backfill-minute-bars",
     }
     try:
@@ -1516,6 +1526,37 @@ def _nightly_job_cmd(job: NightlyJob, *, deadline: dt.datetime) -> list[str]:
         deadline.isoformat(),
     ]
 
+
+
+def _archive_feed_health_at_close(paths: DataPaths, day: dt.date) -> int:
+    """Copy the close-time feed-health snapshots into the day's manifest archive; never raises so EOD continues."""
+    source = paths.work_root / "feed_status"
+    try:
+        files = sorted(source.glob("*.json")) if source.is_dir() else []
+        if not files:
+            return 0
+        target = feed_health_archive_dir(paths, day)
+        target.mkdir(parents=True, exist_ok=True)
+        for path in files:
+            (target / path.name).write_bytes(path.read_bytes())
+    except OSError as exc:
+        logger.warning("[DATA] stage=feed_health_archive status=FAIL reason=%s date=%s", type(exc).__name__, day.isoformat())
+        return 0
+    logger.info("[DATA] stage=feed_health_archive status=OK files=%d date=%s", len(files), day.isoformat())
+    return len(files)
+
+
+def _feed_watch_groups(runner: object) -> tuple[str, ...]:
+    """Watched feed groups of a runner; empty when the failover settings were never attached."""
+    settings = getattr(runner, "_feed_control", None)
+    return tuple(getattr(settings, "watch_groups", ()) or ())
+
+
+def _feed_digest_lines(paths: DataPaths, day: dt.date, *, watch_groups: tuple[str, ...]) -> list[str]:
+    """Feed-control and feed-quality digest lines; empty while no group is watched so the digest stays unchanged."""
+    if not watch_groups:
+        return []
+    return list(feed_digest_lines(paths, day))
 
 
 def _nightly_job_env(job: NightlyJob, overflow: TickTapeOverflowSettings) -> dict[str, str]:
@@ -2015,6 +2056,8 @@ class DaemonRunner:
             return bool(self._tick_tape_cfg.enabled)
         if job is NightlyJob.REPAIR:
             return bool(self._repair_cfg.job_enabled)
+        if job is NightlyJob.FEED_SELECTION:
+            return bool(_feed_watch_groups(self))
         return True
 
     def _nightly_scheduler_active(self) -> bool:
@@ -4510,6 +4553,9 @@ class DaemonRunner:
             audit = self._derive_session_audit(ref_day, day, anchors)
         with _eod_step(_EOD_STEP_SESSION_AUDIT_KIS):
             self._derive_kis_regular_audit(ref_day, day, anchors, ls_audit=audit)
+        if _feed_watch_groups(self):
+            with _eod_step(_EOD_STEP_FEED_HEALTH_ARCHIVE):
+                _archive_feed_health_at_close(paths, ref_day)
         repair_settings = getattr(self, "_repair_cfg", getattr(self._runtime, "repair", None))
         if repair_settings is not None and getattr(repair_settings, "hold_enabled", False):
             housekeeping = _run_eod_housekeeping(
@@ -4599,6 +4645,7 @@ class DaemonRunner:
                 f"repair_held={getattr(housekeeping, 'held', 0)}",
                 f"repair_days={repair_days}",
                 f"degraded_reasons={','.join(degraded_reasons) or 'none'}",
+                *_feed_digest_lines(paths, ref_day, watch_groups=_feed_watch_groups(self)),
             ]
         )
         subject = f"[krx-alpha] EOD {ref_day.isoformat()} {eod_status}"
