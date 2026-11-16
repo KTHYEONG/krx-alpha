@@ -34,6 +34,7 @@ from src.core.config import (
     CollectorSettings,
     DataPaths,
     ExecutionSettings,
+    FeedControlSettings,
     KisCredentials,
     KisTokenSettings,
     KrxCredentials,
@@ -108,6 +109,7 @@ from src.orchestration.eod import (
     run_eod_offload,
     run_eod_remote_l0_purge,
 )
+from src.orchestration.feed_failover import FeedFailoverSupervisor, PrimaryView
 from src.orchestration.premarket import (
     premarket_collection_due,
     premarket_eod_report,
@@ -1794,6 +1796,15 @@ class DaemonRunner:
         self._after_cfg = runtime.aftermarket
         self._snapshot_cfg = runtime.snapshot
         self._premarket_cfg = runtime.premarket
+        self._feed_control = getattr(runtime, "feed_control", None) or FeedControlSettings()
+        _regular_kis_cfg = getattr(runtime, "regular_kis", None) or RegularKisSettings()
+        self._feed_failover = FeedFailoverSupervisor(
+            paths=self._paths,
+            settings=self._feed_control,
+            collector=self._cfg,
+            regular_kis=_regular_kis_cfg,
+            stop_secondary=self._stop_feed_secondary,
+        )
         _tiers = getattr(runtime, "universe_tiers", None)
         self._universe_tiers = _tiers if _tiers is not None else UniverseTierSettings()
         _wd = getattr(runtime, "shard_watchdog", None)
@@ -2330,6 +2341,7 @@ class DaemonRunner:
         self._supervise_regular_nxt(now, anchors)
         self._supervise_regular_ls_shard(today)
         self._watch_ls_shards(now, state, today, anchors)
+        self._run_feed_failover(now, today, anchors)
         self._run_ingest_watchdog(now, state, day, anchors)
         self._run_first_frame_watchdog(now, state, day, anchors)
         self._run_crosscheck_watchdogs(now, state, day, anchors)
@@ -4149,9 +4161,10 @@ class DaemonRunner:
     def _supervise_regular_kis_dynamic(self, today: dt.date) -> None:
         """Run the intraday KIS dynamic shard once its slot lease is free and the slot holds an admission."""
         intraday = self._runtime.intraday
-        if not intraday.enabled or not intraday.kis_dynamic_slots:
-            return
+        secondary_feeds = self._feed_control.secondary_feeds
         for slot in intraday.kis_dynamic_slots:
+            if not (intraday.enabled or f"kis:{slot}" in secondary_feeds):
+                continue
             try:
                 self._supervise_one_dynamic_kis_shard(today, slot)
             except (KrxAlphaError, KisApiError, OSError, ValueError) as exc:
@@ -4194,6 +4207,44 @@ class DaemonRunner:
         for sup in self._children.regular_kis_dynamic.values():
             sup.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
         self._children.regular_kis_dynamic.clear()
+
+    def _run_feed_failover(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
+        if not self._feed_control.watch_groups:
+            return
+        st = self._state
+        self._feed_failover.tick(
+            now=now,
+            today=today,
+            anchors=anchors,
+            ls_plan=st.ls_shard_plan,
+            kis_plan=st.regular_kis_plan,
+            nxt_plan=st.regular_nxt_plan,
+            primaries=self._primary_views(),
+        )
+
+    def _primary_views(self) -> dict[str, PrimaryView]:
+        ch = self._children
+        st = self._state
+        suppliers: dict[str, ProcessSupervisor | None] = {
+            "ls:0": ch.regular,
+            "ls:1": ch.get(StreamChildKey.REGULAR_LS_B),
+        }
+        for shard in st.regular_kis_plan:
+            suppliers[f"kis-krx:{shard.shard_index}"] = ch.regular_kis.get(f"krx-{shard.shard_index:02d}")
+        for shard in st.regular_nxt_plan:
+            suppliers[f"kis-nxt:{shard.shard_index}"] = ch.regular_nxt.get(f"nxt-{shard.shard_index:02d}")
+        for slot, sup in ch.regular_kis_dynamic.items():
+            suppliers[f"kis:{slot}"] = sup
+        return {
+            feed: PrimaryView(running=bool(sup.is_running()), circuit_open=False, auth_rejected=False)
+            for feed, sup in suppliers.items()
+            if sup is not None
+        }
+
+    def _stop_feed_secondary(self, feed_id: str) -> None:
+        sup = self._children.regular_kis_dynamic.pop(feed_id.removeprefix("kis:"), None)
+        if sup is not None:
+            sup.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
 
     def _watch_regular_kis_shards(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
         """Judge each running regular shard's journal freshness inside its window and stop a stale one."""

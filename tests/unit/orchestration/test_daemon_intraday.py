@@ -9,7 +9,8 @@ import pytest
 import src.orchestration.daemon as daemon_mod
 from src.core.config import CollectorSettings, IntradayAdmissionSettings, RegularKisSettings, resolve_collector_runtime
 from src.core.errors import KrxAlphaError
-from src.realtime.kis_sharding import KisDataCredential
+from src.realtime.contracts import MarketVenue
+from src.realtime.kis_sharding import AftermarketShard, KisDataCredential
 from src.universe.intraday import DynamicEntry, DynamicPlan, write_dynamic_admissions
 
 _DAY = dt.date(2026, 11, 3)
@@ -301,3 +302,74 @@ def test_stop_children_includes_dynamic_kis_shard(monkeypatch, tmp_path) -> None
     runner.stop_children()
 
     assert stopped == ["dynamic"]
+
+
+def _failover_runner(monkeypatch, tmp_path, *, secondary: bool):
+    from src.core.config import FeedControlSettings
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
+    monkeypatch.setattr(
+        daemon_mod,
+        "load_kis_data_credentials",
+        lambda: (KisDataCredential("5", "app-5", "secret-5", "hts-5", "kid5"),),
+    )
+    regular = RegularKisSettings(enabled=True, credential_slots=("1", "2"), pair_capacity_per_connection=41)
+    intraday = IntradayAdmissionSettings(enabled=False, kis_dynamic_slots=("5",))
+    feed_control = FeedControlSettings(
+        watch_groups=("ls:0",), secondary_feeds=("kis:5",) if secondary else ()
+    )
+    settings = CollectorSettings(data_root=tmp_path / "data")
+    runtime = resolve_collector_runtime(
+        collector=settings, regular_kis=regular, intraday=intraday, feed_control=feed_control
+    )
+    return daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda s: None)
+
+
+def test_failover_secondary_starts_dynamic_child_with_intraday_off(monkeypatch, tmp_path) -> None:
+    runner = _failover_runner(monkeypatch, tmp_path, secondary=True)
+    write_dynamic_admissions(
+        runner._paths.dynamic_admissions(_DAY),
+        DynamicPlan(rev=1, entries=(DynamicEntry("005930", "kis:5", 1),)),
+    )
+    runner._supervise_regular_kis_dynamic(_DAY)
+    assert set(runner.children.regular_kis_dynamic) == {"5"}
+    assert "collect-regular-kis-dynamic" in runner.children.regular_kis_dynamic["5"].cmd
+    runner._stop_regular_kis_dynamic()
+
+
+def test_dynamic_child_stays_absent_by_default_with_intraday_off(monkeypatch, tmp_path) -> None:
+    runner = _failover_runner(monkeypatch, tmp_path, secondary=False)
+    write_dynamic_admissions(
+        runner._paths.dynamic_admissions(_DAY),
+        DynamicPlan(rev=1, entries=(DynamicEntry("005930", "kis:5", 1),)),
+    )
+    runner._supervise_regular_kis_dynamic(_DAY)
+    assert runner.children.regular_kis_dynamic == {}
+
+
+def test_failover_primary_views_and_secondary_stop(monkeypatch, tmp_path) -> None:
+    runner = _failover_runner(monkeypatch, tmp_path, secondary=True)
+    runner._state.regular_kis_plan = (
+        AftermarketShard(MarketVenue.KRX, 0, ("005930",), ("H0STCNT0", "H0STASP0"), "1", "kid1"),
+    )
+    runner._state.regular_nxt_plan = (
+        AftermarketShard(MarketVenue.NXT, 0, ("005930",), ("H0NXCNT0", "H0NXASP0"), "1", "kid1"),
+    )
+    runner.children.regular_kis["krx-00"] = _FakeSupervisor(cmd=["x"])
+    runner.children.regular_nxt["nxt-00"] = _FakeSupervisor(cmd=["x"])
+    runner.children.regular_kis_dynamic["5"] = _FakeSupervisor(cmd=["collect-regular-kis-dynamic"])
+
+    views = runner._primary_views()
+    assert set(views) == {"kis-krx:0", "kis-nxt:0", "kis:5"}
+    assert views["kis:5"].running is True
+
+    runner._stop_feed_secondary("kis:5")
+    assert "5" not in runner.children.regular_kis_dynamic
+
+    runner._run_feed_failover(dt.datetime(2026, 11, 3, 9, 10, tzinfo=ZoneInfo("Asia/Seoul")), _DAY, _anchors())
+
+
+def _anchors():
+    from src.core.session_anchors import standard_session_anchors
+
+    return standard_session_anchors(_DAY)

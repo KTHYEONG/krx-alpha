@@ -10,7 +10,7 @@ import pathlib
 import time
 from typing import Any, cast
 
-from src.core.config import DataPaths, IntradayAdmissionSettings, resolve_collector_runtime
+from src.core.config import DataPaths, FeedControlSettings, IntradayAdmissionSettings, resolve_collector_runtime
 from src.core.errors import KrxAlphaError, MissingCredentialsError, SlotBudgetExceededError
 from src.core.observability import EVENT
 from src.core.session_anchors import resolve_session_anchors
@@ -268,18 +268,19 @@ async def _run_dynamic_stream(args: argparse.Namespace) -> int:
         0 after a graceful stop, or when started after the window already closed (no socket opened).
 
     Raises:
-        KrxAlphaError: Intraday admission or regular KIS is disabled, or the slot is a regular credential slot.
+        KrxAlphaError: Neither intraday admission nor this slot's failover secondary is enabled, regular KIS is
+            disabled, or the slot is a regular credential slot.
         MissingCredentialsError: Dynamic slot credential fingerprint mismatch.
     """
     runtime = resolve_collector_runtime()
     settings = runtime.collector
     regular_kis = runtime.regular_kis
     intraday = IntradayAdmissionSettings()
-    if not intraday.enabled:
+    slot = str(args.credential_slot)
+    if not (intraday.enabled or f"kis:{slot}" in FeedControlSettings().secondary_feeds):
         raise KrxAlphaError("intraday admission is disabled")
     if not regular_kis.enabled:
         raise KrxAlphaError("regular_kis collection is disabled")
-    slot = str(args.credential_slot)
     if slot not in intraday.kis_dynamic_slots:
         raise KrxAlphaError(f"credential slot {slot} is not a configured kis_dynamic_slots entry")
     if slot in regular_kis.credential_slots:

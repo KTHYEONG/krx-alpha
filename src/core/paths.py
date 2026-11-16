@@ -131,6 +131,12 @@ class DataPaths:
     def feed_health_path(self, feed_id: str) -> pathlib.Path:
         return self.work_root / "feed_status" / f"{feed_id.replace(':', '__')}.json"
 
+    def feed_controller_state_path(self) -> pathlib.Path:
+        return self.work_root / "feed_controller.json"
+
+    def feed_control_log_path(self, day: dt.date) -> pathlib.Path:
+        return self.manifest_dir / "feed_control" / f"{day.isoformat()}.jsonl"
+
     def eod_digest_path(self, day: dt.date) -> pathlib.Path:
         return self.logs_dir / "eod_digests" / f"{day.isoformat()}.txt"
 

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import pathlib
+import types
 
 import pytest
 
@@ -141,3 +142,33 @@ def test_invalid_clock_offset_is_refused(monkeypatch, tmp_path) -> None:
 
     with pytest.raises(ValueError, match="at most 2 seconds"):
         _run(args)
+
+
+def test_dynamic_child_runs_for_failover_secondary_only(monkeypatch, tmp_path) -> None:
+    _env(monkeypatch, intraday=False, slots=("5",), regular_slots=("1", "2"))
+    monkeypatch.setenv("KRX_ALPHA_FEED_CONTROL_WATCH_GROUPS", json.dumps(["ls:0"]))
+    monkeypatch.setenv("KRX_ALPHA_FEED_CONTROL_SECONDARY_FEEDS", json.dumps(["kis:5"]))
+    monkeypatch.setattr(crk, "resolve_session_anchors", lambda *a, **k: None)
+    monkeypatch.setattr(
+        crk,
+        "resolve_clock_overrides",
+        lambda *a, **k: types.SimpleNamespace(ntp_host="ntp", max_clock_offset_ns=1_000_000_000),
+    )
+
+    class _ReachedBootstrapError(Exception):
+        pass
+
+    def _bootstrap(cfg):
+        raise _ReachedBootstrapError
+
+    monkeypatch.setattr(crk, "bootstrap_session", _bootstrap)
+
+    with pytest.raises(_ReachedBootstrapError):
+        _run(_args(tmp_path, slot="5", key_id="kid5"))
+
+
+def test_dynamic_child_still_gated_by_default_for_slot5(monkeypatch, tmp_path) -> None:
+    _env(monkeypatch, intraday=False, slots=("5",), regular_slots=("1", "2"))
+
+    with pytest.raises(KrxAlphaError, match="intraday admission is disabled"):
+        _run(_args(tmp_path, slot="5", key_id="kid5"))
