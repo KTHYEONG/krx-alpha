@@ -287,6 +287,8 @@ class RegularKisSettings(BaseSettings):
     nxt_credential_slots: tuple[str, ...] = ()
     nxt_streams: tuple[str, str] = ("H0NXCNT0", "H0NXASP0")
     nxt_start_lead_s: float = Field(default=120.0, gt=0)
+    nxt_pool_settle_s: float = Field(default=600.0, ge=0)
+    nxt_pool_retry_s: float = Field(default=60.0, gt=0)
 
     @model_validator(mode="after")
     def check_verified_capacity_when_enabled(self) -> RegularKisSettings:

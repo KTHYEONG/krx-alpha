@@ -71,6 +71,43 @@ def _fetch(session: _Session, pacer: _Pacer, *, max_pages: int = 3, min_tv: int 
     )
 
 
+def test_stex_tp_is_sent_and_defaults_to_krx() -> None:
+    nxt_session = _Session([_page([_item(1, stk_cd="000660_NX")])])
+    rows = ranking.fetch_trade_amount_ranking(
+        session=nxt_session,  # type: ignore[arg-type]
+        access_token="TOKEN",
+        app_key="APPKEY",
+        pacer=_Pacer(),  # type: ignore[arg-type]
+        max_pages=1,
+        min_trade_value_krw=1,
+        timeout_s=5.0,
+        stex_tp="2",
+    )
+
+    assert nxt_session.calls[0]["json"]["stex_tp"] == "2"
+    assert rows[0].symbol == "000660"
+    krx_session = _Session([_page([_item(1)])])
+    _fetch(krx_session, _Pacer())
+    assert krx_session.calls[0]["json"]["stex_tp"] == "1"
+
+
+def test_invalid_stex_tp_fails_before_any_request() -> None:
+    session = _Session([_page([_item(1)])])
+
+    with pytest.raises(ValueError, match="stex_tp must be one of"):
+        ranking.fetch_trade_amount_ranking(
+            session=session,  # type: ignore[arg-type]
+            access_token="TOKEN",
+            app_key="APPKEY",
+            pacer=_Pacer(),  # type: ignore[arg-type]
+            max_pages=1,
+            min_trade_value_krw=1,
+            timeout_s=5.0,
+            stex_tp="4",
+        )
+    assert session.calls == []
+
+
 def test_suffix_stripped_and_unit_converted() -> None:
     session = _Session([_page([_item(1)])])
 

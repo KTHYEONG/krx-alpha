@@ -28,6 +28,7 @@ KIWOOM_RANKING_API_ID: str = "ka10032"
 KIWOOM_RANKING_URL: str = f"{KIWOOM_CHART_URL.rsplit('/', 1)[0]}/rkinfo"
 KIWOOM_RANKING_LIST_KEY: str = "trde_prica_upper"
 KIWOOM_RANKING_STEX_TP: str = "1"
+KIWOOM_RANKING_STEX_TPS: frozenset[str] = frozenset({"1", "2", "3"})  # 1 KRX, 2 NXT, 3 KRX+NXT
 KIWOOM_RANKING_MARKET: str = "000"
 KIWOOM_RANKING_MANAGED_INCLUDE: str = "0"
 KIWOOM_TRADE_AMOUNT_UNIT_KRW: int = 1_000_000
@@ -71,7 +72,7 @@ def _parse_row(raw: Mapping[str, Any]) -> KiwoomRankingRow | None:
 
 
 def _post_page(
-    *, session: Any, access_token: str, next_key: str | None, timeout_s: float
+    *, session: Any, access_token: str, next_key: str | None, timeout_s: float, stex_tp: str
 ) -> _RankingPage:
     headers: dict[str, str] = {
         "Content-Type": "application/json;charset=UTF-8",
@@ -87,7 +88,7 @@ def _post_page(
             json={
                 "mrkt_tp": KIWOOM_RANKING_MARKET,
                 "mang_stk_incls": KIWOOM_RANKING_MANAGED_INCLUDE,
-                "stex_tp": KIWOOM_RANKING_STEX_TP,
+                "stex_tp": stex_tp,
             },
             headers=headers,
             timeout=timeout_s,
@@ -137,12 +138,15 @@ def _post_page_with_throttle_retry(
     timeout_s: float,
     pacer: AsyncHostPacer,
     sleep: Callable[[float], None],
+    stex_tp: str,
 ) -> _RankingPage:
     retries = 0
     while True:
         asyncio.run(pacer.acquire())
         try:
-            return _post_page(session=session, access_token=access_token, next_key=next_key, timeout_s=timeout_s)
+            return _post_page(
+                session=session, access_token=access_token, next_key=next_key, timeout_s=timeout_s, stex_tp=stex_tp
+            )
         except KiwoomThrottled:
             retries += 1
             if retries > KIWOOM_THROTTLE_RETRIES:
@@ -159,9 +163,12 @@ def fetch_trade_amount_ranking(
     max_pages: int,
     min_trade_value_krw: int,
     timeout_s: float,
+    stex_tp: str = KIWOOM_RANKING_STEX_TP,
 ) -> tuple[KiwoomRankingRow, ...]:
-    """ka10032 KRX-only ranking pages until max_pages or a page tail below min_trade_value_krw; raises KiwoomTickTapeError family on vendor failure."""
+    """ka10032 ranking pages for the ``stex_tp`` exchange selector until max_pages or a page tail below min_trade_value_krw; raises KiwoomTickTapeError family on vendor failure."""
     _ = app_key
+    if stex_tp not in KIWOOM_RANKING_STEX_TPS:
+        raise ValueError(f"stex_tp must be one of {sorted(KIWOOM_RANKING_STEX_TPS)}")
     if max_pages < 1:
         raise ValueError("max_pages must be >= 1")
     collected: list[KiwoomRankingRow] = []
@@ -176,6 +183,7 @@ def fetch_trade_amount_ranking(
             timeout_s=timeout_s,
             pacer=pacer,
             sleep=time.sleep,
+            stex_tp=stex_tp,
         )
         for row in page.rows:
             if row.rank <= last_rank:

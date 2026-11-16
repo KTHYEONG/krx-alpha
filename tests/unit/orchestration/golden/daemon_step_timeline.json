@@ -149,6 +149,7 @@
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": "2026-09-16T08:30:00+09:00",
         "next_premarket_pool_at": null,
+        "next_regular_nxt_pool_at": null,
         "nightly_done": {},
         "orchestrated_for": null,
         "orchestration_attempts": 1,
@@ -169,6 +170,8 @@
         "regular_nxt_circuit_alerted": [],
         "regular_nxt_plan": [],
         "regular_nxt_plan_day": null,
+        "regular_nxt_pool_day": null,
+        "regular_nxt_pool_failed_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -240,6 +243,7 @@
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": "2026-09-16T08:30:00+09:00",
         "next_premarket_pool_at": null,
+        "next_regular_nxt_pool_at": null,
         "nightly_done": {},
         "orchestrated_for": null,
         "orchestration_attempts": 1,
@@ -260,6 +264,8 @@
         "regular_nxt_circuit_alerted": [],
         "regular_nxt_plan": [],
         "regular_nxt_plan_day": null,
+        "regular_nxt_pool_day": null,
+        "regular_nxt_pool_failed_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -413,6 +419,7 @@
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "next_regular_nxt_pool_at": null,
         "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
@@ -433,6 +440,8 @@
         "regular_nxt_circuit_alerted": [],
         "regular_nxt_plan": [],
         "regular_nxt_plan_day": null,
+        "regular_nxt_pool_day": null,
+        "regular_nxt_pool_failed_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -547,6 +556,7 @@
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "next_regular_nxt_pool_at": null,
         "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
@@ -567,6 +577,8 @@
         "regular_nxt_circuit_alerted": [],
         "regular_nxt_plan": [],
         "regular_nxt_plan_day": null,
+        "regular_nxt_pool_day": null,
+        "regular_nxt_pool_failed_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -698,6 +710,7 @@
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "next_regular_nxt_pool_at": null,
         "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
@@ -718,6 +731,8 @@
         "regular_nxt_circuit_alerted": [],
         "regular_nxt_plan": [],
         "regular_nxt_plan_day": null,
+        "regular_nxt_pool_day": null,
+        "regular_nxt_pool_failed_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -901,6 +916,7 @@
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "next_regular_nxt_pool_at": null,
         "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
@@ -921,6 +937,8 @@
         "regular_nxt_circuit_alerted": [],
         "regular_nxt_plan": [],
         "regular_nxt_plan_day": null,
+        "regular_nxt_pool_day": null,
+        "regular_nxt_pool_failed_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -1108,6 +1126,7 @@
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "next_regular_nxt_pool_at": null,
         "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
@@ -1128,6 +1147,8 @@
         "regular_nxt_circuit_alerted": [],
         "regular_nxt_plan": [],
         "regular_nxt_plan_day": null,
+        "regular_nxt_pool_day": null,
+        "regular_nxt_pool_failed_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -1483,6 +1504,7 @@
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "next_regular_nxt_pool_at": null,
         "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
@@ -1503,6 +1525,8 @@
         "regular_nxt_circuit_alerted": [],
         "regular_nxt_plan": [],
         "regular_nxt_plan_day": null,
+        "regular_nxt_pool_day": null,
+        "regular_nxt_pool_failed_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -1603,6 +1627,7 @@
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "next_regular_nxt_pool_at": null,
         "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
@@ -1623,6 +1648,8 @@
         "regular_nxt_circuit_alerted": [],
         "regular_nxt_plan": [],
         "regular_nxt_plan_day": null,
+        "regular_nxt_pool_day": null,
+        "regular_nxt_pool_failed_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -1744,6 +1771,7 @@
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "next_regular_nxt_pool_at": null,
         "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
@@ -1764,6 +1792,8 @@
         "regular_nxt_circuit_alerted": [],
         "regular_nxt_plan": [],
         "regular_nxt_plan_day": null,
+        "regular_nxt_pool_day": null,
+        "regular_nxt_pool_failed_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -1911,6 +1941,7 @@
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "next_regular_nxt_pool_at": null,
         "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
@@ -1931,6 +1962,8 @@
         "regular_nxt_circuit_alerted": [],
         "regular_nxt_plan": [],
         "regular_nxt_plan_day": null,
+        "regular_nxt_pool_day": null,
+        "regular_nxt_pool_failed_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -2068,6 +2101,7 @@
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "next_regular_nxt_pool_at": null,
         "nightly_done": {},
         "orchestrated_for": "2026-09-16",
         "orchestration_attempts": 2,
@@ -2088,6 +2122,8 @@
         "regular_nxt_circuit_alerted": [],
         "regular_nxt_plan": [],
         "regular_nxt_plan_day": null,
+        "regular_nxt_pool_day": null,
+        "regular_nxt_pool_failed_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -2293,6 +2329,7 @@
         "next_aftermarket_refresh_at": null,
         "next_orchestration_at": null,
         "next_premarket_pool_at": null,
+        "next_regular_nxt_pool_at": null,
         "nightly_done": {},
         "orchestrated_for": "2026-09-18",
         "orchestration_attempts": 1,
@@ -2313,6 +2350,8 @@
         "regular_nxt_circuit_alerted": [],
         "regular_nxt_plan": [],
         "regular_nxt_plan_day": null,
+        "regular_nxt_pool_day": null,
+        "regular_nxt_pool_failed_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')",
@@ -2425,6 +2464,11 @@
     "[DATA] stage=regular_kis_stream status=RESTARTED shard=%s exit_code=%s",
     "[DATA] stage=regular_kis_supervise status=FAIL reason=%s",
     "[DATA] stage=regular_kis_supervise status=FAIL reason=%s",
+    "[DATA] stage=regular_nxt_pool status=FAIL reason=%s target=%s next_retry=%s",
+    "[DATA] stage=regular_nxt_pool status=FAIL reason=%s target=%s next_retry=%s",
+    "[DATA] stage=regular_nxt_pool status=OK target=%s symbols=%d top_value_krw=%d",
+    "[DATA] stage=regular_nxt_pool status=SKIP reason=pool_ready target=%s",
+    "[DATA] stage=regular_nxt_pool status=SKIP reason=shifted_next_day target=%s",
     "[DATA] stage=repair_hold status=EXPIRING days=%s delete_on=%s",
     "[DATA] stage=repair_hold status=FAIL reason=expiry_check_error error=%s",
     "[DATA] stage=repair_overdue status=FAIL reason=attempts_exhausted days=%s",

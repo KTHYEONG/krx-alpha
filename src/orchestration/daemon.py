@@ -73,6 +73,7 @@ from src.core.session_anchors import (
     save_session_anchors,
 )
 from src.execution.contracts import KisApiError
+from src.marketdata.kiwoom_ticks import KiwoomTickTapeError
 from src.marketdata.krx_bars import KrxBarsError
 from src.marketdata.partitioned_store import (
     PartitionedStoreError,
@@ -121,6 +122,7 @@ from src.orchestration.regular_kis import (
     regular_kis_stream_cmd,
     regular_nxt_collection_due,
 )
+from src.orchestration.regular_nxt import fetch_nxt_trade_amount_ranking_live
 from src.orchestration.shard_watchdog import (
     ShardDecision,
     ShardObservation,
@@ -162,6 +164,7 @@ from src.universe.ipc import CandidateFileError, read_candidate_snapshot, read_c
 from src.universe.membership import MembershipFileError, MembershipRow, append_membership, read_membership
 from src.universe.policy import ineligible_security_symbols
 from src.universe.premarket import premarket_pool_ready, refresh_premarket_pool
+from src.universe.regular_nxt import refresh_regular_nxt_pool, regular_nxt_pool_ready
 from src.universe.service import UniversePlanResult as UniversePlanResult
 from src.universe.service import plan_universe
 
@@ -1309,6 +1312,9 @@ class DaemonState:
     premarket_plan_day: dt.date | None = None
     premarket_shard: AftermarketShard | None = None
     premarket_circuit_alerted_day: dt.date | None = None
+    regular_nxt_pool_day: dt.date | None = None
+    next_regular_nxt_pool_at: dt.datetime | None = None
+    regular_nxt_pool_failed_day: dt.date | None = None
     regular_kis_plan: tuple[AftermarketShard, ...] = ()
     regular_kis_plan_day: dt.date | None = None
     regular_kis_circuit_alerted: set[str] = field(default_factory=set)
@@ -2203,6 +2209,7 @@ class DaemonRunner:
             cap = premarket_wake_cap_s(now, anchors=anchors, start_lead_s=self._premarket_cfg.start_lead_s)
             if cap is not None:
                 sleep_sec = min(sleep_sec, cap)
+        self._maybe_select_regular_nxt(now, anchors)
         self._poll_program_sync(now)
         self._maybe_launch_program_sync(now)
         self._poll_nightly(now)
@@ -3530,6 +3537,90 @@ class DaemonRunner:
                     str(exc),
                     label,
                     st.next_premarket_pool_at.isoformat(),
+                )
+
+    def _maybe_select_regular_nxt(self, now: dt.datetime, anchors: SessionAnchors) -> None:
+        """Build the next business day's NXT regular symbol pool once per business evening.
+
+        Mirrors ``_maybe_refresh_premarket_pool`` for the regular_nxt session and never raises. Skips
+        (INFO, marks done) when the next day's anchors are shifted or a valid pool already exists; vendor
+        and file failures retry every ``nxt_pool_retry_s``, with WARNING only on the first failure per day.
+        """
+        cfg = getattr(self._runtime, "regular_kis", None) or RegularKisSettings()
+        if not cfg.enabled or not cfg.nxt_credential_slots:
+            return
+        st = self._state
+        paths = self._paths
+        today = now.astimezone(_KST).date()
+        target: dt.date | None = None
+        try:
+            if st.regular_nxt_pool_day == today:
+                return
+            if st.next_regular_nxt_pool_at is not None and now < st.next_regular_nxt_pool_at:
+                return
+            if not premarket_pool_due(now, anchors=anchors, settle_s=cfg.nxt_pool_settle_s):
+                return
+            view = self._gate.view(today, now)
+            if view.status is not TradingDayStatus.BUSINESS or view.trading_day is None:
+                return
+            target = view.trading_day.next_business_day
+            next_anchors = view.trading_day.next_anchors
+            if next_anchors is None:
+                next_anchors = resolve_session_anchors(paths.session_calendar_dir, target)
+            if next_anchors.open_shift != dt.timedelta(0):
+                st.regular_nxt_pool_day = today
+                logger.info(
+                    "[DATA] stage=regular_nxt_pool status=SKIP reason=shifted_next_day target=%s",
+                    target.isoformat(),
+                )
+                return
+            if regular_nxt_pool_ready(
+                paths.regular_nxt_candidates(target), target_date=target, max_candidates=cfg.nxt_max_symbols
+            ):
+                st.regular_nxt_pool_day = today
+                logger.info(
+                    "[DATA] stage=regular_nxt_pool status=SKIP reason=pool_ready target=%s",
+                    target.isoformat(),
+                )
+                return
+            effective_from = dt.datetime.combine(target, next_anchors.regular_open, tzinfo=_KST) - dt.timedelta(
+                seconds=cfg.nxt_start_lead_s
+            )
+            excluded = self._aftermarket_excluded_symbols(today)
+            snapshot = refresh_regular_nxt_pool(
+                target_date=target,
+                generated_at=now,
+                effective_from=effective_from,
+                fetch=fetch_nxt_trade_amount_ranking_live,
+                out_path=paths.regular_nxt_candidates(target),
+                capacity=cfg.nxt_max_symbols,
+                excluded_symbols=excluded,
+            )
+            st.regular_nxt_pool_day = today
+            st.next_regular_nxt_pool_at = None
+            logger.info(
+                "[DATA] stage=regular_nxt_pool status=OK target=%s symbols=%d top_value_krw=%d",
+                target.isoformat(),
+                len(snapshot.candidates),
+                int(cast(int, snapshot.candidates[0]["trade_value_krw"])),
+            )
+        except (KrxAlphaError, KiwoomTickTapeError, KisApiError, OSError, ValueError) as exc:
+            st.next_regular_nxt_pool_at = now + dt.timedelta(seconds=cfg.nxt_pool_retry_s)
+            label = target.isoformat() if target is not None else "unknown"
+            if st.regular_nxt_pool_failed_day != today:
+                st.regular_nxt_pool_failed_day = today
+                logger.warning(
+                    "[DATA] stage=regular_nxt_pool status=FAIL reason=%s target=%s next_retry=%s",
+                    str(exc),
+                    label,
+                    st.next_regular_nxt_pool_at.isoformat(),
+                )
+            else:
+                logger.debug(
+                    "[DATA] stage=regular_nxt_pool status=FAIL reason=%s target=%s next_retry=%s",
+                    str(exc),
+                    label,
+                    st.next_regular_nxt_pool_at.isoformat(),
                 )
 
     def _ensure_premarket_plan(self, today: dt.date) -> None:
