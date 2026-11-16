@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from typing import Any, Final
 from zoneinfo import ZoneInfo
 
+from src.core.alerts import PageKind, page, page_resolved
+from src.core.config import FeedControlSettings
 from src.core.paths import DataPaths
 from src.core.session_anchors import resolve_session_anchors
 from src.storage.feed_selection import selection_summary_path
@@ -150,18 +152,54 @@ def write_feed_quality(report: FeedQualityReport, *, paths: DataPaths) -> None:
     _atomic_json(rolling_path(paths), days[-ROLLING_DAYS:])
 
 
-def consecutive_days_below(paths: DataPaths, *, floor: float, vendor: str) -> int:
-    """Count of most recent consecutive rolling days where the vendor's availability is below `floor` (days without it break the run)."""
+def consecutive_days_below(
+    paths: DataPaths, *, floor: float, vendor: str, before: dt.date | None = None
+) -> int:
+    """Count of most recent consecutive rolling days (strictly before `before` when given) where the vendor's availability is below `floor`; a day without it breaks the run."""
     existing = _read_json(rolling_path(paths))
     if not isinstance(existing, list):
         return 0
+    cutoff = before.isoformat() if before is not None else None
+    rows = [r for r in existing if isinstance(r, dict) and (cutoff is None or str(r.get("date")) < cutoff)]
     run = 0
-    for row in sorted((r for r in existing if isinstance(r, dict)), key=lambda r: str(r.get("date")), reverse=True):
+    for row in sorted(rows, key=lambda r: str(r.get("date")), reverse=True):
         stats = dict(row.get("vendors", {})).get(vendor)
         if not isinstance(stats, dict) or float(stats.get("availability", 0.0)) >= floor:
             break
         run += 1
     return run
+
+
+def page_quality_floor(report: FeedQualityReport, *, paths: DataPaths, settings: FeedControlSettings) -> None:
+    """Page once per vendor when availability has been below the floor for `quality_floor_days`; log a resolution when the streak ends."""
+    day = dt.date.fromisoformat(report.date)
+    floor = settings.quality_floor_availability
+    required = settings.quality_floor_days
+    vendors = sorted(set(report.vendors) | _rolling_vendors(paths))
+    for vendor in vendors:
+        streak = consecutive_days_below(paths, floor=floor, vendor=vendor)
+        prior = consecutive_days_below(paths, floor=floor, vendor=vendor, before=day)
+        if streak >= required and prior < required:
+            logger.critical(
+                "[DATA] stage=feed_quality status=FAIL shard=%s reason=availability_below_floor streak_days=%d floor=%s",
+                vendor,
+                streak,
+                floor,
+                extra=page(PageKind.FEED_QUALITY_FLOOR),
+            )
+        elif streak == 0 and prior >= required:
+            logger.info(
+                "[DATA] stage=feed_quality status=INFO shard=%s reason=availability_recovered",
+                vendor,
+                extra=page_resolved(PageKind.FEED_QUALITY_FLOOR),
+            )
+
+
+def _rolling_vendors(paths: DataPaths) -> set[str]:
+    existing = _read_json(rolling_path(paths))
+    if not isinstance(existing, list):
+        return set()
+    return {str(vendor) for row in existing if isinstance(row, dict) for vendor in dict(row.get("vendors", {}))}
 
 
 def digest_lines(paths: DataPaths, day: dt.date) -> Sequence[str]:

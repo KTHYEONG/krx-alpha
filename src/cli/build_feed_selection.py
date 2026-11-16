@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from src.core.config import CollectorSettings, FeedControlSettings
 from src.core.paths import DataPaths
-from src.storage.feed_quality import build_feed_quality, write_feed_quality
+from src.storage.feed_quality import build_feed_quality, page_quality_floor, write_feed_quality
 from src.storage.feed_selection import SelectionSpec, build_feed_selection
 
 logger = logging.getLogger(__name__)
@@ -37,13 +37,16 @@ def run(args: argparse.Namespace) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
-    if not FeedControlSettings().watch_groups:
+    settings = FeedControlSettings()
+    if not settings.watch_groups:
         logger.info("[DATA] stage=feed_selection status=NOOP reason=no_watch_groups")
         return 2
     root = args.data_root or CollectorSettings().paths.root
     paths = DataPaths(root)
     day = args.day or (dt.datetime.now(_KST).date() - dt.timedelta(days=1))
     summary = build_feed_selection(day, paths=paths, spec=SelectionSpec())
-    write_feed_quality(build_feed_quality(day, paths=paths), paths=paths)
+    report = build_feed_quality(day, paths=paths)
+    write_feed_quality(report, paths=paths)
+    page_quality_floor(report, paths=paths, settings=settings)
     logger.info("[DATA] stage=feed_selection status=%s date=%s rows=%d", summary.status, day.isoformat(), summary.rows)
     return 0

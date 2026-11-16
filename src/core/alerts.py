@@ -412,6 +412,7 @@ class PageKind(StrEnum):
     LS_SHARD_STALE = "ls_shard_stale"
     FEED_GROUP_DOWN = "feed_group_down"
     FEED_CONTROLLER_STUCK = "feed_controller_stuck"
+    FEED_QUALITY_FLOOR = "feed_quality_floor"
 
 
 @dataclass(frozen=True)
@@ -522,6 +523,11 @@ PAGE_TEXTS: Mapping[PageKind, PageText] = MappingProxyType(
             "피드 장애 전환 컨트롤러 연속 실패",
             "전환 판단을 매 주기 재시도 중이며 주 원천 감시에는 영향 없음",
             "지금 데몬 로그의 feed_control TICK_FAIL 사유를 확인 (장 마감 전)",
+        ),
+        PageKind.FEED_QUALITY_FLOOR: PageText(
+            "보조 원천 시세 가용률이 하한 아래로 연속 여러 날 지속",
+            "보조 원천 점검 기록 후 자동 지속",
+            "manifest/feed_quality/ 의 해당 날짜 보고서와 해당 원천의 공지를 확인",
         ),
     }
 )

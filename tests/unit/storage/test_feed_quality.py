@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 
 import pytest
 
+from src.core.alerts import PAGE_ATTR, RESOLVE_ATTR, PageKind
+from src.core.config import FeedControlSettings
 from src.core.paths import DataPaths
 from src.storage import feed_quality as fq
 
@@ -116,3 +119,50 @@ def test_digest_reports_existing_quality_and_junk_rolling_is_zero(paths) -> None
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text("[]\n", encoding="utf-8")
     assert fq.digest_lines(paths, DAY)[0] == "feed_control_admitted_symbols=0"
+
+
+def _run_floor_day(paths: DataPaths, day: dt.date, minutes: int, settings) -> None:
+    _write_summary(paths, day, minutes=minutes)
+    report = fq.build_feed_quality(day, paths=paths)
+    fq.write_feed_quality(report, paths=paths)
+    fq.page_quality_floor(report, paths=paths, settings=settings)
+
+
+def test_quality_floor_pages_once_per_streak_and_resolves(paths, caplog) -> None:
+    settings = FeedControlSettings(watch_groups=("ls:0",))
+    start = DAY - dt.timedelta(days=5)
+    with caplog.at_level(logging.INFO):
+        _run_floor_day(paths, start, 0, settings)
+        _run_floor_day(paths, start + dt.timedelta(days=1), 0, settings)
+        assert _floor_pages(caplog) == []
+        _run_floor_day(paths, start + dt.timedelta(days=2), 0, settings)
+        assert len(_floor_pages(caplog)) == 1
+        _run_floor_day(paths, start + dt.timedelta(days=3), 0, settings)
+        assert len(_floor_pages(caplog)) == 1
+        _run_floor_day(paths, start + dt.timedelta(days=4), 100_000, settings)
+        resolved = [r for r in caplog.records if getattr(r, RESOLVE_ATTR, None) is PageKind.FEED_QUALITY_FLOOR]
+    assert len(resolved) == 1
+    assert "shard=ls" in resolved[0].getMessage()
+
+
+def _floor_pages(caplog) -> list:
+    return [
+        r
+        for r in caplog.records
+        if getattr(r, PAGE_ATTR, None) is PageKind.FEED_QUALITY_FLOOR and r.levelno == logging.CRITICAL
+    ]
+
+
+def test_consecutive_days_below_before_excludes_day(paths) -> None:
+    for offset in range(3):
+        _run_floor_day(paths, DAY - dt.timedelta(days=2 - offset), 0, FeedControlSettings(watch_groups=("ls:0",)))
+    assert fq.consecutive_days_below(paths, floor=0.5, vendor="ls") == 3
+    assert fq.consecutive_days_below(paths, floor=0.5, vendor="ls", before=DAY) == 2
+    assert fq.consecutive_days_below(paths, floor=0.5, vendor="ls", before=DAY - dt.timedelta(days=1)) == 1
+
+
+def test_quality_floor_without_rolling_file_is_silent(paths, caplog) -> None:
+    report = fq.build_feed_quality(DAY, paths=paths)
+    with caplog.at_level(logging.INFO):
+        fq.page_quality_floor(report, paths=paths, settings=FeedControlSettings(watch_groups=("ls:0",)))
+    assert not [r for r in caplog.records if getattr(r, PAGE_ATTR, None) or getattr(r, RESOLVE_ATTR, None)]

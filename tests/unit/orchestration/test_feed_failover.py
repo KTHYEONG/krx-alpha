@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import itertools
 import json
 import logging
 import pathlib
@@ -687,3 +688,41 @@ def test_group_plan_rewritten_on_change_and_each_day(paths) -> None:
     day2 = paths.feed_control_log_path(DAY2)
     rows = [json.loads(line) for line in day2.read_text(encoding="utf-8").splitlines()]
     assert [row["kind"] for row in rows if row["kind"] == "group_plan"] == ["group_plan"]
+
+
+def test_status_file_written_on_cadence_and_transitions(paths, monkeypatch) -> None:
+    writes: list[float] = []
+    monkeypatch.setattr(ff, "write_status_file", lambda path, payload: writes.append(payload["generated_at"]))
+    clock = _Clock(T0)
+    sup = _supervisor(paths, _settings(), clock, _Stops())
+    _run_healthy_ls(sup, paths, clock, T0, 60)
+    assert len(writes) == 3
+    quiet = len(writes)
+    _run_silent_ls(sup, paths, clock, T0 + 70, 60, kis_alive=True)
+    stamps = [dt.datetime.fromisoformat(w) for w in writes[quiet - 1 :]]
+    gaps = [(later - earlier).total_seconds() for earlier, later in itertools.pairwise(stamps)]
+    assert gaps
+    assert min(gaps) < ff._STATUS_EVERY_S
+
+
+def test_status_write_failure_is_isolated_and_logged_once_per_minute(paths, monkeypatch, caplog) -> None:
+    def _fail(path, payload) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ff, "write_status_file", _fail)
+    clock = _Clock(T0)
+    sup = _supervisor(paths, _settings(), clock, _Stops())
+    with caplog.at_level(logging.WARNING):
+        _run_healthy_ls(sup, paths, clock, T0, 30)
+    fails = [r for r in caplog.records if "status=WRITE_FAIL" in r.getMessage()]
+    assert len(fails) == 1
+    assert _state(paths).day == DAY
+
+
+def test_status_never_written_when_inert(paths, monkeypatch) -> None:
+    writes: list[str] = []
+    monkeypatch.setattr(ff, "write_status_file", lambda path, payload: writes.append(str(path)))
+    clock = _Clock(T0)
+    sup = _supervisor(paths, FeedControlSettings(), clock, _Stops())
+    _run_healthy_ls(sup, paths, clock, T0, 60)
+    assert writes == []

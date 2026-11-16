@@ -58,3 +58,14 @@ def test_kis_secondary_conflicts_with_intraday_admission() -> None:
 
 def test_ls_silence_matches_collector_limit() -> None:
     assert FeedControlSettings().ls_silence_s == CollectorSettings().regular_silence_limit_s
+
+
+def test_quality_floor_bounds_are_validated() -> None:
+    from pydantic import ValidationError
+
+    assert FeedControlSettings().quality_floor_availability == 0.995
+    assert FeedControlSettings().quality_floor_days == 3
+    with pytest.raises(ValidationError):
+        FeedControlSettings(quality_floor_availability=1.5)
+    with pytest.raises(ValidationError):
+        FeedControlSettings(quality_floor_days=0)

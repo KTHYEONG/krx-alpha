@@ -32,6 +32,7 @@ from src.orchestration.feed_control.model import (
     StepResult,
     WindowContext,
 )
+from src.orchestration.feed_status_export import build_status_checks, write_status_file
 from src.realtime.feed_health import SCHEMA as FEED_HEALTH_SCHEMA
 from src.realtime.kis_sharding import AftermarketShard
 from src.realtime.ls_sharding import LsShard
@@ -45,6 +46,7 @@ _KST = ZoneInfo("Asia/Seoul")
 _NS_PER_S = 1_000_000_000
 _LOG_EVERY_S = 60.0
 _PERSIST_EVERY_S = 60.0
+_STATUS_EVERY_S = 30.0
 _MAX_HEALTH_BYTES = 64 * 1024
 _HEAD_SYMBOLS = 5
 
@@ -152,6 +154,8 @@ class FeedFailoverSupervisor:
         self._stuck_paged_day: dt.date | None = None
         self._plan_day: dt.date | None = None
         self._written_plans: dict[str, tuple[str, ...]] = {}
+        self._last_status_wall: float | None = None
+        self._last_status_fail_log_wall: float | None = None
 
     def tick(
         self,
@@ -232,8 +236,33 @@ class FeedFailoverSupervisor:
         rows = self._group_plan_rows(groups, mode, now_wall) + self._journal_rows(result, mode, new_state.plan_rev, now_wall)
         if rows:
             self._append_journal(today, rows)
+        self._publish_status(new_state, health, bool(result.transitions), now_wall)
         for action in result.actions:
             self._apply_action(action, mode, active)
+
+    def _publish_status(
+        self,
+        state: ControllerState,
+        health: Mapping[str, FeedHealth],
+        transitioned: bool,
+        now_wall: float,
+    ) -> None:
+        if not transitioned and self._last_status_wall is not None and now_wall - self._last_status_wall < _STATUS_EVERY_S:
+            return
+        self._last_status_wall = now_wall
+        payload = build_status_checks(
+            state,
+            health,
+            now_wall=now_wall,
+            secondaries=self._settings.secondary_feeds,
+            settings=self._settings,
+        )
+        try:
+            write_status_file(self._paths.feed_control_status_path(), payload)
+        except OSError as exc:
+            if self._last_status_fail_log_wall is None or now_wall - self._last_status_fail_log_wall >= _LOG_EVERY_S:
+                self._last_status_fail_log_wall = now_wall
+                logger.warning("[SYS] stage=feed_status status=WRITE_FAIL reason=%s", type(exc).__name__)
 
     def _resolve_venue_conflicts(
         self,

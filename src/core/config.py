@@ -872,6 +872,8 @@ class FeedControlSettings(BaseSettings):
     demote_relapses: int = Field(default=2, ge=1)
     demote_degraded_s: float = Field(default=900.0, gt=0)
     page_after_s: float = Field(default=300.0, gt=0)
+    quality_floor_availability: float = Field(default=0.995, gt=0, le=1)
+    quality_floor_days: int = Field(default=3, ge=1)
 
     @model_validator(mode="after")
     def check_feed_control_topology(self) -> FeedControlSettings:
