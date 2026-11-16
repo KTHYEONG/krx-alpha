@@ -166,14 +166,6 @@ exit_condition = "enable on the VPS with credentials, or delete the feature"
 review_by = "2026-12-11"
 
 [[flag]]
-name = "MinuteBackfillSettings.enabled"
-kind = "experiment"
-default = false
-reason = "Minute bar backfill; blocked because the Toss source failed the minute gate."
-exit_condition = "KIS-source conversion (Part 5) lands and passes the minute gate, or delete"
-review_by = "2026-12-11"
-
-[[flag]]
 name = "IntradayAdmissionSettings.enabled"
 kind = "experiment"
 default = false

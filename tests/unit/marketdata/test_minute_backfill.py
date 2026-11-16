@@ -17,6 +17,7 @@ from src.core.paths import DataPaths
 from src.marketdata import minute_backfill as backfill_mod
 from src.marketdata.minute_backfill import (
     MinuteTarget,
+    plan_market_minute_targets,
     plan_minute_targets,
     read_minute_ledger_done,
     run_minute_backfill,
@@ -92,7 +93,7 @@ class _FakeKisData:
 
 
 def _settings(**overrides) -> MinuteBackfillSettings:
-    return MinuteBackfillSettings(enabled=True, **overrides)
+    return MinuteBackfillSettings(**overrides)
 
 
 def _creds(slot: str = "5") -> tuple[KisDataCredential, ...]:
@@ -385,19 +386,6 @@ def test_naive_deadline_raises(tmp_path: pathlib.Path, monkeypatch) -> None:
             deadline=dt.datetime(2026, 10, 22, 5, 30), session=object(),
             now=_evening_now, run_id="run1",
         )
-
-
-def test_disabled_settings_short_circuit(tmp_path: pathlib.Path, monkeypatch) -> None:
-    _isolate(monkeypatch, _FakeKisData({}))
-    summary = run_minute_backfill(
-        targets=[MinuteTarget(symbol="A", days=(_D,), universe_sources={_D: "live"})],
-        paths=DataPaths(tmp_path), settings=MinuteBackfillSettings(),
-        credentials=_creds(), deadline=_deadline(), session=object(),
-        now=_evening_now, run_id="run1",
-    )
-    assert summary.status == "OK"
-    assert summary.reason == "disabled"
-    assert summary.symbols == 0
 
 
 def test_missing_slot_credential_raises(tmp_path: pathlib.Path, monkeypatch) -> None:
@@ -786,3 +774,84 @@ def test_discarded_offhours_reported(tmp_path, monkeypatch):
         session=fake, now=_evening_now, run_id="offhours",
     )
     assert summary.discarded_offhours == 1
+
+
+_PREV2 = dt.date(2026, 10, 15)
+_S1, _S2, _S3 = "005930", "000660", "035420"
+
+
+def _daily(paths: DataPaths, rows: list[tuple[dt.date, str, int]]) -> None:
+    frame = pl.DataFrame(
+        {"date": [r[0] for r in rows], "symbol": [r[1] for r in rows], "volume": [r[2] for r in rows]},
+        schema={"date": pl.Date, "symbol": pl.String, "volume": pl.Int64},
+    )
+    out = paths.bars_daily_dir / f"{rows[0][0]:%Y-%m}.parquet"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_parquet(out)
+
+
+def _market(paths: DataPaths, *, ledger_done: frozenset = frozenset(), limit: int | None = None,
+            start: dt.date = _PREV2, end: dt.date = _D) -> tuple[MinuteTarget, ...]:
+    return plan_market_minute_targets(paths=paths, start=start, end=end, ledger_done=ledger_done, limit=limit)
+
+
+def _grid(paths: DataPaths) -> None:
+    rows = [(day, sym, 100) for day in (_PREV2, _PREV, _D) for sym in (_S1, _S2, _S3)]
+    _daily(paths, list(reversed(rows)))
+
+
+def test_market_targets_from_daily_bars(tmp_path: pathlib.Path) -> None:
+    paths = DataPaths(tmp_path)
+    _daily(paths, [
+        (_PREV, _S1, 1), (_PREV, _S2, 2), (_PREV, _S3, 0),
+        (_D, _S1, 3), (_D, _S2, 4), (_D, _S3, 5),
+    ])
+    targets = _market(paths, start=_PREV, end=_D)
+    assert {(t.symbol, t.days) for t in targets} == {
+        (_S1, (_PREV,)), (_S2, (_PREV,)), (_S1, (_D,)), (_S2, (_D,)), (_S3, (_D,)),
+    }
+    assert all(dict(t.universe_sources) == {t.days[0]: "market"} for t in targets)
+
+
+def test_ledger_done_symbol_day_skipped(tmp_path: pathlib.Path) -> None:
+    paths = DataPaths(tmp_path)
+    _daily(paths, [(_PREV, _S1, 1), (_D, _S1, 1)])
+    targets = _market(paths, ledger_done=frozenset({(_S1, _PREV)}), start=_PREV, end=_D)
+    assert [(t.symbol, t.days) for t in targets] == [(_S1, (_D,))]
+
+
+def test_day_major_order_stable(tmp_path: pathlib.Path) -> None:
+    paths = DataPaths(tmp_path)
+    _grid(paths)
+    first = _market(paths, start=_PREV2, end=_D)
+    expected = [(day, sym) for day in (_PREV2, _PREV, _D) for sym in sorted((_S1, _S2, _S3))]
+    assert [(t.days[0], t.symbol) for t in first] == expected
+    assert all(len(t.days) == 1 for t in first)
+    assert first == _market(paths, start=_PREV2, end=_D)
+
+
+def test_limit_truncates_to_prefix_of_full_order(tmp_path: pathlib.Path) -> None:
+    paths = DataPaths(tmp_path)
+    _grid(paths)
+    full = _market(paths)
+    assert _market(paths, limit=4) == full[:4]
+    assert len(_market(paths, limit=1000)) == 9
+    with pytest.raises(ValueError, match="limit must be >= 1"):
+        _market(paths, limit=0)
+
+
+def test_invalid_symbol_dropped(tmp_path: pathlib.Path) -> None:
+    paths = DataPaths(tmp_path)
+    _daily(paths, [(_D, _S1, 1), (_D, "00593", 1), (_D, "ab-123", 1), (_D, "0059301", 1)])
+    assert [t.symbol for t in _market(paths, start=_D, end=_D)] == [_S1]
+
+
+def test_empty_range_or_no_sessions_returns_empty(tmp_path: pathlib.Path) -> None:
+    paths = DataPaths(tmp_path)
+    _grid(paths)
+    assert _market(paths, start=_D, end=_PREV2) == ()
+    assert _market(paths, start=dt.date(2025, 1, 2), end=dt.date(2025, 1, 3)) == ()
+
+
+def test_missing_partitions_return_empty(tmp_path: pathlib.Path) -> None:
+    assert _market(DataPaths(tmp_path)) == ()

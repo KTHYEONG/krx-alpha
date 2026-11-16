@@ -10,7 +10,6 @@ _KST = ZoneInfo("Asia/Seoul")
 
 def test_repair_cmd_and_enabled(tmp_path, monkeypatch) -> None:
     import threading
-    from types import SimpleNamespace
 
     from src.core.config import RepairSettings, TickTapeBackfillSettings
     from src.orchestration.daemon import DaemonRunner, NightlyJob, _nightly_job_cmd
@@ -34,7 +33,6 @@ def test_repair_cmd_and_enabled(tmp_path, monkeypatch) -> None:
         now=lambda: dt.datetime(2026, 9, 25, 23, 45, tzinfo=_KST),
         sleep=lambda s: None,
         tick_tape_settings=TickTapeBackfillSettings(enabled=False),
-        minute_backfill_settings=SimpleNamespace(enabled=False),
         repair_settings=RepairSettings(job_enabled=True),
     )
     assert runner._nightly_job_enabled(NightlyJob.REPAIR) is True
@@ -47,7 +45,6 @@ def test_repair_cmd_and_enabled(tmp_path, monkeypatch) -> None:
     (True, False, ["backfill-tick-tape", "backfill-minute-bars"]),
 ])
 def test_launch_order_and_skip_finishes_window(tmp_path, monkeypatch, tick, repair, expected) -> None:
-    from types import SimpleNamespace
 
     from src.core.config import CollectorSettings, RepairSettings, TickTapeBackfillSettings, resolve_collector_runtime
     from src.orchestration import daemon
@@ -59,7 +56,6 @@ def test_launch_order_and_skip_finishes_window(tmp_path, monkeypatch, tick, repa
     runner = daemon.DaemonRunner(
         runtime=runtime, shutdown=None, now=lambda: now, sleep=lambda s: None,
         tick_tape_settings=TickTapeBackfillSettings(enabled=tick),
-        minute_backfill_settings=SimpleNamespace(enabled=True),
     )
     monkeypatch.setattr(runner._gate, "view", lambda day, at: TradingDayView(day, TradingDayStatus.HOLIDAY, None))
     launched = []

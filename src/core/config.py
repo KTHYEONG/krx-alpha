@@ -485,14 +485,14 @@ class TickTapeOverflowSettings(BaseSettings):
 
 
 class MinuteBackfillSettings(BaseSettings):
-    """KIS historical 1m backfill pacing, slot, budget and range; inert when `enabled` is false."""
+    """KIS historical 1m backfill pacing, slot, budget and range for the nightly MINUTE_BARS child."""
 
     model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_MINUTE_BACKFILL_", extra="ignore")
 
-    enabled: bool = False
     kis_data_slot: int = Field(default=5, ge=1, le=5)
     rate_per_s: float = Field(default=8.0, gt=0, le=15.0)
-    max_calls_per_run: int = Field(default=60000, ge=1)
+    # rate_per_s x the 23:30-05:30 nightly window (21,600 s); the nightly deadline still stops a run earlier.
+    max_calls_per_run: int = Field(default=172_800, ge=1)
     history_start: dt.date = dt.date(2025, 10, 27)
     request_timeout_s: float = Field(default=10.0, gt=0)
     freeze_start_kst: dt.time = dt.time(8, 10)

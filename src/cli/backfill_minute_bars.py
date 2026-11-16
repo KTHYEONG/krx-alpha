@@ -23,6 +23,7 @@ from src.core.paths import DataPaths
 from src.core.session_anchors import resolve_session_anchors
 from src.marketdata.minute_backfill import (
     MinuteTarget,
+    plan_market_minute_targets,
     plan_minute_targets,
     read_minute_ledger_done,
     run_minute_backfill,
@@ -46,6 +47,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--end", default=None, help="ISO end date; defaults to last completed session")
     parser.add_argument("--deadline", default=None, help="ISO datetime deadline (KST); defaults to the next nightly window end")
     parser.add_argument("--max-calls", type=int, default=None, help="override the per-run call budget")
+    parser.add_argument("--scope", choices=("market", "universe"), default="market", help="market: every traded KRX symbol; universe: replayed/live universe files")
     parser.add_argument("--dry-run", action="store_true", help="print the plan summary without any vendor call")
     parser.add_argument("--data-root", type=pathlib.Path, default=None)
     parser.set_defaults(handler=run)
@@ -85,11 +87,14 @@ def _parse_deadline(raw: str | None, now: dt.datetime) -> dt.datetime:
 
 
 def run(args: argparse.Namespace) -> int:
-    """Plan replayed-universe symbol-days and fetch their KIS 1m bars."""
+    """Plan whole-market symbol-days (or the universe scope) and fetch their KIS 1m bars."""
     settings = MinuteBackfillSettings()
-    if not settings.enabled and not getattr(args, "dry_run", False):
-        logger.info("[DATA] stage=minute_backfill status=SKIP reason=disabled")
-        return 2
+    override = getattr(args, "max_calls", None)
+    budget = settings.max_calls_per_run if override is None else int(override)
+    if budget < 1:
+        logger.error("[DATA] stage=minute_backfill status=FAIL reason=invalid_max_calls")
+        return 4
+    scope = getattr(args, "scope", "market")
     root = getattr(args, "data_root", None)
     paths = DataPaths(pathlib.Path(root)) if root is not None else CollectorSettings().paths
     now = _now_kst()
@@ -115,7 +120,12 @@ def run(args: argparse.Namespace) -> int:
         start = floor
     try:
         ledger_done = read_minute_ledger_done(paths.minute_history_ledger)
-        targets: tuple[MinuteTarget, ...] = plan_minute_targets(paths=paths, start=start, end=end, ledger_done=ledger_done)
+        if scope == "market":
+            targets: tuple[MinuteTarget, ...] = plan_market_minute_targets(
+                paths=paths, start=start, end=end, ledger_done=ledger_done, limit=budget,
+            )
+        else:
+            targets = plan_minute_targets(paths=paths, start=start, end=end, ledger_done=ledger_done)
     except (OSError, ValueError, pl.exceptions.PolarsError) as exc:
         logger.error("[DATA] stage=minute_backfill status=FAIL reason=plan error=%s", type(exc).__name__)
         return 4
@@ -123,6 +133,7 @@ def run(args: argparse.Namespace) -> int:
         plan = {
             "symbols": len(targets),
             "symbol_days": sum(len(item.days) for item in targets),
+            "scope": scope,
         }
         print(json.dumps(plan))  # noqa: T201 - CLI result goes to stdout
         return 0
@@ -135,11 +146,6 @@ def run(args: argparse.Namespace) -> int:
             raise MissingCredentialsError(f"no data credential for slot {settings.kis_data_slot}")
     except (KrxAlphaError, MissingCredentialsError) as exc:
         logger.error("[DATA] stage=minute_backfill status=FAIL reason=missing_credentials:%s", str(exc))
-        return 4
-    override = getattr(args, "max_calls", None)
-    budget = settings.max_calls_per_run if override is None else int(override)
-    if budget < 1:
-        logger.error("[DATA] stage=minute_backfill status=FAIL reason=invalid_max_calls")
         return 4
     run_settings = settings.model_copy(update={"max_calls_per_run": budget})
     try:

@@ -59,7 +59,7 @@ def _holiday_view(day: dt.date):
     return TradingDayView(date=day, status=TradingDayStatus.HOLIDAY, trading_day=None)
 
 
-def _runner(tmp_path, monkeypatch, *, now: dt.datetime, tick_enabled=True, minute_enabled=False):
+def _runner(tmp_path, monkeypatch, *, now: dt.datetime, tick_enabled=True):
     import pathlib
 
     from src.core.config import (
@@ -79,7 +79,6 @@ def _runner(tmp_path, monkeypatch, *, now: dt.datetime, tick_enabled=True, minut
         sleep=lambda s: None,
         program_sync_settings=TossProgramTradesSettings(auto_backfill_enabled=False),
         tick_tape_settings=TickTapeBackfillSettings(enabled=tick_enabled),
-        minute_backfill_settings=SimpleNamespace(enabled=minute_enabled),
     )
 
 
@@ -171,7 +170,7 @@ def test_disabled_never_launches(tmp_path, monkeypatch) -> None:
     _FakePopen.instances.clear()
     day = dt.date(2026, 9, 25)
     now = _at(day, 23, 0)
-    runner = _runner(tmp_path, monkeypatch, now=now, tick_enabled=False, minute_enabled=False)
+    runner = _runner(tmp_path, monkeypatch, now=now, tick_enabled=False)
     runner._state.eod_attempted_for = day
     def forbidden(*args, **kwargs):
         raise AssertionError("disabled nightly jobs must have no calendar or command side effects")
@@ -255,7 +254,7 @@ def test_tick_tape_before_minute_bars_never_concurrent(tmp_path, monkeypatch, ca
     _FakePopen.instances.clear()
     day = dt.date(2026, 9, 25)
     launch_at = _at(day, 23, 45)
-    runner = _runner(tmp_path, monkeypatch, now=launch_at, minute_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, now=launch_at)
     runner._state.eod_attempted_for = day
     monkeypatch.setattr(runner._gate, "view", lambda today, at: _business_view(day))
     monkeypatch.setattr(daemon_mod.subprocess, "Popen", _FakePopen)
@@ -282,6 +281,10 @@ def test_tick_tape_before_minute_bars_never_concurrent(tmp_path, monkeypatch, ca
     assert "backfill-minute-bars" in _FakePopen.instances[1].cmd
 
 
+def _tick_launches() -> int:
+    return sum("backfill-tick-tape" in proc.cmd for proc in _FakePopen.instances)
+
+
 def test_one_attempt_per_window(tmp_path, monkeypatch, caplog) -> None:
     # Given: tick tape이 exit 4로 실패한 윈도우
     import logging
@@ -305,16 +308,19 @@ def test_one_attempt_per_window(tmp_path, monkeypatch, caplog) -> None:
 
     # Then: 실패가 기록되고 재실행되지 않는다
     assert "stage=nightly_tick_tape status=FAIL exit_code=4" in caplog.text
-    assert len(_FakePopen.instances) == 1
+    assert _tick_launches() == 1
+    assert "backfill-minute-bars" in _FakePopen.instances[-1].cmd
     # When: 다음 윈도우 식별자(다음날 23:31)가 오면
     runner._state.eod_attempted_for = day + dt.timedelta(days=1)
     monkeypatch.setattr(
         runner._gate, "view", lambda today, at: _business_view(day + dt.timedelta(days=1))
     )
+    _FakePopen.instances[-1]._exit_code = 0
+    runner._poll_nightly(_at(day + dt.timedelta(days=1), 23, 31))
     runner._maybe_launch_nightly(_at(day + dt.timedelta(days=1), 23, 31))
 
     # Then: 다시 한 번 시도한다
-    assert len(_FakePopen.instances) == 2
+    assert _tick_launches() == 2
 
 
 def test_child_exit_two_logged_as_noop(tmp_path, monkeypatch, caplog) -> None:
@@ -459,7 +465,7 @@ def test_step_reaps_and_hands_over_to_minute_bars(tmp_path, monkeypatch) -> None
     _FakePopen.instances.clear()
     day = dt.date(2026, 9, 25)
     now = _at(day + dt.timedelta(days=1), 0, 10)
-    runner = _runner(tmp_path, monkeypatch, now=now, minute_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, now=now)
     runner._state.eod_attempted_for = day
     runner._state.nightly_done[NightlyJob.TICK_TAPE] = day
     dead = _FakePopen(["backfill-tick-tape"], exit_code=0)

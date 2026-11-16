@@ -28,9 +28,16 @@ def _planning_clock(monkeypatch):
     monkeypatch.setattr(minute_backfill, "_now_kst", lambda: _NOW)
 
 
-def _history(paths: DataPaths) -> None:
+def _calendar(paths: DataPaths) -> None:
     from src.marketdata.toss_calendar import TradingDay, save_trading_day_cache
 
+    save_trading_day_cache(
+        paths.calendar_cache,
+        TradingDay(_NOW.date(), True, _D, _NOW.date() + dt.timedelta(days=1)),
+    )
+
+
+def _history(paths: DataPaths) -> None:
     frame = pl.DataFrame(
         {"date": [_PREV, _D], "symbol": ["X", "X"]},
         schema={"date": pl.Date, "symbol": pl.String},
@@ -38,12 +45,20 @@ def _history(paths: DataPaths) -> None:
     out = paths.bars_daily_dir / f"{_PREV:%Y-%m}.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
     frame.write_parquet(out)
-    save_trading_day_cache(
-        paths.calendar_cache,
-        TradingDay(_NOW.date(), True, _D, _NOW.date() + dt.timedelta(days=1)),
-    )
+    _calendar(paths)
     paths.universe_out(_PREV).parent.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({"symbol": ["A"]}, schema={"symbol": pl.String}).write_parquet(paths.universe_out(_PREV))
+
+
+def _market_history(paths: DataPaths) -> None:
+    frame = pl.DataFrame(
+        {"date": [_PREV, _PREV, _D], "symbol": ["005930", "000660", "000660"], "volume": [1000, 0, 500]},
+        schema={"date": pl.Date, "symbol": pl.String, "volume": pl.Int64},
+    )
+    out = paths.bars_daily_dir / f"{_PREV:%Y-%m}.parquet"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_parquet(out)
+    _calendar(paths)
 
 
 def _enabled(monkeypatch) -> None:
@@ -67,10 +82,14 @@ def test_subcommand_registered() -> None:
     assert "backfill-minute-bars" in actions[0].choices
 
 
-def test_disabled_mode_is_inert(tmp_path: pathlib.Path, monkeypatch) -> None:
+def test_removed_enabled_env_is_ignored(tmp_path: pathlib.Path, monkeypatch, capsys) -> None:
+    _market_history(DataPaths(tmp_path))
     monkeypatch.setenv("KRX_ALPHA_MINUTE_BACKFILL_ENABLED", "false")
-    args = build_parser().parse_args(["backfill-minute-bars", "--data-root", str(tmp_path)])
-    assert cli.run(args) == 2
+    monkeypatch.setattr(cli, "_now_kst", lambda: _NOW)
+    args = build_parser().parse_args(["backfill-minute-bars", "--dry-run", "--data-root", str(tmp_path)])
+    assert cli.run(args) == 0
+    assert json.loads(capsys.readouterr().out)["symbol_days"] == 2
+    assert not hasattr(cli.MinuteBackfillSettings(), "enabled")
 
 
 def test_missing_credentials_exit_4(tmp_path: pathlib.Path, monkeypatch) -> None:
@@ -79,7 +98,7 @@ def test_missing_credentials_exit_4(tmp_path: pathlib.Path, monkeypatch) -> None
     monkeypatch.delenv("KIS_DATA_SLOTS", raising=False)
     for key in ("KIS_DATA_5_APP_KEY", "KIS_DATA_5_APP_SECRET", "KIS_DATA_5_HTS_ID"):
         monkeypatch.delenv(key, raising=False)
-    args = type("Args", (), {"dry_run": False, "data_root": tmp_path, "max_calls": None,
+    args = type("Args", (), {"scope": "universe", "dry_run": False, "data_root": tmp_path, "max_calls": None,
                              "deadline": None, "start": None, "end": None})()
     assert cli.run(args) == 4
 
@@ -91,7 +110,7 @@ def test_missing_slot_exit_4(tmp_path: pathlib.Path, monkeypatch) -> None:
     monkeypatch.setenv("KIS_DATA_1_APP_KEY", "k1")
     monkeypatch.setenv("KIS_DATA_1_APP_SECRET", "s1")
     monkeypatch.setenv("KIS_DATA_1_HTS_ID", "h1")
-    args = type("Args", (), {"dry_run": False, "data_root": tmp_path, "max_calls": None,
+    args = type("Args", (), {"scope": "universe", "dry_run": False, "data_root": tmp_path, "max_calls": None,
                              "deadline": None, "start": None, "end": None})()
     assert cli.run(args) == 4
 
@@ -99,7 +118,7 @@ def test_missing_slot_exit_4(tmp_path: pathlib.Path, monkeypatch) -> None:
 def test_calendar_absence_is_fatal(tmp_path: pathlib.Path, monkeypatch) -> None:
     _enabled(monkeypatch)
     _creds(monkeypatch)
-    args = type("Args", (), {"dry_run": False, "data_root": tmp_path, "max_calls": None,
+    args = type("Args", (), {"scope": "universe", "dry_run": False, "data_root": tmp_path, "max_calls": None,
                              "deadline": None, "start": None, "end": None})()
     assert cli.run(args) == 4
 
@@ -108,7 +127,7 @@ def test_invalid_date_exit_4(tmp_path: pathlib.Path, monkeypatch) -> None:
     _history(DataPaths(tmp_path))
     _enabled(monkeypatch)
     _creds(monkeypatch)
-    args = type("Args", (), {"dry_run": False, "data_root": tmp_path, "max_calls": None,
+    args = type("Args", (), {"scope": "universe", "dry_run": False, "data_root": tmp_path, "max_calls": None,
                              "deadline": None, "start": "bogus", "end": None})()
     assert cli.run(args) == 4
 
@@ -117,7 +136,7 @@ def test_end_capped_to_last_completed_session(tmp_path: pathlib.Path, monkeypatc
     _history(DataPaths(tmp_path))
     _creds(monkeypatch)
     monkeypatch.setattr(cli, "_now_kst", lambda: _NOW)
-    args = type("Args", (), {"dry_run": True, "data_root": tmp_path, "max_calls": None,
+    args = type("Args", (), {"scope": "universe", "dry_run": True, "data_root": tmp_path, "max_calls": None,
                              "deadline": None, "start": None, "end": "2026-10-22"})()
     assert cli.run(args) == 0
     out = json.loads(capsys.readouterr().out)
@@ -136,7 +155,7 @@ def test_start_clamped_to_vendor_retention(tmp_path: pathlib.Path, monkeypatch, 
         return original(**kwargs)
 
     monkeypatch.setattr(cli, "plan_minute_targets", planner)
-    args = type("Args", (), {"dry_run": True, "data_root": tmp_path, "max_calls": None,
+    args = type("Args", (), {"scope": "universe", "dry_run": True, "data_root": tmp_path, "max_calls": None,
                              "deadline": None, "start": "2025-04-20", "end": None})()
     with caplog.at_level(logging.INFO, logger="src.cli.backfill_minute_bars"):
         assert cli.run(args) == 0
@@ -153,7 +172,7 @@ def test_plan_failure_exit_4(tmp_path: pathlib.Path, monkeypatch) -> None:
     ledger = paths.minute_history_ledger
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text("{truncated\n")
-    args = type("Args", (), {"dry_run": False, "data_root": tmp_path, "max_calls": None,
+    args = type("Args", (), {"scope": "universe", "dry_run": False, "data_root": tmp_path, "max_calls": None,
                              "deadline": None, "start": None, "end": None})()
     assert cli.run(args) == 4
 
@@ -169,7 +188,7 @@ def test_setup_failure_exit_4(tmp_path: pathlib.Path, monkeypatch) -> None:
         raise KrxAlphaError("setup down")
 
     monkeypatch.setattr(cli, "run_minute_backfill", _boom)
-    args = type("Args", (), {"dry_run": False, "data_root": tmp_path, "max_calls": None,
+    args = type("Args", (), {"scope": "universe", "dry_run": False, "data_root": tmp_path, "max_calls": None,
                              "deadline": None, "start": None, "end": None})()
     assert cli.run(args) == 4
 
@@ -180,7 +199,7 @@ def test_nothing_to_do_exit_2(tmp_path: pathlib.Path, monkeypatch) -> None:
     paths.universe_out(_PREV).unlink()
     _enabled(monkeypatch)
     _creds(monkeypatch)
-    args = type("Args", (), {"dry_run": False, "data_root": tmp_path, "max_calls": None,
+    args = type("Args", (), {"scope": "universe", "dry_run": False, "data_root": tmp_path, "max_calls": None,
                              "deadline": None, "start": None, "end": None})()
     assert cli.run(args) == 2
 
@@ -189,7 +208,7 @@ def test_dry_run_reports_symbol_days(tmp_path: pathlib.Path, monkeypatch, capsys
     _history(DataPaths(tmp_path))
     _creds(monkeypatch)
     monkeypatch.setattr(cli, "_now_kst", lambda: _NOW)
-    args = type("Args", (), {"dry_run": True, "data_root": tmp_path, "max_calls": None,
+    args = type("Args", (), {"scope": "universe", "dry_run": True, "data_root": tmp_path, "max_calls": None,
                              "deadline": None, "start": None, "end": None})()
     assert cli.run(args) == 0
     out = json.loads(capsys.readouterr().out)
@@ -224,7 +243,7 @@ def test_run_delegates_and_maps_exit_codes(tmp_path: pathlib.Path, monkeypatch) 
                                 symbol_days=1, calls=2, vendor_empty=0, failed=0, discarded_offhours=0)
 
     monkeypatch.setattr(cli, "run_minute_backfill", _ok)
-    args = type("Args", (), {"dry_run": False, "data_root": tmp_path, "max_calls": 100,
+    args = type("Args", (), {"scope": "universe", "dry_run": False, "data_root": tmp_path, "max_calls": 100,
                              "deadline": None, "start": None, "end": None})()
     assert cli.run(args) == 0
     assert seen["settings"].max_calls_per_run == 100
@@ -235,10 +254,10 @@ def test_run_delegates_and_maps_exit_codes(tmp_path: pathlib.Path, monkeypatch) 
 
     monkeypatch.setattr(cli, "run_minute_backfill", _fail)
     assert cli.run(args) == 4
-    bad = type("Args", (), {"dry_run": False, "data_root": tmp_path, "max_calls": 0,
+    bad = type("Args", (), {"scope": "universe", "dry_run": False, "data_root": tmp_path, "max_calls": 0,
                             "deadline": None, "start": None, "end": None})()
     assert cli.run(bad) == 4
-    invalid = type("Args", (), {"dry_run": False, "data_root": tmp_path, "max_calls": None,
+    invalid = type("Args", (), {"scope": "universe", "dry_run": False, "data_root": tmp_path, "max_calls": None,
                                 "deadline": "invalid", "start": None, "end": None})()
     assert cli.run(invalid) == 4
 
@@ -251,9 +270,62 @@ def test_completed_session_includes_today_only_after_close(tmp_path: pathlib.Pat
 
 
 def test_dry_run_does_not_require_credentials(tmp_path: pathlib.Path, monkeypatch, capsys) -> None:
-    _history(DataPaths(tmp_path))
+    _market_history(DataPaths(tmp_path))
     monkeypatch.setattr(cli, "_now_kst", lambda: _NOW)
     monkeypatch.delenv("KIS_DATA_SLOTS", raising=False)
     args = build_parser().parse_args(["backfill-minute-bars", "--dry-run", "--data-root", str(tmp_path)])
     assert cli.run(args) == 0
-    assert json.loads(capsys.readouterr().out)["symbol_days"] == 1
+    assert json.loads(capsys.readouterr().out)["symbol_days"] == 2
+
+
+def test_scope_market_is_default(tmp_path: pathlib.Path, monkeypatch, capsys) -> None:
+    _market_history(DataPaths(tmp_path))
+    monkeypatch.setattr(cli, "_now_kst", lambda: _NOW)
+    args = build_parser().parse_args(["backfill-minute-bars", "--dry-run", "--data-root", str(tmp_path)])
+    assert cli.run(args) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"symbols": 2, "symbol_days": 2, "scope": "market"}
+
+
+def test_scope_universe_selects_old_planner(tmp_path: pathlib.Path, monkeypatch, capsys) -> None:
+    _history(DataPaths(tmp_path))
+    monkeypatch.setattr(cli, "_now_kst", lambda: _NOW)
+    args = build_parser().parse_args(
+        ["backfill-minute-bars", "--dry-run", "--scope", "universe", "--data-root", str(tmp_path)]
+    )
+    assert cli.run(args) == 0
+    assert json.loads(capsys.readouterr().out) == {"symbols": 1, "symbol_days": 1, "scope": "universe"}
+
+
+def test_zero_budget_rejected_before_planning(tmp_path: pathlib.Path, monkeypatch) -> None:
+    _market_history(DataPaths(tmp_path))
+
+    def _forbidden(**kwargs):
+        raise AssertionError("planning must not run for an invalid budget")
+
+    monkeypatch.setattr(cli, "plan_market_minute_targets", _forbidden)
+    monkeypatch.setattr(cli, "plan_minute_targets", _forbidden)
+    args = build_parser().parse_args(
+        ["backfill-minute-bars", "--dry-run", "--max-calls", "0", "--data-root", str(tmp_path)]
+    )
+    assert cli.run(args) == 4
+
+
+def test_budget_is_planner_limit(tmp_path: pathlib.Path, monkeypatch, capsys) -> None:
+    from src.core.config import MinuteBackfillSettings
+
+    _market_history(DataPaths(tmp_path))
+    monkeypatch.setattr(cli, "_now_kst", lambda: _NOW)
+    original = cli.plan_market_minute_targets
+    limits: list[int | None] = []
+
+    def planner(**kwargs):
+        limits.append(kwargs["limit"])
+        return original(**kwargs)
+
+    monkeypatch.setattr(cli, "plan_market_minute_targets", planner)
+    base = ["backfill-minute-bars", "--dry-run", "--data-root", str(tmp_path)]
+    assert cli.run(build_parser().parse_args([*base, "--max-calls", "1"])) == 0
+    assert cli.run(build_parser().parse_args(base)) == 0
+    assert limits == [1, MinuteBackfillSettings().max_calls_per_run]
+    assert MinuteBackfillSettings().max_calls_per_run == 172_800

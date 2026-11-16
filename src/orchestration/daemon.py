@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
-import importlib
 import logging
 import math
 import pathlib
@@ -1530,14 +1529,6 @@ def _env_text(value: object) -> str:
     return str(value)
 
 
-def _minute_backfill_settings(explicit: Any | None) -> Any | None:
-    """Minute-bars settings override, else the Part 4 class when it exists (None until then)."""
-    if explicit is not None:
-        return explicit
-    cls = getattr(importlib.import_module("src.core.config"), "MinuteBackfillSettings", None)
-    return cls() if cls is not None else None
-
-
 def _child_alive(proc: Any) -> bool:
     """True while a raw Popen or a ProcessSupervisor child is still running."""
     poll = getattr(proc, "poll", None)
@@ -1787,7 +1778,6 @@ class DaemonRunner:
         program_sync_settings: TossProgramTradesSettings | None = None,
         tick_tape_settings: TickTapeBackfillSettings | None = None,
         tick_tape_overflow_settings: TickTapeOverflowSettings | None = None,
-        minute_backfill_settings: Any | None = None,
         repair_settings: RepairSettings | None = None,
         wall_ns: Callable[[], int] = time.time_ns,
     ) -> None:
@@ -1838,7 +1828,6 @@ class DaemonRunner:
         self._tick_tape_overflow_cfg = (
             tick_tape_overflow_settings if tick_tape_overflow_settings is not None else TickTapeOverflowSettings()
         )
-        self._minute_cfg = _minute_backfill_settings(minute_backfill_settings)
         if repair_settings is not None:
             self._repair_cfg = repair_settings
         else:
@@ -2005,12 +1994,16 @@ class DaemonRunner:
         logger.info("[DAEMON] stage=program_trades_sync status=STARTED date=%s", today.isoformat())
 
     def _nightly_job_enabled(self, job: NightlyJob) -> bool:
-        """Per-job enable gate; minute bars stay inert until the Part 4 settings land."""
+        """Per-job enable gate; minute bars always run inside an active nightly scheduler."""
         if job is NightlyJob.TICK_TAPE:
             return bool(self._tick_tape_cfg.enabled)
         if job is NightlyJob.REPAIR:
             return bool(self._repair_cfg.job_enabled)
-        return self._minute_cfg is not None and bool(self._minute_cfg.enabled)
+        return True
+
+    def _nightly_scheduler_active(self) -> bool:
+        """The nightly scheduler runs iff a tick-tape or repair job is enabled; minute bars ride its window."""
+        return self._nightly_job_enabled(NightlyJob.TICK_TAPE) or self._nightly_job_enabled(NightlyJob.REPAIR)
 
     def _nightly_session_live(self) -> bool:
         """True while any session state or supervised session child is active."""
@@ -2122,7 +2115,7 @@ class DaemonRunner:
         """Launch at most one backfill child at a time, each job at most once per window."""
         st = self._state
         ch = self._children
-        if not any(self._nightly_job_enabled(job) for job in _NIGHTLY_JOB_ORDER):
+        if not self._nightly_scheduler_active():
             return
         now = max(now, self._now())
         if ch.nightly is not None:
@@ -2217,7 +2210,7 @@ class DaemonRunner:
         if self._children.program_sync is not None or self._children.nightly is not None:
             # A running nightly child must not wait out a long night sleep before its deadline is checked.
             sleep_sec = min(sleep_sec, PROGRAM_SYNC_POLL_S)
-        if any(self._nightly_job_enabled(job) for job in _NIGHTLY_JOB_ORDER):
+        if self._nightly_scheduler_active():
             sleep_sec = min(sleep_sec, PROGRAM_SYNC_POLL_S)
         return sleep_sec
 

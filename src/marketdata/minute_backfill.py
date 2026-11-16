@@ -25,6 +25,7 @@ from src.core.config import KisTokenSettings, MinuteBackfillSettings
 from src.core.errors import MissingCredentialsError
 from src.core.paths import DataPaths
 from src.core.session_anchors import resolve_session_anchors
+from src.core.symbols import is_krx_short_code
 from src.execution.contracts import KisApiError
 from src.marketdata.kis_minute_history import (
     MinuteBackfillBoundaryError,
@@ -166,6 +167,40 @@ def plan_minute_targets(
     return tuple(targets)
 
 
+def plan_market_minute_targets(
+    *,
+    paths: DataPaths,
+    start: dt.date,
+    end: dt.date,
+    ledger_done: frozenset[tuple[str, dt.date]],
+    limit: int | None = None,
+) -> tuple[MinuteTarget, ...]:
+    """Whole-market symbol-days that traded in [start, end], oldest day first, at most ``limit`` targets."""
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be >= 1")
+    if end < start:
+        return ()
+    sessions = _business_sessions(paths, start, end)
+    if not sessions:
+        return ()
+    traded = (
+        scan_month_partitions(paths.bars_daily_dir, min_date=start, max_date=end)
+        .filter(pl.col("date").is_in(list(sessions)) & (pl.col("volume") > 0))
+        .select("date", "symbol")
+        .unique()
+        .sort("date", "symbol")
+        .collect(engine="streaming")
+    )
+    targets: list[MinuteTarget] = []
+    for day, symbol in traded.iter_rows():
+        if limit is not None and len(targets) >= limit:
+            break
+        if not is_krx_short_code(symbol) or (str(symbol), day) in ledger_done:
+            continue
+        targets.append(MinuteTarget(symbol=str(symbol), days=(day,), universe_sources={day: "market"}))
+    return tuple(targets)
+
+
 def read_minute_ledger_done(path: pathlib.Path) -> frozenset[tuple[str, dt.date]]:
     """Return (symbol, date) pairs with status complete or vendor_empty; tolerates a torn final line."""
     try:
@@ -266,8 +301,6 @@ def run_minute_backfill(
         raise ValueError("invalid minute-history run_id")
     if deadline.tzinfo is None or now().tzinfo is None:
         raise ValueError("deadline and now must be timezone-aware")
-    if not settings.enabled:
-        return MinuteRunSummary("OK", "disabled", run_id, 0, 0, 0, 0, 0, 0)
     if not targets or now() >= deadline:
         return MinuteRunSummary("OK", "nothing_to_do", run_id, 0, 0, 0, 0, 0, 0)
     run_marker = paths.minute_history_ledger.parent / "runs" / run_id
