@@ -150,4 +150,4 @@ AI 코딩 도구를 주로 코드를 쓰는 데 사용했고, 아이디어를 �
 
 ## 📚 참고
 
-- [브로커 API 명세](./docs/architecture/brokers/api_master.md)
+- 브로커 API 명세: 별도 저장소 api-manager의 `docs/brokers/` (`api-manager-spec lookup`으로 조회)
