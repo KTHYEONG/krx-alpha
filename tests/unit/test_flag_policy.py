@@ -67,7 +67,7 @@ DEPLOYED_COUPLING: dict[str, tuple[Callable[[dict[str, Any]], object], dict[str,
     ),
     "RegularKisSettings.enabled": (
         lambda kwargs: RegularKisSettings(**kwargs),
-        {"enabled": True, "credential_slots": ("1", "2", "3", "4"), "pair_capacity_per_connection": 41},
+        {"enabled": True, "credential_slots": ("3", "4"), "pair_capacity_per_connection": 41},
         ("RegularKisSettings.credential_slots", "RegularKisSettings.pair_capacity_per_connection"),
     ),
 }

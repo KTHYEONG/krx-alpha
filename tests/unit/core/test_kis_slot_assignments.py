@@ -41,6 +41,9 @@ def _krx_rows() -> dict[str, dict[str, object]]:
         elif row["purpose"] == "regular_kis_ws":
             name = "regular_kis_ws"
             assert str(row["slot"]) in [str(slot) for slot in selectors["KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS"]]
+        elif row["purpose"] == "regular_nxt_ws":
+            name = "regular_nxt_ws"
+            assert str(row["slot"]) in [str(slot) for slot in selectors["KRX_ALPHA_REGULAR_KIS_NXT_CREDENTIAL_SLOTS"]]
         elif row["purpose"] == "regular_kis_dynamic_ws":
             name = "regular_kis_dynamic_ws"
             assert str(row["slot"]) not in [str(slot) for slot in selectors["KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS"]]
@@ -131,6 +134,7 @@ def test_krx_rows_exact() -> None:
         "snapshot_rest",
         "minute_history_rest",
         "premarket_ws",
+        "regular_nxt_ws",
         "regular_kis_ws",
         "regular_kis_dynamic_ws",
         "aftermarket_ws",
@@ -148,8 +152,12 @@ def test_krx_rows_exact() -> None:
     assert krx["premarket_ws"]["slots"] == ["5"]
     assert krx["premarket_ws"]["window_kst"] == ["07:58", "08:50"]
 
+    assert krx["regular_nxt_ws"]["channel"] == "ws"
+    assert krx["regular_nxt_ws"]["slots"] == ["1", "2"]
+    assert krx["regular_nxt_ws"]["window_kst"] == ["08:58", "15:22"]
+
     assert krx["regular_kis_ws"]["channel"] == "ws"
-    assert krx["regular_kis_ws"]["slots"] == ["1", "2", "3", "4"]
+    assert krx["regular_kis_ws"]["slots"] == ["3", "4"]
     assert krx["regular_kis_ws"]["window_kst"] == ["08:28", "15:32"]
 
     assert krx["regular_kis_dynamic_ws"]["channel"] == "ws"
@@ -180,13 +188,15 @@ def test_compose_regular_kis_slots_match_table(monkeypatch) -> None:
     env = _compose_env()
     assert env["KRX_ALPHA_REGULAR_KIS_ENABLED"] == "true"
     assert json.loads(env["KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS"]) == _krx_rows()["regular_kis_ws"]["slots"]
+    assert json.loads(env["KRX_ALPHA_REGULAR_KIS_NXT_CREDENTIAL_SLOTS"]) == _krx_rows()["regular_nxt_ws"]["slots"]
     assert env["KRX_ALPHA_REGULAR_KIS_PAIR_CAPACITY_PER_CONNECTION"] == "41"
     for key, value in env.items():
         if key.startswith("KRX_ALPHA_REGULAR_KIS_"):
             monkeypatch.setenv(key, value)
     resolved = RegularKisSettings()
     assert resolved.enabled is True
-    assert resolved.credential_slots == ("1", "2", "3", "4")
+    assert resolved.credential_slots == ("3", "4")
+    assert resolved.nxt_credential_slots == ("1", "2")
 
 
 def test_aftermarket_derived_slots_match_table(caplog, monkeypatch) -> None:
@@ -230,7 +240,15 @@ def test_assignment_table_excluded_from_image() -> None:
     assert TABLE_PATH.as_posix() in patterns
 
 
+def test_regular_slots_disjoint() -> None:
+    selectors = tomllib.loads(TABLE_PATH.read_text(encoding="utf-8"))["selectors"]["krx"]
+    krx = set(selectors["KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS"])
+    nxt = set(selectors["KRX_ALPHA_REGULAR_KIS_NXT_CREDENTIAL_SLOTS"])
+    assert not krx & nxt
+    assert not (krx | nxt) & {5}
+
+
 def test_canonical_table_hash_pinned() -> None:
     raw = TABLE_PATH.read_bytes()
     assert raw.splitlines()[0] == b"# canonical: krx-alpha/deploy/shared/kis_slot_assignments.toml schema=1"
-    assert hashlib.sha256(raw).hexdigest() == "8ffc2096fccce16f69304ba54a7ed37c273025e34511ef35a5496b5ae06e7a6b"
+    assert hashlib.sha256(raw).hexdigest() == "c33b94f0bd72dc713dfe423645de4e2912f977228d6263a6cabbbecc250214b2"
