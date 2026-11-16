@@ -156,7 +156,7 @@ def shard_window(
             raise ValueError(f"no krx_after window for venue {venue!r}")
         start, end = aftermarket_open_time(venue, anchors), anchors.after_market_end
     elif session is MarketSession.REGULAR:
-        if venue is not MarketVenue.KRX:
+        if venue not in (MarketVenue.KRX, MarketVenue.NXT):
             raise ValueError(f"no regular window for venue {venue!r}")
         start, end = anchors.regular_open, anchors.closing_auction_start
     else:

@@ -1470,3 +1470,109 @@ def test_after_close_silence_limit_validator_when_enabled() -> None:
         CollectorSettings(after_close_silence_enabled=True, after_close_silence_limit_s=100.0)
     assert CollectorSettings(after_close_silence_enabled=True, after_close_silence_limit_s=900.0).after_close_silence_limit_s == 900.0
     assert CollectorSettings(after_close_silence_enabled=False, after_close_silence_limit_s=100.0).after_close_silence_limit_s == 100.0
+
+
+def test_regular_kis_nxt_defaults_are_inert() -> None:
+    from src.core.config import RegularKisSettings
+
+    settings = RegularKisSettings()
+
+    assert settings.nxt_credential_slots == ()
+    assert settings.nxt_streams == ("H0NXCNT0", "H0NXASP0")
+    assert settings.nxt_start_lead_s == 120.0
+    assert settings.nxt_max_symbols == 0
+
+
+def test_regular_kis_nxt_slots_capacity_and_derived_count() -> None:
+    from src.core.config import RegularKisSettings
+
+    settings = RegularKisSettings(
+        enabled=True,
+        credential_slots=("1",),
+        pair_capacity_per_connection=41,
+        nxt_credential_slots=("2", "3"),
+    )
+
+    assert settings.nxt_max_symbols == 40
+    assert RegularKisSettings(enabled=True, credential_slots=("1",), pair_capacity_per_connection=41).nxt_max_symbols == 0
+
+
+@pytest.mark.parametrize(
+    "nxt_slots",
+    [("2", "2"), ("6",), ("1",), ("0",)],
+)
+def test_regular_kis_nxt_slots_reject_duplicates_out_of_range_and_overlap(nxt_slots) -> None:
+    from src.core.config import RegularKisSettings
+
+    with pytest.raises(ValueError, match="nxt_credential_slots"):
+        RegularKisSettings(
+            enabled=True, credential_slots=("1",), pair_capacity_per_connection=41, nxt_credential_slots=nxt_slots
+        )
+
+
+def test_regular_kis_nxt_capacity_must_hold_one_symbol() -> None:
+    from src.core.config import RegularKisSettings
+
+    with pytest.raises(ValueError, match="at least one symbol"):
+        RegularKisSettings(
+            enabled=True,
+            credential_slots=("1",),
+            pair_capacity_per_connection=1,
+            streams=("H0STCNT0", "H0STASP0"),
+            nxt_credential_slots=("2",),
+        )
+
+
+def test_regular_kis_nxt_rejects_premarket_and_intraday_slot_overlap() -> None:
+    from src.core.config import (
+        CollectorSettings,
+        IntradayAdmissionSettings,
+        PremarketSettings,
+        RegularKisSettings,
+        resolve_collector_runtime,
+    )
+
+    regular = RegularKisSettings(
+        enabled=True, credential_slots=("1",), pair_capacity_per_connection=41, nxt_credential_slots=("5",)
+    )
+    with pytest.raises(ValueError, match="premarket"):
+        resolve_collector_runtime(
+            collector=CollectorSettings(),
+            premarket=PremarketSettings(enabled=True, credential_slot="5", pair_capacity_per_connection=41),
+            regular_kis=regular,
+        )
+    with pytest.raises(ValueError, match="kis_dynamic_slots"):
+        resolve_collector_runtime(
+            collector=CollectorSettings(),
+            regular_kis=regular,
+            intraday=IntradayAdmissionSettings(enabled=True, kis_dynamic_slots=("5",)),
+        )
+
+
+def test_intraday_dynamic_default_is_slot_five() -> None:
+    from src.core.config import IntradayAdmissionSettings
+
+    assert IntradayAdmissionSettings().kis_dynamic_slots == ("5",)
+
+
+def test_nxt_window_must_end_strictly_before_nxt_prearm_moment() -> None:
+    import pytest
+
+    from src.core.config import CollectorSettings, RegularKisSettings, resolve_collector_runtime
+
+    # NXT prearm = 15:40 - 60s = 15:39:00; the regular NXT window ends at 15:20 + close_grace_s.
+    def _resolve(close_grace_s: float):
+        return resolve_collector_runtime(
+            collector=CollectorSettings(),
+            regular_kis=RegularKisSettings(
+                enabled=True,
+                credential_slots=("1",),
+                pair_capacity_per_connection=41,
+                nxt_credential_slots=("2",),
+                close_grace_s=close_grace_s,
+            ),
+        )
+
+    assert _resolve(1139.0).regular_kis.close_grace_s == 1139.0
+    with pytest.raises(ValueError, match="NXT regular window must end strictly before"):
+        _resolve(1140.0)

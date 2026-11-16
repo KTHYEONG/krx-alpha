@@ -3,6 +3,7 @@ import json
 
 import polars as pl
 
+from src.core.session_anchors import AnchorSource, SessionAnchors
 from src.realtime.contracts import MarketVenue
 from src.storage.market_phase import (
     EventKind,
@@ -11,6 +12,7 @@ from src.storage.market_phase import (
     classify_market_phase,
     event_time_expr,
     market_phase_expr,
+    phase_windows_for,
 )
 
 
@@ -54,7 +56,30 @@ def test_classify_krx_aftermarket_window() -> None:
 def test_classify_nxt_aftermarket_starts_1540() -> None:
     assert classify_market_phase(MarketVenue.NXT, "154000", EventKind.TRADE) is MarketPhase.AFTERMARKET
     assert classify_market_phase(MarketVenue.NXT, "153959", EventKind.TRADE) is MarketPhase.UNCLASSIFIED
-    assert classify_market_phase(MarketVenue.NXT, "100000", EventKind.QUOTE) is MarketPhase.UNCLASSIFIED
+    assert classify_market_phase(MarketVenue.NXT, "100000", EventKind.QUOTE) is MarketPhase.REGULAR
+
+
+def test_classify_nxt_regular_boundaries_half_open() -> None:
+    assert classify_market_phase(MarketVenue.NXT, "085959", EventKind.TRADE) is MarketPhase.UNCLASSIFIED
+    assert classify_market_phase(MarketVenue.NXT, "090000", EventKind.TRADE) is MarketPhase.REGULAR
+    assert classify_market_phase(MarketVenue.NXT, "151959", EventKind.QUOTE) is MarketPhase.REGULAR
+    assert classify_market_phase(MarketVenue.NXT, "152000", EventKind.QUOTE) is MarketPhase.UNCLASSIFIED
+
+
+def test_classify_nxt_regular_follows_shifted_anchors() -> None:
+    shifted = SessionAnchors(
+        date=dt.date(2026, 11, 19),
+        regular_open=dt.time(9, 5),
+        closing_auction_start=dt.time(15, 25),
+        regular_close=dt.time(15, 30),
+        after_market_end=dt.time(18, 0),
+        source=AnchorSource.DEFAULT,
+    )
+    windows = phase_windows_for(shifted)
+    assert classify_market_phase(MarketVenue.NXT, "090000", EventKind.TRADE, windows=windows) is MarketPhase.UNCLASSIFIED
+    assert classify_market_phase(MarketVenue.NXT, "090500", EventKind.TRADE, windows=windows) is MarketPhase.REGULAR
+    assert classify_market_phase(MarketVenue.NXT, "152459", EventKind.TRADE, windows=windows) is MarketPhase.REGULAR
+    assert classify_market_phase(MarketVenue.NXT, "152500", EventKind.TRADE, windows=windows) is MarketPhase.UNCLASSIFIED
 
 
 def test_classify_malformed_event_time_unclassified() -> None:

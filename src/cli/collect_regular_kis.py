@@ -23,7 +23,7 @@ from src.realtime.session import DynamicFeed, DynamicPairWatcher, SessionConfig,
 from src.realtime.streamer import RealtimeStreamer, regular_kis_silence_limit_s
 from src.realtime.streaming_child import resolve_clock_overrides, run_streaming_child
 from src.universe.intraday import read_dynamic_admissions
-from src.universe.ipc import read_candidates
+from src.universe.ipc import CandidateFileError, read_candidate_snapshot, read_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--credential-slot", required=True)
     parser.add_argument("--credential-key-id", required=True)
     parser.add_argument("--symbols", required=True)
+    parser.add_argument("--venue", choices=["krx", "nxt"], default="krx")
     parser.add_argument("--ntp-host", default=None)
     parser.add_argument("--max-clock-offset-ns", type=int, default=None)
     parser.add_argument("--max-cycles", type=int, default=None)
@@ -58,6 +59,22 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
 
 def _deadline_ns(expected_close_ns: int, close_grace_s: float) -> int:
     return expected_close_ns + int(close_grace_s * 1_000_000_000)
+
+
+def _nxt_candidate_symbols(
+    candidates_path: pathlib.Path, session_date: dt.date, max_candidates: int
+) -> tuple[str, ...]:
+    try:
+        snapshot = read_candidate_snapshot(
+            candidates_path,
+            expected_session_date=session_date,
+            expected_session="regular_nxt",
+            max_candidates=max_candidates,
+        )
+    except CandidateFileError as exc:
+        raise KrxAlphaError(str(exc)) from exc
+    ordered = sorted(snapshot.candidates, key=lambda row: int(cast(int, row["rank"])))
+    return tuple(str(row["symbol"]) for row in ordered)
 
 
 def _candidate_symbols(
@@ -102,8 +119,9 @@ async def _run_stream(args: argparse.Namespace) -> int:
     regular_kis = runtime.regular_kis
     if not regular_kis.enabled:
         raise KrxAlphaError("regular_kis collection is disabled")
-    route = StreamRoute(MarketVenue.KRX, MarketSession.REGULAR)
-    streams: tuple[str, str] = tuple(regular_kis.streams)  # type: ignore[assignment]
+    venue = MarketVenue(str(getattr(args, "venue", "krx")))
+    route = StreamRoute(venue, MarketSession.REGULAR)
+    streams: tuple[str, str] = tuple(regular_kis.nxt_streams if venue is MarketVenue.NXT else regular_kis.streams)  # type: ignore[assignment]
     credentials = load_kis_data_credentials()
     slot = str(args.credential_slot)
     key_id = str(args.credential_key_id)
@@ -115,19 +133,32 @@ async def _run_stream(args: argparse.Namespace) -> int:
         raise KrxAlphaError(f"regular_kis symbols must be non-empty for slot {slot}")
     session_date = dt.date.fromisoformat(str(args.session_date))
     paths = DataPaths(pathlib.Path(str(args.journal_root)).parent)
-    candidates_order = _candidate_symbols(pathlib.Path(str(args.candidates_path)), session_date, paths)
+    anchors = resolve_session_anchors(paths.session_calendar_dir, session_date)
     capacity = regular_kis.pair_capacity_per_connection
     if capacity is None:
         raise SlotBudgetExceededError("regular_kis pair capacity is not configured")
+    if venue is MarketVenue.NXT:
+        if not regular_kis.nxt_credential_slots:
+            raise KrxAlphaError("nxt regular collection has no configured credential slots")
+        if anchors.open_shift != dt.timedelta(0):
+            raise KrxAlphaError(f"nxt regular collection is not verified for shifted session {session_date.isoformat()}")
+        candidates_order = _nxt_candidate_symbols(
+            pathlib.Path(str(args.candidates_path)), session_date, regular_kis.nxt_max_symbols
+        )
+        plan_slots = tuple(regular_kis.nxt_credential_slots)
+    else:
+        candidates_order = _candidate_symbols(pathlib.Path(str(args.candidates_path)), session_date, paths)
+        plan_slots = tuple(regular_kis.credential_slots)
     slot_budget = len(symbols) * len(streams)
     if slot_budget > capacity:
         raise SlotBudgetExceededError(f"planned pairs {slot_budget} exceed capacity {capacity}")
     plan = plan_regular_kis_shards(
         symbols=candidates_order,
         credentials=credentials,
-        credential_slots=tuple(regular_kis.credential_slots),
+        credential_slots=plan_slots,
         pair_capacity_per_connection=capacity,
         streams=streams,
+        venue=venue,
     )
     shard_index = int(args.shard_index)
     expected = next((shard for shard in plan if shard.shard_index == shard_index), None)
@@ -135,13 +166,10 @@ async def _run_stream(args: argparse.Namespace) -> int:
         raise MissingCredentialsError(f"shard symbols do not match the regular_kis plan for shard {shard_index}")
     if slot != expected.credential_slot or key_id != expected.credential_key_id:
         raise MissingCredentialsError(f"credential fingerprint mismatch for slot {slot}")
-    anchors = resolve_session_anchors(
-        DataPaths(pathlib.Path(str(args.journal_root)).parent).session_calendar_dir, session_date
-    )
     overrides = resolve_clock_overrides(getattr(args, "ntp_host", None), getattr(args, "max_clock_offset_ns", None), settings)
     if not 0 < overrides.max_clock_offset_ns <= 2_000_000_000:
         raise ValueError("max_clock_offset_ns must be positive and at most 2 seconds")
-    shard = AftermarketShard(MarketVenue.KRX, shard_index, symbols, streams, cred.slot, cred.key_id)
+    shard = AftermarketShard(venue, shard_index, symbols, streams, cred.slot, cred.key_id)
     cfg = SessionConfig(
         session_date=session_date,
         journal_root=pathlib.Path(str(args.journal_root)),

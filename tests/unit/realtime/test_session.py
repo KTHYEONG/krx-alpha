@@ -1217,3 +1217,29 @@ def test_invalid_identity_clears_previously_set_identity(tmp_path, monkeypatch, 
 
     assert process_identity() == {}
     assert any("stage=process_identity status=INVALID" in r.getMessage() for r in caplog.records)
+
+
+def test_nxt_regular_manifest_closes_at_closing_auction(tmp_path, monkeypatch) -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    import src.realtime.session as session_mod
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import SessionConfig, StreamRoute, bootstrap_session
+    from src.universe.ipc import write_candidates
+
+    monkeypatch.setattr(session_mod, "measure_ntp_offset_ns", lambda host, *, client=None: 0)
+    day = dt.date(2026, 11, 16)
+    cp = tmp_path / "c.json"
+    write_candidates(cp, [{"symbol": "005930", "selection_reasons": ["limit_up"]}], rev=1)
+    cfg = SessionConfig(
+        session_date=day, journal_root=tmp_path / "l0", manifest_path=tmp_path / "s.json",
+        candidates_path=cp, ntp_host="h", slot_budget=40, max_clock_offset_ns=2_000_000_000,
+        desired_streams=("H0NXCNT0", "H0NXASP0"), vendor="kis",
+        route=StreamRoute(MarketVenue.NXT, MarketSession.REGULAR),
+    )
+
+    session = bootstrap_session(cfg, now_ns=1)
+
+    expected = int(dt.datetime(2026, 11, 16, 15, 20, tzinfo=ZoneInfo("Asia/Seoul")).timestamp() * 1_000_000_000)
+    assert session.manifest.expected_close_ns == expected

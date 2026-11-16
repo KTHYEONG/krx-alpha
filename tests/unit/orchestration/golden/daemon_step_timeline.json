@@ -166,6 +166,9 @@
         "regular_kis_circuit_alerted": [],
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
+        "regular_nxt_circuit_alerted": [],
+        "regular_nxt_plan": [],
+        "regular_nxt_plan_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -254,6 +257,9 @@
         "regular_kis_circuit_alerted": [],
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
+        "regular_nxt_circuit_alerted": [],
+        "regular_nxt_plan": [],
+        "regular_nxt_plan_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -424,6 +430,9 @@
         "regular_kis_circuit_alerted": [],
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
+        "regular_nxt_circuit_alerted": [],
+        "regular_nxt_plan": [],
+        "regular_nxt_plan_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -555,6 +564,9 @@
         "regular_kis_circuit_alerted": [],
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
+        "regular_nxt_circuit_alerted": [],
+        "regular_nxt_plan": [],
+        "regular_nxt_plan_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -703,6 +715,9 @@
         "regular_kis_circuit_alerted": [],
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
+        "regular_nxt_circuit_alerted": [],
+        "regular_nxt_plan": [],
+        "regular_nxt_plan_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -903,6 +918,9 @@
         "regular_kis_circuit_alerted": [],
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
+        "regular_nxt_circuit_alerted": [],
+        "regular_nxt_plan": [],
+        "regular_nxt_plan_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -1107,6 +1125,9 @@
         "regular_kis_circuit_alerted": [],
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
+        "regular_nxt_circuit_alerted": [],
+        "regular_nxt_plan": [],
+        "regular_nxt_plan_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -1479,6 +1500,9 @@
         "regular_kis_circuit_alerted": [],
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
+        "regular_nxt_circuit_alerted": [],
+        "regular_nxt_plan": [],
+        "regular_nxt_plan_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -1596,6 +1620,9 @@
         "regular_kis_circuit_alerted": [],
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
+        "regular_nxt_circuit_alerted": [],
+        "regular_nxt_plan": [],
+        "regular_nxt_plan_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -1734,6 +1761,9 @@
         "regular_kis_circuit_alerted": [],
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
+        "regular_nxt_circuit_alerted": [],
+        "regular_nxt_plan": [],
+        "regular_nxt_plan_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -1898,6 +1928,9 @@
         "regular_kis_circuit_alerted": [],
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
+        "regular_nxt_circuit_alerted": [],
+        "regular_nxt_plan": [],
+        "regular_nxt_plan_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -2052,6 +2085,9 @@
         "regular_kis_circuit_alerted": [],
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
+        "regular_nxt_circuit_alerted": [],
+        "regular_nxt_plan": [],
+        "regular_nxt_plan_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')"
@@ -2274,6 +2310,9 @@
         "regular_kis_circuit_alerted": [],
         "regular_kis_plan": [],
         "regular_kis_plan_day": null,
+        "regular_nxt_circuit_alerted": [],
+        "regular_nxt_plan": [],
+        "regular_nxt_plan_day": null,
         "repair_expiry_paged": [],
         "resume_logged": [
           "(datetime.date(2026, 9, 16), 'STREAMER_ACTIVE:manifest_missing')",
@@ -2376,9 +2415,15 @@
     "[DATA] stage=regular_kis_dynamic status=RESTARTED slot=%s exit_code=%s",
     "[DATA] stage=regular_kis_dynamic status=SUPERVISE_FAIL slot=%s reason=%s",
     "[DATA] stage=regular_kis_plan status=SKIP reason=%s date=%s",
+    "[DATA] stage=regular_kis_plan status=SKIP reason=%s date=%s",
+    "[DATA] stage=regular_kis_plan status=SKIP reason=%s date=%s",
+    "[DATA] stage=regular_kis_plan status=SKIP reason=%s date=%s",
     "[DATA] stage=regular_kis_plan status=SKIP reason=degraded_candidates date=%s",
     "[DATA] stage=regular_kis_stream status=FAIL reason=circuit_open shard=%s date=%s",
+    "[DATA] stage=regular_kis_stream status=FAIL reason=circuit_open shard=%s date=%s",
     "[DATA] stage=regular_kis_stream status=RESTARTED shard=%s exit_code=%s",
+    "[DATA] stage=regular_kis_stream status=RESTARTED shard=%s exit_code=%s",
+    "[DATA] stage=regular_kis_supervise status=FAIL reason=%s",
     "[DATA] stage=regular_kis_supervise status=FAIL reason=%s",
     "[DATA] stage=repair_hold status=EXPIRING days=%s delete_on=%s",
     "[DATA] stage=repair_hold status=FAIL reason=expiry_check_error error=%s",

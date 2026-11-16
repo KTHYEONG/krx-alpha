@@ -169,6 +169,7 @@ def plan_regular_kis_shards(
     pair_capacity_per_connection: int,
     streams: tuple[str, str],
     ls_covered_symbols: frozenset[str] | None = None,
+    venue: MarketVenue = MarketVenue.KRX,
 ) -> tuple[AftermarketShard, ...]:
     """Assign LS-uncovered symbols first, then fill configured KIS slots in priority order."""
     ordered = tuple(symbols)
@@ -176,6 +177,8 @@ def plan_regular_kis_shards(
         raise KrxAlphaError("empty regular_kis symbols")
     if len(set(ordered)) != len(ordered):
         raise KrxAlphaError("duplicate regular_kis symbols")
+    if ls_covered_symbols is not None and venue is not MarketVenue.KRX:
+        raise KrxAlphaError("ls_covered_symbols is KRX-only")
     if ls_covered_symbols is not None:
         ordered = tuple(s for s in symbols if s not in ls_covered_symbols) + tuple(
             s for s in symbols if s in ls_covered_symbols
@@ -223,7 +226,7 @@ def plan_regular_kis_shards(
             continue
         plan.append(
             AftermarketShard(
-                MarketVenue.KRX,
+                venue,
                 index,
                 chunk,
                 streams,

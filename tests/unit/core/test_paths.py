@@ -163,3 +163,17 @@ def test_membership_and_universe_dropped_paths_layout(tmp_path) -> None:
     assert paths.membership_path(day) == paths.manifest_dir / "membership" / "2026-11-03.jsonl"
     assert paths.universe_dropped_dir == paths.root / "universe_dropped"
     assert paths.universe_dropped_out(day) == paths.root / "universe_dropped" / "2026-11-03.parquet"
+
+
+def test_regular_kis_manifest_path_venue_and_nxt_candidates() -> None:
+    import datetime as dt
+    import pathlib
+
+    from src.core.paths import DataPaths
+    from src.realtime.contracts import MarketVenue
+
+    paths = DataPaths(pathlib.Path("var/krx"))
+    day = dt.date(2026, 10, 22)
+    assert paths.regular_kis_manifest_path(day, 1, MarketVenue.NXT).name == "2026-10-22.nxt.shard-01.json"
+    assert paths.regular_kis_manifest_path(day, 1).name == "2026-10-22.krx.shard-01.json"
+    assert paths.regular_nxt_candidates(day) == paths.universe_dir / "regular_nxt" / "2026-10-22.json"

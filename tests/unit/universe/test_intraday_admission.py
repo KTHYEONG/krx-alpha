@@ -189,7 +189,7 @@ def test_settings_defaults_are_inert() -> None:
     assert settings.enabled is False
     assert settings.admission_cutoff == dt.time(15, 15)
     assert settings.post_close_screen_at == dt.time(15, 31)
-    assert settings.kis_dynamic_slots == ("3", "4")
+    assert settings.kis_dynamic_slots == ("5",)
 
 
 @pytest.mark.parametrize("slots", [("3", "3"), ("6",)])

@@ -197,9 +197,14 @@ class DataPaths:
         venue_s = str(getattr(venue, "value", venue))
         return self.manifest_dir / "aftermarket" / f"{day.isoformat()}.{venue_s}.shard-{shard_index:02d}.json"
 
-    def regular_kis_manifest_path(self, day: dt.date, shard_index: int) -> pathlib.Path:
-        """Return `manifest/regular_kis/<day>.krx.shard-<NN>.json`; pure path algebra."""
-        return self.manifest_dir / "regular_kis" / f"{day.isoformat()}.krx.shard-{shard_index:02d}.json"
+    def regular_kis_manifest_path(self, day: dt.date, shard_index: int, venue: object = "krx") -> pathlib.Path:
+        """Return `manifest/regular_kis/<day>.<venue>.shard-<NN>.json`; pure path algebra."""
+        venue_s = str(getattr(venue, "value", venue))
+        return self.manifest_dir / "regular_kis" / f"{day.isoformat()}.{venue_s}.shard-{shard_index:02d}.json"
+
+    def regular_nxt_candidates(self, day: dt.date) -> pathlib.Path:
+        """Return the NXT regular symbol file written by Part 3b; pure path algebra."""
+        return self.universe_dir / "regular_nxt" / f"{day.isoformat()}.json"
 
     def ls_manifest_path(self, day: dt.date, shard_index: int) -> pathlib.Path:
         """Return the LS manifest for a shard; shard 0 is the legacy `manifest_path(day)`. Pure path algebra."""

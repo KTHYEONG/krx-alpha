@@ -38,7 +38,7 @@ class _FakeSupervisor:
         return "not_running"
 
 
-def _runner(monkeypatch, tmp_path, *, intraday_enabled: bool, credential_slots=("1", "2"), dynamic_slots=None):
+def _runner(monkeypatch, tmp_path, *, intraday_enabled: bool, credential_slots=("1", "2"), dynamic_slots=("3", "4")):
     monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
     monkeypatch.setattr(
         daemon_mod,
@@ -52,7 +52,7 @@ def _runner(monkeypatch, tmp_path, *, intraday_enabled: bool, credential_slots=(
         enabled=True, credential_slots=credential_slots, pair_capacity_per_connection=41
     )
     intraday = IntradayAdmissionSettings(
-        enabled=intraday_enabled, **({} if dynamic_slots is None else {"kis_dynamic_slots": dynamic_slots})
+        enabled=intraday_enabled, kis_dynamic_slots=dynamic_slots
     )
     settings = CollectorSettings(data_root=tmp_path / "data")
     runtime = resolve_collector_runtime(collector=settings, regular_kis=regular, intraday=intraday)

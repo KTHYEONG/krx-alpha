@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from src.cli import collect_regular_kis
-from src.core.errors import MissingCredentialsError
+from src.core.errors import KrxAlphaError, MissingCredentialsError
 from src.realtime.kis_sharding import KisDataCredential
 
 _KST = ZoneInfo("Asia/Seoul")
@@ -34,7 +34,7 @@ def _write_candidates(path: pathlib.Path, *, day: dt.date, symbols: tuple[str, .
     )
 
 
-def _runtime(*, enabled=True, slots=("1", "2"), capacity=41, grace=120.0, silence=30.0):
+def _runtime(*, enabled=True, slots=("1", "2"), capacity=41, grace=120.0, silence=30.0, nxt_slots=()):
     collector = SimpleNamespace(
         ntp_host="ntp-host",
         ntp_fallback_hosts=(),
@@ -49,6 +49,9 @@ def _runtime(*, enabled=True, slots=("1", "2"), capacity=41, grace=120.0, silenc
         streams=("H0STCNT0", "H0STASP0"),
         close_grace_s=grace,
         silence_limit_s=silence,
+        nxt_credential_slots=nxt_slots,
+        nxt_streams=("H0NXCNT0", "H0NXASP0"),
+        nxt_max_symbols=len(nxt_slots) * ((capacity or 0) // 2),
     )
     return SimpleNamespace(collector=collector, regular_kis=regular_kis)
 
@@ -294,3 +297,92 @@ def test_malformed_rev_and_over_capacity_are_rejected(monkeypatch, tmp_path) -> 
                 _args(tmp_path, day="2026-09-16", symbols=",".join(symbols), slot="1", key_id="fp1")
             )
         )
+
+
+def _write_nxt_snapshot(path: pathlib.Path, *, day: dt.date, symbols: tuple[str, ...], session: str = "regular_nxt") -> None:
+    from src.universe.ipc import CandidateSnapshot, write_candidate_snapshot
+
+    stamp = dt.datetime(day.year, day.month, day.day, 8, 0, tzinfo=_KST)
+    rows = tuple({"symbol": sym, "rank": rank} for rank, sym in enumerate(symbols, start=1))
+    write_candidate_snapshot(
+        path,
+        CandidateSnapshot(
+            schema_version=1, rev=int(day.strftime("%Y%m%d")), session_date=day, session=session,
+            generated_at=stamp, source_asof=stamp, effective_from=stamp, policy_version="test",
+            capacity=len(rows), eligible_count=len(rows), selected_count=len(rows), candidates=rows,
+        ),
+    )
+
+
+def test_nxt_stream_refuses_without_slots_or_on_shifted_day(monkeypatch, tmp_path) -> None:
+    from src.core.session_anchors import AnchorSource, SessionAnchors
+
+    day = dt.date(2026, 9, 16)
+    symbols = tuple(f"{i:06d}" for i in range(20))
+    _write_nxt_snapshot(tmp_path / "nxt.json", day=day, symbols=symbols)
+    args = _args(tmp_path, day="2026-09-16", symbols=",".join(symbols[:20]), slot="2", key_id="fp2")
+    args.venue = "nxt"
+    args.candidates_path = str(tmp_path / "nxt.json")
+    monkeypatch.setattr(collect_regular_kis, "load_kis_data_credentials", lambda: _creds())
+    monkeypatch.setattr(collect_regular_kis, "resolve_collector_runtime", lambda **kw: _runtime(nxt_slots=()))
+    with pytest.raises(KrxAlphaError, match="no configured credential slots"):
+        asyncio.run(collect_regular_kis._run_stream(args))
+
+    shifted = SessionAnchors(
+        date=day, regular_open=dt.time(9, 5), closing_auction_start=dt.time(15, 25),
+        regular_close=dt.time(15, 30), after_market_end=dt.time(18, 0), source=AnchorSource.DEFAULT,
+    )
+    monkeypatch.setattr(collect_regular_kis, "resolve_collector_runtime", lambda **kw: _runtime(nxt_slots=("2",)))
+    monkeypatch.setattr(collect_regular_kis, "resolve_session_anchors", lambda *a, **kw: shifted)
+    with pytest.raises(KrxAlphaError, match="shifted session"):
+        asyncio.run(collect_regular_kis._run_stream(args))
+
+
+def test_nxt_stream_rejects_stale_snapshot_and_symbol_mismatch(monkeypatch, tmp_path) -> None:
+    day = dt.date(2026, 9, 16)
+    symbols = tuple(f"{i:06d}" for i in range(20))
+    monkeypatch.setattr(collect_regular_kis, "load_kis_data_credentials", lambda: _creds())
+    monkeypatch.setattr(collect_regular_kis, "resolve_collector_runtime", lambda **kw: _runtime(nxt_slots=("2",)))
+    monkeypatch.setattr(
+        collect_regular_kis, "bootstrap_session", lambda cfg: (_ for _ in ()).throw(AssertionError("no bootstrap"))
+    )
+    args = _args(tmp_path, day="2026-09-16", symbols=",".join(symbols), slot="2", key_id="fp2")
+    args.venue = "nxt"
+
+    args.candidates_path = str(tmp_path / "missing.json")
+    with pytest.raises(KrxAlphaError):
+        asyncio.run(collect_regular_kis._run_stream(args))
+
+    _write_nxt_snapshot(tmp_path / "stale.json", day=day - dt.timedelta(days=1), symbols=symbols)
+    args.candidates_path = str(tmp_path / "stale.json")
+    with pytest.raises(KrxAlphaError):
+        asyncio.run(collect_regular_kis._run_stream(args))
+
+    _write_nxt_snapshot(tmp_path / "ok.json", day=day, symbols=symbols)
+    args.candidates_path = str(tmp_path / "ok.json")
+    args.symbols = ",".join(symbols[1:]) + ",000099"
+    with pytest.raises(MissingCredentialsError, match="do not match"):
+        asyncio.run(collect_regular_kis._run_stream(args))
+
+
+def test_collect_parser_venue_defaults_to_krx_and_accepts_nxt() -> None:
+    import argparse
+
+    root = argparse.ArgumentParser()
+    collect_regular_kis.add_parser(root.add_subparsers(dest="command"))
+    base = [
+        "collect-regular-kis",
+        "--session-date", "2026-09-16",
+        "--journal-root", "journal",
+        "--manifest-path", "manifest.json",
+        "--candidates-path", "pool.json",
+        "--shard-index", "0",
+        "--credential-slot", "2",
+        "--credential-key-id", "fp2",
+        "--symbols", "000001",
+    ]
+
+    assert root.parse_args(base).venue == "krx"
+    assert root.parse_args([*base, "--venue", "nxt"]).venue == "nxt"
+    with pytest.raises(SystemExit):
+        root.parse_args([*base, "--venue", "kosdaq"])

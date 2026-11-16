@@ -62,4 +62,26 @@ def test_stream_cmd_layout(tmp_path) -> None:
     assert cmd[cmd.index("--credential-slot") + 1] == "2"
     assert cmd[cmd.index("--credential-key-id") + 1] == "fp2"
     assert cmd[cmd.index("--symbols") + 1] == "005930"
-    assert "--venue" not in cmd
+    assert cmd[cmd.index("--venue") + 1] == "krx"
+
+
+def test_nxt_collection_due_window_and_shifted_day() -> None:
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from src.core.session_anchors import SessionAnchors, AnchorSource, standard_session_anchors
+    from src.orchestration.regular_kis import regular_nxt_collection_due
+
+    kst = ZoneInfo("Asia/Seoul")
+    anchors = standard_session_anchors(DAY)
+
+    def due(hour: int, minute: int, second: int = 0, *, a=anchors) -> bool:
+        now = dt.datetime(DAY.year, DAY.month, DAY.day, hour, minute, second, tzinfo=kst)
+        return regular_nxt_collection_due(now, anchors=a, start_lead_s=120.0, close_grace_s=120.0)
+
+    assert (due(8, 57, 59), due(8, 58, 0), due(15, 21, 59), due(15, 22, 0)) == (False, True, True, False)
+    shifted = SessionAnchors(
+        date=DAY, regular_open=dt.time(9, 5), closing_auction_start=dt.time(15, 25),
+        regular_close=dt.time(15, 30), after_market_end=dt.time(18, 0), source=AnchorSource.DEFAULT,
+    )
+    assert due(9, 0, a=shifted) is False

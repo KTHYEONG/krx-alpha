@@ -284,6 +284,9 @@ class RegularKisSettings(BaseSettings):
     start_lead_s: float = Field(default=1920.0, gt=0)
     close_grace_s: float = Field(default=120.0, ge=0)
     silence_limit_s: float = Field(default=30.0, gt=0)
+    nxt_credential_slots: tuple[str, ...] = ()
+    nxt_streams: tuple[str, str] = ("H0NXCNT0", "H0NXASP0")
+    nxt_start_lead_s: float = Field(default=120.0, gt=0)
 
     @model_validator(mode="after")
     def check_verified_capacity_when_enabled(self) -> RegularKisSettings:
@@ -297,6 +300,20 @@ class RegularKisSettings(BaseSettings):
             raise ValueError("pair_capacity_per_connection must hold at least one symbol across streams")
         return self
 
+    @model_validator(mode="after")
+    def check_nxt_slots_when_enabled(self) -> RegularKisSettings:
+        if not self.enabled or not self.nxt_credential_slots:
+            return self
+        if len(set(self.nxt_credential_slots)) != len(self.nxt_credential_slots):
+            raise ValueError(f"nxt_credential_slots must be duplicate-free: {self.nxt_credential_slots}")
+        invalid = [slot for slot in self.nxt_credential_slots if slot not in _KIS_CREDENTIAL_SLOTS]
+        if invalid:
+            raise ValueError(f"nxt_credential_slots entries must be within '1'..'5': {invalid}")
+        overlap = sorted(set(self.nxt_credential_slots) & set(self.credential_slots))
+        if overlap:
+            raise ValueError(f"nxt_credential_slots must not overlap credential_slots: {overlap}")
+        return self
+
     @property
     def max_symbols(self) -> int:
         if not self.enabled:
@@ -304,6 +321,12 @@ class RegularKisSettings(BaseSettings):
         if self.pair_capacity_per_connection is None:
             return 0
         return len(self.credential_slots) * (self.pair_capacity_per_connection // len(self.streams))
+
+    @property
+    def nxt_max_symbols(self) -> int:
+        if not self.enabled or not self.nxt_credential_slots or self.pair_capacity_per_connection is None:
+            return 0
+        return len(self.nxt_credential_slots) * (self.pair_capacity_per_connection // len(self.nxt_streams))
 
 
 _KIS_CREDENTIAL_SLOTS: frozenset[str] = frozenset({"1", "2", "3", "4", "5"})
@@ -322,7 +345,7 @@ class IntradayAdmissionSettings(BaseSettings):
     min_abs_change_pct: float = Field(default=5.0, gt=0)
     min_trade_value_krw: int = Field(default=10_000_000_000, gt=0)
     max_pages: int = Field(default=3, ge=1)
-    kis_dynamic_slots: tuple[str, ...] = ("3", "4")
+    kis_dynamic_slots: tuple[str, ...] = ("5",)
     status_check: bool = True
 
     @model_validator(mode="after")
@@ -972,6 +995,7 @@ def resolve_collector_runtime(
     resolved_watchdog = shard_watchdog if shard_watchdog is not None else ShardWatchdogSettings()
     resolved_audit = audit if audit is not None else AuditSettings()
     resolved_regular_kis = regular_kis if regular_kis is not None else RegularKisSettings()
+    resolved_intraday = intraday if intraday is not None else IntradayAdmissionSettings()
     if aftermarket is None:
         resolved_aftermarket = AftermarketSettings(enabled=resolved_collector.after_market_enabled)
     else:
@@ -988,6 +1012,21 @@ def resolve_collector_runtime(
     if resolved_regular_kis.enabled:
         if resolved_premarket.enabled and resolved_premarket.credential_slot in resolved_regular_kis.credential_slots:
             raise ValueError("regular_kis credential_slots must not overlap the premarket credential slot")
+        if resolved_regular_kis.nxt_credential_slots:
+            if resolved_premarket.enabled and resolved_premarket.credential_slot in resolved_regular_kis.nxt_credential_slots:
+                raise ValueError("regular_kis nxt_credential_slots must not overlap the premarket credential slot")
+            if resolved_intraday.enabled and set(resolved_intraday.kis_dynamic_slots) & set(
+                resolved_regular_kis.nxt_credential_slots
+            ):
+                raise ValueError("regular_kis nxt_credential_slots must not overlap intraday kis_dynamic_slots")
+            nxt_end = dt.datetime.combine(dt.date(2000, 1, 1), STANDARD_CLOSING_AUCTION) + dt.timedelta(
+                seconds=float(resolved_regular_kis.close_grace_s)
+            )
+            nxt_prearm = dt.datetime.combine(dt.date(2000, 1, 1), STANDARD_NXT_AFTER_MARKET_OPEN) - dt.timedelta(
+                seconds=float(resolved_aftermarket.prearm_lead_s)
+            )
+            if not nxt_end < nxt_prearm:
+                raise ValueError("NXT regular window must end strictly before the aftermarket prearm moment")
         if resolved_aftermarket.enabled:
             base = dt.date(2000, 1, 1)
             regular_end = dt.datetime.combine(base, STANDARD_REGULAR_CLOSE) + dt.timedelta(
@@ -1016,7 +1055,7 @@ def resolve_collector_runtime(
         regular_kis=resolved_regular_kis,
         universe_tiers=resolved_tiers,
         repair=resolved_repair,
-        intraday=intraday if intraday is not None else IntradayAdmissionSettings(),
+        intraday=resolved_intraday,
     )
 
 

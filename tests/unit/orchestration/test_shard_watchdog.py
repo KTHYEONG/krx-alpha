@@ -268,7 +268,14 @@ def test_window_unsupported_pair() -> None:
     with pytest.raises(ValueError, match="premarket window"):
         shard_window(MarketVenue.KRX, MarketSession.NXT_PRE, day=DAY, anchors=anchors)
     with pytest.raises(ValueError, match="regular window"):
-        shard_window(MarketVenue.NXT, MarketSession.REGULAR, day=DAY, anchors=anchors)
+        shard_window(MarketVenue.UNKNOWN, MarketSession.REGULAR, day=DAY, anchors=anchors)
+
+
+def test_regular_window_accepts_krx_and_nxt() -> None:
+    anchors = standard_session_anchors(DAY)
+    for venue in (MarketVenue.KRX, MarketVenue.NXT):
+        open_dt, end_dt = shard_window(venue, MarketSession.REGULAR, day=DAY, anchors=anchors)
+        assert (open_dt.time(), end_dt.time()) == (dt.time(9, 0), dt.time(15, 20))
 
 
 def test_regular_window_is_open_to_closing_auction() -> None:

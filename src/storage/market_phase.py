@@ -75,6 +75,7 @@ MARKET_PHASE_WINDOWS: tuple[PhaseWindow, ...] = (
     PhaseWindow(MarketVenue.KRX, None, STANDARD_POST_CLOSING_PRICE_OPEN, STANDARD_KRX_AFTER_MARKET_OPEN, MarketPhase.POST_MARKET_CLOSING_PRICE),
     PhaseWindow(MarketVenue.KRX, None, STANDARD_KRX_AFTER_MARKET_OPEN, STANDARD_AFTER_MARKET_END, MarketPhase.AFTERMARKET),
     PhaseWindow(MarketVenue.NXT, None, STANDARD_NXT_PREMARKET_OPEN, STANDARD_NXT_PREMARKET_END, MarketPhase.PREMARKET),
+    PhaseWindow(MarketVenue.NXT, None, STANDARD_REGULAR_OPEN, STANDARD_CLOSING_AUCTION, MarketPhase.REGULAR),
     PhaseWindow(MarketVenue.NXT, None, STANDARD_NXT_AFTER_MARKET_OPEN, STANDARD_AFTER_MARKET_END, MarketPhase.AFTERMARKET),
 )
 
@@ -112,6 +113,7 @@ def phase_windows_for(anchors: SessionAnchors) -> tuple[PhaseWindow, ...]:
         PhaseWindow(MarketVenue.KRX, None, anchors.shift_post_close(STANDARD_POST_CLOSING_PRICE_OPEN), anchors.shift_post_close(STANDARD_KRX_AFTER_MARKET_OPEN), MarketPhase.POST_MARKET_CLOSING_PRICE),
         PhaseWindow(MarketVenue.KRX, None, anchors.shift_post_close(STANDARD_KRX_AFTER_MARKET_OPEN), anchors.after_market_end, MarketPhase.AFTERMARKET),
         PhaseWindow(MarketVenue.NXT, None, anchors.shift_pre_open(STANDARD_NXT_PREMARKET_OPEN), anchors.shift_pre_open(STANDARD_NXT_PREMARKET_END), MarketPhase.PREMARKET),
+        PhaseWindow(MarketVenue.NXT, None, anchors.regular_open, anchors.closing_auction_start, MarketPhase.REGULAR),
         PhaseWindow(MarketVenue.NXT, None, anchors.shift_post_close(STANDARD_NXT_AFTER_MARKET_OPEN), anchors.after_market_end, MarketPhase.AFTERMARKET),
     )
 

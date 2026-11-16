@@ -443,3 +443,51 @@ def test_regular_plan_rejects_duplicate_or_empty_symbols() -> None:
             symbols=("005930",), credentials=keys, credential_slots=("1",),
             pair_capacity_per_connection=1, streams=("H0STCNT0", "H0STASP0"),
         )
+
+
+def test_nxt_regular_plan_carries_venue_without_ls_coverage(caplog) -> None:
+    import logging
+
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    keys = tuple(KisDataCredential(str(i), f"key{i}", "s", "h", f"id{i}") for i in (2, 3))
+    symbols = tuple(f"{i:06d}" for i in range(40))
+    with caplog.at_level(logging.INFO, logger="src.realtime.kis_sharding"):
+        plan = plan_regular_kis_shards(
+            symbols=symbols, credentials=keys, credential_slots=("2", "3"),
+            pair_capacity_per_connection=41, streams=("H0NXCNT0", "H0NXASP0"),
+            venue=MarketVenue.NXT,
+        )
+    assert all(shard.venue is MarketVenue.NXT for shard in plan)
+    assert [len(shard.symbols) for shard in plan] == [20, 20]
+    assert tuple(sym for shard in plan for sym in shard.symbols) == symbols
+    assert not [r for r in caplog.records if "regular_feed_coverage" in r.getMessage()]
+
+
+def test_nxt_regular_plan_rejects_ls_coverage() -> None:
+    import pytest
+
+    from src.core.errors import KrxAlphaError
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    keys = (KisDataCredential("2", "key2", "s", "h", "id2"),)
+    with pytest.raises(KrxAlphaError, match="KRX-only"):
+        plan_regular_kis_shards(
+            symbols=("005930",), credentials=keys, credential_slots=("2",),
+            pair_capacity_per_connection=41, streams=("H0NXCNT0", "H0NXASP0"),
+            ls_covered_symbols=frozenset(), venue=MarketVenue.NXT,
+        )
+
+
+def test_krx_regular_plan_default_venue_is_krx() -> None:
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    keys = (KisDataCredential("1", "key1", "s", "h", "id1"),)
+    plan = plan_regular_kis_shards(
+        symbols=("005930", "000660"), credentials=keys, credential_slots=("1",),
+        pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
+    )
+    assert [(shard.venue, shard.credential_slot) for shard in plan] == [(MarketVenue.KRX, "1")]

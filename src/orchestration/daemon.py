@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Any, ClassVar, Final
+from typing import Any, ClassVar, Final, cast
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -119,6 +119,7 @@ from src.orchestration.regular_kis import (
     regular_kis_collection_due,
     regular_kis_dynamic_stream_cmd,
     regular_kis_stream_cmd,
+    regular_nxt_collection_due,
 )
 from src.orchestration.shard_watchdog import (
     ShardDecision,
@@ -1311,6 +1312,9 @@ class DaemonState:
     regular_kis_plan: tuple[AftermarketShard, ...] = ()
     regular_kis_plan_day: dt.date | None = None
     regular_kis_circuit_alerted: set[str] = field(default_factory=set)
+    regular_nxt_plan: tuple[AftermarketShard, ...] = ()
+    regular_nxt_plan_day: dt.date | None = None
+    regular_nxt_circuit_alerted: set[str] = field(default_factory=set)
     ls_shard_plan: tuple[LsShard, ...] = ()
     ls_shard_plan_day: dt.date | None = None
     aftermarket_deferred_slots: set[str] = field(default_factory=set)
@@ -1340,6 +1344,7 @@ class DaemonChildren:
     streams: dict[StreamChildKey, ProcessSupervisor] = field(default_factory=dict)
     aftermarket: dict[str, ProcessSupervisor] = field(default_factory=dict)
     regular_kis: dict[str, ProcessSupervisor] = field(default_factory=dict)
+    regular_nxt: dict[str, ProcessSupervisor] = field(default_factory=dict)
     regular_kis_dynamic: dict[str, ProcessSupervisor] = field(default_factory=dict)
     program_sync: Any | None = None
     program_sync_started_at: dt.datetime | None = None
@@ -1814,6 +1819,9 @@ class DaemonRunner:
         self._regular_kis_watchdog = ShardWatchdog(
             limit_s=_wd.aftermarket_stale_limit_s, max_restarts_per_day=_wd.max_restarts_per_day
         )
+        self._regular_nxt_watchdog = ShardWatchdog(
+            limit_s=_wd.aftermarket_stale_limit_s, max_restarts_per_day=_wd.max_restarts_per_day
+        )
         self._ls_watchdog = ShardWatchdog(
             limit_s=_wd.ls_after_close_stale_limit_s, max_restarts_per_day=_wd.max_restarts_per_day
         )
@@ -1883,6 +1891,7 @@ class DaemonRunner:
             targets.append(regular)
         targets.extend(ch.aftermarket.values())
         targets.extend(ch.regular_kis.values())
+        targets.extend(ch.regular_nxt.values())
         targets.extend(ch.regular_kis_dynamic.values())
         ls_b = ch.get(StreamChildKey.REGULAR_LS_B)
         if ls_b is not None:
@@ -2005,7 +2014,7 @@ class DaemonRunner:
         singles: list[Any | None] = [ch.regular, ch.snapshot, ch.db_crosscheck, ch.kiwoom_crosscheck, ch.premarket]
         if any(sup is not None and _child_alive(sup) for sup in singles):
             return True
-        return any(any(_child_alive(sup) for sup in mapping.values()) for mapping in (ch.aftermarket, ch.regular_kis))
+        return any(any(_child_alive(sup) for sup in mapping.values()) for mapping in (ch.aftermarket, ch.regular_kis, ch.regular_nxt))
 
     def _stop_nightly_child(self, *, reason: str) -> None:
         """Terminate the nightly backfill child when present and drop its handle."""
@@ -2318,6 +2327,7 @@ class DaemonRunner:
         self._maybe_orchestrate(now, state, day)
         self._supervise_session_children(now, anchors)
         self._supervise_regular_kis(now, anchors)
+        self._supervise_regular_nxt(now, anchors)
         self._supervise_regular_ls_shard(today)
         self._watch_ls_shards(now, state, today, anchors)
         self._run_ingest_watchdog(now, state, day, anchors)
@@ -2370,6 +2380,9 @@ class DaemonRunner:
         st.regular_kis_plan = ()
         st.regular_kis_plan_day = None
         st.regular_kis_circuit_alerted.clear()
+        st.regular_nxt_plan = ()
+        st.regular_nxt_plan_day = None
+        st.regular_nxt_circuit_alerted.clear()
         st.ls_shard_plan = ()
         st.ls_shard_plan_day = None
         st.aftermarket_deferred_slots.clear()
@@ -3387,9 +3400,10 @@ class DaemonRunner:
             )
         self._page_missing_aftermarket_plan(now, today, anchors, prearm_lead_s)
         plan_slots = {f"krx-{s.shard_index:02d}": s.credential_slot for s in st.regular_kis_plan}
+        plan_slots.update({f"nxt-{s.shard_index:02d}": s.credential_slot for s in st.regular_nxt_plan})
         live_regular_slots = {
             plan_slots[key]
-            for key, sup in ch.regular_kis.items()
+            for key, sup in (*ch.regular_kis.items(), *ch.regular_nxt.items())
             if key in plan_slots and hasattr(sup, "is_running") and bool(sup.is_running())
         }
         for shard in st.aftermarket_plan:
@@ -3605,6 +3619,10 @@ class DaemonRunner:
             raise KrxAlphaError(
                 f"intraday kis_dynamic_slots {index_clash} collide with regular_kis shard indices 0..{len(regular_slots) - 1}"
             )
+        nxt_slots = tuple(getattr(getattr(self._runtime, "regular_kis", None), "nxt_credential_slots", ()))
+        nxt_overlap = sorted(set(intraday.kis_dynamic_slots) & set(nxt_slots))
+        if intraday.enabled and nxt_overlap:
+            raise KrxAlphaError(f"intraday kis_dynamic_slots {nxt_overlap} must not be a regular_nxt credential slot")
         st = self._state
         if st.regular_kis_plan_day == today:
             return
@@ -3657,6 +3675,61 @@ class DaemonRunner:
             logger.error(
                 "[DATA] stage=regular_kis_plan status=SKIP reason=%s date=%s",
                 str(exc),
+                today.isoformat(),
+            )
+
+    def _ensure_regular_nxt_plan(self, today: dt.date) -> None:
+        """Plan NXT regular shards once per day from the rank-ordered symbol file; plan stays () when untrusted."""
+        st = self._state
+        cfg = getattr(self._runtime, "regular_kis", None) or RegularKisSettings()
+        if st.regular_nxt_plan_day == today:
+            return
+        if not cfg.nxt_credential_slots:
+            st.regular_nxt_plan_day = today
+            st.regular_nxt_plan = ()
+            return
+        if st.degraded_active:
+            st.regular_nxt_plan_day = today
+            st.regular_nxt_plan = ()
+            logger.error(
+                "[DATA] stage=regular_kis_plan status=SKIP reason=%s date=%s",
+                "nxt_degraded_candidates",
+                today.isoformat(),
+            )
+            return
+        if st.orchestrated_for != today:
+            return
+        st.regular_nxt_plan_day = today
+        try:
+            snapshot = read_candidate_snapshot(
+                self._paths.regular_nxt_candidates(today),
+                expected_session_date=today,
+                expected_session="regular_nxt",
+                max_candidates=cfg.nxt_max_symbols,
+            )
+        except CandidateFileError:
+            st.regular_nxt_plan = ()
+            logger.error(
+                "[DATA] stage=regular_kis_plan status=SKIP reason=%s date=%s",
+                "nxt_symbol_file_invalid",
+                today.isoformat(),
+            )
+            return
+        symbols = tuple(str(row["symbol"]) for row in sorted(snapshot.candidates, key=lambda row: int(cast(int, row["rank"]))))
+        try:
+            st.regular_nxt_plan = plan_regular_kis_shards(
+                symbols=symbols,
+                credentials=load_kis_data_credentials(),
+                credential_slots=tuple(cfg.nxt_credential_slots),
+                pair_capacity_per_connection=int(cfg.pair_capacity_per_connection or 0),
+                streams=cfg.nxt_streams,
+                venue=MarketVenue.NXT,
+            )
+        except (KrxAlphaError, OSError, ValueError) as exc:
+            st.regular_nxt_plan = ()
+            logger.error(
+                "[DATA] stage=regular_kis_plan status=SKIP reason=%s date=%s",
+                f"nxt_{exc}",
                 today.isoformat(),
             )
 
@@ -3876,6 +3949,118 @@ class DaemonRunner:
             self._watch_regular_kis_shards(now, today, anchors)
         except (KrxAlphaError, KisApiError, OSError, ValueError) as exc:
             logger.warning("[DATA] stage=regular_kis_supervise status=FAIL reason=%s", str(exc))
+
+    def _supervise_regular_nxt(self, now: dt.datetime, anchors: SessionAnchors) -> None:
+        """Start, supervise, watchdog and stop NXT regular shards; never raises and never touches KRX children."""
+        try:
+            cfg = getattr(self._runtime, "regular_kis", None) or RegularKisSettings()
+            st = self._state
+            ch = self._children
+            today = now.astimezone(_KST).date()
+            due = bool(cfg.enabled and cfg.nxt_credential_slots)
+            if due:
+                view = self._gate.view(today, now)
+                if view.status is TradingDayStatus.HOLIDAY or not regular_nxt_collection_due(
+                    now,
+                    anchors=anchors,
+                    start_lead_s=cfg.nxt_start_lead_s,
+                    close_grace_s=cfg.close_grace_s,
+                ):
+                    due = False
+            if not due:
+                for live in ch.regular_nxt.values():
+                    live.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
+                ch.regular_nxt.clear()
+                return
+            self._ensure_regular_nxt_plan(today)
+            for shard in st.regular_nxt_plan:
+                key = f"nxt-{shard.shard_index:02d}"
+                sup = ch.regular_nxt.get(key)
+                if sup is None:
+                    sup = ProcessSupervisor(
+                        cmd=regular_kis_stream_cmd(today, self._paths, shard=shard),
+                        breaker=RestartCircuitBreaker(),
+                    )
+                    ch.regular_nxt[key] = sup
+                result = sup.ensure_running()
+                if result == "restarted":
+                    logger.warning(
+                        "[DATA] stage=regular_kis_stream status=RESTARTED shard=%s exit_code=%s",
+                        key,
+                        sup.last_exit_code,
+                    )
+                elif result == "circuit_open" and key not in st.regular_nxt_circuit_alerted:
+                    st.regular_nxt_circuit_alerted.add(key)
+                    logger.critical(
+                        "[DATA] stage=regular_kis_stream status=FAIL reason=circuit_open shard=%s date=%s",
+                        key,
+                        today.isoformat(),
+                        extra=page(PageKind.REGULAR_FEED_DOWN),
+                    )
+            self._watch_regular_nxt_shards(now, today, anchors)
+        except (KrxAlphaError, KisApiError, OSError, ValueError) as exc:
+            logger.warning("[DATA] stage=regular_kis_supervise status=FAIL reason=%s", str(exc))
+
+    def _watch_regular_nxt_shards(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
+        """Judge each running NXT regular shard's journal freshness inside its window and stop a stale one."""
+        try:
+            self._watch_regular_nxt_shards_guarded(now, today, anchors)
+        except (OSError, ValueError) as exc:
+            self._log_watchdog_error("regular_nxt", exc, now)
+
+    def _watch_regular_nxt_shards_guarded(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
+        wd = getattr(self._runtime, "shard_watchdog", None)
+        if wd is None or not wd.enabled:
+            return
+        st = self._state
+        ch = self._children
+        if not ch.regular_nxt or st.regular_nxt_plan_day != today:
+            return
+        plan = {f"nxt-{s.shard_index:02d}": s for s in st.regular_nxt_plan}
+        live = {
+            key: sup
+            for key, sup in ch.regular_nxt.items()
+            if key in plan and hasattr(sup, "is_running") and hasattr(sup, "stop_for_restart")
+        }
+        if not live:
+            return
+        open_dt, end_dt = shard_window(MarketVenue.NXT, MarketSession.REGULAR, day=today, anchors=anchors)
+        if not open_dt <= now < end_dt:
+            return
+        observations = tuple(
+            ShardObservation(
+                key=key,
+                venue="nxt",
+                running=bool(sup.is_running()),
+                started_at_wall=getattr(sup, "started_at_wall", None),
+                last_journal_wall=shard_last_journal_wall(
+                    self._paths.journal_root,
+                    vendor="kis",
+                    venue="nxt",
+                    session=MarketSession.REGULAR.value,
+                    streams=plan[key].streams,
+                    day=today,
+                    shard_index=plan[key].shard_index,
+                ),
+            )
+            for key, sup in live.items()
+        )
+        decisions = self._regular_nxt_watchdog.evaluate(
+            observations,
+            now_wall=now.timestamp(),
+            window_open_wall=open_dt.timestamp(),
+            in_window=True,
+            day=today,
+        )
+        self._apply_shard_decisions(
+            decisions,
+            watchdog=self._regular_nxt_watchdog,
+            venue="nxt",
+            today=today,
+            supervisors=live,
+            max_restarts=wd.max_restarts_per_day,
+            budget_page=PageKind.REGULAR_SHARD_STALE,
+        )
 
     def _supervise_regular_kis_dynamic(self, today: dt.date) -> None:
         """Run the intraday KIS dynamic shard once its slot lease is free and the slot holds an admission."""
@@ -4538,9 +4723,13 @@ class DaemonRunner:
         for sup in self._children.regular_kis.values():
             sup.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
         self._children.regular_kis.clear()
+        for sup in self._children.regular_nxt.values():
+            sup.stop(timeout_s=CHILD_STOP_TIMEOUT_S)
+        self._children.regular_nxt.clear()
         self._stop_regular_kis_dynamic()
         if clear_circuit_alerts:
             self._state.regular_kis_circuit_alerted.clear()
+            self._state.regular_nxt_circuit_alerted.clear()
 
 
 def _migrate_market_stores(paths: DataPaths) -> None:
