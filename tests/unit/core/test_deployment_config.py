@@ -480,6 +480,7 @@ def _accepted_typed_env_names() -> set[str]:
         config_module.ObservabilitySettings,
         config_module.AlertSettings,
         config_module.TossProgramTradesSettings,
+        config_module.FeedControlSettings,
         config_module.KrxCredentials,
         config_module.TossCredentials,
         config_module.LsCredentials,
