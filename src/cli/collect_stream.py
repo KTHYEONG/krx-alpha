@@ -15,12 +15,14 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from src.core.config import AuditSettings, CollectorSettings, IntradayAdmissionSettings, KisTokenSettings
+from src.core.config import AuditSettings, CollectorSettings, DataPaths, IntradayAdmissionSettings, KisTokenSettings
 from src.core.errors import KrxAlphaError
 from src.core.observability import EVENT
 from src.core.session_anchors import resolve_session_anchors
 from src.realtime.adapters.registry import RegularAdapterContext, regular_vendor
 from src.realtime.connection_handover import SwapRequest
+from src.realtime.contracts import StreamObserver
+from src.realtime.feed_health import FeedHealthConfig, build_feed_health_tracker, feed_id_for
 from src.realtime.lag_monitor import LagMonitor
 from src.realtime.ls_limits import LsGuardConfig
 from src.realtime.regular_open_watch import RegularOpenWatch
@@ -194,6 +196,7 @@ def _ls_dynamic_watch(
     vendor: str,
     shard_index: int,
     static_pairs: list[tuple[str, str]],
+    observer: StreamObserver | None = None,
 ) -> DynamicPairWatcher | None:
     """Watcher for an LS dynamic-reserve shard (index >= 1); None when intraday admission is disabled or for shard 0."""
     if vendor != "ls" or shard_index < 1 or not IntradayAdmissionSettings().enabled:
@@ -217,6 +220,7 @@ def _ls_dynamic_watch(
         session=session,
         static_pairs=static_pairs,
         initial_dynamic=initial,
+        observer=observer,
     )
 
 
@@ -302,6 +306,10 @@ async def run_regular_stream(
         if shard_symbols is not None:
             logger.info("[DATA] stage=ls_shard index=%d symbols=%d", shard_index, len(shard_symbols), extra=EVENT)
         static_pairs = session.replay_pairs()
+        feed_id = feed_id_for(profile.vendor, "krx", shard_index)
+        health_tracker = build_feed_health_tracker(
+            feed_id=feed_id, vendor=profile.vendor, venue="krx", session="regular", session_date=session_date
+        )
         live_watch = _ls_dynamic_watch(
             session=session,
             session_date=session_date,
@@ -309,6 +317,7 @@ async def run_regular_stream(
             vendor=profile.vendor,
             shard_index=shard_index,
             static_pairs=static_pairs,
+            observer=health_tracker,
         )
         await run_streaming_child(
             session=session,
@@ -326,6 +335,11 @@ async def run_regular_stream(
                 on_exceeded=swap_request.request if profile.proactive_handover and shard_index == 0 else None,
             ),
             frame_observers=(open_watch,),
+            feed_health=FeedHealthConfig(
+                tracker=health_tracker,
+                path=DataPaths(pathlib.Path(str(args.journal_root)).parent).feed_health_path(feed_id),
+                interval_s=settings.feed_health_interval_s,
+            ),
             handover=(
                 HandoverSettings(
                     swap_request,

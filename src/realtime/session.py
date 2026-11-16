@@ -20,7 +20,7 @@ from src.core.config import DataPaths
 from src.core.observability import EVENT, clear_process_identity, set_process_identity
 from src.core.session_anchors import STANDARD_NXT_PREMARKET_END, resolve_session_anchors
 from src.realtime.clock import ClockUnsyncedError, measure_ntp_offset_ns
-from src.realtime.contracts import LiveSubscribable, MarketSession, MarketVenue, VendorAck
+from src.realtime.contracts import LiveSubscribable, MarketSession, MarketVenue, StreamObserver, VendorAck
 from src.realtime.ls_limits import LsGuardConfig, apply_ls_subscription_guard
 from src.realtime.kis_sharding import AftermarketShard
 from src.universe.intraday import read_dynamic_admissions
@@ -415,6 +415,7 @@ class DynamicPairWatcher:
         initial_dynamic: Sequence[tuple[str, str]] = (),
         poll_s: float = 5.0,
         wall_ns: Callable[[], int] = time.time_ns,
+        observer: StreamObserver | None = None,
     ) -> None:
         if poll_s <= 0:
             raise ValueError("poll_s must be positive")
@@ -427,6 +428,7 @@ class DynamicPairWatcher:
         self._rev: int | None = None
         self._poll_s = poll_s
         self._wall_ns = wall_ns
+        self._observer = observer
 
     def pairs(self) -> list[tuple[str, str]]:
         return list(dict.fromkeys([*self._static, *self._accepted]))
@@ -469,11 +471,18 @@ class DynamicPairWatcher:
         new = [pair for pair in wanted if pair not in held and pair not in self._rejected]
         if not new:
             return 0
+        if self._observer is not None:
+            self._observer.on_acks(planned=len(new), accepted=0, rejected=0)
         try:
             acks = await adapter.subscribe_live(new)
         except BaseException:
             self._rev = None
+            if self._observer is not None:
+                self._observer.on_acks(planned=0, accepted=0, rejected=len(new))
             raise
+        if self._observer is not None:
+            accepted = sum(1 for ack in acks if ack.accepted)
+            self._observer.on_acks(planned=0, accepted=accepted, rejected=len(acks) - accepted)
         self._record(acks)
         return len(new)
 

@@ -28,6 +28,7 @@ from src.realtime.contracts import (
     HeartbeatProbe,
     L0Frame,
     MarketVenue,
+    StreamObserver,
     VendorAck,
     VendorAdapter,
     VendorAuthRejected,
@@ -198,6 +199,7 @@ class RealtimeStreamer:
         monotonic: Callable[[], float] = time.monotonic,
         pairs_provider: Callable[[], list[tuple[str, str]]] | None = None,
         live_watch: LiveSubscriptionWatch | None = None,
+        observer: StreamObserver | None = None,
     ) -> None:
         if silence_poll_interval_s <= 0:
             raise ValueError(f"silence_poll_interval_s must be positive, got {silence_poll_interval_s}")
@@ -206,6 +208,7 @@ class RealtimeStreamer:
         self._replay_pairs = replay_pairs
         self._pairs_provider = pairs_provider
         self._live_watch = live_watch
+        self._observer = observer
         self._flush_every = flush_every
         self._flush_interval_s = flush_interval_s
         self._silence_limit = silence_limit
@@ -313,6 +316,9 @@ class RealtimeStreamer:
                 self._sink.note_ack(self._adapter.name, ack)
             subscribed_ns = self._wall_ns()
             accepted = sum(1 for a in acks if a.accepted)
+            if self._observer is not None:
+                self._observer.on_acks(planned=len(connect_pairs), accepted=accepted, rejected=len(acks) - accepted)
+                self._observer.on_connected(subscribed_ns / 1e9)
             if self._adapter.name == "ls":
                 accepted_pairs = {(ack.symbol, ack.stream) for ack in acks if ack.accepted}
                 logger.info(
@@ -486,6 +492,8 @@ class RealtimeStreamer:
                     self._last_frame_wall_ns if self._last_frame_wall_ns is not None else run_start_ns,
                     reason,
                 )
+            if self._observer is not None:
+                self._observer.on_disconnected(self._wall_ns() / 1e9, reason)
             cap = AUTH_BACKOFF_MAX_S if reason == "auth_rejected" else self._backoff_max_s
             delay = min(cap, backoff_s * 2 ** (self._failures - 1)) * (0.5 + self._rng() / 2)
             logger.warning(

@@ -17,6 +17,24 @@ logger = logging.getLogger(__name__)
 _KST = ZoneInfo("Asia/Seoul")
 _EVENT_TIME_RE = re.compile(r'"(?:chetime|hotime)"\s*:\s*"(\d{6})"')
 _NS = 1_000_000_000
+LAG_DISCARD_BELOW_S = -60.0
+
+
+def delivery_lag_s(frame: L0Frame) -> float | None:
+    """Return receive wall time minus exchange event time in seconds, or None when the event time is unusable.
+
+    Lags below ``LAG_DISCARD_BELOW_S`` are treated as clock or parse noise and discarded; other negatives clamp to 0.
+    """
+    stamp = frame.exchange_event_time
+    if len(stamp) != 6 or not stamp.isdigit():
+        match = _EVENT_TIME_RE.search(frame.raw)
+        if match is None:
+            return None
+        stamp = match.group(1)
+    received = dt.datetime.fromtimestamp(frame.recv_wall_ns / _NS, tz=_KST)
+    event = received.replace(hour=int(stamp[:2]), minute=int(stamp[2:4]), second=int(stamp[4:]), microsecond=0)
+    lag = (received - event).total_seconds()
+    return None if lag < LAG_DISCARD_BELOW_S else max(0.0, lag)
 
 
 def event_second_of(frame: L0Frame) -> int | None:
@@ -96,16 +114,7 @@ class LagMonitor:
 
     @staticmethod
     def _lag_s(frame: L0Frame) -> float | None:
-        stamp = frame.exchange_event_time
-        if len(stamp) != 6 or not stamp.isdigit():
-            match = _EVENT_TIME_RE.search(frame.raw)
-            if match is None:
-                return None
-            stamp = match.group(1)
-        received = dt.datetime.fromtimestamp(frame.recv_wall_ns / _NS, tz=_KST)
-        event = received.replace(hour=int(stamp[:2]), minute=int(stamp[2:4]), second=int(stamp[4:]), microsecond=0)
-        lag = (received - event).total_seconds()
-        return None if lag < -60.0 else max(0.0, lag)
+        return delivery_lag_s(frame)
 
     def _close_window(self, stream: str) -> None:
         all_lags, self._lags = self._lags, []

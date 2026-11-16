@@ -62,6 +62,8 @@ class CollectorSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_", extra="ignore")
 
+    feed_health_interval_s: float = Field(default=5.0, ge=1.0)
+
     # The host backup script is the sole writer, and the container mounts this path
     # read-only. It must not live under root-owned data_root, which the host user
     # cannot write.

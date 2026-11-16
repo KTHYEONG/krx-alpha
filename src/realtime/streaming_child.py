@@ -16,6 +16,7 @@ from src.core.config import CollectorSettings
 from src.core.errors import SlotBudgetExceededError
 from src.realtime.connection_handover import Handover, SwapRequest
 from src.realtime.contracts import L0Frame, VendorAck, VendorAdapter
+from src.realtime.feed_health import FeedHealthConfig, FeedHealthPublisher, FeedHealthSink
 from src.realtime.lag_monitor import LagMonitor
 from src.realtime.streamer import FrameSink, LiveSubscriptionWatch, RealtimeStreamer, SessionFrameSink
 from src.realtime.ws_lease import Lease, WsLeaseLedger
@@ -93,6 +94,7 @@ async def run_streaming_child(
     frame_observers: tuple[FrameObserver, ...] = (),
     handover: HandoverSettings | None = None,
     live_watch: LiveSubscriptionWatch | None = None,
+    feed_health: FeedHealthConfig | None = None,
 ) -> None:
     """Drive one bootstrapped session until SIGTERM/deadline/max_cycles, then persist."""
     stop = asyncio.Event()
@@ -109,6 +111,7 @@ async def run_streaming_child(
         deadline_task = asyncio.ensure_future(_deadline_watch())
     http: aiohttp.ClientSession | None = None
     handover_state: Handover | None = None
+    health_task: asyncio.Task[None] | None = None
     try:
         http = aiohttp.ClientSession()
         adapter = adapter_factory(http)
@@ -122,6 +125,12 @@ async def run_streaming_child(
         for observer in frame_observers:
             sink = LagMonitoringSink(sink, observer)
         extra: dict[str, Any] = {}
+        if feed_health is not None:
+            sink = FeedHealthSink(sink, feed_health.tracker)
+            extra["observer"] = feed_health.tracker
+            health_task = asyncio.ensure_future(
+                FeedHealthPublisher(feed_health.tracker, feed_health.path, interval_s=feed_health.interval_s).run()
+            )
         if live_watch is not None:
             extra["pairs_provider"] = live_watch.pairs
             extra["live_watch"] = live_watch
@@ -151,6 +160,10 @@ async def run_streaming_child(
         )
         await streamer.run_forever(stop, max_cycles=max_cycles)
     finally:
+        if health_task is not None:
+            health_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await health_task
         if handover_state is not None:
             handover_state.release_primary_lease()
         if deadline_task is not None:

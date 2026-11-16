@@ -41,6 +41,7 @@ def _runtime(*, enabled=True, slots=("1", "2"), capacity=41, grace=120.0, silenc
         min_free_disk_gb=3.0,
         journal_retain_days=3,
         kis_ack_timeout_s=10.0,
+        feed_health_interval_s=5.0,
     )
     regular_kis = SimpleNamespace(
         enabled=enabled,

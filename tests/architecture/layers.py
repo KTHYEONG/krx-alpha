@@ -122,6 +122,7 @@ LAYER_RANK["src/storage/l0_repair.py"] = 2
 LAYER_RANK["src/storage/l0_repair_merge.py"] = 2
 LAYER_RANK["src/cli/gapfill_ticks.py"] = 7
 LAYER_RANK["src/realtime/lag_monitor.py"] = 1
+LAYER_RANK["src/realtime/feed_health.py"] = 1
 LAYER_RANK["src/realtime/regular_open_watch.py"] = 1
 LAYER_RANK["src/realtime/connection_handover.py"] = 2
 LAYER_RANK["src/realtime/ls_limits.py"] = 1

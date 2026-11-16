@@ -17,6 +17,7 @@ from src.core.session_anchors import resolve_session_anchors
 from src.marketdata.toss_calendar import load_trading_day_cache, trading_day_from_cache
 from src.realtime.adapters.kis import KisRealtimeAdapter
 from src.realtime.contracts import MarketSession, MarketVenue
+from src.realtime.feed_health import FeedHealthConfig, build_feed_health_tracker, feed_id_for
 from src.realtime.kis_lease import KisWebSocketLease
 from src.realtime.kis_sharding import AftermarketShard, load_kis_data_credentials, plan_regular_kis_shards
 from src.realtime.session import DynamicFeed, DynamicPairWatcher, SessionConfig, StreamRoute, bootstrap_session
@@ -227,6 +228,10 @@ async def _run_stream(args: argparse.Namespace) -> int:
             ack_timeout_s=settings.kis_ack_timeout_s,
         )
 
+    feed_id = feed_id_for("kis", venue.value, shard_index)
+    health_tracker = build_feed_health_tracker(
+        feed_id=feed_id, vendor="kis", venue=venue.value, session="regular", session_date=session_date
+    )
     await run_streaming_child(
         session=session,
         adapter_factory=_adapter_factory,
@@ -238,6 +243,11 @@ async def _run_stream(args: argparse.Namespace) -> int:
         streamer_factory=RealtimeStreamer,
         stop_deadline_ns=deadline,
         close_writer=True,
+        feed_health=FeedHealthConfig(
+            tracker=health_tracker,
+            path=paths.feed_health_path(feed_id),
+            interval_s=settings.feed_health_interval_s,
+        ),
     )
     logger.info(
         "[DATA] stage=regular_kis_stream status=STOP date=%s shard=%d symbols=%d pairs=%d credential_key_id=%s",
@@ -322,6 +332,10 @@ async def _run_dynamic_stream(args: argparse.Namespace) -> int:
             extra=EVENT,
         )
         return 0
+    feed_id = feed_id_for("kis", MarketVenue.KRX.value, 0, slot=slot)
+    health_tracker = build_feed_health_tracker(
+        feed_id=feed_id, vendor="kis", venue=MarketVenue.KRX.value, session="regular", session_date=session_date
+    )
     watch = DynamicPairWatcher(
         feed=DynamicFeed(
             vendor="kis",
@@ -334,6 +348,7 @@ async def _run_dynamic_stream(args: argparse.Namespace) -> int:
         session=session,
         static_pairs=(),
         initial_dynamic=initial,
+        observer=health_tracker,
     )
     logger.info(
         "[DATA] stage=regular_kis_dynamic status=START date=%s slot=%s initial_pairs=%d credential_key_id=%s",
@@ -369,6 +384,11 @@ async def _run_dynamic_stream(args: argparse.Namespace) -> int:
         streamer_factory=RealtimeStreamer,
         stop_deadline_ns=deadline,
         close_writer=True,
+        feed_health=FeedHealthConfig(
+            tracker=health_tracker,
+            path=paths.feed_health_path(feed_id),
+            interval_s=settings.feed_health_interval_s,
+        ),
     )
     return 0
 

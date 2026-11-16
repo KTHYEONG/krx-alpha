@@ -85,6 +85,16 @@ class LiveSubscribable(Protocol):
         ...
 
 
+class StreamObserver(Protocol):
+    """Receives connection and subscription lifecycle events; `on_acks` counts are increments, not totals."""
+
+    def on_connected(self, wall: float) -> None: ...
+
+    def on_disconnected(self, wall: float, reason: str) -> None: ...
+
+    def on_acks(self, *, planned: int, accepted: int, rejected: int) -> None: ...
+
+
 @runtime_checkable
 class HeartbeatProbe(Protocol):
     """Optional adapter telemetry for vendor application-level heartbeats.
