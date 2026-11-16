@@ -37,8 +37,8 @@ services:
       - KRX_ALPHA_REGULAR_KIS_NXT_CREDENTIAL_SLOTS=["1","2"]
       - KRX_ALPHA_REGULAR_KIS_PAIR_CAPACITY_PER_CONNECTION=41
       - KRX_ALPHA_REGULAR_KIS_ENABLED=true
-      # 피드 전환 컨트롤러 관찰 전용 (feed_resilience G-CTRL-DRY): 판단만 기록하고 구독은 바꾸지 않는다.
-      # secondary_feeds를 채우면 활성 모드. 3영업일 would_admit 오탐 0 확인 후에만 채운다.
+      # 피드 전환 컨트롤러 관찰 전용 (feed_resilience G-CTRL-DRY): 판단과 would_admit만 manifest/feed_control에 기록하고 구독은 바꾸지 않는다.
+      # secondary_feeds를 채우면 활성 모드가 된다. 3영업일 연속 오탐 0 확인 후에만 채운다.
       - KRX_ALPHA_FEED_CONTROL_WATCH_GROUPS=["ls:0","ls:1","kis-krx:0","kis-krx:1","kis-nxt:0","kis-nxt:1"]
       # 2층 유니버스 (Part5; 2026-10-22 G-UNIVERSE 오프라인 20일 재현 PASS: 코어 65-71, 교체율 최대 4.2%).
       # 코어가 후보 앞쪽(거래대금 순)을 차지하므로 KIS 샤드 0이 최대 거래대금 20종목이 되어 G-KIS-HEAVY 조건을 충족한다.
