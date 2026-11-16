@@ -461,6 +461,7 @@ def _wire_env(monkeypatch, tmp_path, **overrides: str) -> None:
         "KRX_ALPHA_INTRADAY_POST_CLOSE_SCREEN_AT": "09:02:00",
         "KRX_ALPHA_INTRADAY_MIN_TRADE_VALUE_KRW": "10000000000",
         "KRX_ALPHA_INTRADAY_STATUS_CHECK": "false",
+        "KRX_ALPHA_INTRADAY_KIS_DYNAMIC_SLOTS": '["3","4"]',
         "KRX_ALPHA_DATA_ROOT": str(tmp_path / "data"),
         "KRX_ALPHA_REGULAR_KIS_ENABLED": "true",
         "KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS": '["1","2","3","4"]',

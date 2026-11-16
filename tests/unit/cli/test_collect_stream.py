@@ -173,6 +173,7 @@ def test_collect_stream_wires_watchdog_ntp_fallback_and_shutdown_event(tmp_path,
     import argparse
     import json
     import logging
+    from src.core.config import CollectorSettings
 
     from src.cli import collect_stream
     from src.realtime.adapters import registry
@@ -217,7 +218,7 @@ def test_collect_stream_wires_watchdog_ntp_fallback_and_shutdown_event(tmp_path,
     silence_limit = captured["streamer_kwargs"]["silence_limit"]
     assert callable(silence_limit)
     limit = silence_limit()
-    assert limit is None or limit >= captured["cfg"].regular_silence_limit_s
+    assert limit is None or limit >= CollectorSettings().regular_silence_limit_s
     assert captured["max_cycles"] == 1
     assert "[DATA] stage=stream_shutdown" in caplog.text
     assert (tmp_path / "s.json").exists()
