@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import pathlib
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -842,6 +843,59 @@ class ShardWatchdogSettings(BaseSettings):
         return self
 
 
+_FEED_CONTROL_GROUP_RE = re.compile(r"(ls|kis-krx|kis-nxt):[0-9]+")
+_FEED_CONTROL_SECONDARY_FEEDS = frozenset({"db:0", "db:1", "toss:0", "toss:1", "kis:5"})
+
+
+class FeedControlSettings(BaseSettings):
+    """Feed failover controller thresholds (env_prefix='KRX_ALPHA_FEED_CONTROL_'); inert while watch_groups is empty."""
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_FEED_CONTROL_", extra="ignore")
+
+    watch_groups: tuple[str, ...] = ()
+    secondary_feeds: tuple[str, ...] = ()
+    health_max_age_s: float = Field(default=15.0, gt=0)
+    unknown_grace_s: float = Field(default=30.0, gt=0)
+    ls_silence_s: float = Field(default=10.0, gt=0)
+    kis_silence_s: float = Field(default=30.0, gt=0)
+    other_silence_s: float = Field(default=30.0, gt=0)
+    first_frame_grace_s: float = Field(default=30.0, ge=0)
+    lag_limit_s: float = Field(default=5.0, gt=0)
+    pairs_shortfall_after_s: float = Field(default=20.0, gt=0)
+    degrade_after_s: float = Field(default=3.0, ge=0)
+    heal_after_s: float = Field(default=15.0, gt=0)
+    failover_after_s: float = Field(default=30.0, gt=0)
+    failback_hold_s: float = Field(default=600.0, gt=0)
+    failback_confirm_s: float = Field(default=60.0, gt=0)
+    demote_relapses: int = Field(default=2, ge=1)
+    demote_degraded_s: float = Field(default=900.0, gt=0)
+    page_after_s: float = Field(default=300.0, gt=0)
+
+    @model_validator(mode="after")
+    def check_feed_control_topology(self) -> FeedControlSettings:
+        if len(set(self.watch_groups)) != len(self.watch_groups):
+            raise ValueError("watch_groups must not contain duplicates")
+        for group_id in self.watch_groups:
+            if _FEED_CONTROL_GROUP_RE.fullmatch(group_id) is None:
+                raise ValueError(f"watch_groups entry {group_id!r} must be ls:<n>, kis-krx:<n> or kis-nxt:<n>")
+        unknown = set(self.secondary_feeds) - _FEED_CONTROL_SECONDARY_FEEDS
+        if unknown:
+            raise ValueError(f"secondary_feeds entries {sorted(unknown)!r} are not supported feed ids")
+        if self.secondary_feeds and not self.watch_groups:
+            raise ValueError("secondary_feeds requires non-empty watch_groups")
+        return self
+
+    @model_validator(mode="after")
+    def check_feed_control_windows(self) -> FeedControlSettings:
+        if not self.failback_hold_s > self.failover_after_s:
+            raise ValueError("failback_hold_s must exceed failover_after_s")
+        if not self.demote_degraded_s > self.failback_hold_s:
+            raise ValueError("demote_degraded_s must exceed failback_hold_s")
+        if not self.page_after_s > self.failover_after_s:
+            raise ValueError("page_after_s must exceed failover_after_s")
+        return self
+
+
 class AuditMode(StrEnum):
     """EOD session-audit rollout mode."""
 
@@ -956,6 +1010,7 @@ class CollectorRuntime:
     universe_tiers: UniverseTierSettings = field(default_factory=lambda: UniverseTierSettings())
     repair: RepairSettings = field(default_factory=lambda: RepairSettings())
     intraday: IntradayAdmissionSettings = field(default_factory=lambda: IntradayAdmissionSettings())
+    feed_control: FeedControlSettings = field(default_factory=lambda: FeedControlSettings())
 
 
 def resolve_collector_runtime(
@@ -970,6 +1025,7 @@ def resolve_collector_runtime(
     universe_tiers: UniverseTierSettings | None = None,
     repair: RepairSettings | None = None,
     intraday: IntradayAdmissionSettings | None = None,
+    feed_control: FeedControlSettings | None = None,
 ) -> CollectorRuntime:
     """Resolve one coherent collector configuration before child processes start.
 
@@ -1041,6 +1097,9 @@ def resolve_collector_runtime(
                 raise ValueError("regular_kis window must end strictly before the aftermarket prearm moment")
     resolved_tiers = universe_tiers if universe_tiers is not None else UniverseTierSettings()
     resolved_repair = repair if repair is not None else RepairSettings()
+    resolved_feed_control = feed_control if feed_control is not None else FeedControlSettings()
+    if "kis:5" in resolved_feed_control.secondary_feeds and resolved_intraday.enabled:
+        raise ValueError("feed_control secondary kis:5 conflicts with intraday admission on the shared slot 5")
     if resolved_tiers.core_enabled and resolved_tiers.core_exit_rank > resolved_collector.universe_slot_budget:
         raise SlotBudgetExceededError(
             f"core_exit_rank {resolved_tiers.core_exit_rank} exceeds "
@@ -1058,6 +1117,7 @@ def resolve_collector_runtime(
         universe_tiers=resolved_tiers,
         repair=resolved_repair,
         intraday=resolved_intraday,
+        feed_control=resolved_feed_control,
     )
 
 
