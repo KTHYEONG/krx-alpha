@@ -229,7 +229,5 @@ tmp/
 
 # 서버 점검표·운영 에이전트 지침(로컬 운영 문서)
 docs/vps-checklist.md
-docs/vps-ops-agent.md
+docs/vps-agent.md
 
-# LS official API spec dump (2.7MB, local reference only)
-docs/vendor/ls_api_guide.md
