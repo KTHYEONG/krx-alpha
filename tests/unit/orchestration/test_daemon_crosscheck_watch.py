@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import src.orchestration.daemon as daemon_mod
-from src.core.config import CollectorSettings, resolve_collector_runtime
+from src.core.config import CollectorSettings, FeedControlSettings, resolve_collector_runtime
 from src.orchestration.trading_day_gate import TradingDayStatus, TradingDayView
 from tests.unit.orchestration.daemon_fixtures import _business_trading_day
 
@@ -28,8 +28,12 @@ def _verified_aftermarket_capacity(monkeypatch) -> None:
 
 def _runner(tmp_path, monkeypatch, **settings_kw):
     monkeypatch.chdir(tmp_path)
+    db_enabled = settings_kw.pop("db_feeds_enabled", False)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", **settings_kw)
-    runtime = resolve_collector_runtime(collector=settings)
+    feed_control = (
+        FeedControlSettings(watch_groups=("ls:0",), secondary_feeds=("db:0", "db:1")) if db_enabled else None
+    )
+    runtime = resolve_collector_runtime(collector=settings, feed_control=feed_control)
     return daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda s: None)
 
 
@@ -72,11 +76,14 @@ def _stub_eod(monkeypatch, runner) -> list[tuple[str, str]]:
 
 
 def test_crosscheck_stale_warns_never_critical(tmp_path, monkeypatch, caplog) -> None:
-    runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
 
     class _Running:
         def ensure_running(self):
             return "running"
+
+        def is_running(self):
+            return True
 
     runner.children.regular = _Running()
     runner.children.db_crosscheck = _Running()
@@ -97,7 +104,7 @@ def test_crosscheck_stale_warns_never_critical(tmp_path, monkeypatch, caplog) ->
 
 
 def test_crosscheck_stale_alert_once_per_day_then_recovers(tmp_path, monkeypatch, caplog) -> None:
-    runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     runner.children.db_crosscheck = object()
     anchors = _anchors(DAY)
     view = _business_view(DAY)
@@ -119,7 +126,7 @@ def test_crosscheck_stale_alert_once_per_day_then_recovers(tmp_path, monkeypatch
 
 
 def test_crosscheck_watch_respects_cadence(tmp_path, monkeypatch) -> None:
-    runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     runner.children.db_crosscheck = object()
     anchors = _anchors(DAY)
     view = _business_view(DAY)
@@ -139,7 +146,7 @@ def test_crosscheck_watch_respects_cadence(tmp_path, monkeypatch) -> None:
 
 
 def test_primary_stale_unaffected_by_crosscheck_journal(tmp_path, monkeypatch, caplog) -> None:
-    runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     runner.children.regular = object()
     runner.children.db_crosscheck = object()
     now = dt.datetime(2026, 9, 14, 10, 0, tzinfo=KST)
@@ -159,7 +166,7 @@ def test_primary_stale_unaffected_by_crosscheck_journal(tmp_path, monkeypatch, c
 
 
 def test_crosscheck_skipped_when_child_absent_or_unknown_day(tmp_path, monkeypatch) -> None:
-    runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     anchors = _anchors(DAY)
     from src.core.calendar import SessionState
 
@@ -176,7 +183,7 @@ def test_crosscheck_skipped_when_child_absent_or_unknown_day(tmp_path, monkeypat
 
 
 def test_crosscheck_first_frame_warns_once(tmp_path, monkeypatch, caplog) -> None:
-    runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     runner.children.db_crosscheck = object()
     anchors = _anchors(DAY)
     view = _business_view(DAY)
@@ -206,7 +213,7 @@ def test_stream_spec_journal_fields_validated() -> None:
 
 
 def test_crosscheck_first_frame_cadence_and_recovery(tmp_path, monkeypatch, caplog) -> None:
-    runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     runner.children.db_crosscheck = object()
     anchors = _anchors(DAY)
     view = _business_view(DAY)
@@ -236,7 +243,7 @@ def test_crosscheck_first_frame_cadence_and_recovery(tmp_path, monkeypatch, capl
 
 
 def test_reconcile_crosscheck_sessions_oserror_logs_warning(tmp_path, monkeypatch, caplog) -> None:
-    runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     runner.state.orchestrated_for = DAY
 
     def _boom(**kwargs):
@@ -246,18 +253,23 @@ def test_reconcile_crosscheck_sessions_oserror_logs_warning(tmp_path, monkeypatc
     with caplog.at_level(logging.WARNING, logger=daemon_mod.logger.name):
         outcomes = runner._reconcile_crosscheck_sessions(DAY, _business_view(DAY), _anchors(DAY))
 
-    assert outcomes == {daemon_mod.StreamChildKey.DB_CROSSCHECK: "error"}
+    assert outcomes == {
+        daemon_mod.StreamChildKey.DB_CROSSCHECK: "error",
+        daemon_mod.StreamChildKey.DB_CROSSCHECK_B: "error",
+    }
     failure = [r for r in caplog.records if "stage=crosscheck_reconciliation status=FAIL" in r.getMessage()]
-    assert len(failure) == 1
+    assert len(failure) == 2
     assert failure[0].levelno == logging.WARNING
     assert failure[0].exc_info is not None
 
 
 def test_eod_crosscheck_gap_keeps_status_ok(tmp_path, monkeypatch, caplog) -> None:
-    runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     digests = _stub_eod(monkeypatch, runner)
     monkeypatch.setattr(runner, "_reconcile_regular_session", lambda *a, **k: (True, True))
     runner.children.db_crosscheck = object()
+    runner.children.db_crosscheck_b = object()
+    assert runner.children.db_crosscheck_b is not None
     runner.state.orchestrated_for = DAY
     anchors = _anchors(DAY)
     view = _business_view(DAY)
@@ -269,14 +281,15 @@ def test_eod_crosscheck_gap_keeps_status_ok(tmp_path, monkeypatch, caplog) -> No
     subject, body = digests[0]
     assert subject == "[krx-alpha] EOD 2026-09-14 OK"
     assert "crosscheck_db_crosscheck=gap" in body.splitlines()
+    assert "crosscheck_db_crosscheck_b=gap" in body.splitlines()
     failure = [r for r in caplog.records if "stage=session_reconciliation status=FAIL" in r.getMessage()]
-    assert len(failure) == 1
+    assert len(failure) == 2
     assert failure[0].levelno == logging.WARNING
     assert not any(r.levelno >= logging.CRITICAL for r in caplog.records)
 
 
 def test_eod_crosscheck_skipped_when_not_orchestrated(tmp_path, monkeypatch) -> None:
-    runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     digests = _stub_eod(monkeypatch, runner)
     calls: list = []
     monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: calls.append(kw) or True)
@@ -371,7 +384,7 @@ def test_crosscheck_watch_window_boundaries(tmp_path, monkeypatch, caplog, shift
 
     from src.core.calendar import SessionState
 
-    runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     runner.children.db_crosscheck = object()
     anchors = _anchors(DAY)
     shift = dt.timedelta(hours=shift_hours)
@@ -398,7 +411,7 @@ def test_crosscheck_watch_window_boundaries(tmp_path, monkeypatch, caplog, shift
 
 
 def test_crosscheck_reconciliation_unexpected_error_propagates(tmp_path, monkeypatch) -> None:
-    runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     runner.state.orchestrated_for = DAY
 
     def _broken(**kwargs):

@@ -1040,7 +1040,7 @@ def _snapshot_cmd(today: dt.date, paths: DataPaths) -> list[str]:
     ]
 
 
-def _db_crosscheck_cmd(today: dt.date, paths: DataPaths) -> list[str]:
+def _db_crosscheck_cmd(today: dt.date, paths: DataPaths, *, session_index: int = 0, hot_symbols: int = 0) -> list[str]:
     return [
         sys.executable,
         "-m",
@@ -1051,9 +1051,15 @@ def _db_crosscheck_cmd(today: dt.date, paths: DataPaths) -> list[str]:
         "--journal-root",
         str(paths.journal_root),
         "--manifest-path",
-        str(paths.db_crosscheck_manifest_path(today)),
+        str(paths.db_crosscheck_manifest_path(today, session_index)),
         "--candidates-path",
         str(paths.candidates),
+        "--dynamic-plan-path",
+        str(paths.dynamic_admissions(today)),
+        "--db-session-index",
+        str(session_index),
+        "--hot-symbols",
+        str(hot_symbols),
     ]
 
 
@@ -1179,12 +1185,19 @@ class StreamChildKey(StrEnum):
     REGULAR = "regular"
     SNAPSHOT = "snapshot"
     DB_CROSSCHECK = "db_crosscheck"
+    DB_CROSSCHECK_B = "db_crosscheck_b"
     KIWOOM_CROSSCHECK = "kiwoom_crosscheck"
     AFTERMARKET = "aftermarket"
     PREMARKET = "premarket"
     REGULAR_KIS = "regular_kis"
     REGULAR_LS_B = "regular_ls_b"
     INTRADAY_DISCOVERY = "intraday_discovery"
+
+
+_DB_CROSSCHECK_SESSION_INDEX: Final[Mapping[StreamChildKey, int]] = {
+    StreamChildKey.DB_CROSSCHECK: 0,
+    StreamChildKey.DB_CROSSCHECK_B: 1,
+}
 
 
 class ChildLifecycle(StrEnum):
@@ -1280,7 +1293,7 @@ class DaemonState:
     streamer_restarts: int = 0
     last_supervisor_result: str | None = None
     last_snapshot_result: str | None = None
-    last_db_crosscheck_result: str | None = None
+    last_db_crosscheck_result: str | None = None  # shared by both DB sessions (no per-session field)
     last_kiwoom_crosscheck_result: str | None = None
     aftermarket_plan: tuple[AftermarketShard, ...] = ()
     aftermarket_plan_day: dt.date | None = None
@@ -1328,6 +1341,7 @@ class DaemonState:
         StreamChildKey.REGULAR: "last_supervisor_result",
         StreamChildKey.SNAPSHOT: "last_snapshot_result",
         StreamChildKey.DB_CROSSCHECK: "last_db_crosscheck_result",
+        StreamChildKey.DB_CROSSCHECK_B: "last_db_crosscheck_result",
         StreamChildKey.KIWOOM_CROSSCHECK: "last_kiwoom_crosscheck_result",
     }
 
@@ -1393,6 +1407,14 @@ class DaemonChildren:
     @db_crosscheck.setter
     def db_crosscheck(self, supervisor: ProcessSupervisor | None) -> None:
         self.set(StreamChildKey.DB_CROSSCHECK, supervisor)
+
+    @property
+    def db_crosscheck_b(self) -> ProcessSupervisor | None:
+        return self.get(StreamChildKey.DB_CROSSCHECK_B)
+
+    @db_crosscheck_b.setter
+    def db_crosscheck_b(self, supervisor: ProcessSupervisor | None) -> None:
+        self.set(StreamChildKey.DB_CROSSCHECK_B, supervisor)
 
     @property
     def kiwoom_crosscheck(self) -> ProcessSupervisor | None:
@@ -1681,6 +1703,12 @@ class DaemonRunner:
 
     _REPLACE_LIVE_LOG = "[DAEMON] stage=child_ownership status=REPLACE_LIVE slot=%s stop_result=%s"
 
+    # Both DB sessions share one log vocabulary; a per-session stage literal would change the log-format golden.
+    _DB_CROSSCHECK_LOGS: ClassVar[SupervisionLogs] = SupervisionLogs(
+        restarted="[DAEMON] stage=db_crosscheck status=RESTARTED exit_code=%s",
+        circuit_open="[DAEMON] stage=db_crosscheck status=FAIL reason=circuit_open",
+        circuit_level=logging.WARNING,
+    )
     _STREAM_SPECS: ClassVar[tuple[StreamChildSpec, ...]] = (
         StreamChildSpec(
             key=StreamChildKey.REGULAR,
@@ -1720,17 +1748,26 @@ class DaemonRunner:
             key=StreamChildKey.DB_CROSSCHECK,
             role=StreamRole.CROSSCHECK,
             lifecycle=ChildLifecycle.SESSION,
-            enabled=lambda runtime: runtime.collector.db_crosscheck_enabled,
-            cmd=lambda today, paths, reason: _db_crosscheck_cmd(today, paths),
+            enabled=lambda runtime: "db:0" in runtime.feed_control.secondary_feeds,
+            # Hot count is runtime-dependent; the daemon builds the real command in _session_child_cmd.
+            cmd=lambda today, paths, reason: _db_crosscheck_cmd(today, paths, session_index=0),
             active=lambda runtime, now, anchors: now.astimezone(_KST).time() < anchors.regular_close,
-            logs=SupervisionLogs(
-                restarted="[DAEMON] stage=db_crosscheck status=RESTARTED exit_code=%s",
-                circuit_open="[DAEMON] stage=db_crosscheck status=FAIL reason=circuit_open",
-                circuit_level=logging.WARNING,
-            ),
+            logs=_DB_CROSSCHECK_LOGS,
             requires_primary=True,
             journal_vendor=lambda cfg: L0_VENDOR_DB,
-            manifest_path=lambda paths, day: paths.db_crosscheck_manifest_path(day),
+            manifest_path=lambda paths, day: paths.db_crosscheck_manifest_path(day, 0),
+        ),
+        StreamChildSpec(
+            key=StreamChildKey.DB_CROSSCHECK_B,
+            role=StreamRole.CROSSCHECK,
+            lifecycle=ChildLifecycle.SESSION,
+            enabled=lambda runtime: "db:1" in runtime.feed_control.secondary_feeds,
+            cmd=lambda today, paths, reason: _db_crosscheck_cmd(today, paths, session_index=1),
+            active=lambda runtime, now, anchors: now.astimezone(_KST).time() < anchors.regular_close,
+            logs=_DB_CROSSCHECK_LOGS,
+            requires_primary=True,
+            journal_vendor=lambda cfg: L0_VENDOR_DB,
+            manifest_path=lambda paths, day: paths.db_crosscheck_manifest_path(day, 1),
         ),
         StreamChildSpec(
             key=StreamChildKey.KIWOOM_CROSSCHECK,
@@ -2056,7 +2093,14 @@ class DaemonRunner:
         if self._state.prev_state in _NIGHTLY_BLOCKED_STATES:
             return True
         ch = self._children
-        singles: list[Any | None] = [ch.regular, ch.snapshot, ch.db_crosscheck, ch.kiwoom_crosscheck, ch.premarket]
+        singles: list[Any | None] = [
+            ch.regular,
+            ch.snapshot,
+            ch.db_crosscheck,
+            ch.db_crosscheck_b,
+            ch.kiwoom_crosscheck,
+            ch.premarket,
+        ]
         if any(sup is not None and _child_alive(sup) for sup in singles):
             return True
         return any(any(_child_alive(sup) for sup in mapping.values()) for mapping in (ch.aftermarket, ch.regular_kis, ch.regular_nxt))
@@ -3980,6 +4024,10 @@ class DaemonRunner:
 
     def _session_child_cmd(self, spec: StreamChildSpec, today: dt.date, reason: str | None) -> list[str]:
         """Return a SESSION child command; the primary receives its shard-0 symbol set once LS sharding is active."""
+        if spec.key in _DB_CROSSCHECK_SESSION_INDEX:
+            index = _DB_CROSSCHECK_SESSION_INDEX[spec.key]
+            hot = dict(self._runtime.feed_control.hot_symbols).get(f"db:{index}", 0)
+            return _db_crosscheck_cmd(today, self._paths, session_index=index, hot_symbols=hot)
         if spec.key is not StreamChildKey.REGULAR:
             assert spec.cmd is not None
             return spec.cmd(today, self._paths, reason)

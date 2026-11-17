@@ -158,14 +158,6 @@ exit_condition = "enable on the VPS with credentials, or delete the feature"
 review_by = "2026-12-11"
 
 [[flag]]
-name = "CollectorSettings.db_crosscheck_enabled"
-kind = "experiment"
-default = false
-reason = "DB cross-check of collected data; added 2026-10-29, never enabled."
-exit_condition = "enable on the VPS with credentials, or delete the feature"
-review_by = "2026-12-11"
-
-[[flag]]
 name = "IntradayAdmissionSettings.enabled"
 kind = "experiment"
 default = false

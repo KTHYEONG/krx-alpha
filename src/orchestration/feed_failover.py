@@ -66,9 +66,21 @@ class PrimaryView:
     auth_rejected: bool
 
 
-def _secondary_routes(regular_kis: RegularKisSettings) -> dict[str, SecondaryRoute]:
+# Feeds used when `secondary_feeds` is unset: DB stays warm-standby only when explicitly configured.
+_DEFAULT_SECONDARY_FEEDS: tuple[str, ...] = ("kis:5",)
+
+
+def _secondary_routes(
+    regular_kis: RegularKisSettings, collector: CollectorSettings, settings: FeedControlSettings
+) -> dict[str, SecondaryRoute]:
     capacity = int(regular_kis.pair_capacity_per_connection or 0)
-    return {"kis:5": SecondaryRoute("kis:5", "kis", frozenset({"krx", "nxt"}), capacity)}
+    routes = {"kis:5": SecondaryRoute("kis:5", "kis", frozenset({"krx", "nxt"}), capacity)}
+    hot = dict(settings.hot_symbols)
+    for index in range(collector.db_max_sessions):
+        feed = f"db:{index}"
+        reserved = hot.get(feed, 0) * len(collector.streams)
+        routes[feed] = SecondaryRoute(feed, "db", frozenset({"krx"}), collector.db_capacity_pairs - reserved)
+    return routes
 
 
 def _venue_locks(plan: DynamicPlan) -> dict[str, str]:
@@ -140,7 +152,7 @@ class FeedFailoverSupervisor:
         self._paths = paths
         self._settings = settings
         self._collector = collector
-        self._routes = _secondary_routes(regular_kis)
+        self._routes = _secondary_routes(regular_kis, collector, settings)
         self._streams = tuple(regular_kis.streams)
         self._stop_secondary = stop_secondary
         self._wall = wall
@@ -420,7 +432,7 @@ class FeedFailoverSupervisor:
         streams: Sequence[str],
         locks: Mapping[str, str],
     ) -> GroupSpec:
-        configured = self._settings.secondary_feeds or tuple(self._routes)
+        configured = self._settings.secondary_feeds or _DEFAULT_SECONDARY_FEEDS
         secondaries = tuple(
             feed
             for feed in configured

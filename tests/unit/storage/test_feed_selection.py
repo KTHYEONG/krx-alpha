@@ -115,11 +115,19 @@ def _kis_tick_raw(symbol: str, price: int) -> str:
     return "^".join(fields)
 
 
+def _db_tick_raw(symbol: str, price: int) -> str:
+    body = {
+        "ShrnIscd": symbol, "StckPrpr": str(price), "CntgVol": "10", "AcmlVol": "100", "PrdyVrss": "0",
+        "PrdyVrsssign": "2", "PrdyCtrt": "0.0", "SelnCntgcsnu": "1", "ShnuCntgcsnu": "1",
+    }
+    return json.dumps({"header": {"tr_cd": "S00", "tr_key": symbol}, "body": body})
+
+
 def _write_l1(paths: DataPaths, vendor: str, venue: str, stream: str, minutes: list[str]) -> pathlib.Path:
     path = paths.archive_root / vendor / venue / "regular" / stream / f"dt={DAY.isoformat()}.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
     walls = [int(dt.datetime.fromisoformat(minute).replace(tzinfo=KST).timestamp() * 1e9) for minute in minutes]
-    raw = _kis_tick_raw("005930", 70000) if vendor == "kis" else _ls_tick_raw("005930", 70000)
+    raw = {"kis": _kis_tick_raw, "db": _db_tick_raw}.get(vendor, _ls_tick_raw)("005930", 70000)
     table = pa.table({"raw": [raw] * len(minutes), "recv_wall_ns": pa.array(walls, pa.int64())})
     pq.write_table(table, path)
     return path
@@ -228,3 +236,59 @@ def test_unmapped_venue_is_not_selected(paths) -> None:
     summary = build_feed_selection(DAY, paths=paths, spec=krx_only)
     assert summary.status == "OK"
     assert {row["venue"] for row in pq.read_table(fs.selection_partition_path(paths, DAY)).to_pylist()} == {"krx"}
+
+
+def test_selection_never_prefers_conflated_db_trades_over_lossless_source() -> None:
+    minute = MINUTES[0]
+    candidates = {"ls": {}, "kis": {("005930", minute): 3}, "db": {("005930", minute): 40}}
+    rows = _select(candidates)
+    assert [(row.selected_vendor, row.reason) for row in rows] == [("kis", "secondary_only")]
+
+
+def test_conflated_db_trades_are_selected_only_when_no_lossless_source_has_frames() -> None:
+    minute = MINUTES[0]
+    rows = _select({"ls": {}, "db": {("005930", minute): 40}})
+    assert [(row.selected_vendor, row.reason) for row in rows] == [("db", "secondary_only")]
+
+
+def test_lossless_source_outside_its_window_does_not_block_conflated_db() -> None:
+    minute = MINUTES[0]
+    window = {("kis", "005930"): [(_minute_wall("2026-11-16T10:00"), _minute_wall("2026-11-16T11:00"))]}
+    candidates = {"ls": {}, "kis": {("005930", minute): 3}, "db": {("005930", minute): 40}}
+    rows = _select(candidates, windows=window)
+    assert [row.selected_vendor for row in rows] == ["db"]
+
+
+def test_conflated_vendor_rule_applies_to_trade_stream_only() -> None:
+    minute = MINUTES[0]
+    candidates = {"ls": {}, "kis": {("005930", minute): 3}, "db": {("005930", minute): 40}}
+    rows = select_minutes(
+        venue="krx",
+        session="regular",
+        kind="book",
+        primary_vendor="ls",
+        candidates=candidates,
+        demoted_from={},
+        active_windows={},
+        spec=SPEC,
+    )
+    assert [row.selected_vendor for row in rows] == ["db"]
+
+
+def test_selection_spec_declares_db_as_conflated_by_default() -> None:
+    assert SPEC.conflated_trade_vendors == frozenset({"db"})
+
+
+def test_summary_counts_conflated_selected_minutes_per_vendor(paths) -> None:
+    only_db = ["2026-11-16T09:10", "2026-11-16T09:11"]
+    shared = "2026-11-16T09:12"
+    _write_l1(paths, "ls", "krx", "H0STCNT0", [shared] * 2)
+    _write_l1(paths, "db", "krx", "H0STCNT0", [*only_db, shared] * 4)
+    summary = build_feed_selection(DAY, paths=paths, spec=SPEC)
+    assert summary.status == "OK"
+    assert summary.vendors["db"]["conflated_selected_minutes"] == len(only_db)
+    assert summary.vendors["ls"]["conflated_selected_minutes"] == 0
+    payload = json.loads(fs.selection_summary_path(paths, DAY).read_text(encoding="utf-8"))
+    assert payload["vendors"]["db"]["conflated_selected_minutes"] == len(only_db)
+    tick = {row["minute_kst"]: row["selected_vendor"] for row in pq.read_table(fs.selection_partition_path(paths, DAY)).to_pylist() if row["kind"] == "tick"}
+    assert tick == {only_db[0]: "db", only_db[1]: "db", shared: "ls"}

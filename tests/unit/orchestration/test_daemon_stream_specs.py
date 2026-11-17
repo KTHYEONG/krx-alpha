@@ -60,6 +60,7 @@ def test_spec_table_order_and_roles() -> None:
         daemon_mod.StreamChildKey.REGULAR,
         daemon_mod.StreamChildKey.SNAPSHOT,
         daemon_mod.StreamChildKey.DB_CROSSCHECK,
+        daemon_mod.StreamChildKey.DB_CROSSCHECK_B,
         daemon_mod.StreamChildKey.KIWOOM_CROSSCHECK,
         daemon_mod.StreamChildKey.INTRADAY_DISCOVERY,
         daemon_mod.StreamChildKey.AFTERMARKET,
@@ -76,6 +77,7 @@ def test_spec_table_order_and_roles() -> None:
         daemon_mod.StreamChildKey.REGULAR,
         daemon_mod.StreamChildKey.SNAPSHOT,
         daemon_mod.StreamChildKey.DB_CROSSCHECK,
+        daemon_mod.StreamChildKey.DB_CROSSCHECK_B,
         daemon_mod.StreamChildKey.KIWOOM_CROSSCHECK,
         daemon_mod.StreamChildKey.INTRADAY_DISCOVERY,
     ]
@@ -240,7 +242,7 @@ def test_stop_stream_child_rejects_aftermarket(tmp_path, monkeypatch) -> None:
 
 
 def test_crosscheck_supervise_requires_primary_and_window(tmp_path, monkeypatch) -> None:
-    runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     day = dt.date(2026, 9, 14)
     calls: list[str] = []
 
@@ -313,7 +315,7 @@ def test_replace_constructs_after_stop(tmp_path, monkeypatch, caplog) -> None:
 
 
 def test_degraded_upgrade_silences_snapshot_only(tmp_path, monkeypatch, caplog) -> None:
-    runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
 
     class _Fake:
         def stop(self, *, timeout_s: float = 15.0) -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -12,7 +13,7 @@ import os
 import pathlib
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
 from src.core.config import AuditSettings, CollectorSettings, DataPaths, IntradayAdmissionSettings, KisTokenSettings
@@ -20,6 +21,7 @@ from src.core.errors import KrxAlphaError
 from src.core.observability import EVENT
 from src.core.session_anchors import resolve_session_anchors
 from src.realtime.adapters.registry import RegularAdapterContext, regular_vendor
+from src.realtime.connect_guard import ConnectRateGuard
 from src.realtime.connection_handover import SwapRequest
 from src.realtime.contracts import StreamObserver
 from src.realtime.feed_health import FeedHealthConfig, build_feed_health_tracker, feed_id_for
@@ -107,24 +109,30 @@ def _credential_key_id(app_key: str) -> str:
     return hashlib.sha256(app_key.encode("utf-8")).hexdigest()[:12]
 
 
-def _ls_lease_ledger(
+def _lease_ledger(
     vendor: str, settings: CollectorSettings, token_cache_dir: pathlib.Path, app_key: str
 ) -> WsLeaseLedger | None:
-    """Host-wide LS slot ledger for multi-session collection; None keeps the single-session path unchanged."""
-    if vendor != "ls" or settings.ls_active_sessions < 2:
+    """Host-wide slot ledger per vendor credential; None keeps the single-session LS path unchanged."""
+    if vendor == "ls" and settings.ls_active_sessions >= 2:
+        max_connections = settings.ls_max_sessions
+    elif vendor == "db":
+        max_connections = settings.db_max_sessions
+    else:
         return None
     return WsLeaseLedger(
         token_cache_dir,
         vendor=vendor,
         key_id=_credential_key_id(app_key),
-        max_connections=settings.ls_max_sessions,
+        max_connections=max_connections,
         ttl_s=settings.ws_lease_ttl_s,
     )
 
 
-async def _claim_primary(ledger: WsLeaseLedger, *, owner: str, shard_index: int, ttl_s: float) -> Lease | None:
-    """Acquire the shard's PRIMARY slot; shard 0 proceeds unleased after its retry window, other shards raise."""
-    if shard_index >= 1:
+async def _claim_primary(
+    ledger: WsLeaseLedger, *, owner: str, shard_index: int, ttl_s: float, strict: bool = False
+) -> Lease | None:
+    """Acquire the PRIMARY slot; shard 0 proceeds unleased after its retry window unless `strict` or index >= 1."""
+    if strict or shard_index >= 1:
         return ledger.acquire(owner, LeaseRole.PRIMARY)
     deadline = time.monotonic() + _SHARD0_LEASE_WAIT_TTLS * ttl_s
     while True:
@@ -135,6 +143,39 @@ async def _claim_primary(ledger: WsLeaseLedger, *, owner: str, shard_index: int,
                 logger.critical("[SYS] stage=ws_lease status=PRIMARY_FORCED reason=%s", exc, extra=EVENT)
                 return None
             await asyncio.sleep(_LEASE_RETRY_S)
+
+
+async def _run_lease_guarded(stream: Awaitable[None], ledger: WsLeaseLedger, lease: Lease, *, every_s: float) -> bool:
+    """Await `stream` while renewing `lease`; returns False after cancelling it when the lease is lost."""
+    task = asyncio.ensure_future(stream)
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=every_s)
+        if task in done:
+            task.result()
+            return True
+        try:
+            renewed = ledger.renew(lease)
+        except LeaseUnavailable:
+            renewed = False
+        if not renewed:
+            logger.critical("[SYS] stage=ws_lease status=LOST owner=%s", lease.owner, extra=EVENT)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            return False
+
+
+def _armed_when_subscribed(limit: Callable[[], float | None], subscribed: Callable[[], bool]) -> Callable[[], float | None]:
+    """Silence watchdog that stays disarmed until the child holds at least one subscribed pair."""
+    return lambda: limit() if subscribed() else None
+
+
+def _warm_static_pairs(
+    replay: Sequence[tuple[str, str]], streams: Sequence[str], hot_symbols: int
+) -> list[tuple[str, str]]:
+    """Top `hot_symbols` candidates x streams in priority order; empty for a pure warm standby."""
+    symbols = list(dict.fromkeys(symbol for symbol, _ in replay))[:hot_symbols]
+    return [(symbol, stream) for symbol in symbols for stream in streams]
 
 
 def _release_lease_quietly(ledger: WsLeaseLedger, lease: Lease) -> None:
@@ -152,6 +193,11 @@ class RegularStreamProfile:
     route: StreamRoute | None
     shutdown_log: str
     proactive_handover: bool = False
+    # Fixed connection index for vendors without LS shards; None reads --ls-shard-index.
+    session_index: int | None = None
+    # Warm standby: subscribes `hot_symbols` statically, the rest only via the dynamic plan, watchdog disarmed until subscribed.
+    warm_standby: bool = False
+    hot_symbols: int = 0
 
 
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -186,6 +232,39 @@ def run(args: argparse.Namespace) -> int:
         MissingCredentialsError: LS credentials are absent.
     """
     return asyncio.run(_run_stream(args))
+
+
+def _warm_dynamic_watch(
+    *,
+    session: CollectorSession,
+    session_date: dt.date,
+    settings: CollectorSettings,
+    vendor: str,
+    session_index: int,
+    plan_path: pathlib.Path,
+    static_pairs: list[tuple[str, str]],
+    observer: StreamObserver | None = None,
+) -> DynamicPairWatcher:
+    """Dynamic watcher of a warm-standby connection; admissions of feed `<vendor>:<index>` come from `plan_path`."""
+    feed = feed_id_for(vendor, "krx", session_index)
+    initial = [
+        (symbol, stream)
+        for symbol in dict.fromkeys(read_dynamic_admissions(plan_path).symbols_for(feed))
+        for stream in settings.streams
+    ]
+    return DynamicPairWatcher(
+        feed=DynamicFeed(
+            vendor=vendor,
+            feed=feed,
+            streams=tuple(settings.streams),
+            ipc_path=plan_path,
+            membership_path=settings.paths.membership_path(session_date),
+        ),
+        session=session,
+        static_pairs=static_pairs,
+        initial_dynamic=initial,
+        observer=observer,
+    )
 
 
 def _ls_dynamic_watch(
@@ -233,7 +312,10 @@ async def run_regular_stream(
     streamer_factory: Callable[..., RealtimeStreamer],
 ) -> int:
     """Run one regular-session streamer for profile.vendor; return 0 after a graceful stop, or SHARD_DENIED_EXIT on a denied shard lease."""
-    shard_index, shard_symbols = _shard_request(args)
+    if profile.session_index is not None:
+        shard_index, shard_symbols = profile.session_index, None
+    else:
+        shard_index, shard_symbols = _shard_request(args)
     entry = regular_vendor(profile.vendor)
     creds = entry.load_credentials()
     session_date = dt.date.fromisoformat(str(args.session_date))
@@ -248,12 +330,18 @@ async def run_regular_stream(
         kwargs["route"] = profile.route
     candidates_path = pathlib.Path(str(args.candidates_path))
     token_cache_dir = KisTokenSettings().token_cache_dir
-    ledger = _ls_lease_ledger(profile.vendor, settings, token_cache_dir, creds.app_key)
-    owner = f"ls-shard-{shard_index}-{os.getpid()}"
+    ledger = _lease_ledger(profile.vendor, settings, token_cache_dir, creds.app_key)
+    owner = f"{profile.vendor}-shard-{shard_index}-{os.getpid()}"
     primary: Lease | None = None
     if ledger is not None:
         try:
-            primary = await _claim_primary(ledger, owner=owner, shard_index=shard_index, ttl_s=settings.ws_lease_ttl_s)
+            primary = await _claim_primary(
+                ledger,
+                owner=owner,
+                shard_index=shard_index,
+                ttl_s=settings.ws_lease_ttl_s,
+                strict=profile.warm_standby,
+            )
         except LeaseUnavailable as exc:
             logger.error(
                 "[SYS] stage=ws_lease status=PRIMARY_DENIED index=%d reason=%s",
@@ -305,28 +393,74 @@ async def run_regular_stream(
         swap_request = SwapRequest()
         if shard_symbols is not None:
             logger.info("[DATA] stage=ls_shard index=%d symbols=%d", shard_index, len(shard_symbols), extra=EVENT)
-        static_pairs = session.replay_pairs()
         feed_id = feed_id_for(profile.vendor, "krx", shard_index)
         health_tracker = build_feed_health_tracker(
             feed_id=feed_id, vendor=profile.vendor, venue="krx", session="regular", session_date=session_date
         )
-        live_watch = _ls_dynamic_watch(
-            session=session,
-            session_date=session_date,
-            settings=settings,
-            vendor=profile.vendor,
-            shard_index=shard_index,
-            static_pairs=static_pairs,
-            observer=health_tracker,
+        if profile.warm_standby:
+            static_pairs = _warm_static_pairs(session.replay_pairs(), settings.streams, profile.hot_symbols)
+            warm_watch = _warm_dynamic_watch(
+                session=session,
+                session_date=session_date,
+                settings=settings,
+                vendor=profile.vendor,
+                session_index=shard_index,
+                plan_path=pathlib.Path(str(args.dynamic_plan_path)),
+                static_pairs=static_pairs,
+                observer=health_tracker,
+            )
+            live_watch: DynamicPairWatcher | None = warm_watch
+            silence_limit = _armed_when_subscribed(open_watch.silence_limit, lambda: bool(warm_watch.pairs()))
+        else:
+            static_pairs = session.replay_pairs()
+            live_watch = _ls_dynamic_watch(
+                session=session,
+                session_date=session_date,
+                settings=settings,
+                vendor=profile.vendor,
+                shard_index=shard_index,
+                static_pairs=static_pairs,
+                observer=health_tracker,
+            )
+            silence_limit = open_watch.silence_limit
+        # Warm children hold their lease by renewal; LS children hold it through connection handover.
+        handover_cfg = (
+            HandoverSettings(
+                swap_request,
+                settings.lag_handover_max_s,
+                settings.lag_handover_cooldown_s,
+                open_watch.standby_window if profile.proactive_handover and shard_index == 0 else None,
+                max_sessions=settings.ls_max_sessions,
+                stall_lag_s=AuditSettings().latency_alert_threshold_s
+                if settings.lag_handover_standby_refresh_enabled
+                else None,
+                refresh_cooldown_s=settings.lag_handover_refresh_cooldown_s,
+                lease_ledger=ledger,
+                owner=owner,
+                primary_lease=primary,
+                lease_ttl_s=settings.ws_lease_ttl_s,
+            )
+            if profile.proactive_handover or (ledger is not None and not profile.warm_standby)
+            else None
         )
-        await run_streaming_child(
+        connect_gate = (
+            ConnectRateGuard(
+                settings.paths.db_connect_guard_path(),
+                max_connects=settings.db_connects_per_window,
+                window_s=settings.db_connect_window_s,
+                vendor=profile.vendor,
+            ).wait_turn
+            if profile.vendor == "db"
+            else None
+        )
+        stream = run_streaming_child(
             session=session,
             adapter_factory=lambda http: entry.build(
-                creds, RegularAdapterContext(http, settings, token_cache_dir, market_of)
+                creds, RegularAdapterContext(http, settings, token_cache_dir, market_of, connect_gate)
             ),
             replay_pairs=live_watch.pairs() if live_watch is not None else static_pairs,
             live_watch=live_watch,
-            silence_limit=open_watch.silence_limit,
+            silence_limit=silence_limit,
             max_cycles=getattr(args, "max_cycles", None),
             streamer_factory=streamer_factory,
             lag_monitor=LagMonitor(
@@ -340,26 +474,13 @@ async def run_regular_stream(
                 path=DataPaths(pathlib.Path(str(args.journal_root)).parent).feed_health_path(feed_id),
                 interval_s=settings.feed_health_interval_s,
             ),
-            handover=(
-                HandoverSettings(
-                    swap_request,
-                    settings.lag_handover_max_s,
-                    settings.lag_handover_cooldown_s,
-                    open_watch.standby_window if profile.proactive_handover and shard_index == 0 else None,
-                    max_sessions=settings.ls_max_sessions,
-                    stall_lag_s=AuditSettings().latency_alert_threshold_s
-                    if settings.lag_handover_standby_refresh_enabled
-                    else None,
-                    refresh_cooldown_s=settings.lag_handover_refresh_cooldown_s,
-                    lease_ledger=ledger,
-                    owner=owner,
-                    primary_lease=primary,
-                    lease_ttl_s=settings.ws_lease_ttl_s,
-                )
-                if profile.proactive_handover or ledger is not None
-                else None
-            ),
+            handover=handover_cfg,
         )
+        if ledger is not None and primary is not None and handover_cfg is None:
+            if not await _run_lease_guarded(stream, ledger, primary, every_s=settings.ws_lease_ttl_s / 3):
+                return SHARD_DENIED_EXIT
+        else:
+            await stream
         logger.info(
             profile.shutdown_log,
             str(cfg.manifest_path),

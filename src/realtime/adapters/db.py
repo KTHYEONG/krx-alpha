@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Final
 
 from src.marketdata.host_token_store import AsyncRotatingTokenStore
@@ -59,8 +59,9 @@ class DbRealtimeAdapter(JsonWsOAuthAdapter):
         heartbeat_s: float = 10.0,
         ack_timeout_s: float = 10.0,
         subscribe_spacing_s: float = 0.12,
+        connect_gate: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
-        """Bind one DB websocket session to a host-shared token store."""
+        """Bind one DB websocket session to a host-shared token store; `connect_gate` runs before every connect."""
         if set(streams) - set(DB_TR_CD):
             raise ValueError(f"unsupported streams: {streams}")
         super().__init__(
@@ -76,6 +77,13 @@ class DbRealtimeAdapter(JsonWsOAuthAdapter):
             ack_timeout_s=ack_timeout_s,
             subscribe_spacing_s=subscribe_spacing_s,
         )
+        self._connect_gate = connect_gate
+
+    async def connect(self) -> None:
+        """Pass the connect-rate gate, then open the session."""
+        if self._connect_gate is not None:
+            await self._connect_gate()
+        await super().connect()
 
     def _subscribe_body(self, symbol: str, stream: str) -> dict[str, str]:
         return {"tr_cd": DB_TR_CD[stream], "tr_key": f"J {symbol}"}

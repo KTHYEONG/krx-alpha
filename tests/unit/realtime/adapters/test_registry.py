@@ -106,5 +106,5 @@ def test_registry_patch_points_are_module_globals(monkeypatch, tmp_path, vendor)
         expected["market_of"] = market_of
         expected["capacity_pairs"] = settings.ls_max_subscriptions_per_session
     else:
-        expected.update(capacity_pairs=12, ack_timeout_s=3, subscribe_spacing_s=0.2)
+        expected.update(capacity_pairs=12, ack_timeout_s=3, subscribe_spacing_s=0.2, connect_gate=None)
     assert seen["adapter"] == expected

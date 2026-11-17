@@ -69,3 +69,48 @@ def test_quality_floor_bounds_are_validated() -> None:
         FeedControlSettings(quality_floor_availability=1.5)
     with pytest.raises(ValidationError):
         FeedControlSettings(quality_floor_days=0)
+
+
+def test_hot_symbols_must_name_a_configured_secondary_feed() -> None:
+    import pytest
+
+    from src.core.config import FeedControlSettings
+
+    FeedControlSettings(watch_groups=("ls:0",), secondary_feeds=("db:0",), hot_symbols=(("db:0", 5),))
+    with pytest.raises(ValueError, match="not in secondary_feeds"):
+        FeedControlSettings(watch_groups=("ls:0",), secondary_feeds=("db:0",), hot_symbols=(("db:1", 5),))
+    with pytest.raises(ValueError, match="non-negative"):
+        FeedControlSettings(watch_groups=("ls:0",), secondary_feeds=("db:0",), hot_symbols=(("db:0", -1),))
+    with pytest.raises(ValueError, match="repeat"):
+        FeedControlSettings(
+            watch_groups=("ls:0",), secondary_feeds=("db:0",), hot_symbols=(("db:0", 1), ("db:0", 2))
+        )
+
+
+def test_hot_pairs_cannot_exceed_db_pair_capacity() -> None:
+    import pytest
+
+    from src.core.config import CollectorSettings, FeedControlSettings, resolve_collector_runtime
+
+    collector = CollectorSettings()
+    per_stream_cap = collector.db_capacity_pairs // len(collector.streams)
+    feed_ok = FeedControlSettings(
+        watch_groups=("ls:0",), secondary_feeds=("db:0",), hot_symbols=(("db:0", per_stream_cap),)
+    )
+    resolve_collector_runtime(collector=collector, feed_control=feed_ok)
+    feed_over = FeedControlSettings(
+        watch_groups=("ls:0",), secondary_feeds=("db:0",), hot_symbols=(("db:0", per_stream_cap + 1),)
+    )
+    with pytest.raises(ValueError, match="db_capacity_pairs"):
+        resolve_collector_runtime(collector=collector, feed_control=feed_over)
+
+
+def test_db_max_sessions_is_bounded_to_two_connections() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from src.core.config import CollectorSettings
+
+    assert CollectorSettings().db_max_sessions == 2
+    with pytest.raises(ValidationError):
+        CollectorSettings(db_max_sessions=3)

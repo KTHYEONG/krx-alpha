@@ -70,6 +70,8 @@ class SelectionSpec:
     min_frames: int = 1
     min_advantage_frames: int = 3
     primary_by_venue: tuple[tuple[str, str], ...] = (("krx", "ls"), ("nxt", "kis"))
+    # Vendors whose trade stream is conflated (per-trade detail lost); used for a symbol-minute only when no lossless source has frames.
+    conflated_trade_vendors: frozenset[str] = frozenset({"db"})
 
     def primary_for(self, venue: str) -> str | None:
         return dict(self.primary_by_venue).get(venue)
@@ -116,8 +118,10 @@ def select_minutes(
 
     A vendor that appears in `active_windows` is eligible for a symbol only inside its windows; other
     vendors are always eligible. The primary is kept on ties and on advantages below `min_advantage_frames`.
+    On the trade stream a conflated vendor is eligible for a symbol-minute only when no lossless source has frames.
     """
     managed = {vendor for vendor, _ in active_windows}
+    conflated = spec.conflated_trade_vendors if kind == _KIND_TICK else frozenset()
     keys: set[tuple[str, str]] = set()
     for counts in candidates.values():
         keys.update(key for key, frames in counts.items() if frames > 0)
@@ -126,12 +130,16 @@ def select_minutes(
     for symbol, minute in sorted(keys):
         primary_frames = candidates.get(primary_vendor, {}).get((symbol, minute), 0)
         minute_wall = _minute_wall(minute)
-        eligible = [
+        in_window = [
             vendor
             for vendor in secondaries
             if candidates[vendor].get((symbol, minute), 0) > 0
             and _eligible(vendor, symbol, minute_wall, managed, active_windows)
         ]
+        lossless_present = (primary_frames > 0 and primary_vendor not in conflated) or any(
+            vendor not in conflated for vendor in in_window
+        )
+        eligible = [vendor for vendor in in_window if vendor not in conflated or not lossless_present]
         best = max(eligible, key=lambda vendor: candidates[vendor][(symbol, minute)], default=None)
         best_frames = candidates[best][(symbol, minute)] if best is not None else 0
         demoted_at = demoted_from.get(symbol)
@@ -311,7 +319,9 @@ def build_feed_selection(day: dt.date, *, paths: DataPaths, spec: SelectionSpec)
                 decode = tick_decode if kind == _KIND_TICK else quote_decode
                 counts = _count_frames(path, decode)
                 candidates[vendor] = counts
-                stats = vendor_stats.setdefault(vendor, {"tick_frames": 0, "book_frames": 0})
+                stats = vendor_stats.setdefault(
+                    vendor, {"tick_frames": 0, "book_frames": 0, "conflated_selected_minutes": 0}
+                )
                 stats[f"{kind}_frames"] += sum(counts.values())
             if primary not in candidates:
                 continue
@@ -326,6 +336,9 @@ def build_feed_selection(day: dt.date, *, paths: DataPaths, spec: SelectionSpec)
                 spec=spec,
             )
             all_rows.extend(rows)
+            for row in rows:
+                if row.kind == _KIND_TICK and row.selected_vendor in spec.conflated_trade_vendors:
+                    vendor_stats[row.selected_vendor]["conflated_selected_minutes"] += 1
             symbols.update(row.symbol for row in rows if row.reason != "primary_ok")
             for vendor, counts in candidates.items():
                 minutes = vendor_minutes.setdefault(vendor, set())

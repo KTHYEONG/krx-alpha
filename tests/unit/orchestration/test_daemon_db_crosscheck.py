@@ -23,9 +23,17 @@ def _runner(tmp_path, monkeypatch, **settings_kw):
     from src.orchestration import daemon as daemon_mod
 
     monkeypatch.chdir(tmp_path)
+    db_enabled = settings_kw.pop("db_feeds_enabled", False)
     settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", **settings_kw)
-    runtime = resolve_collector_runtime(collector=settings)
+    feed_control = _db_feed_control() if db_enabled else None
+    runtime = resolve_collector_runtime(collector=settings, feed_control=feed_control)
     return daemon_mod, daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda s: None)
+
+
+def _db_feed_control():
+    from src.core.config import FeedControlSettings
+
+    return FeedControlSettings(watch_groups=("ls:0",), secondary_feeds=("db:0", "db:1"))
 
 
 def _anchors(day):
@@ -47,7 +55,7 @@ def test_db_crosscheck_not_installed_when_disabled(tmp_path, monkeypatch) -> Non
 
 
 def test_db_crosscheck_installed_with_own_manifest_cmd(tmp_path, monkeypatch) -> None:
-    daemon_mod, runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    daemon_mod, runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     day = dt.date(2026, 9, 14)
     created: list = []
 
@@ -78,7 +86,7 @@ def test_db_crosscheck_installed_with_own_manifest_cmd(tmp_path, monkeypatch) ->
 
 
 def test_db_crosscheck_install_replaces_live_predecessor(tmp_path, monkeypatch, caplog) -> None:
-    daemon_mod, runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    daemon_mod, runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     stops: list[float] = []
 
     class _Old:
@@ -95,7 +103,7 @@ def test_db_crosscheck_install_replaces_live_predecessor(tmp_path, monkeypatch, 
 
 
 def test_db_crosscheck_circuit_open_warns_not_critical(tmp_path, monkeypatch, caplog) -> None:
-    daemon_mod, runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    daemon_mod, runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     day = dt.date(2026, 9, 14)
 
     class _Tripping:
@@ -118,7 +126,7 @@ def test_db_crosscheck_circuit_open_warns_not_critical(tmp_path, monkeypatch, ca
 
 
 def test_db_crosscheck_restart_warns_and_after_close_skips(tmp_path, monkeypatch, caplog) -> None:
-    daemon_mod, runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    daemon_mod, runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     day = dt.date(2026, 9, 14)
     calls: list[str] = []
 
@@ -153,7 +161,7 @@ def test_db_crosscheck_restart_warns_and_after_close_skips(tmp_path, monkeypatch
 
 
 def test_db_crosscheck_stopped_with_snapshot_child(tmp_path, monkeypatch) -> None:
-    daemon_mod, runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    daemon_mod, runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     runner._paths.candidates.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(daemon_mod, "_run_eod_housekeeping", lambda *a, **k: daemon_mod._EodHousekeeping(deleted=0, uploaded=0, purged=0, maintenance_ok=True, offload_ok=True))
     monkeypatch.setattr(daemon_mod, "_check_backup", lambda *a, **k: ([], True, "ok"))
@@ -198,7 +206,7 @@ def test_db_crosscheck_absent_from_degraded_mode(tmp_path, monkeypatch) -> None:
     from src.orchestration import daemon as daemon_mod
 
     monkeypatch.chdir(tmp_path)
-    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", db_crosscheck_enabled=True)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
     settings.paths.candidates.parent.mkdir(parents=True, exist_ok=True)
     from src.universe.ipc import write_candidates
 
@@ -219,7 +227,7 @@ def test_db_crosscheck_absent_from_degraded_mode(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSup)
     from src.core.config import resolve_collector_runtime
 
-    runtime = resolve_collector_runtime(collector=settings)
+    runtime = resolve_collector_runtime(collector=settings, feed_control=_db_feed_control())
     runner = daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda s: None)
     runner._handle_orchestration_failure(dt.datetime(2026, 9, 14, 8, 25, tzinfo=_KST), dt.date(2026, 9, 14))
     assert runner.children.db_crosscheck is None
@@ -235,8 +243,8 @@ def test_ls_watchdogs_and_reconciliation_ignore_db_journals(tmp_path, monkeypatc
     from src.orchestration.trading_day_gate import TradingDayStatus, TradingDayView
 
     monkeypatch.chdir(tmp_path)
-    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data", db_crosscheck_enabled=True)
-    runtime = resolve_collector_runtime(collector=settings)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    runtime = resolve_collector_runtime(collector=settings, feed_control=_db_feed_control())
     runner = daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda s: None)
     runner.children.regular = object()
     day = dt.date(2026, 9, 14)
@@ -258,7 +266,7 @@ def test_ls_watchdogs_and_reconciliation_ignore_db_journals(tmp_path, monkeypatc
 
 
 def test_stop_children_includes_db_crosscheck(tmp_path, monkeypatch) -> None:
-    daemon_mod, runner = _runner(tmp_path, monkeypatch, db_crosscheck_enabled=True)
+    daemon_mod, runner = _runner(tmp_path, monkeypatch, db_feeds_enabled=True)
     selected: list = []
 
     class _Sup:
@@ -269,3 +277,34 @@ def test_stop_children_includes_db_crosscheck(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(daemon_mod, "stop_supervisors", lambda children, *, deadline_s: selected.extend(children) or {"graceful": 1, "killed": 0, "not_running": 0})
     runner.stop_children()
     assert db in selected
+
+
+def test_db_specs_enabled_only_by_secondary_feeds(tmp_path, monkeypatch) -> None:
+    import pathlib
+
+    from src.core.config import CollectorSettings, FeedControlSettings, resolve_collector_runtime
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    collector = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+
+    def _enabled(feed_control: FeedControlSettings | None) -> dict:
+        runtime = resolve_collector_runtime(collector=collector, feed_control=feed_control)
+        specs = {spec.key: spec for spec in daemon_mod.DaemonRunner._STREAM_SPECS}
+        return {
+            key: specs[key].enabled(runtime)
+            for key in (daemon_mod.StreamChildKey.DB_CROSSCHECK, daemon_mod.StreamChildKey.DB_CROSSCHECK_B)
+        }
+
+    assert _enabled(None) == {
+        daemon_mod.StreamChildKey.DB_CROSSCHECK: False,
+        daemon_mod.StreamChildKey.DB_CROSSCHECK_B: False,
+    }
+    assert _enabled(FeedControlSettings(watch_groups=("ls:0",), secondary_feeds=("db:0",))) == {
+        daemon_mod.StreamChildKey.DB_CROSSCHECK: True,
+        daemon_mod.StreamChildKey.DB_CROSSCHECK_B: False,
+    }
+    assert _enabled(FeedControlSettings(watch_groups=("ls:0",), secondary_feeds=("db:1",))) == {
+        daemon_mod.StreamChildKey.DB_CROSSCHECK: False,
+        daemon_mod.StreamChildKey.DB_CROSSCHECK_B: True,
+    }

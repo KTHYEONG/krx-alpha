@@ -598,3 +598,56 @@ def test_db_token_store_uses_the_host_contract_vendor_name(tmp_path) -> None:
     digest = hashlib.sha256(b"k").hexdigest()[:12]
     assert path == tmp_path / f"token_dbsec_{digest}.json"
     assert path.name.split("_")[1] in VENDOR_IDS
+
+
+def test_db_adapter_connect_passes_gate_each_time(tmp_path) -> None:
+    calls: list[int] = []
+
+    async def gate() -> None:
+        calls.append(1)
+
+    http = _TokenHttp({"access_token": "TOK", "expires_in": 86400}, ws=object())
+    adapter = DbRealtimeAdapter(
+        app_key="k", app_secret="s", http=http, token_store=_store(tmp_path), connect_gate=gate
+    )
+    asyncio.run(adapter.connect())
+    assert calls == [1]
+    asyncio.run(adapter.connect())
+    assert calls == [1, 1]
+
+
+def test_db_adapter_without_gate_connects_as_before(tmp_path) -> None:
+    http = _TokenHttp({"access_token": "TOK", "expires_in": 86400}, ws=object())
+    adapter = DbRealtimeAdapter(app_key="k", app_secret="s", http=http, token_store=_store(tmp_path))
+    asyncio.run(adapter.connect())
+    assert adapter._token == "TOK"
+
+
+def test_db_crash_loop_bounded(tmp_path) -> None:
+    from src.realtime.connect_guard import ConnectRateGuard
+
+    now = [1_000_000.0]
+    stamps: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    guard = ConnectRateGuard(tmp_path / "g.json", max_connects=4, window_s=60.0, clock=lambda: now[0], sleep=sleep)
+
+    async def gate() -> None:
+        await guard.wait_turn()
+        stamps.append(now[0])
+
+    http = _TokenHttp({"access_token": "TOK", "expires_in": 86400}, ws=object())
+    adapter = DbRealtimeAdapter(
+        app_key="k", app_secret="s", http=http, token_store=_store(tmp_path), connect_gate=gate
+    )
+
+    async def crash_loop() -> None:
+        for _ in range(12):
+            await adapter.connect()
+            now[0] += 0.1
+
+    asyncio.run(crash_loop())
+    assert len(stamps) == 12
+    assert max(sum(1 for other in stamps if start <= other < start + 60.0) for start in stamps) <= 4

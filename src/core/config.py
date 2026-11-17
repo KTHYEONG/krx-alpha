@@ -93,10 +93,15 @@ class CollectorSettings(BaseSettings):
     lag_handover_cooldown_s: float = Field(default=300.0, ge=0)
     lag_handover_standby_refresh_enabled: bool = True
     lag_handover_refresh_cooldown_s: float = Field(default=30.0, ge=0)
+    # Per-session pair cap of one DB connection (probe-verified 50 pairs); raise only with a new probe report.
     db_capacity_pairs: int = Field(default=50, ge=1)
+    db_max_sessions: int = Field(default=2, ge=1, le=2)
     db_token_rotation_cooldown_s: float = Field(default=300.0, ge=0)
     db_subscribe_spacing_s: float = Field(default=0.12, ge=0.1)
     db_ack_timeout_s: float = Field(default=10.0, gt=0)
+    # Vendor allows 6 DB websocket connects/min per account; the guard keeps headroom below that cap across both DB children.
+    db_connects_per_window: int = Field(default=4, ge=1, le=6)
+    db_connect_window_s: float = Field(default=60.0, gt=0)
     # Kiwoom REST WebSocket crosscheck (conflated, volume-lossless 0B stream).
     kiwoom_crosscheck_enabled: bool = False
     kiwoom_capacity_pairs: int = Field(default=200, ge=1)
@@ -104,7 +109,6 @@ class CollectorSettings(BaseSettings):
     kiwoom_user_agent: str = "krx-alpha"
     # Per-subscribe-ack deadline (seconds) of the KIS adapter; mirrors `db_ack_timeout_s`.
     kis_ack_timeout_s: float = Field(default=10.0, gt=0)
-    db_crosscheck_enabled: bool = False
     # Symbols per session universe. Unset derives ``ls_capacity_pairs // len(streams)`` so the cap cannot drift from vendor capacity (a literal caused the 2026-09-10 and 2026-10-02 incidents). An explicit value (env ``KRX_ALPHA_UNIVERSE_SLOT_BUDGET`` or kwarg) may only tighten it.
     universe_slot_budget: int = Field(default=0, ge=0)
     bars_window_days: int = 90
@@ -144,10 +148,6 @@ class CollectorSettings(BaseSettings):
     @property
     def subscription_symbol_budget(self) -> int:
         return self.ls_capacity_pairs * self.ls_active_sessions // len(self.streams) - self.ls_dynamic_reserve_symbols
-
-    @property
-    def db_crosscheck_symbol_budget(self) -> int:
-        return self.db_capacity_pairs // len(self.streams)
 
     @property
     def kiwoom_crosscheck_symbol_budget(self) -> int:
@@ -874,6 +874,9 @@ class FeedControlSettings(BaseSettings):
     page_after_s: float = Field(default=300.0, gt=0)
     quality_floor_availability: float = Field(default=0.995, gt=0, le=1)
     quality_floor_days: int = Field(default=3, ge=1)
+    # (secondary feed id, top-priority symbols subscribed from session start); empty or 0 is pure warm standby.
+    # Hot pairs (count x streams) are reserved out of the feed's pair capacity; the rest admits on failover.
+    hot_symbols: tuple[tuple[str, int], ...] = ()
 
     @model_validator(mode="after")
     def check_feed_control_topology(self) -> FeedControlSettings:
@@ -887,6 +890,14 @@ class FeedControlSettings(BaseSettings):
             raise ValueError(f"secondary_feeds entries {sorted(unknown)!r} are not supported feed ids")
         if self.secondary_feeds and not self.watch_groups:
             raise ValueError("secondary_feeds requires non-empty watch_groups")
+        hot_ids = [feed for feed, _ in self.hot_symbols]
+        if len(set(hot_ids)) != len(hot_ids):
+            raise ValueError("hot_symbols must not repeat a feed id")
+        for feed, count in self.hot_symbols:
+            if feed not in self.secondary_feeds:
+                raise ValueError(f"hot_symbols feed {feed!r} is not in secondary_feeds")
+            if count < 0:
+                raise ValueError(f"hot_symbols count for {feed!r} must be non-negative")
         return self
 
     @model_validator(mode="after")
@@ -1104,6 +1115,11 @@ def resolve_collector_runtime(
     resolved_feed_control = feed_control if feed_control is not None else FeedControlSettings()
     if "kis:5" in resolved_feed_control.secondary_feeds and resolved_intraday.enabled:
         raise ValueError("feed_control secondary kis:5 conflicts with intraday admission on the shared slot 5")
+    for hot_feed, hot_count in resolved_feed_control.hot_symbols:
+        if hot_feed.startswith("db:") and hot_count * len(resolved_collector.streams) > resolved_collector.db_capacity_pairs:
+            raise ValueError(
+                f"hot_symbols {hot_feed!r} x streams exceeds db_capacity_pairs {resolved_collector.db_capacity_pairs}"
+            )
     if resolved_tiers.core_enabled and resolved_tiers.core_exit_rank > resolved_collector.universe_slot_budget:
         raise SlotBudgetExceededError(
             f"core_exit_rank {resolved_tiers.core_exit_rank} exceeds "

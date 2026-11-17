@@ -91,7 +91,7 @@ def _write_health(paths: DataPaths, feed: str, wall: float, *, last_frame: float
     payload = {
         "schema": "feed-health.v1",
         "feed_id": feed,
-        "vendor": "kis" if feed.startswith("kis") else "ls",
+        "vendor": feed.split(":", 1)[0],
         "venue": "krx",
         "session": "regular",
         "session_date": DAY.isoformat(),
@@ -246,6 +246,24 @@ def test_ls_silence_admits_to_slot5(paths) -> None:
     later = read_dynamic_admissions(paths.dynamic_admissions(DAY))
     assert later.rev == 1
     assert later.entries == plan.entries
+    assert stops.feeds == []
+
+
+def test_db_failover_end_to_end_fake(paths) -> None:
+    clock = _Clock(T0)
+    stops = _Stops()
+    sup = _supervisor(paths, _settings(secondary_feeds=("db:0",)), clock, stops)
+    primaries = {**ALIVE, "db:0": PrimaryView(running=True, circuit_open=False, auth_rejected=False)}
+    wall = T0
+    while wall <= T0 + 40:
+        _write_health(paths, "db:0", wall, last_frame=wall)
+        _tick(sup, paths, clock, wall, ls_frame=wall - 40, primaries=primaries)
+        wall += 10
+    plan = read_dynamic_admissions(paths.dynamic_admissions(DAY))
+    assert plan.symbols_for("db:0") == LS_SYMBOLS
+    assert plan.symbols_for("kis:5") == ()
+    assert _state(paths).groups["ls:0"].state is GroupState.SECONDARY_ACTIVE
+    assert any(row["kind"] == "ADMIT" and row["feed"] == "db:0" for row in _journal(paths))
     assert stops.feeds == []
 
 

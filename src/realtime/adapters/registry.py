@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import pathlib
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
@@ -41,6 +41,7 @@ class RegularAdapterContext:
     settings: CollectorSettings
     token_cache_dir: pathlib.Path
     market_of: Mapping[str, str] | None
+    connect_gate: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ def _build_db(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAdapte
         capacity_pairs=ctx.settings.db_capacity_pairs,
         ack_timeout_s=ctx.settings.db_ack_timeout_s,
         subscribe_spacing_s=ctx.settings.db_subscribe_spacing_s,
+        connect_gate=ctx.connect_gate,
     )
 
 
