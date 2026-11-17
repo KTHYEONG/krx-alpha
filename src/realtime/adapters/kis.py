@@ -114,6 +114,7 @@ class KisRealtimeAdapter:
     async def connect(self) -> None:
         if self._lease is not None:
             await self._lease.acquire()
+        phase = "approval"
         try:
             async with self._http.post(
                 KIS_APPROVAL_URL,
@@ -127,11 +128,12 @@ class KisRealtimeAdapter:
                 if not approval:
                     raise VendorAuthRejected(f"auth_rejected:{status}:no_approval_key")
                 self._approval_key = str(approval)
+            phase = "ws"
             self._ws = await self._http.ws_connect(KIS_WS_URL)
         except (VendorAuthRejected, VendorDisconnected):
             raise
         except (aiohttp.ClientError, TimeoutError, OSError, ValueError) as exc:
-            raise VendorDisconnected(f"connect_failed:{type(exc).__name__}") from exc
+            raise VendorDisconnected(f"connect_failed:{type(exc).__name__}:{phase}") from exc
         self._seq = 0
         self._conn_id = f"kis-{time.time_ns()}"
         self._pending = []

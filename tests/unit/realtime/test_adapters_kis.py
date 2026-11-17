@@ -465,7 +465,7 @@ def test_kis_connect_approval_post_network_error_disconnects() -> None:
         async def ws_connect(self, *a):
             raise AssertionError("ws must not open")
 
-    with pytest.raises(VendorDisconnected, match="connect_failed:ClientConnectorError"):
+    with pytest.raises(VendorDisconnected, match="connect_failed:ClientConnectorError:approval"):
         asyncio.run(_kis_connect_adapter(Http()).connect())
 
 
@@ -499,7 +499,7 @@ def test_kis_connect_ws_failure_disconnects_and_aclose_safe(tmp_path) -> None:
 
     adapter = _kis_connect_adapter(Http())
     adapter._lease = KisWebSocketLease(root=tmp_path, credential_key_id="failed-connect")
-    with pytest.raises(VendorDisconnected, match="connect_failed:WSServerHandshakeError"):
+    with pytest.raises(VendorDisconnected, match="connect_failed:WSServerHandshakeError:ws"):
         asyncio.run(adapter.connect())
     asyncio.run(adapter.aclose())
 
