@@ -185,7 +185,8 @@ def _db_trade_raw(symbol: str, stamp: str, cum: int, *, drop: str | None = None)
         "StckCntghour": stamp,
         "StckPrpr": "100",
         "CntgVol": "1",
-        "AcmlVol": str(cum),
+        "SelnCntgcsnu": str(cum),
+        "ShnuCntgcsnu": "0",
     }
     if drop is not None:
         body.pop(drop)
@@ -249,7 +250,11 @@ def _run(
     journal_root = tmp_path / "journal"
     if with_reference:
         reference = [
-            (_recv_ns(10, 0, 5 + REFERENCE_LAG_S), EVENT_STAMP, _ls_trade_raw("H0STCNT0", SYMBOL, SYMBOL, EVENT_STAMP, cum))
+            (
+                _recv_ns(10, 0, 5 + REFERENCE_LAG_S),
+                EVENT_STAMP,
+                _ls_trade_raw("H0STCNT0", SYMBOL, SYMBOL, EVENT_STAMP, cum),
+            )
             for cum in range(1, 11)
         ]
         _write_reference(journal_root, reference)
@@ -291,9 +296,9 @@ def test_db_gate_fails_on_conflated_trades(tmp_path: Path) -> None:
     assert result["gates"]["pass"] is False
 
 
-def test_db_missing_volume_field_is_counted_and_fails_gate(tmp_path: Path) -> None:
-    result = _run(tmp_path, "db", drop="AcmlVol")
-    assert result["field_missing"] == {"field_missing:AcmlVol": 10}
+def test_db_missing_trade_count_field_is_counted_and_fails_gate(tmp_path: Path) -> None:
+    result = _run(tmp_path, "db", drop="SelnCntgcsnu")
+    assert result["field_missing"] == {"field_missing:SelnCntgcsnu": 10}
     assert result["gates"]["pass"] is False
 
 
@@ -316,3 +321,15 @@ def test_ls_nxt_gate_fails_without_reference_samples(tmp_path: Path) -> None:
     assert result["reference_lag"]["count"] == 0
     assert _criteria(result)["lag_within_reference"] is False
     assert result["gates"]["pass"] is False
+
+
+def test_conflation_judges_only_reference_trades_inside_the_candidate_span() -> None:
+    cand = [rep.ReceivedTick(SYMBOL, 100100, 5, 100, 1)]
+    ref = [
+        rep.ReceivedTick(SYMBOL, 100000, 4, 100, 1),
+        rep.ReceivedTick(SYMBOL, 100100, 5, 100, 1),
+        rep.ReceivedTick("000660", 100100, 9, 100, 1),
+    ]
+    stats = rep.conflation_ratio(cand, ref, scope=rep._trade_spans(cand))
+    assert stats.symbol_minutes == 1
+    assert stats.p50_ratio == pytest.approx(1.0)

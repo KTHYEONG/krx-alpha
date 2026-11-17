@@ -144,14 +144,25 @@ def _minute_key(tick: ReceivedTick) -> tuple[str, int]:
     return (tick.symbol.zfill(6), tick.chetime // 100)
 
 
-def conflation_ratio(candidate: Sequence[ReceivedTick], reference: Sequence[ReceivedTick]) -> ConflationStats:
-    """Per symbol-minute share of reference trades (matched by cumulative volume) that the candidate also printed."""
+def conflation_ratio(
+    candidate: Sequence[ReceivedTick],
+    reference: Sequence[ReceivedTick],
+    *,
+    scope: Mapping[str, tuple[int, int]] | None = None,
+) -> ConflationStats:
+    """Per symbol-minute share of reference trades (matched by cumulative trade count) the candidate also printed.
+
+    scope maps each symbol to the HHMMSS span the candidate was observing; reference trades outside it are not judged.
+    None judges every reference trade.
+    """
     cand: dict[tuple[str, int], list[int]] = defaultdict(list)
     ref: dict[tuple[str, int], list[int]] = defaultdict(list)
     for tick in candidate:
         cand[_minute_key(tick)].append(tick.cum)
     for tick in reference:
-        ref[_minute_key(tick)].append(tick.cum)
+        span = None if scope is None else scope.get(tick.symbol.zfill(6))
+        if scope is None or (span is not None and span[0] <= tick.chetime <= span[1]):
+            ref[_minute_key(tick)].append(tick.cum)
     ratios: list[float] = []
     for key, ref_cums in ref.items():
         ref_set = set(ref_cums)
@@ -278,7 +289,9 @@ def _second_to_hhmmss(second: int) -> int:
     return (second // 3600) * 10000 + ((second % 3600) // 60) * 100 + second % 60
 
 
-def _db_levels(body: Mapping[str, object], price_prefix: str, qty_prefix: str, missing: Counter[str]) -> tuple[tuple[int, int], ...]:
+def _db_levels(
+    body: Mapping[str, object], price_prefix: str, qty_prefix: str, missing: Counter[str]
+) -> tuple[tuple[int, int], ...]:
     levels: list[tuple[int, int]] = []
     for n in range(1, _BOOK_LEVELS + 1):
         price = _as_int(_db_field(body, f"{price_prefix}{n}", missing))
@@ -287,7 +300,9 @@ def _db_levels(body: Mapping[str, object], price_prefix: str, qty_prefix: str, m
     return tuple(levels)
 
 
-def _decode_db(rows: Iterable[_Capture], missing: Counter[str]) -> tuple[list[DecodedFrame], list[DecodedBook], list[ReceivedTick]]:
+def _decode_db(
+    rows: Iterable[_Capture], missing: Counter[str]
+) -> tuple[list[DecodedFrame], list[DecodedBook], list[ReceivedTick]]:
     """Decode DB S00 trades and S01 books straight from raw JSON; absent or unparsable fields are counted in `missing`."""
     frames: list[DecodedFrame] = []
     books: list[DecodedBook] = []
@@ -311,14 +326,26 @@ def _decode_db(rows: Iterable[_Capture], missing: Counter[str]) -> tuple[list[De
             continue
         if tr_cd == _DB_TRADE_TR:
             stamp = _db_field(body, _DB_TRADE_EVENT_FIELD, missing)
-            frame = L0Frame("db", _KRX_TICK_STREAM, symbol, row.raw, 0, row.recv_wall_ns, 0, "", exchange_event_time=str(stamp or ""))
+            frame = L0Frame(
+                "db",
+                _KRX_TICK_STREAM,
+                symbol,
+                row.raw,
+                0,
+                row.recv_wall_ns,
+                0,
+                "",
+                exchange_event_time=str(stamp or ""),
+            )
             second = event_second_of(frame)
             frames.append(DecodedFrame(row.recv_wall_ns, symbol, second))
             price = _as_int(_db_field(body, "StckPrpr", missing))
             volume = _as_int(_db_field(body, "CntgVol", missing))
-            cum = _as_int(_db_field(body, "AcmlVol", missing))
-            if second is None or price is None or volume is None or cum is None:
+            sell_count = _as_int(_db_field(body, "SelnCntgcsnu", missing))
+            buy_count = _as_int(_db_field(body, "ShnuCntgcsnu", missing))
+            if second is None or price is None or volume is None or sell_count is None or buy_count is None:
                 continue
+            cum = sell_count + buy_count
             trades.append(ReceivedTick(symbol, _second_to_hhmmss(second), cum, price, volume))
         else:
             _db_field(body, _DB_BOOK_EVENT_FIELD, missing)
@@ -357,6 +384,16 @@ def _minute_of(recv_wall_ns: int) -> int:
     return _second_of_day_kst(recv_wall_ns) // 60
 
 
+def _trade_spans(trades: Sequence[ReceivedTick]) -> dict[str, tuple[int, int]]:
+    """Per symbol, the first and last HHMMSS at which the candidate printed a trade."""
+    spans: dict[str, tuple[int, int]] = {}
+    for trade in trades:
+        symbol = trade.symbol.zfill(6)
+        low, high = spans.get(symbol, (trade.chetime, trade.chetime))
+        spans[symbol] = (min(low, trade.chetime), max(high, trade.chetime))
+    return spans
+
+
 def _reference_rows(
     journal_root: pathlib.Path, day: dt.date, references: Sequence[str]
 ) -> tuple[list[ReceivedTick], list[DecodedFrame]]:
@@ -380,7 +417,14 @@ def _reference_rows(
                     if record is None or not record.symbol:
                         continue
                     frame = L0Frame(
-                        vendor, stream, record.symbol, record.raw, 0, record.recv_ns, 0, record.conn_id,
+                        vendor,
+                        stream,
+                        record.symbol,
+                        record.raw,
+                        0,
+                        record.recv_ns,
+                        0,
+                        record.conn_id,
                         exchange_event_time=record.exchange_event_time,
                     )
                     lags.append(DecodedFrame(record.recv_ns, record.symbol, event_second_of(frame)))
@@ -422,10 +466,12 @@ def analyze(
         frames, books, trades = _decode_db(rows, missing)
         result["decode"] = "decoded"
     result["field_missing"] = dict(sorted(missing.items()))
-    result["rate"] = dataclasses.asdict(rate_stats(frames or [DecodedFrame(r.recv_wall_ns, "", None) for r in rows], window_s=1.0))
+    result["rate"] = dataclasses.asdict(
+        rate_stats(frames or [DecodedFrame(r.recv_wall_ns, "", None) for r in rows], window_s=1.0)
+    )
     result["lag"] = dataclasses.asdict(lag_stats(frames))
     ref_trades, ref_lags = _reference_rows(journal_root, day, reference_vendors) if reference_vendors else ([], [])
-    result["conflation"] = dataclasses.asdict(conflation_ratio(trades, ref_trades))
+    result["conflation"] = dataclasses.asdict(conflation_ratio(trades, ref_trades, scope=_trade_spans(trades)))
     keys = {(f.symbol, _minute_of(f.recv_wall_ns)) for f in frames}
     matched_ref_lags = [r for r in ref_lags if (r.symbol, _minute_of(r.recv_wall_ns)) in keys]
     result["reference_lag"] = dataclasses.asdict(lag_stats(matched_ref_lags))
