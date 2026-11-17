@@ -94,6 +94,7 @@ class WindowContext:
     in_high_risk: bool
     session_open_wall: float
     session_close_wall: float
+    continuous_close_wall: float
 
 
 @dataclass(frozen=True, slots=True)

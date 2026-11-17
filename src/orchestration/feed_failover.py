@@ -475,6 +475,7 @@ class FeedFailoverSupervisor:
             in_high_risk=in_standby or in_auction,
             session_open_wall=open_wall,
             session_close_wall=close_wall,
+            continuous_close_wall=auction_wall,
         )
 
     def _capacity(self, plan: DynamicPlan) -> dict[str, SecondaryCapacity]:

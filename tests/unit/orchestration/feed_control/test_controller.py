@@ -363,3 +363,28 @@ def test_classify_disconnected_feed_is_silent() -> None:
     now = T0 + 1000
     ctx = window(now, session_open_wall=T0)
     assert classify_source(_fh(now, connected=False), now_wall=now, ctx=ctx, settings=SETTINGS) is SourceStatus.SILENT
+
+
+def test_auction_trade_silence_is_not_a_stream_mismatch() -> None:
+    now = T0 + 1000
+    ctx = window(now, session_open_wall=T0, continuous_close_wall=now - 5)
+    health = _fh(now, stream_last_frame_wall={"H0STCNT0": now - 40, "H0STASP0": now}, last_frame_wall=now)
+    assert classify_source(health, now_wall=now, ctx=ctx, settings=SETTINGS) is SourceStatus.HEALTHY
+    during_trading = window(now, session_open_wall=T0, continuous_close_wall=now + 5)
+    assert classify_source(health, now_wall=now, ctx=during_trading, settings=SETTINGS) is SourceStatus.SILENT
+
+
+def test_auction_total_silence_is_still_detected() -> None:
+    now = T0 + 1000
+    ctx = window(now, session_open_wall=T0, continuous_close_wall=now - 5)
+    health = _fh(now, last_frame_wall=now - 500, stream_last_frame_wall=dict.fromkeys(STREAMS, now - 500))
+    assert classify_source(health, now_wall=now, ctx=ctx, settings=SETTINGS) is SourceStatus.SILENT
+
+
+def test_nxt_group_is_not_judged_after_continuous_close() -> None:
+    nxt = replace(GROUP, venue="nxt")
+    script = [(T0 + 100, {"ls:0": silent_since(T0 + 100)}, {}, {"continuous_close_wall": T0 + 100})]
+    quiet = run_scenario((nxt,), SETTINGS, script, end=T0 + 400)
+    assert quiet.transitions() == []
+    judged = run_scenario(GROUPS, SETTINGS, script, end=T0 + 400)
+    assert judged.transitions() != []

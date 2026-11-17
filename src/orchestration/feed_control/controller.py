@@ -22,6 +22,7 @@ from src.orchestration.feed_control.model import (
     Transition,
     WindowContext,
 )
+from src.realtime.contracts import MarketVenue
 
 MAX_STEP_GAP_S = 60.0
 _MAX_TRANSITIONS_PER_STEP = len(GroupState)
@@ -52,7 +53,7 @@ def classify_source(
             return SourceStatus.SILENT
     elif now_wall - health.last_frame_wall > limit:
         return SourceStatus.SILENT
-    if not in_open_grace and health.stream_last_frame_wall:
+    if not in_open_grace and now_wall < ctx.continuous_close_wall and health.stream_last_frame_wall:
         ages = [now_wall - ts for ts in health.stream_last_frame_wall.values()]
         if any(age > limit for age in ages) and any(age <= limit for age in ages):
             return SourceStatus.SILENT
@@ -89,7 +90,7 @@ def step(
         runtime = state.groups.get(spec.group_id)
         if runtime is None:
             runtime = _fresh_runtime(ctx.now_wall)
-        if ctx.in_session:
+        if ctx.in_session and not _venue_closed(spec, ctx):
             runtime, group_actions, group_transitions = _advance_group(
                 runtime, spec, health, capacity, remaining, gap_s, ctx, settings
             )
@@ -109,6 +110,11 @@ def _silence_limit_s(vendor: str, settings: FeedControlSettings) -> float:
     if vendor == "kis":
         return settings.kis_silence_s
     return settings.other_silence_s
+
+
+def _venue_closed(spec: GroupSpec, ctx: WindowContext) -> bool:
+    """NXT regular ends with continuous trading; KRX keeps its auction until the regular close."""
+    return spec.venue == MarketVenue.NXT.value and ctx.now_wall >= ctx.continuous_close_wall
 
 
 def _fresh_runtime(now_wall: float) -> GroupRuntime:

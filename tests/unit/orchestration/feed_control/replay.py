@@ -81,6 +81,7 @@ def window(now: float, **overrides: Any) -> WindowContext:
         "in_high_risk": False,
         "session_open_wall": T0,
         "session_close_wall": SESSION_CLOSE,
+        "continuous_close_wall": SESSION_CLOSE,
     }
     fields.update(overrides)
     return WindowContext(**fields)
