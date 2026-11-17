@@ -333,3 +333,102 @@ def test_conflation_judges_only_reference_trades_inside_the_candidate_span() -> 
     stats = rep.conflation_ratio(cand, ref, scope=rep._trade_spans(cand))
     assert stats.symbol_minutes == 1
     assert stats.p50_ratio == pytest.approx(1.0)
+
+
+def _toss_trade_raw(symbol: str, timestamp: str, price: str, volume: str) -> str:
+    data = {"price": price, "volume": volume, "timestamp": timestamp, "currency": "KRW"}
+    return json.dumps({"type": "message", "topic": f"trade:kr:{symbol}", "data": data})
+
+
+def _toss_book_raw(symbol: str, timestamp: str, levels: int = 10) -> str:
+    asks = [{"price": str(100 + n), "volume": "10"} for n in range(levels)]
+    bids = [{"price": str(99 - n), "volume": "10"} for n in range(levels)]
+    data = {"timestamp": timestamp, "currency": "KRW", "asks": asks, "bids": bids}
+    return json.dumps({"type": "message", "topic": f"orderbook:kr:{symbol}", "data": data})
+
+
+def test_toss_decoder_parses_trade_and_book_frames() -> None:
+    recv = _recv_ns(10, 0, 6)
+    rows = [
+        rep._Capture(recv, "PONG"),
+        rep._Capture(recv, '{"type":"subscriptions","subscribed":["trade:kr:005930"]}'),
+        rep._Capture(recv, _toss_trade_raw(SYMBOL, "2026-11-16T10:00:05.123+09:00", "70000", "10")),
+        rep._Capture(recv, _toss_trade_raw(SYMBOL, "2026-11-16T01:00:05.500Z", "70100", "3")),
+        rep._Capture(recv, _toss_book_raw(SYMBOL, "2026-11-16T10:00:05.123+09:00", levels=11)),
+    ]
+    frames, books, trades = rep._decode_toss(rows)
+    assert [f.event_second for f in frames] == [36005, 36005]
+    assert trades == [
+        rep.ReceivedTick(SYMBOL, 100005, 0, 70000, 10),
+        rep.ReceivedTick(SYMBOL, 100005, 0, 70100, 3),
+    ]
+    assert len(books) == 1
+    assert len(books[0].asks) == 10
+    assert len(books[0].bids) == 10
+    assert rep.book_completeness(books).completeness == pytest.approx(1.0)
+
+
+def test_toss_conflation_uses_second_price_volume_multiset() -> None:
+    candidate = [
+        rep.ReceivedTick(SYMBOL, 100005, 0, 100, 1),
+        rep.ReceivedTick(SYMBOL, 100010, 0, 100, 9),
+        rep.ReceivedTick(SYMBOL, 100020, 0, 101, 1),
+    ]
+    reference = [
+        rep.ReceivedTick(SYMBOL, 100005, 7, 100, 1),
+        rep.ReceivedTick(SYMBOL, 100010, 7, 100, 2),
+        rep.ReceivedTick(SYMBOL, 100030, 7, 100, 3),
+        rep.ReceivedTick(SYMBOL, 100020, 7, 101, 1),
+        rep.ReceivedTick(SYMBOL, 100040, 7, 102, 5),
+    ]
+    stats = rep.trade_match(candidate, reference, scope=rep._trade_spans(candidate))
+    assert stats.symbol_minutes == 1
+    assert stats.p50_matched_share == pytest.approx(2 / 3)
+    assert stats.unexplained == 1
+
+
+def _toss_run(tmp_path: Path, *, matched: int) -> dict[str, Any]:
+    capture_dir = tmp_path / "capture"
+    journal_root = tmp_path / "journal"
+    reference = [
+        (_recv_ns(10, 0, 6), EVENT_STAMP, _ls_trade_raw("H0STCNT0", SYMBOL, SYMBOL, EVENT_STAMP, cum))
+        for cum in range(1, 11)
+    ]
+    _write_reference(journal_root, reference)
+    stamp = "2026-11-16T10:00:05.000+09:00"
+    recv = _recv_ns(10, 0, 6)
+    trades = [_toss_trade_raw(SYMBOL, stamp, "100", "1")] * matched
+    trades += [_toss_trade_raw(SYMBOL, stamp, "999", "1")] * (10 - matched)
+    rows = [(recv, raw) for raw in trades] + [(recv, _toss_book_raw(SYMBOL, stamp))]
+    _write_capture(capture_dir, "toss", rows, 50)
+    return rep.analyze(capture_dir, journal_root, DAY, vendor="toss", reference_vendors=["ls-krx"])
+
+
+def test_toss_gate_passes_when_match_share_meets_threshold(tmp_path: Path) -> None:
+    result = _toss_run(tmp_path, matched=10)
+    assert result["decode"] == "decoded"
+    assert result["gates"]["name"] == "G-PROBE-TOSS"
+    assert result["trade_match"]["p50_matched_share"] == pytest.approx(1.0)
+    assert all(_criteria(result).values())
+    assert result["gates"]["pass"] is True
+
+
+def test_toss_gate_fails_below_match_share_threshold(tmp_path: Path) -> None:
+    result = _toss_run(tmp_path, matched=5)
+    assert result["trade_match"]["p50_matched_share"] == pytest.approx(0.5)
+    assert _criteria(result)["trade_match_p50"] is False
+    assert result["gates"]["pass"] is False
+
+
+def test_db_split_gates_book_pass_tick_fail(tmp_path: Path) -> None:
+    result = _run(tmp_path, "db", candidate_cums=range(1, 6))
+    assert result["gates_split"]["G-PROBE-DB-BOOK"]["pass"] is True
+    assert result["gates_split"]["G-PROBE-DB-TICK"]["pass"] is False
+    assert result["gates"]["pass"] is False
+    assert set(result["gates"]) == {"name", "pass", "criteria", "note"}
+    assert set(result["gates"]["criteria"]) == {
+        "accepted_pairs",
+        "conflation_p50",
+        "book_completeness",
+        "lag_within_reference",
+    }

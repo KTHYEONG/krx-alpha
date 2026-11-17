@@ -373,3 +373,101 @@ def test_disconnect_at_connect_is_rejected_exit(monkeypatch: pytest.MonkeyPatch,
     summary = _run("toss", tmp_path / "out", tmp_path / "l0", [10], MONDAY_10)
     assert summary.exit_code == fp.EXIT_REJECTED
     assert dataclasses.is_dataclass(summary)
+
+
+class PairRecordingIO(FakeIO):
+    def __init__(self, capacity: int = 200, reject_after: int | None = None) -> None:
+        super().__init__(capacity, reject_after)
+        self.pairs: list[Any] = []
+
+    async def add(self, pairs: list[Any]) -> list[Any]:
+        self.pairs.extend(pairs)
+        return await super().add(pairs)
+
+
+class DroppingIO(PairRecordingIO):
+    async def next_frame(self) -> Any:
+        raise VendorDisconnected("closed:test")
+
+
+def _open_sequence(monkeypatch: pytest.MonkeyPatch, ios: list[FakeIO]) -> list[FakeIO]:
+    opened: list[FakeIO] = []
+
+    async def open_fake(vendor: str) -> FakeIO:
+        opened.append(ios[len(opened)])
+        return opened[-1]
+
+    monkeypatch.setattr(fp, "_open_io", open_fake)
+    return opened
+
+
+def test_second_session_records_disjoint_pairs_and_both_captures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    first, second = PairRecordingIO(capacity=4), PairRecordingIO(capacity=4)
+    _open_sequence(monkeypatch, [first, second])
+    summary = _run("db", tmp_path / "out", tmp_path / "l0", [2, 4, 8], MONDAY_10, second_session=True)
+    all_pairs = fp.build_pairs(SYMBOLS, ("trade", "book"))
+    assert summary.exit_code == fp.EXIT_OK
+    assert first.pairs == all_pairs[:4]
+    assert second.pairs == all_pairs[4:8]
+    assert summary.second_session_tried is True
+    assert summary.second_session == {
+        "tried": True,
+        "accepted": 4,
+        "rejected": {},
+        "disconnect": None,
+        "first_session_disconnect": None,
+    }
+    assert (tmp_path / "out" / "capture.db.4.jsonl").exists()
+    assert (tmp_path / "out" / "capture.db.8.jsonl").exists()
+    assert json.loads((tmp_path / "out" / "summary.db.json").read_text())["second_session"]["accepted"] == 4
+
+
+def test_second_session_rejection_is_result_not_crash(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    first, second = PairRecordingIO(capacity=4), PairRecordingIO(capacity=4, reject_after=0)
+    _open_sequence(monkeypatch, [first, second])
+    summary = _run("db", tmp_path / "out", tmp_path / "l0", [2, 4, 8], MONDAY_10, second_session=True)
+    assert summary.exit_code == fp.EXIT_OK
+    assert summary.second_session is not None
+    assert summary.second_session["accepted"] == 0
+    assert summary.second_session["rejected"] == {"rejected": 4}
+    assert summary.cap_pairs == 4
+    assert summary.stop_reason == "local_capacity"
+    assert [step.total_pairs for step in summary.steps[:2]] == [2, 4]
+    assert second.closed
+
+
+def test_first_session_drop_during_second_is_reported(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    first, second = DroppingIO(capacity=4), PairRecordingIO(capacity=4)
+    _open_sequence(monkeypatch, [first, second])
+    summary = _run("db", tmp_path / "out", tmp_path / "l0", [2, 4, 8], MONDAY_10, second_session=True)
+    assert summary.exit_code == fp.EXIT_OK
+    assert summary.second_session is not None
+    assert summary.second_session["first_session_disconnect"] == "VendorDisconnected:closed:test"
+    assert summary.second_session["accepted"] == 4
+    assert summary.second_session["disconnect"] is None
+    assert second.closed
+
+
+def test_second_session_default_off_changes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    opened: list[int] = []
+
+    async def open_fake(vendor: str) -> FakeIO:
+        opened.append(1)
+        return FakeIO(capacity=4)
+
+    monkeypatch.setattr(fp, "_open_io", open_fake)
+    summary = _run("db", tmp_path / "out", tmp_path / "l0", [2, 4, 8], MONDAY_10)
+    assert len(opened) == 1
+    assert summary.second_session_tried is False
+    assert "second_session" not in summary.as_json()
+    assert "second session not tried" in (summary.detail or "")
+
+
+def test_second_session_ignored_for_ls_nxt(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    opened = _open_sequence(monkeypatch, [PairRecordingIO(capacity=4)])
+    summary = _run("ls-nxt", tmp_path / "out", tmp_path / "l0", [2, 4, 8], MONDAY_10, second_session=True)
+    assert len(opened) == 1
+    assert summary.second_session_tried is False
+    assert "ignored for ls-nxt" in (summary.detail or "")

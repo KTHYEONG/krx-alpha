@@ -145,9 +145,17 @@ class ProbeSummary:
     second_session_tried: bool = False
     steps: list[StepRecord] = dataclasses.field(default_factory=list)
     detail: str | None = None
+    second_session: dict[str, Any] | None = None
 
     def as_json(self) -> dict[str, Any]:
-        return dataclasses.asdict(self)
+        data = dataclasses.asdict(self)
+        if self.second_session is None:
+            del data["second_session"]
+        return data
+
+
+def _append_detail(summary: ProbeSummary, text: str) -> None:
+    summary.detail = text if summary.detail is None else f"{summary.detail}; {text}"
 
 
 def redact(text: str, secrets: Sequence[str]) -> str:
@@ -597,13 +605,16 @@ async def _ramp(
     hold_s: float,
     recorder: _Recorder,
     summary: ProbeSummary,
+    *,
+    second_session: bool = False,
 ) -> None:
     accepted_total = 0
     prev_total = 0
     for total in ramp:
         if total > io.capacity:
             summary.stop_reason = "local_capacity"
-            summary.detail = f"session capacity {io.capacity} reached; second session not tried"
+            tail = "second session follows" if second_session else "second session not tried"
+            _append_detail(summary, f"session capacity {io.capacity} reached; {tail}")
             break
         step = StepRecord(total_pairs=total)
         summary.steps.append(step)
@@ -640,6 +651,87 @@ async def _ramp(
     recorder.close_step()
 
 
+async def _hold_pair(
+    first_io: ProbeIO,
+    first_recorder: _Recorder,
+    second_io: ProbeIO,
+    second_recorder: _Recorder,
+    result: dict[str, Any],
+    hold_s: float,
+) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + hold_s
+    while True:
+        await asyncio.sleep(max(0.0, min(deadline - loop.time(), _LEASE_RENEW_EVERY_S)))
+        if second_recorder.disconnect is not None:
+            result["disconnect"] = second_recorder.disconnect
+            return
+        if not second_io.renew():
+            result["disconnect"] = "lease_preempted"
+            return
+        if not first_io.renew():
+            first_recorder.disconnect = first_recorder.disconnect or "lease_preempted"
+        if loop.time() >= deadline:
+            return
+
+
+async def _run_second_session(
+    vendor: str,
+    pairs: list[Pair],
+    offset: int,
+    hold_s: float,
+    out_dir: pathlib.Path,
+    first_io: ProbeIO,
+    first_recorder: _Recorder,
+    summary: ProbeSummary,
+    secrets_out: list[str],
+) -> None:
+    """Subscribe a disjoint pair block on a second IO while the first session keeps holding; results go to summary.second_session."""
+    result: dict[str, Any] = {
+        "tried": True,
+        "accepted": 0,
+        "rejected": {},
+        "disconnect": None,
+        "first_session_disconnect": None,
+    }
+    summary.second_session_tried = True
+    summary.second_session = result
+    try:
+        second_io = await _open_io(vendor)
+    except _NoTokenError as exc:
+        result["disconnect"] = f"no_token:{exc}"
+        return
+    recorder = _Recorder(out_dir, vendor, lambda: second_io.secrets)
+    pump: asyncio.Task[None] | None = None
+    try:
+        await second_io.connect()
+        secrets_out.extend(second_io.secrets)
+        block = pairs[offset : min(len(pairs), offset + second_io.capacity, 2 * second_io.capacity)]
+        step = StepRecord(total_pairs=offset + len(block))
+        summary.steps.append(step)
+        recorder.start_step(step, block)
+        pump = asyncio.create_task(recorder.pump(second_io))
+        for _, accepted, code in await second_io.add(block):
+            if accepted:
+                result["accepted"] += 1
+                step.accepted += 1
+            else:
+                result["rejected"][code] = result["rejected"].get(code, 0) + 1
+                step.rejected[code] = step.rejected.get(code, 0) + 1
+        await _hold_pair(first_io, first_recorder, second_io, recorder, result, hold_s)
+    except (_RefusedError, VendorAuthRejected, VendorDisconnected) as exc:
+        result["disconnect"] = f"{type(exc).__name__}:{exc}"
+    finally:
+        if pump is not None:
+            pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pump
+        recorder.close_step()
+        await second_io.close()
+        if first_recorder.disconnect is not None:
+            result["first_session_disconnect"] = first_recorder.disconnect
+
+
 async def run_probe(
     vendor: Literal["db", "toss", "ls-nxt"],
     *,
@@ -650,6 +742,7 @@ async def run_probe(
     out_dir: pathlib.Path,
     journal_root: pathlib.Path,
     now: Callable[[], float],
+    second_session: bool = False,
 ) -> ProbeSummary:
     """Run one ramp for a candidate vendor and return the summary; the caller maps summary.exit_code to the process exit."""
     summary = ProbeSummary(vendor=vendor, exit_code=EXIT_OK)
@@ -667,6 +760,10 @@ async def run_probe(
         summary.detail = str(exc)
         return summary
 
+    if second_session and vendor == "ls-nxt":
+        _append_detail(summary, "second session ignored for ls-nxt: LS keeps the third session as handover spare")
+        second_session = False
+
     now_kst = dt.datetime.fromtimestamp(now(), _KST)
     refusal = forbidden_reason(vendor, now_kst, _session_anchors(now_kst.date()))
     if refusal is not None:
@@ -683,12 +780,21 @@ async def run_probe(
 
     recorder = _Recorder(out_dir, vendor, lambda: io.secrets)
     pump: asyncio.Task[None] | None = None
+    second_secrets: list[str] = []
     try:
         await io.connect()
         pump = asyncio.create_task(recorder.pump(io))
-        await _ramp(io, pairs, ramp, hold_s, recorder, summary)
+        await _ramp(io, pairs, ramp, hold_s, recorder, summary, second_session=second_session)
         if summary.stop_reason in ("rejected", "disconnect") and not summary.cap_pairs:
             summary.exit_code = EXIT_REJECTED
+        elif second_session and summary.stop_reason in (None, "local_capacity"):
+            offset = summary.cap_pairs or 0
+            if offset < len(pairs):
+                await _run_second_session(
+                    vendor, pairs, offset, hold_s, out_dir, io, recorder, summary, second_secrets
+                )
+            else:
+                _append_detail(summary, "second session not tried: no pairs left")
     except _RefusedError as exc:
         summary.exit_code = exc.exit_code
         summary.detail = str(exc)
@@ -701,7 +807,7 @@ async def run_probe(
             with contextlib.suppress(asyncio.CancelledError):
                 await pump
         await io.close()
-        _write_summary(out_dir, summary, io_secrets=io.secrets)
+        _write_summary(out_dir, summary, io_secrets=(*io.secrets, *second_secrets))
     return summary
 
 
@@ -758,6 +864,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ramp", default="10,25,50,100,200", help="ascending total pair counts")
     parser.add_argument("--hold-s", type=float, default=60.0, help="seconds held at each ramp step")
     parser.add_argument("--out", required=True, help="output directory, outside the L0 journal root")
+    parser.add_argument(
+        "--second-session",
+        action="store_true",
+        help="after a full or capacity-limited ramp, open a second session on disjoint pairs (DB, Toss; ignored for ls-nxt)",
+    )
     return parser
 
 
@@ -792,6 +903,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             out_dir=out_dir,
             journal_root=settings.paths.journal_root,
             now=time.time,
+            second_session=args.second_session,
         )
     )
     print(json.dumps(summary.as_json(), sort_keys=True))  # noqa: T201 - probe result goes to stdout

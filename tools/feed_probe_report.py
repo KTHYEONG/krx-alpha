@@ -46,6 +46,10 @@ _DB_BOOK_TR = "S01"
 _DB_TRADE_EVENT_FIELD = "StckCntghour"
 _DB_BOOK_EVENT_FIELD = "BsopHour"
 _CAPTURE_RE = re.compile(r"capture\.(?P<vendor>[a-z-]+)\.(?P<step>\d+)\.jsonl")
+_TOSS_TRADE_PREFIX = "trade:kr:"
+_TOSS_BOOK_PREFIX = "orderbook:kr:"
+_DB_BOOK_GATE = "G-PROBE-DB-BOOK"
+_DB_TICK_GATE = "G-PROBE-DB-TICK"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -54,6 +58,7 @@ class ProbeCriteria:
     conflation_p50: float = _CONFLATION_OK
     book_completeness: float = 0.99
     liquid_top_n: int = 10
+    toss_trade_match: float = 0.85
 
 
 @dataclasses.dataclass(frozen=True)
@@ -87,6 +92,13 @@ class ConflationStats:
     p50_ratio: float | None
     share_below_threshold: float | None
     extra_minutes: int
+
+
+@dataclasses.dataclass(frozen=True)
+class TradeMatchStats:
+    symbol_minutes: int
+    p50_matched_share: float | None
+    unexplained: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -175,6 +187,39 @@ def conflation_ratio(
         p50_ratio=_nearest_rank(ratios, 0.50),
         share_below_threshold=(below / len(ratios)) if ratios else None,
         extra_minutes=extra,
+    )
+
+
+def trade_match(
+    candidate: Sequence[ReceivedTick],
+    reference: Sequence[ReceivedTick],
+    *,
+    scope: Mapping[str, tuple[int, int]],
+) -> TradeMatchStats:
+    """Exact (HHMMSS, price, volume) multiset match of in-span reference trades per symbol-minute.
+
+    Used for unified streams that carry no cumulative count. unexplained counts candidate trades with no reference twin.
+    """
+    cand: dict[tuple[str, int], Counter[tuple[int, int, int]]] = defaultdict(Counter)
+    ref: dict[tuple[str, int], Counter[tuple[int, int, int]]] = defaultdict(Counter)
+    for tick in candidate:
+        cand[_minute_key(tick)][(tick.chetime, tick.price, tick.volume)] += 1
+    for tick in reference:
+        span = scope.get(tick.symbol.zfill(6))
+        if span is not None and span[0] <= tick.chetime <= span[1]:
+            ref[_minute_key(tick)][(tick.chetime, tick.price, tick.volume)] += 1
+    unexplained = 0
+    for key, cand_counts in cand.items():
+        matched = sum((cand_counts & ref.get(key, Counter())).values())
+        unexplained += sum(cand_counts.values()) - matched
+    shares: list[float] = []
+    for key, ref_counts in ref.items():
+        matched = sum((ref_counts & cand.get(key, Counter())).values())
+        shares.append(matched / sum(ref_counts.values()))
+    return TradeMatchStats(
+        symbol_minutes=len(shares),
+        p50_matched_share=_nearest_rank(shares, 0.50),
+        unexplained=unexplained,
     )
 
 
@@ -360,6 +405,63 @@ def _decode_db(
     return frames, books, trades
 
 
+def _toss_event_second(stamp: object) -> int | None:
+    if not isinstance(stamp, str):
+        return None
+    try:
+        moment = dt.datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return None
+    local = moment.astimezone(_KST)
+    return local.hour * 3600 + local.minute * 60 + local.second
+
+
+def _toss_levels(levels: object) -> tuple[tuple[int, int], ...]:
+    out: list[tuple[int, int]] = []
+    if isinstance(levels, list):
+        for item in levels[:_BOOK_LEVELS]:
+            price = _as_int(item.get("price")) if isinstance(item, dict) else None
+            qty = _as_int(item.get("volume")) if isinstance(item, dict) else None
+            out.append((price or 0, qty or 0))
+    out.extend([(0, 0)] * (_BOOK_LEVELS - len(out)))
+    return tuple(out)
+
+
+def _decode_toss(rows: Iterable[_Capture]) -> tuple[list[DecodedFrame], list[DecodedBook], list[ReceivedTick]]:
+    """Decode Toss unified-stream trade and orderbook data frames; PONG and control frames are skipped."""
+    frames: list[DecodedFrame] = []
+    books: list[DecodedBook] = []
+    trades: list[ReceivedTick] = []
+    for row in rows:
+        try:
+            entry = json.loads(row.raw)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "message":
+            continue
+        topic = entry.get("topic")
+        data = entry.get("data")
+        if not isinstance(topic, str) or not isinstance(data, dict):
+            continue
+        if topic.startswith(_TOSS_TRADE_PREFIX):
+            symbol = topic.removeprefix(_TOSS_TRADE_PREFIX)
+            second = _toss_event_second(data.get("timestamp"))
+            frames.append(DecodedFrame(row.recv_wall_ns, symbol, second))
+            price = _as_int(data.get("price"))
+            volume = _as_int(data.get("volume"))
+            if second is None or price is None or volume is None:
+                continue
+            trades.append(ReceivedTick(symbol, _second_to_hhmmss(second), 0, price, volume))
+        elif topic.startswith(_TOSS_BOOK_PREFIX):
+            symbol = topic.removeprefix(_TOSS_BOOK_PREFIX)
+            books.append(
+                DecodedBook(row.recv_wall_ns, symbol, _toss_levels(data.get("asks")), _toss_levels(data.get("bids")))
+            )
+    return frames, books, trades
+
+
 def _book_from_body(recv_wall_ns: int, symbol: str, body: Mapping[str, object]) -> DecodedBook | None:
     def level(side: str, n: int) -> tuple[int, int]:
         price = _as_int(body.get(f"{'offer' if side == 'ask' else 'bid'}ho{n}"))
@@ -454,6 +556,8 @@ def analyze(
         "accepted_pairs": summary.get("cap_pairs"),
         "decode": "raw_only",
     }
+    if "second_session" in summary:
+        result["second_session"] = summary["second_session"]
     criteria = criteria or ProbeCriteria()
     frames: list[DecodedFrame] = []
     books: list[DecodedBook] = []
@@ -465,13 +569,19 @@ def analyze(
     elif vendor == "db":
         frames, books, trades = _decode_db(rows, missing)
         result["decode"] = "decoded"
+    elif vendor == "toss":
+        frames, books, trades = _decode_toss(rows)
+        result["decode"] = "decoded"
     result["field_missing"] = dict(sorted(missing.items()))
     result["rate"] = dataclasses.asdict(
         rate_stats(frames or [DecodedFrame(r.recv_wall_ns, "", None) for r in rows], window_s=1.0)
     )
     result["lag"] = dataclasses.asdict(lag_stats(frames))
     ref_trades, ref_lags = _reference_rows(journal_root, day, reference_vendors) if reference_vendors else ([], [])
-    result["conflation"] = dataclasses.asdict(conflation_ratio(trades, ref_trades, scope=_trade_spans(trades)))
+    if vendor == "toss":
+        result["trade_match"] = dataclasses.asdict(trade_match(trades, ref_trades, scope=_trade_spans(trades)))
+    else:
+        result["conflation"] = dataclasses.asdict(conflation_ratio(trades, ref_trades, scope=_trade_spans(trades)))
     keys = {(f.symbol, _minute_of(f.recv_wall_ns)) for f in frames}
     matched_ref_lags = [r for r in ref_lags if (r.symbol, _minute_of(r.recv_wall_ns)) in keys]
     result["reference_lag"] = dataclasses.asdict(lag_stats(matched_ref_lags))
@@ -480,6 +590,8 @@ def analyze(
     liquid_books = [b for b in books if b.symbol in liquid]
     result["book"] = dataclasses.asdict(book_completeness(liquid_books))
     result["gates"] = _gates(vendor, result, criteria)
+    if vendor == "db":
+        result["gates_split"] = _db_gates_split(result, criteria)
     return result
 
 
@@ -491,25 +603,68 @@ def _lag_within_reference(lag: Mapping[str, Any], reference: Mapping[str, Any]) 
     return lag["p50_s"] <= ref_p99 and lag["p99_s"] <= ref_p99
 
 
-def _gates(vendor: str, result: Mapping[str, Any], criteria: ProbeCriteria) -> dict[str, Any]:
-    name = f"G-PROBE-{vendor.upper().replace('-', '')}"
-    if result["decode"] != "decoded":
-        return {"name": name, "pass": False, "criteria": {}, "note": "not_decoded: no verified schema for this vendor"}
-    accepted = result.get("accepted_pairs") or 0
-    conf = result["conflation"]["p50_ratio"]
+def _accepted_ok(result: Mapping[str, Any], criteria: ProbeCriteria) -> bool:
+    return (result.get("accepted_pairs") or 0) >= criteria.min_accepted_pairs
+
+
+def _book_ok(result: Mapping[str, Any], criteria: ProbeCriteria) -> bool:
     book = result["book"]["completeness"]
-    checks = {
-        "accepted_pairs": accepted >= criteria.min_accepted_pairs,
-        "conflation_p50": conf is not None and conf >= criteria.conflation_p50,
-        "book_completeness": book is not None and book >= criteria.book_completeness,
-        "lag_within_reference": _lag_within_reference(result["lag"], result["reference_lag"]),
-    }
+    return book is not None and book >= criteria.book_completeness
+
+
+def _share_ok(share: float | None, threshold: float) -> bool:
+    return share is not None and share >= threshold
+
+
+def _gate(name: str, checks: dict[str, bool], result: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "name": name,
         "pass": decide_gate(checks),
         "criteria": checks,
         "note": f"reference lag samples on matched symbol-minutes: {result['reference_lag']['count']}",
     }
+
+
+def _db_gates_split(result: Mapping[str, Any], criteria: ProbeCriteria) -> dict[str, Any]:
+    """Book gate (accepted pairs, book, lag) and tick gate (conflation) for DB; both must pass for the legacy verdict."""
+    book_checks = {
+        "accepted_pairs": _accepted_ok(result, criteria),
+        "book_completeness": _book_ok(result, criteria),
+        "lag_within_reference": _lag_within_reference(result["lag"], result["reference_lag"]),
+    }
+    conf = result["conflation"]["p50_ratio"]
+    tick_checks = {"conflation_p50": conf is not None and conf >= criteria.conflation_p50}
+    return {
+        _DB_BOOK_GATE: _gate(_DB_BOOK_GATE, book_checks, result),
+        _DB_TICK_GATE: _gate(_DB_TICK_GATE, tick_checks, result),
+    }
+
+
+def _gates(vendor: str, result: Mapping[str, Any], criteria: ProbeCriteria) -> dict[str, Any]:
+    name = f"G-PROBE-{vendor.upper().replace('-', '')}"
+    if result["decode"] != "decoded":
+        return {"name": name, "pass": False, "criteria": {}, "note": "not_decoded: no verified schema for this vendor"}
+    if vendor == "db":
+        split = _db_gates_split(result, criteria)
+        checks = {key: value for gate in split.values() for key, value in gate["criteria"].items()}
+        return _gate(name, checks, result) | {"pass": all(gate["pass"] for gate in split.values())}
+    if vendor == "toss":
+        share = result["trade_match"]["p50_matched_share"]
+        checks = {
+            "accepted_pairs": _accepted_ok(result, criteria),
+            "book_completeness": _book_ok(result, criteria),
+            "lag_within_reference": _lag_within_reference(result["lag"], result["reference_lag"]),
+            "trade_match_p50": _share_ok(share, criteria.toss_trade_match),
+        }
+        return _gate(name, checks, result)
+    conf = result["conflation"]["p50_ratio"]
+    checks = {
+        "accepted_pairs": _accepted_ok(result, criteria),
+        "conflation_p50": conf is not None and conf >= criteria.conflation_p50,
+        "book_completeness": _book_ok(result, criteria),
+        "lag_within_reference": _lag_within_reference(result["lag"], result["reference_lag"]),
+    }
+    return _gate(name, checks, result)
 
 
 def _markdown(report: Mapping[str, Any]) -> str:
@@ -524,7 +679,15 @@ def _markdown(report: Mapping[str, Any]) -> str:
         f"- note: {gate.get('note', '')}",
         "",
     ]
-    for key in ("rate", "lag", "reference_lag", "conflation", "book", "field_missing"):
+    lines.extend(
+        f"- gate {sub['name']}: {'PASS' if sub['pass'] else 'FAIL'} {sub['criteria']}"
+        for sub in report.get("gates_split", {}).values()
+    )
+    if "gates_split" in report:
+        lines.append("")
+    for key in ("rate", "lag", "reference_lag", "conflation", "trade_match", "book", "field_missing", "second_session"):
+        if key not in report:
+            continue
         lines.append(f"## {key}")
         lines.extend(f"- {k}: {v}" for k, v in report[key].items())
         lines.append("")
