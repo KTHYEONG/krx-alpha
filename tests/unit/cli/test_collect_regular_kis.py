@@ -36,6 +36,7 @@ def _write_candidates(path: pathlib.Path, *, day: dt.date, symbols: tuple[str, .
 
 def _runtime(*, enabled=True, slots=("1", "2"), capacity=41, grace=120.0, silence=30.0, nxt_slots=()):
     collector = SimpleNamespace(
+        vendor="kis",
         ntp_host="ntp-host",
         ntp_fallback_hosts=(),
         min_free_disk_gb=3.0,
@@ -387,3 +388,55 @@ def test_collect_parser_venue_defaults_to_krx_and_accepts_nxt() -> None:
     assert root.parse_args([*base, "--venue", "nxt"]).venue == "nxt"
     with pytest.raises(SystemExit):
         root.parse_args([*base, "--venue", "kosdaq"])
+
+
+def test_child_recomputes_daemon_plan_with_ls_blocks(monkeypatch, tmp_path) -> None:
+    from src.orchestration.regular_kis import ls_shard_blocks, regular_kis_ls_plan_inputs
+    from src.realtime.kis_sharding import plan_regular_kis_shards
+
+    day = dt.date(2026, 9, 16)
+    symbols = tuple(f"{i:06d}" for i in range(1, 61))
+    _write_candidates(tmp_path / "pool.json", day=day, symbols=symbols)
+    runtime = _runtime()
+    runtime.collector.vendor = "ls"
+    runtime.collector.streams = ("H0STCNT0", "H0STASP0")
+    runtime.collector.ls_active_sessions = 2
+    runtime.collector.ls_max_subscriptions_per_session = 40
+    runtime.collector.ls_dynamic_reserve_symbols = 0
+    runtime.collector.ls_max_sessions = 3
+    monkeypatch.setattr(collect_regular_kis, "resolve_collector_runtime", lambda **kw: runtime)
+    monkeypatch.setattr(collect_regular_kis, "load_kis_data_credentials", lambda: _creds())
+    monkeypatch.setattr(
+        collect_regular_kis, "bootstrap_session", lambda cfg: (_ for _ in ()).throw(AssertionError("no bootstrap"))
+    )
+    blocks = ls_shard_blocks(tmp_path / "pool.json", runtime.collector)
+    assert blocks == (symbols[:20], symbols[20:40])
+    covered, ls_blocks = regular_kis_ls_plan_inputs(blocks)
+    daemon_plan = plan_regular_kis_shards(
+        symbols=symbols, credentials=_creds(), credential_slots=("1", "2"),
+        pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
+        ls_covered_symbols=covered, ls_shard_symbols=ls_blocks,
+    )
+    plain_plan = plan_regular_kis_shards(
+        symbols=symbols, credentials=_creds(), credential_slots=("1", "2"),
+        pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
+    )
+    assert daemon_plan[1].symbols != plain_plan[1].symbols
+    args = _args(tmp_path, day="2026-09-16", symbols=",".join(daemon_plan[1].symbols), shard=1, slot="2", key_id="fp2")
+    with pytest.raises(AssertionError, match="no bootstrap"):
+        asyncio.run(collect_regular_kis._run_stream(args))
+    stale = _args(tmp_path, day="2026-09-16", symbols=",".join(plain_plan[1].symbols), shard=1, slot="2", key_id="fp2")
+    with pytest.raises(MissingCredentialsError):
+        asyncio.run(collect_regular_kis._run_stream(stale))
+
+
+def test_ls_shard_blocks_empty_for_non_ls_vendor_and_unreadable_candidates(tmp_path) -> None:
+    from src.orchestration.regular_kis import ls_shard_blocks
+
+    kis = SimpleNamespace(vendor="kis")
+    ls = SimpleNamespace(
+        vendor="ls", streams=("A", "B"), ls_active_sessions=2, ls_max_subscriptions_per_session=40,
+        ls_dynamic_reserve_symbols=0, ls_max_sessions=3,
+    )
+    assert ls_shard_blocks(tmp_path / "pool.json", kis) == ()
+    assert ls_shard_blocks(tmp_path / "missing.json", ls) == ()

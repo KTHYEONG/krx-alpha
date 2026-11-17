@@ -11,6 +11,7 @@ import polars as pl
 import pytest
 
 import src.orchestration.daemon as daemon_mod
+import src.orchestration.regular_kis as regular_kis_mod
 from src.core.config import CollectorSettings, RegularKisSettings, resolve_collector_runtime
 from src.core.session_anchors import standard_session_anchors
 from src.orchestration.trading_day_gate import TradingDayStatus, TradingDayView
@@ -72,9 +73,9 @@ def _symbols(count: int) -> tuple[str, ...]:
     return tuple(f"{i:06d}" for i in range(1, count + 1))
 
 
-def _runner(tmp_path, monkeypatch, **collector_kw):
+def _runner(tmp_path, monkeypatch, kis_slots=("1", "2", "3"), **collector_kw):
     collector = CollectorSettings(data_root=tmp_path / "data", **collector_kw)
-    rk = RegularKisSettings(enabled=True, credential_slots=("1", "2", "3"), pair_capacity_per_connection=41)
+    rk = RegularKisSettings(enabled=True, credential_slots=kis_slots, pair_capacity_per_connection=41)
     runtime = resolve_collector_runtime(collector=collector, regular_kis=rk)
     monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSupervisor)
     return daemon_mod.DaemonRunner(
@@ -208,6 +209,22 @@ def test_default_settings_ls_coverage_matches_legacy_split(tmp_path, monkeypatch
         ls_covered_symbols=legacy_covered,
     )
     assert runner.state.regular_kis_plan == expected_kis
+
+
+def test_two_ls_shards_spread_kis_duplicates_and_log_dup_by_ls_shard(tmp_path, monkeypatch, caplog) -> None:
+    runner = _runner(tmp_path, monkeypatch, kis_slots=("1", "2"), ls_active_sessions=2)
+    symbols = _symbols(200)
+    _write_candidates(runner._paths, symbols)
+    runner.state.orchestrated_for = DAY
+    with caplog.at_level(logging.INFO, logger="src.realtime.kis_sharding"):
+        runner._ensure_regular_kis_plan(DAY)
+
+    ls_blocks = [shard.symbols for shard in runner.state.ls_shard_plan]
+    assert len(ls_blocks) == 2
+    plan = runner.state.regular_kis_plan
+    assert [shard.symbols for shard in plan] == [ls_blocks[0][:20], ls_blocks[1][:20]]
+    assert "dup_by_ls_shard=20,20" in caplog.text
+    assert regular_kis_mod.ls_shard_blocks(runner._paths.candidates, runner._runtime.collector) == tuple(ls_blocks)
 
 
 def test_eod_audit_skips_manifest_without_frame_counts(tmp_path, monkeypatch) -> None:

@@ -3,22 +3,73 @@
 from __future__ import annotations
 
 import datetime as dt
+import pathlib
 import sys
 from zoneinfo import ZoneInfo
 
+from src.core.config import CollectorSettings
+from src.core.errors import KrxAlphaError
 from src.core.paths import DataPaths
 from src.core.session_anchors import SessionAnchors
 from src.realtime.contracts import MarketVenue
 from src.realtime.kis_sharding import AftermarketShard
+from src.realtime.ls_sharding import plan_ls_shards
+from src.universe.ipc import read_candidates
 
 _KST = ZoneInfo("Asia/Seoul")
 
 __all__ = [
+    "candidate_symbols_and_tiers",
+    "ls_shard_blocks",
     "regular_kis_collection_due",
     "regular_kis_dynamic_stream_cmd",
+    "regular_kis_ls_plan_inputs",
     "regular_kis_stream_cmd",
     "regular_nxt_collection_due",
 ]
+
+
+def candidate_symbols_and_tiers(path: pathlib.Path) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Return candidate symbols in priority order and their tiers; raises KrxAlphaError when the file is not ready."""
+    data = read_candidates(path)
+    rows = data.get("candidates") if isinstance(data, dict) else None
+    if (
+        not isinstance(rows, list)
+        or not rows
+        or not all(isinstance(row, dict) and isinstance(row.get("symbol"), str) and row["symbol"] for row in rows)
+    ):
+        raise KrxAlphaError(f"invalid candidates file: {path}")
+    symbols = tuple(str(row["symbol"]) for row in rows)
+    tiers = {str(row["symbol"]): str(row.get("tier", "event")) for row in rows}
+    return symbols, tiers
+
+
+def ls_shard_blocks(candidates_path: pathlib.Path, collector: CollectorSettings) -> tuple[tuple[str, ...], ...]:
+    """LS shard symbol blocks as the daemon plans them; () for non-LS vendors or when planning fails."""
+    if collector.vendor != "ls":
+        return ()
+    try:
+        symbols, tiers = candidate_symbols_and_tiers(candidates_path)
+        shards, _overflow = plan_ls_shards(
+            symbols,
+            tiers=tiers,
+            streams=collector.streams,
+            active_sessions=collector.ls_active_sessions,
+            pairs_per_session=collector.ls_max_subscriptions_per_session,
+            dynamic_reserve_symbols=collector.ls_dynamic_reserve_symbols,
+            max_sessions=collector.ls_max_sessions,
+        )
+    except (KrxAlphaError, OSError, ValueError):
+        return ()
+    return tuple(shard.symbols for shard in shards)
+
+
+def regular_kis_ls_plan_inputs(
+    blocks: tuple[tuple[str, ...], ...],
+) -> tuple[frozenset[str], tuple[tuple[str, ...], ...] | None]:
+    """(ls_covered_symbols, ls_shard_symbols) for ``plan_regular_kis_shards``; blocks only when 2+ LS shards exist."""
+    covered = frozenset(symbol for block in blocks for symbol in block)
+    return covered, (blocks if len(blocks) >= 2 else None)
 
 
 def regular_kis_collection_due(

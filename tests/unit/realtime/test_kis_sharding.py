@@ -491,3 +491,87 @@ def test_krx_regular_plan_default_venue_is_krx() -> None:
         pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
     )
     assert [(shard.venue, shard.credential_slot) for shard in plan] == [(MarketVenue.KRX, "1")]
+
+
+def _ls_plan(symbols, blocks, *, covered=None, slots=("1", "2"), venue=None):
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    keys = tuple(KisDataCredential(slot, f"key{slot}", "s", "h", f"id{slot}") for slot in slots)
+    covered = frozenset(s for block in blocks for s in block) if covered is None else covered
+    return plan_regular_kis_shards(
+        symbols=symbols, credentials=keys, credential_slots=slots,
+        pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
+        ls_covered_symbols=covered, ls_shard_symbols=blocks, venue=venue or MarketVenue.KRX,
+    )
+
+
+def _two_blocks(n0=100, n1=100):
+    block0 = tuple(f"a{i:05d}" for i in range(n0))
+    block1 = tuple(f"b{i:05d}" for i in range(n1))
+    return block0, block1
+
+
+def test_kis_plan_single_ls_block_equals_priority_order() -> None:
+    block = tuple(f"{i:06d}" for i in range(60))
+    plan = _ls_plan(block, (block,))
+    assert tuple(s for shard in plan for s in shard.symbols) == block[:40]
+
+
+def test_kis_plan_two_shards_aligns_slots_to_shards() -> None:
+    block0, block1 = _two_blocks()
+    plan = _ls_plan(block0 + block1, (block0, block1))
+    assert [shard.symbols for shard in plan] == [block0[:20], block1[:20]]
+
+
+def test_kis_plan_uncovered_first_then_quota(caplog) -> None:
+    import logging
+
+    block0, block1 = _two_blocks(50, 50)
+    uncovered = tuple(f"u{i:05d}" for i in range(6))
+    with caplog.at_level(logging.INFO, logger="src.realtime.kis_sharding"):
+        plan = _ls_plan(uncovered + block0 + block1, (block0, block1))
+    flat = tuple(s for shard in plan for s in shard.symbols)
+    assert flat == uncovered + block0[:17] + block1[:17]
+    assert plan[0].symbols[:6] == uncovered
+    assert "dup_by_ls_shard=17,17" in caplog.text
+
+
+def test_kis_plan_short_block_borrows_from_next() -> None:
+    block0, block1 = _two_blocks(5, 100)
+    plan = _ls_plan(block0 + block1, (block0, block1))
+    flat = tuple(s for shard in plan for s in shard.symbols)
+    assert flat == block0 + block1[:35]
+    assert len(set(flat)) == 40
+
+
+def test_kis_plan_rejects_bad_blocks() -> None:
+    import pytest
+
+    from src.core.errors import KrxAlphaError
+    from src.realtime.contracts import MarketVenue
+
+    block0, block1 = _two_blocks(30, 30)
+    symbols = block0 + block1
+    with pytest.raises(KrxAlphaError):
+        _ls_plan(symbols, (block0, block0[:5] + block1))
+    with pytest.raises(KrxAlphaError):
+        _ls_plan(symbols, (block0, block1[:-1]), covered=frozenset(symbols))
+    with pytest.raises(KrxAlphaError):
+        _ls_plan(symbols, (block0, block1), venue=MarketVenue.NXT)
+
+
+def test_kis_plan_blocks_require_covered_symbols() -> None:
+    import pytest
+
+    from src.core.errors import KrxAlphaError
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    block0, block1 = _two_blocks(5, 5)
+    keys = (KisDataCredential("1", "k", "s", "h", "id1"),)
+    with pytest.raises(KrxAlphaError):
+        plan_regular_kis_shards(
+            symbols=block0 + block1, credentials=keys, credential_slots=("1",),
+            pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
+            ls_shard_symbols=(block0, block1),
+        )

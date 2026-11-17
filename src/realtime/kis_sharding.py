@@ -161,6 +161,32 @@ def plan_aftermarket_shards(
     return tuple(plan)
 
 
+def _order_by_ls_shard_quota(
+    symbols: tuple[str, ...],
+    ls_covered_symbols: frozenset[str],
+    blocks: tuple[tuple[str, ...], ...],
+    capacity: int,
+) -> tuple[str, ...]:
+    """Uncovered first, then each LS block's quota (short blocks lend capacity to later ones), then the rest."""
+    covered_in_plan = ls_covered_symbols & set(symbols)
+    flat = tuple(s for block in blocks for s in block)
+    if len(set(flat)) != len(flat) or set(flat) != covered_in_plan:
+        raise KrxAlphaError("ls_shard_symbols must be disjoint and cover exactly the LS-covered plan symbols")
+    uncovered = tuple(s for s in symbols if s not in ls_covered_symbols)
+    cap_left = max(0, capacity - len(uncovered))
+    count = len(blocks)
+    carry = 0
+    picked: list[str] = []
+    for index, block in enumerate(blocks):
+        quota = cap_left // count + (1 if index < cap_left % count else 0) + carry
+        take = min(len(block), quota)
+        carry = quota - take
+        picked.extend(block[:take])
+    chosen = set(picked)
+    rest = tuple(s for s in flat if s not in chosen)
+    return uncovered + tuple(picked) + rest
+
+
 def plan_regular_kis_shards(
     *,
     symbols: tuple[str, ...],
@@ -169,9 +195,11 @@ def plan_regular_kis_shards(
     pair_capacity_per_connection: int,
     streams: tuple[str, str],
     ls_covered_symbols: frozenset[str] | None = None,
+    ls_shard_symbols: tuple[tuple[str, ...], ...] | None = None,
+    log_coverage: bool = True,
     venue: MarketVenue = MarketVenue.KRX,
 ) -> tuple[AftermarketShard, ...]:
-    """Assign LS-uncovered symbols first, then fill configured KIS slots in priority order."""
+    """Assign LS-uncovered symbols first, then fill the KIS slots; with ``ls_shard_symbols`` the rest is quota-split per LS shard."""
     ordered = tuple(symbols)
     if not ordered:
         raise KrxAlphaError("empty regular_kis symbols")
@@ -179,6 +207,8 @@ def plan_regular_kis_shards(
         raise KrxAlphaError("duplicate regular_kis symbols")
     if ls_covered_symbols is not None and venue is not MarketVenue.KRX:
         raise KrxAlphaError("ls_covered_symbols is KRX-only")
+    if ls_shard_symbols is not None and ls_covered_symbols is None:
+        raise KrxAlphaError("ls_shard_symbols requires ls_covered_symbols")
     if ls_covered_symbols is not None:
         ordered = tuple(s for s in symbols if s not in ls_covered_symbols) + tuple(
             s for s in symbols if s in ls_covered_symbols
@@ -196,13 +226,20 @@ def plan_regular_kis_shards(
             raise MissingCredentialsError(f"no data credential for slot {slot}")
         ordered_creds.append(cred)
     capacity = len(credential_slots) * per_shard
-    if ls_covered_symbols is not None:
+    if ls_shard_symbols is not None and ls_covered_symbols is not None:
+        ordered = _order_by_ls_shard_quota(symbols, ls_covered_symbols, ls_shard_symbols, capacity)
+    if ls_covered_symbols is not None and log_coverage:
         selected = set(ordered[:capacity])
+        dup_by_ls_shard = (
+            " dup_by_ls_shard=" + ",".join(str(len(selected & set(block))) for block in ls_shard_symbols)
+            if ls_shard_symbols
+            else ""
+        )
         uncovered = tuple(s for s in symbols if s not in ls_covered_symbols and s not in selected)
         log = logger.critical if uncovered else logger.info
         log(
             "[DATA] stage=regular_feed_coverage status=%s candidates=%d ls_covered=%d kis_planned=%d "
-            "kis_exclusive=%d uncovered=%d uncovered_symbols=%s",
+            "kis_exclusive=%d uncovered=%d uncovered_symbols=%s%s",
             "VIOLATION" if uncovered else "OK",
             len(symbols),
             len(set(symbols) & ls_covered_symbols),
@@ -210,6 +247,7 @@ def plan_regular_kis_shards(
             len(selected - ls_covered_symbols),
             len(uncovered),
             ",".join(uncovered) or "none",
+            dup_by_ls_shard,
             extra={**EVENT, **page(PageKind.FEED_COVERAGE_HOLE)} if uncovered else EVENT,
         )
     if len(ordered) > capacity:

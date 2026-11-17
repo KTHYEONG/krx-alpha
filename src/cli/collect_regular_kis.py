@@ -15,6 +15,7 @@ from src.core.errors import KrxAlphaError, MissingCredentialsError, SlotBudgetEx
 from src.core.observability import EVENT
 from src.core.session_anchors import resolve_session_anchors
 from src.marketdata.toss_calendar import load_trading_day_cache, trading_day_from_cache
+from src.orchestration.regular_kis import ls_shard_blocks, regular_kis_ls_plan_inputs
 from src.realtime.adapters.kis import KisRealtimeAdapter
 from src.realtime.contracts import MarketSession, MarketVenue
 from src.realtime.feed_health import FeedHealthConfig, build_feed_health_tracker, feed_id_for
@@ -154,12 +155,21 @@ async def _run_stream(args: argparse.Namespace) -> int:
     slot_budget = len(symbols) * len(streams)
     if slot_budget > capacity:
         raise SlotBudgetExceededError(f"planned pairs {slot_budget} exceed capacity {capacity}")
+    ls_covered: frozenset[str] | None = None
+    ls_blocks: tuple[tuple[str, ...], ...] | None = None
+    if venue is MarketVenue.KRX:
+        blocks = ls_shard_blocks(pathlib.Path(str(args.candidates_path)), settings)
+        if blocks:
+            ls_covered, ls_blocks = regular_kis_ls_plan_inputs(blocks)
     plan = plan_regular_kis_shards(
         symbols=candidates_order,
         credentials=credentials,
         credential_slots=plan_slots,
         pair_capacity_per_connection=capacity,
         streams=streams,
+        ls_covered_symbols=ls_covered,
+        ls_shard_symbols=ls_blocks,
+        log_coverage=False,
         venue=venue,
     )
     shard_index = int(args.shard_index)

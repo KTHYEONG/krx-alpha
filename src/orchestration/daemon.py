@@ -118,8 +118,10 @@ from src.orchestration.premarket import (
     premarket_wake_cap_s,
 )
 from src.orchestration.regular_kis import (
+    candidate_symbols_and_tiers,
     regular_kis_collection_due,
     regular_kis_dynamic_stream_cmd,
+    regular_kis_ls_plan_inputs,
     regular_kis_stream_cmd,
     regular_nxt_collection_due,
 )
@@ -930,21 +932,6 @@ def _oldest_manifest_day(relpaths: Sequence[str]) -> dt.date | None:
         except ValueError:
             continue
     return min(days) if days else None
-
-
-def _candidate_symbols_and_tiers(path: pathlib.Path) -> tuple[tuple[str, ...], dict[str, str]]:
-    """Return candidate symbols in priority order and their tiers; raises KrxAlphaError when the file is not ready."""
-    data = read_candidates(path)
-    rows = data.get("candidates") if isinstance(data, dict) else None
-    if (
-        not isinstance(rows, list)
-        or not rows
-        or not all(isinstance(row, dict) and isinstance(row.get("symbol"), str) and row["symbol"] for row in rows)
-    ):
-        raise KrxAlphaError(f"invalid candidates file: {path}")
-    symbols = tuple(str(row["symbol"]) for row in rows)
-    tiers = {str(row["symbol"]): str(row.get("tier", "event")) for row in rows}
-    return symbols, tiers
 
 
 def _latest_universe_decision(paths: DataPaths) -> dt.date | None:
@@ -3807,8 +3794,8 @@ class DaemonRunner:
             priority_pairs = prioritize_ls_pairs(pairs, tier_of=tiers, order=symbols)
             priority_symbols = tuple(dict.fromkeys(s for s, _ in priority_pairs))
             ls_shards = self._ensure_ls_shard_plan(today)
-            ls_covered = (
-                frozenset(s for shard in ls_shards for s in shard.symbols) if collector.vendor == "ls" else frozenset()
+            ls_covered, ls_blocks = regular_kis_ls_plan_inputs(
+                tuple(shard.symbols for shard in ls_shards) if collector.vendor == "ls" else ()
             )
             cfg = getattr(self._runtime, "regular_kis", None) or RegularKisSettings()
             st.regular_kis_plan = plan_regular_kis_shards(
@@ -3818,6 +3805,7 @@ class DaemonRunner:
                 pair_capacity_per_connection=int(cfg.pair_capacity_per_connection or 0),
                 streams=cfg.streams,
                 ls_covered_symbols=ls_covered,
+                ls_shard_symbols=ls_blocks,
             )
         except (KrxAlphaError, OSError, ValueError) as exc:
             st.regular_kis_plan = ()
@@ -3891,7 +3879,7 @@ class DaemonRunner:
         st.ls_shard_plan = ()
         collector = self._runtime.collector
         try:
-            symbols, tiers = _candidate_symbols_and_tiers(self._paths.candidates)
+            symbols, tiers = candidate_symbols_and_tiers(self._paths.candidates)
             shards, overflow = plan_ls_shards(
                 symbols,
                 tiers=tiers,
