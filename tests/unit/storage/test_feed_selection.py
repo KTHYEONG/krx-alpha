@@ -292,3 +292,62 @@ def test_summary_counts_conflated_selected_minutes_per_vendor(paths) -> None:
     assert payload["vendors"]["db"]["conflated_selected_minutes"] == len(only_db)
     tick = {row["minute_kst"]: row["selected_vendor"] for row in pq.read_table(fs.selection_partition_path(paths, DAY)).to_pylist() if row["kind"] == "tick"}
     assert tick == {only_db[0]: "db", only_db[1]: "db", shared: "ls"}
+
+
+def _toss_tick_raw() -> str:
+    return json.dumps({"type": "message", "topic": "trade:kr:005930", "data": {"price": "70000", "volume": "1"}})
+
+
+def _write_unified_toss(paths: DataPaths, minutes: list[str]) -> None:
+    path = paths.archive_root / "toss" / "unified" / "regular" / "H0STCNT0" / f"dt={DAY.isoformat()}.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    walls = [int(dt.datetime.fromisoformat(minute).replace(tzinfo=KST).timestamp() * 1e9) for minute in minutes]
+    pq.write_table(pa.table({"raw": [_toss_tick_raw()] * len(minutes), "recv_wall_ns": pa.array(walls, pa.int64())}), path)
+
+
+def test_selection_spec_declares_toss_as_mixed_venue_by_default() -> None:
+    assert SPEC.mixed_venue_vendors == frozenset({"toss"})
+
+
+def test_mixed_venue_vendor_is_last_resort_on_trades() -> None:
+    minute = MINUTES[0]
+    window = {("toss", "005930"): [(_minute_wall("2026-11-16T09:00"), _minute_wall("2026-11-16T10:00"))]}
+    only_toss = _select({"ls": {}, "toss": {("005930", minute): 9}}, windows=window)
+    assert [(r.selected_vendor, r.mixed_venue) for r in only_toss] == [("toss", True)]
+    with_kis = _select({"ls": {}, "kis": {("005930", minute): 4}, "toss": {("005930", minute): 9}}, windows=window)
+    assert [(r.selected_vendor, r.mixed_venue) for r in with_kis] == [("kis", False)]
+    with_conflated = _select({"ls": {}, "db": {("005930", minute): 4}, "toss": {("005930", minute): 9}}, windows=window)
+    assert [r.selected_vendor for r in with_conflated] == ["db"]
+    healthy = _select({"ls": {("005930", minute): 5}, "toss": {("005930", minute): 90}}, windows=window)
+    assert [(r.selected_vendor, r.mixed_venue) for r in healthy] == [("ls", False)]
+
+
+def test_mixed_venue_vendor_outside_its_window_is_never_selected() -> None:
+    minute = MINUTES[0]
+    rows = _select({"ls": {}, "toss": {("005930", minute): 9}}, windows={("toss", "005930"): []})
+    assert [r.selected_vendor for r in rows] == ["ls"]
+
+
+def test_mixed_venue_vendor_never_selected_for_quotes() -> None:
+    minute = MINUTES[0]
+    rows = select_minutes(
+        venue="krx", session="regular", kind="book", primary_vendor="ls",
+        candidates={"ls": {}, "toss": {("005930", minute): 9}},
+        demoted_from={}, active_windows={}, spec=SPEC,
+    )
+    assert [(r.selected_vendor, r.mixed_venue) for r in rows] == [("ls", False)]
+
+
+def test_summary_and_rows_count_mixed_selected_minutes_for_both_venues(paths) -> None:
+    only_toss = ["2026-11-16T09:10", "2026-11-16T09:11"]
+    _write_l1(paths, "ls", "krx", "H0STCNT0", ["2026-11-16T09:12"] * 2)
+    _write_unified_toss(paths, [*only_toss, "2026-11-16T09:12"] * 4)
+    summary = build_feed_selection(DAY, paths=paths, spec=SPEC)
+    assert summary.vendors["toss"]["mixed_selected_minutes"] == len(only_toss)
+    assert summary.vendors["ls"].get("mixed_selected_minutes", 0) == 0
+    rows = [r for r in pq.read_table(fs.selection_partition_path(paths, DAY)).to_pylist() if r["kind"] == "tick"]
+    assert {r["minute_kst"]: (r["selected_vendor"], r["mixed_venue"]) for r in rows} == {
+        only_toss[0]: ("toss", True),
+        only_toss[1]: ("toss", True),
+        "2026-11-16T09:12": ("ls", False),
+    }

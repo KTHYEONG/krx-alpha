@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -15,12 +15,28 @@ from src.storage.market_phase import _VALID_HHMMSS_RE, MarketPhase
 from src.storage.quality_db import decode_db_quotes, decode_db_ticks
 from src.storage.quality_kis import decode_kis_quotes, decode_kis_ticks
 from src.storage.quality_ls import decode_ls_quotes, decode_ls_ticks
+from src.storage.quality_toss import decode_toss_quotes, decode_toss_ticks
 
-_VENDOR_ORDER: tuple[str, ...] = ("kis", "ls", "db")
+_VENDOR_ORDER: tuple[str, ...] = ("kis", "ls", "db", "toss")
 _VENDOR_DECODERS: dict[str, tuple[Callable[[pl.DataFrame], pl.DataFrame], Callable[[pl.DataFrame], pl.DataFrame]]] = {
     "kis": (decode_kis_ticks, decode_kis_quotes),
     "ls": (decode_ls_ticks, decode_ls_quotes),
     "db": (decode_db_ticks, decode_db_quotes),
+    "toss": (decode_toss_ticks, decode_toss_quotes),
+}
+
+# Vendors whose frames lack cumulative or reference fields; their dependent DQ rules are skipped and reported, never passed.
+_NO_CUMULATIVE_VENDORS: frozenset[str] = frozenset({"toss"})
+_CUM_APPLICABLE_COLUMN: str = "cum_applicable"
+_TOTALS_APPLICABLE_COLUMN: str = "dq_totals_applicable"
+DQ_SKIPPED_RULES: dict[str, tuple[str, ...]] = {
+    "toss": (
+        "tick.cum_volume_regression:no_cumulative_volume",
+        "tick.tick_loss:no_cumulative_volume",
+        "tick.price_band_violation:no_reference_price",
+        "tick.schema_disagree:no_reference_fields",
+        "quote.total_remain_short:no_total_remain_field",
+    ),
 }
 
 _TICK_STREAM: str = "H0STCNT0"
@@ -105,6 +121,7 @@ class DqVerdict:
     tick: TickQualitySummary | None
     quote: QuoteQualitySummary | None
     reasons: tuple[str, ...]
+    skipped: tuple[str, ...] = ()
 
     def to_metadata(self) -> dict[str, str]:
         """Serialize into parquet footer key-value metadata under key ``krx_alpha.dq``."""
@@ -130,6 +147,8 @@ class DqVerdict:
                 "zero_volume": self.tick.zero_volume,
             },
         }
+        if self.skipped:
+            payload["skipped"] = list(self.skipped)
         return {DQ_METADATA_KEY: json.dumps(payload, sort_keys=True)}
 
 
@@ -138,6 +157,7 @@ def evaluate_stream_quality(
     quote: QuoteQualitySummary | None,
     *,
     settings: DataQualitySettings,
+    vendors: Iterable[str] = (),
 ) -> DqVerdict:
     """Classify one L1 partition's DQ counters into a PASS/WARN/FAIL verdict.
 
@@ -150,6 +170,7 @@ def evaluate_stream_quality(
         tick: Tick summary, or None when the partition holds no tick rows.
         quote: Quote summary, or None when the partition holds no quote rows.
         settings: Ratio ceilings.
+        vendors: Vendors present in the partition; their skipped DQ rules are listed on the verdict.
 
     Returns:
         Verdict with human-readable reasons naming each exceeded counter and ratio.
@@ -186,7 +207,8 @@ def evaluate_stream_quality(
         _check(quote.negative_remain, quote.rows, settings.max_invariant_violation_ratio, "quote.negative_remain")
         _check(quote.total_remain_short, quote.rows, settings.max_total_remain_short_ratio, "quote.total_remain_short")
     status = DqStatus.FAIL if reasons else (DqStatus.WARN if any_nonzero else DqStatus.PASS)
-    return DqVerdict(status=status, tick=tick, quote=quote, reasons=tuple(reasons))
+    skipped = tuple(rule for vendor in sorted(set(vendors)) for rule in DQ_SKIPPED_RULES.get(vendor, ()))
+    return DqVerdict(status=status, tick=tick, quote=quote, reasons=tuple(reasons), skipped=skipped)
 
 
 def _split_by_vendor(chunk: pl.DataFrame) -> dict[str, pl.DataFrame]:
@@ -207,7 +229,9 @@ def _split_by_vendor(chunk: pl.DataFrame) -> dict[str, pl.DataFrame]:
 def _decode_tick_chunk_mixed(chunk: pl.DataFrame) -> pl.DataFrame:
     # Vendor tick decoders are 1:1 per row, so the connection id is carried positionally.
     return pl.concat([
-        _VENDOR_DECODERS[vendor][0](part).with_columns(_connection_key(part))
+        _VENDOR_DECODERS[vendor][0](part).with_columns(
+            _connection_key(part), pl.lit(vendor not in _NO_CUMULATIVE_VENDORS).alias(_CUM_APPLICABLE_COLUMN)
+        )
         for vendor, part in _split_by_vendor(chunk).items()
     ])
 
@@ -235,13 +259,14 @@ def _summarize_tick_fields(
         mdchecnt=pl.col("mdchecnt_raw").cast(pl.Int64, strict=False),
         mschecnt=pl.col("mschecnt_raw").cast(pl.Int64, strict=False),
     )
+    cum_ok = pl.col(_CUM_APPLICABLE_COLUMN) if _CUM_APPLICABLE_COLUMN in frame.columns else pl.lit(True)
     flagged = frame.with_columns(
         dq_decode_fail=(
             pl.col("shcode").is_null()
             | pl.col("price").is_null()
             | pl.col("price").is_nan()
             | pl.col("cvolume").is_null()
-            | pl.col("volume").is_null()
+            | (cum_ok & pl.col("volume").is_null())
         ),
         ref_price=pl.when(pl.col("sign").is_in(["1", "2"])).then(pl.col("price") - pl.col("change")).otherwise(pl.col("price") + pl.col("change")),
         drate_factor=1 + pl.col("drate") / 100,
@@ -261,12 +286,14 @@ def _summarize_tick_fields(
     flagged = flagged.with_columns(
         dq_zero_volume=(~pl.col("dq_decode_fail")) & (pl.col("cvolume") <= 0),
         dq_price_band_violation=(~pl.col("dq_decode_fail"))
+        & cum_ok
         & (pl.col("ref_price") > 0)
         & (
             (pl.col("price") > pl.when(is_listing).then(pl.col("ref_price") * listing_upper).otherwise(pl.col("ref_price") * standard_upper))
             | (pl.col("price") < pl.when(is_listing).then(pl.col("ref_price") * listing_lower).otherwise(pl.col("ref_price") * standard_lower))
         ),
         dq_schema_disagree=(~pl.col("dq_decode_fail"))
+        & cum_ok
         & pl.col("ref_from_drate").is_not_null()
         & ((pl.col("ref_price") - pl.col("ref_from_drate")).abs() > pl.col("ref_from_drate").abs() * _SCHEMA_DISAGREE_TOLERANCE),
     )
@@ -291,13 +318,14 @@ def _summarize_tick_fields(
     # 진짜 이상만 남는다(재검증 후 0.0006%).
     loss_applicable = (
         (~pl.col("dq_decode_fail"))
+        & cum_ok
         & (pl.col("cvolume") > 0)
         & pl.col("volume_prev").is_not_null()
         & pl.col("checnt_prev").is_not_null()
         & (pl.col("checnt_delta") <= 1)
     )
     flagged = flagged.with_columns(
-        dq_cum_volume_regression=(~pl.col("dq_decode_fail")) & pl.col("volume_prev").is_not_null() & (pl.col("volume") < pl.col("volume_prev")),
+        dq_cum_volume_regression=(~pl.col("dq_decode_fail")) & cum_ok & pl.col("volume_prev").is_not_null() & (pl.col("volume") < pl.col("volume_prev")),
         dq_tick_loss=loss_applicable & (pl.col("vol_delta") > pl.col("cvolume")),
         lost_volume=pl.when(loss_applicable & (pl.col("vol_delta") > pl.col("cvolume")))
         .then(pl.col("vol_delta") - pl.col("cvolume"))
@@ -480,20 +508,20 @@ def _flag_quote_invariants(frame: pl.DataFrame) -> pl.DataFrame:
     for c in rem_cols:
         neg_rem = neg_rem | (pl.col(c) < 0)
     in_auction = _auction_exemption(frame.columns)
+    totals_ok = pl.col(_TOTALS_APPLICABLE_COLUMN) if _TOTALS_APPLICABLE_COLUMN in frame.columns else pl.lit(True)
     top_offer_sum = sum((pl.col(c) for c in [f"offerrem{k}" for k in range(1, _QUOTE_LEVELS + 1)]), start=pl.lit(0))
     top_bid_sum = sum((pl.col(c) for c in [f"bidrem{k}" for k in range(1, _QUOTE_LEVELS + 1)]), start=pl.lit(0))
     return frame.with_columns(
         dq_decode_fail=(
             pl.col("shcode").is_null()
             | pl.col("hotime").is_null()
-            | pl.col("totofferrem").is_null()
-            | pl.col("totbidrem").is_null()
+            | (totals_ok & (pl.col("totofferrem").is_null() | pl.col("totbidrem").is_null()))
         ),
     ).with_columns(
         dq_ladder_disorder=(~pl.col("dq_decode_fail")) & ladder_bad,
         dq_negative_remain=(~pl.col("dq_decode_fail")) & neg_rem,
         dq_crossed_book=(~pl.col("dq_decode_fail")) & (~in_auction) & (pl.col("bidho1") > 0) & (pl.col("offerho1") > 0) & (pl.col("bidho1") >= pl.col("offerho1")),
-        dq_total_remain_short=(~pl.col("dq_decode_fail")) & ((pl.col("totofferrem") < top_offer_sum) | (pl.col("totbidrem") < top_bid_sum)),
+        dq_total_remain_short=(~pl.col("dq_decode_fail")) & totals_ok & ((pl.col("totofferrem") < top_offer_sum) | (pl.col("totbidrem") < top_bid_sum)),
     )
 
 
@@ -511,7 +539,9 @@ def decode_and_flag_quotes(df: pl.DataFrame, *, chunk_rows: int = _QUOTE_CHUNK_R
         carried = [c for c in ("market_phase", "exchange_event_time") if c in chunk.columns]
         frames: list[pl.DataFrame] = []
         for vendor, part in _split_by_vendor(chunk).items():
-            decoded_part = _VENDOR_DECODERS[vendor][1](part)
+            decoded_part = _VENDOR_DECODERS[vendor][1](part).with_columns(
+                pl.lit(vendor not in _NO_CUMULATIVE_VENDORS).alias(_TOTALS_APPLICABLE_COLUMN)
+            )
             if carried:
                 decoded_part = decoded_part.with_columns(part.select(carried).get_columns())
             frames.append(decoded_part)

@@ -333,7 +333,7 @@ def normalize_l0_partition(
         vendor_label = ",".join(sorted(vendors)) if vendors else ""
         phases_json = json.dumps(phase_counts, sort_keys=True, separators=(",", ":"))
         if tick_summary is not None or quote_summary is not None:
-            verdict = evaluate_stream_quality(tick_summary, quote_summary, settings=settings)
+            verdict = evaluate_stream_quality(tick_summary, quote_summary, settings=settings, vendors=vendors)
             writer.add_key_value_metadata({**verdict.to_metadata(), MARKET_PHASE_METADATA_KEY: phases_json})
             writer.close()
             writer = None
@@ -377,6 +377,14 @@ def normalize_l0_partition(
                     quote_quality.total_remain_short,
                     verdict.status.value,
                     reasons,
+                )
+            if verdict.skipped:
+                logger.info(
+                    "[DATA] stage=quality_skipped tr_id=%s vendor=%s part=%s rules=%s",
+                    stream_name,
+                    vendor_label,
+                    str(part),
+                    ",".join(verdict.skipped),
                 )
         else:
             writer.add_key_value_metadata({MARKET_PHASE_METADATA_KEY: phases_json})

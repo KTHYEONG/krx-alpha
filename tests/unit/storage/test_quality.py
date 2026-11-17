@@ -1527,11 +1527,11 @@ def test_quality_unknown_vendor_fails_closed() -> None:
 
     from src.storage.quality import decode_and_flag_quotes, decode_and_flag_ticks
 
-    tick = pl.DataFrame({'raw': ['x'], 'tr_id': ['H0STCNT0'], 'vendor': ['toss'], 'recv_wall_ns': [100]})
-    with pytest.raises(ValueError, match="toss"):
+    tick = pl.DataFrame({'raw': ['x'], 'tr_id': ['H0STCNT0'], 'vendor': ['bogus'], 'recv_wall_ns': [100]})
+    with pytest.raises(ValueError, match="bogus"):
         decode_and_flag_ticks(tick)
-    quote = pl.DataFrame({'raw': ['x'], 'tr_id': ['H0STASP0'], 'vendor': ['toss'], 'recv_wall_ns': [100]})
-    with pytest.raises(ValueError, match="toss"):
+    quote = pl.DataFrame({'raw': ['x'], 'tr_id': ['H0STASP0'], 'vendor': ['bogus'], 'recv_wall_ns': [100]})
+    with pytest.raises(ValueError, match="bogus"):
         decode_and_flag_quotes(quote)
 
 

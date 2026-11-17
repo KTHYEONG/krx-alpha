@@ -27,6 +27,7 @@ from src.storage.layout import l0_partition_key, l0_partition_relpath, l1_relpat
 from src.storage.quality_db import decode_db_quotes, decode_db_ticks
 from src.storage.quality_kis import decode_kis_quotes, decode_kis_ticks
 from src.storage.quality_ls import decode_ls_quotes, decode_ls_ticks
+from src.storage.quality_toss import decode_toss_quotes, decode_toss_ticks
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,9 @@ _DECODERS: Final[Mapping[str, tuple[Decoder, Decoder]]] = {
     "ls": (decode_ls_ticks, decode_ls_quotes),
     "kis": (decode_kis_ticks, decode_kis_quotes),
     "db": (decode_db_ticks, decode_db_quotes),
+    "toss": (decode_toss_ticks, decode_toss_quotes),
 }
+_UNIFIED_VENUE: Final[str] = "unified"
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +64,7 @@ class SelectionRow:
     reason: str
     frames_primary: int
     frames_selected: int
+    mixed_venue: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +76,8 @@ class SelectionSpec:
     primary_by_venue: tuple[tuple[str, str], ...] = (("krx", "ls"), ("nxt", "kis"))
     # Vendors whose trade stream is conflated (per-trade detail lost); used for a symbol-minute only when no lossless source has frames.
     conflated_trade_vendors: frozenset[str] = frozenset({"db"})
+    # Vendors whose single stream merges KRX and NXT prints; they read the unified L1 partition and are a last resort on trades only.
+    mixed_venue_vendors: frozenset[str] = frozenset({"toss"})
 
     def primary_for(self, venue: str) -> str | None:
         return dict(self.primary_by_venue).get(venue)
@@ -122,6 +128,7 @@ def select_minutes(
     """
     managed = {vendor for vendor, _ in active_windows}
     conflated = spec.conflated_trade_vendors if kind == _KIND_TICK else frozenset()
+    mixed = spec.mixed_venue_vendors
     keys: set[tuple[str, str]] = set()
     for counts in candidates.values():
         keys.update(key for key, frames in counts.items() if frames > 0)
@@ -136,6 +143,12 @@ def select_minutes(
             if candidates[vendor].get((symbol, minute), 0) > 0
             and _eligible(vendor, symbol, minute_wall, managed, active_windows)
         ]
+        if kind != _KIND_TICK:
+            in_window = [vendor for vendor in in_window if vendor not in mixed]
+        non_mixed_present = (primary_frames > 0 and primary_vendor not in mixed) or any(
+            vendor not in mixed for vendor in in_window
+        )
+        in_window = [vendor for vendor in in_window if vendor not in mixed or not non_mixed_present]
         lossless_present = (primary_frames > 0 and primary_vendor not in conflated) or any(
             vendor not in conflated for vendor in in_window
         )
@@ -164,6 +177,7 @@ def select_minutes(
                 reason=reason,
                 frames_primary=primary_frames,
                 frames_selected=candidates[chosen].get((symbol, minute), 0),
+                mixed_venue=kind == _KIND_TICK and chosen in mixed,
             )
         )
     return rows
@@ -276,6 +290,7 @@ _SCHEMA: Final[pa.Schema] = pa.schema([
     pa.field("reason", pa.string(), nullable=False),
     pa.field("frames_primary", pa.int64(), nullable=False),
     pa.field("frames_selected", pa.int64(), nullable=False),
+    pa.field("mixed_venue", pa.bool_(), nullable=False),
 ])
 
 
@@ -300,6 +315,17 @@ def build_feed_selection(day: dt.date, *, paths: DataPaths, spec: SelectionSpec)
     vendor_stats: dict[str, dict[str, int]] = {}
     vendor_minutes: dict[str, set[str]] = {}
     secondary_present = False
+    unified_ticks: dict[str, dict[tuple[str, str], int]] = {}
+    for vendor in sorted(spec.mixed_venue_vendors & _DECODERS.keys()):
+        path = _l1_partition(paths, day, vendor, _UNIFIED_VENUE, _ROUTES[0].tick_stream)
+        if path is None:
+            continue
+        secondary_present = True
+        unified_ticks[vendor] = _count_frames(path, _DECODERS[vendor][0])
+        stats = vendor_stats.setdefault(
+            vendor, {"tick_frames": 0, "book_frames": 0, "conflated_selected_minutes": 0, "mixed_selected_minutes": 0}
+        )
+        stats["tick_frames"] += sum(unified_ticks[vendor].values())
     for route in _ROUTES:
         primary = spec.primary_for(route.venue)
         if primary is None:
@@ -310,7 +336,11 @@ def build_feed_selection(day: dt.date, *, paths: DataPaths, spec: SelectionSpec)
         )
         for kind, stream in kinds:
             candidates: dict[str, dict[tuple[str, str], int]] = {}
+            if kind == _KIND_TICK:
+                candidates.update(unified_ticks)
             for vendor, (tick_decode, quote_decode) in _DECODERS.items():
+                if vendor in spec.mixed_venue_vendors:
+                    continue
                 path = _l1_partition(paths, day, vendor, route.venue, stream)
                 if path is None:
                     continue
@@ -339,6 +369,8 @@ def build_feed_selection(day: dt.date, *, paths: DataPaths, spec: SelectionSpec)
             for row in rows:
                 if row.kind == _KIND_TICK and row.selected_vendor in spec.conflated_trade_vendors:
                     vendor_stats[row.selected_vendor]["conflated_selected_minutes"] += 1
+                if row.mixed_venue:
+                    vendor_stats[row.selected_vendor]["mixed_selected_minutes"] += 1
             symbols.update(row.symbol for row in rows if row.reason != "primary_ok")
             for vendor, counts in candidates.items():
                 minutes = vendor_minutes.setdefault(vendor, set())

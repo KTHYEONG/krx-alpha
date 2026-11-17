@@ -432,3 +432,41 @@ def test_db_split_gates_book_pass_tick_fail(tmp_path: Path) -> None:
         "book_completeness",
         "lag_within_reference",
     }
+
+
+def _toss_split_run(tmp_path: Path, *, locked_books: int, normal_books: int) -> dict[str, Any]:
+    """Trades match the reference fully; books mirror the 2026-11-17 live mix (normal, locked, crossed)."""
+    capture_dir = tmp_path / "capture"
+    journal_root = tmp_path / "journal"
+    _write_reference(
+        journal_root,
+        [
+            (_recv_ns(10, 0, 6), EVENT_STAMP, _ls_trade_raw("H0STCNT0", SYMBOL, SYMBOL, EVENT_STAMP, cum))
+            for cum in range(1, 11)
+        ],
+    )
+    stamp = "2026-11-16T10:00:05.000+09:00"
+    recv = _recv_ns(10, 0, 6)
+    rows = [(recv, _toss_trade_raw(SYMBOL, stamp, "100", "1")) for _ in range(10)]
+    rows += [(recv, _toss_book_raw(SYMBOL, stamp)) for _ in range(normal_books)]
+    locked = json.loads(_toss_book_raw(SYMBOL, stamp))
+    locked["data"]["bids"][0]["price"] = locked["data"]["asks"][0]["price"]
+    rows += [(recv, json.dumps(locked)) for _ in range(locked_books)]
+    _write_capture(capture_dir, "toss", rows, 50)
+    return rep.analyze(capture_dir, journal_root, DAY, vendor="toss", reference_vendors=["ls-krx"])
+
+
+def test_toss_report_split_gates_trade_pass_book_fail_on_live_mix(tmp_path: Path) -> None:
+    result = _toss_split_run(tmp_path, locked_books=25, normal_books=75)
+    gates = result["gates_split"]
+    assert gates["G-PROBE-TOSS-TRADE"]["pass"] is True
+    assert gates["G-PROBE-TOSS-BOOK"]["pass"] is False
+    assert gates["G-PROBE-TOSS-BOOK"]["criteria"]["crossed_share"] is False
+    assert gates["G-PROBE-TOSS-BOOK"]["criteria"]["book_completeness"] is True
+    assert result["gates"]["pass"] is False
+
+
+def test_toss_report_book_gate_passes_without_crossed_frames(tmp_path: Path) -> None:
+    result = _toss_split_run(tmp_path, locked_books=0, normal_books=50)
+    assert result["gates_split"]["G-PROBE-TOSS-BOOK"]["pass"] is True
+    assert result["gates"]["pass"] is True

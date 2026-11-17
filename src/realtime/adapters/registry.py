@@ -18,15 +18,18 @@ from src.core.config import (
     KisTokenSettings,
     KiwoomCredentials,
     LsCredentials,
+    TossCredentials,
     load_credentials,
 )
 from src.core.errors import KrxAlphaError
 from src.marketdata.host_token_store import AsyncRotatingTokenStore, kiwoom_issued, make_kiwoom_store
+from src.marketdata.toss_token_store import TossTokenStore, toss_token_path
 from src.realtime.adapters.db import DbRealtimeAdapter
 from src.realtime.adapters.kiwoom import KiwoomRealtimeAdapter
 from src.realtime.adapters.ls import LsRealtimeAdapter
+from src.realtime.adapters.toss import TossRealtimeAdapter
 from src.realtime.contracts import VendorAdapter
-from src.storage.layout import L0_VENDOR_DB, L0_VENDOR_KIWOOM
+from src.storage.layout import L0_VENDOR_DB, L0_VENDOR_KIWOOM, L0_VENDOR_TOSS
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,11 @@ def _load_kiwoom_credentials() -> AppCredentials:
     return AppCredentials(app_key=creds.kiwoom_app_key, app_secret=creds.kiwoom_secret_key)
 
 
+def _load_toss_credentials() -> AppCredentials:
+    creds = load_credentials(TossCredentials)
+    return AppCredentials(app_key=creds.toss_app_key, app_secret=creds.toss_app_secret)
+
+
 def _build_ls(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAdapter:
     if ctx.market_of is None:
         raise ValueError("market_of is required for ls adapter")
@@ -102,6 +110,17 @@ def _build_db(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAdapte
         ack_timeout_s=ctx.settings.db_ack_timeout_s,
         subscribe_spacing_s=ctx.settings.db_subscribe_spacing_s,
         connect_gate=ctx.connect_gate,
+    )
+
+
+def _build_toss(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAdapter:
+    # Same cache dir and path derivation as the kca REST clients, so one file serves the host-wide single issuer.
+    return TossRealtimeAdapter(
+        http=ctx.http,
+        token_store=TossTokenStore(toss_token_path(ctx.token_cache_dir, creds.app_key)),
+        capacity_pairs=ctx.settings.toss_capacity_pairs,
+        ack_timeout_s=ctx.settings.toss_ack_timeout_s,
+        declare_spacing_s=ctx.settings.toss_declare_spacing_s,
     )
 
 
@@ -143,6 +162,7 @@ ADAPTERS: Mapping[str, RegularVendor] = MappingProxyType(
     {
         "ls": RegularVendor(vendor="ls", load_credentials=_load_ls_credentials, build=_build_ls, requires_market_map=True),
         L0_VENDOR_DB: RegularVendor(vendor=L0_VENDOR_DB, load_credentials=_load_db_credentials, build=_build_db, requires_market_map=False),
+        L0_VENDOR_TOSS: RegularVendor(vendor=L0_VENDOR_TOSS, load_credentials=_load_toss_credentials, build=_build_toss, requires_market_map=False),
         L0_VENDOR_KIWOOM: RegularVendor(vendor=L0_VENDOR_KIWOOM, load_credentials=_load_kiwoom_credentials, build=_build_kiwoom, requires_market_map=False),
     }
 )

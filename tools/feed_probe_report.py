@@ -50,6 +50,8 @@ _TOSS_TRADE_PREFIX = "trade:kr:"
 _TOSS_BOOK_PREFIX = "orderbook:kr:"
 _DB_BOOK_GATE = "G-PROBE-DB-BOOK"
 _DB_TICK_GATE = "G-PROBE-DB-TICK"
+_TOSS_TRADE_GATE = "G-PROBE-TOSS-TRADE"
+_TOSS_BOOK_GATE = "G-PROBE-TOSS-BOOK"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -59,6 +61,7 @@ class ProbeCriteria:
     book_completeness: float = 0.99
     liquid_top_n: int = 10
     toss_trade_match: float = 0.85
+    max_crossed_share: float = 0.001
 
 
 @dataclasses.dataclass(frozen=True)
@@ -592,6 +595,8 @@ def analyze(
     result["gates"] = _gates(vendor, result, criteria)
     if vendor == "db":
         result["gates_split"] = _db_gates_split(result, criteria)
+    elif vendor == "toss":
+        result["gates_split"] = _toss_gates_split(result, criteria)
     return result
 
 
@@ -640,6 +645,25 @@ def _db_gates_split(result: Mapping[str, Any], criteria: ProbeCriteria) -> dict[
     }
 
 
+def _toss_gates_split(result: Mapping[str, Any], criteria: ProbeCriteria) -> dict[str, Any]:
+    """Trade gate (accepted pairs, lag, trade match) and book gate (completeness, crossed or locked share) for Toss."""
+    book = result["book"]
+    crossed_share = book["crossed"] / book["frames"] if book["frames"] else None
+    trade_checks = {
+        "accepted_pairs": _accepted_ok(result, criteria),
+        "lag_within_reference": _lag_within_reference(result["lag"], result["reference_lag"]),
+        "trade_match_p50": _share_ok(result["trade_match"]["p50_matched_share"], criteria.toss_trade_match),
+    }
+    book_checks = {
+        "book_completeness": _book_ok(result, criteria),
+        "crossed_share": crossed_share is not None and crossed_share <= criteria.max_crossed_share,
+    }
+    return {
+        _TOSS_TRADE_GATE: _gate(_TOSS_TRADE_GATE, trade_checks, result),
+        _TOSS_BOOK_GATE: _gate(_TOSS_BOOK_GATE, book_checks, result),
+    }
+
+
 def _gates(vendor: str, result: Mapping[str, Any], criteria: ProbeCriteria) -> dict[str, Any]:
     name = f"G-PROBE-{vendor.upper().replace('-', '')}"
     if result["decode"] != "decoded":
@@ -649,14 +673,9 @@ def _gates(vendor: str, result: Mapping[str, Any], criteria: ProbeCriteria) -> d
         checks = {key: value for gate in split.values() for key, value in gate["criteria"].items()}
         return _gate(name, checks, result) | {"pass": all(gate["pass"] for gate in split.values())}
     if vendor == "toss":
-        share = result["trade_match"]["p50_matched_share"]
-        checks = {
-            "accepted_pairs": _accepted_ok(result, criteria),
-            "book_completeness": _book_ok(result, criteria),
-            "lag_within_reference": _lag_within_reference(result["lag"], result["reference_lag"]),
-            "trade_match_p50": _share_ok(share, criteria.toss_trade_match),
-        }
-        return _gate(name, checks, result)
+        split = _toss_gates_split(result, criteria)
+        checks = {key: value for gate in split.values() for key, value in gate["criteria"].items()}
+        return _gate(name, checks, result) | {"pass": all(gate["pass"] for gate in split.values())}
     conf = result["conflation"]["p50_ratio"]
     checks = {
         "accepted_pairs": _accepted_ok(result, criteria),

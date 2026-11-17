@@ -114,3 +114,28 @@ def test_db_max_sessions_is_bounded_to_two_connections() -> None:
     assert CollectorSettings().db_max_sessions == 2
     with pytest.raises(ValidationError):
         CollectorSettings(db_max_sessions=3)
+
+
+def test_toss_settings_defaults_are_trade_only_and_bounded() -> None:
+    from pydantic import ValidationError
+
+    settings = CollectorSettings()
+    assert settings.toss_streams == ("H0STCNT0",)
+    assert (settings.toss_capacity_pairs, settings.toss_max_sessions) == (100, 2)
+    for kwargs in ({"toss_max_sessions": 3}, {"toss_declare_spacing_s": 0.1}, {"toss_streams": ()},
+                   {"toss_streams": ("H0NXCNT0",)}, {"toss_streams": ("H0STCNT0", "H0STCNT0")}):
+        with pytest.raises(ValidationError):
+            CollectorSettings(**kwargs)
+    assert CollectorSettings(toss_streams=("H0STCNT0", "H0STASP0")).toss_streams == ("H0STCNT0", "H0STASP0")
+
+
+def test_toss_hot_pairs_use_toss_streams_and_capacity() -> None:
+    collector = CollectorSettings()
+    ok = FeedControlSettings(watch_groups=("ls:0",), secondary_feeds=("toss:0",), hot_symbols=(("toss:0", 100),))
+    resolve_collector_runtime(collector=collector, feed_control=ok)
+    over = FeedControlSettings(watch_groups=("ls:0",), secondary_feeds=("toss:0",), hot_symbols=(("toss:0", 101),))
+    with pytest.raises(ValueError, match="toss_capacity_pairs"):
+        resolve_collector_runtime(collector=collector, feed_control=over)
+    both = CollectorSettings(toss_streams=("H0STCNT0", "H0STASP0"))
+    with pytest.raises(ValueError, match="toss_capacity_pairs"):
+        resolve_collector_runtime(collector=both, feed_control=ok)

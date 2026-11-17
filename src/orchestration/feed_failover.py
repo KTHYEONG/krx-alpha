@@ -57,6 +57,8 @@ class SecondaryRoute:
     vendor: str
     venues: frozenset[str]
     pair_capacity: int
+    # A unified feed carries both venues at once, so the one-venue-per-day lock of a shared slot does not apply.
+    unified_venue: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +82,13 @@ def _secondary_routes(
         feed = f"db:{index}"
         reserved = hot.get(feed, 0) * len(collector.streams)
         routes[feed] = SecondaryRoute(feed, "db", frozenset({"krx"}), collector.db_capacity_pairs - reserved)
+    for index in range(collector.toss_max_sessions):
+        feed = f"toss:{index}"
+        # Controller capacity is counted in symbols x the primary's logical streams; Toss subscribes only toss_streams per symbol.
+        free_symbols = collector.toss_capacity_pairs // len(collector.toss_streams) - hot.get(feed, 0)
+        routes[feed] = SecondaryRoute(
+            feed, "toss", frozenset({"krx", "nxt"}), max(0, free_symbols) * len(collector.streams), unified_venue=True
+        )
     return routes
 
 
@@ -290,13 +299,14 @@ class FeedFailoverSupervisor:
         venue_of = {spec.group_id: spec.venue for spec in groups}
         winners: dict[str, str] = {}
         for action in result.actions:
-            if action.kind is ActionKind.ADMIT and action.feed_id is not None:
+            if action.kind is ActionKind.ADMIT and action.feed_id is not None and not self._routes[action.feed_id].unified_venue:
                 winners.setdefault(action.feed_id, venue_of[action.group_id])
         refused = [
             action
             for action in result.actions
             if action.kind is ActionKind.ADMIT
             and action.feed_id is not None
+            and str(action.feed_id) in winners
             and venue_of[action.group_id] != winners[str(action.feed_id)]
         ]
         if not refused:
@@ -436,7 +446,9 @@ class FeedFailoverSupervisor:
         secondaries = tuple(
             feed
             for feed in configured
-            if feed in self._routes and venue in self._routes[feed].venues and locks.get(feed, venue) == venue
+            if feed in self._routes
+            and venue in self._routes[feed].venues
+            and (self._routes[feed].unified_venue or locks.get(feed, venue) == venue)
         )
         return GroupSpec(
             group_id=group_id,

@@ -613,3 +613,14 @@ def test_premarket_route_is_inferred_from_directory() -> None:
     assert route.venue == "nxt"
     assert route.session is MarketSession.NXT_PRE
     assert route.stream == "H0NXASP0"
+
+
+def test_unified_venue_path_for_toss() -> None:
+    import datetime as dt
+
+    from src.realtime.contracts import MarketVenue
+    from src.storage.layout import L0_VENDOR_TOSS, l0_partition_key, l0_partition_relpath
+
+    key = l0_partition_key(L0_VENDOR_TOSS, MarketVenue.UNIFIED.value, "regular", "H0STCNT0", dt.date(2026, 11, 17))
+    assert key is not None
+    assert str(l0_partition_relpath(key)) == "toss/unified/regular/H0STCNT0/dt=2026-11-17"

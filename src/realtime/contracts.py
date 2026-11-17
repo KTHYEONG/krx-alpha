@@ -23,6 +23,7 @@ __all__ = [
 class MarketVenue(StrEnum):
     KRX = "krx"
     NXT = "nxt"
+    UNIFIED = "unified"
     UNKNOWN = "unknown"
 
 

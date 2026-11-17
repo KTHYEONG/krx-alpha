@@ -9,7 +9,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, TypeVar
+from typing import Any, Final, TypeVar
 
 from pydantic import AliasChoices, Field, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -57,6 +57,9 @@ class ExecutionMode(StrEnum):
     LIVE = "live"
 
 
+TOSS_LOGICAL_STREAMS: Final[frozenset[str]] = frozenset({"H0STCNT0", "H0STASP0"})
+
+
 class CollectorSettings(BaseSettings):
     """수집기 전역 설정 (env_prefix='KRX_ALPHA_')."""
 
@@ -102,6 +105,13 @@ class CollectorSettings(BaseSettings):
     # Vendor allows 6 DB websocket connects/min per account; the guard keeps headroom below that cap across both DB children.
     db_connects_per_window: int = Field(default=4, ge=1, le=6)
     db_connect_window_s: float = Field(default=60.0, gt=0)
+    # Toss unified streams: trade-only by default (the unified book is not an exchange book); 100 topics per connection, 2 connections per account.
+    toss_streams: tuple[str, ...] = ("H0STCNT0",)
+    toss_capacity_pairs: int = Field(default=100, ge=1)
+    toss_max_sessions: int = Field(default=2, ge=1, le=2)
+    # Vendor limit is 5 declarations per second; the 0.2 s floor keeps the adapter at or below it.
+    toss_declare_spacing_s: float = Field(default=0.25, ge=0.2)
+    toss_ack_timeout_s: float = Field(default=10.0, gt=0)
     # Kiwoom REST WebSocket crosscheck (conflated, volume-lossless 0B stream).
     kiwoom_crosscheck_enabled: bool = False
     kiwoom_capacity_pairs: int = Field(default=200, ge=1)
@@ -152,6 +162,13 @@ class CollectorSettings(BaseSettings):
     @property
     def kiwoom_crosscheck_symbol_budget(self) -> int:
         return self.kiwoom_capacity_pairs // len(self.streams)
+
+    @model_validator(mode="after")
+    def check_toss_streams(self) -> CollectorSettings:
+        """Toss streams are a non-empty subset of the logical trade and book ids."""
+        if not self.toss_streams or set(self.toss_streams) - TOSS_LOGICAL_STREAMS or len(set(self.toss_streams)) != len(self.toss_streams):
+            raise ValueError(f"toss_streams {self.toss_streams!r} must be unique, non-empty and within {sorted(TOSS_LOGICAL_STREAMS)!r}")
+        return self
 
     @model_validator(mode="after")
     def check_ls_sharding_capacity(self) -> CollectorSettings:
@@ -1119,6 +1136,10 @@ def resolve_collector_runtime(
         if hot_feed.startswith("db:") and hot_count * len(resolved_collector.streams) > resolved_collector.db_capacity_pairs:
             raise ValueError(
                 f"hot_symbols {hot_feed!r} x streams exceeds db_capacity_pairs {resolved_collector.db_capacity_pairs}"
+            )
+        if hot_feed.startswith("toss:") and hot_count * len(resolved_collector.toss_streams) > resolved_collector.toss_capacity_pairs:
+            raise ValueError(
+                f"hot_symbols {hot_feed!r} x toss_streams exceeds toss_capacity_pairs {resolved_collector.toss_capacity_pairs}"
             )
     if resolved_tiers.core_enabled and resolved_tiers.core_exit_rank > resolved_collector.universe_slot_budget:
         raise SlotBudgetExceededError(

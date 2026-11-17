@@ -396,7 +396,8 @@ class DynamicFeed:
     membership_path: pathlib.Path
     ls_shard: int | None = None
     kis_slot: str | None = None
-    venue: str = "krx"
+    # None consumes admissions of every venue (unified feeds).
+    venue: str | None = "krx"
 
 
 class DynamicPairWatcher:
@@ -467,7 +468,11 @@ class DynamicPairWatcher:
         self._rev = plan.rev
         wanted = dict.fromkeys(
             (symbol, stream)
-            for symbol in plan.pairs_for(self._feed.feed, self._feed.venue)
+            for symbol in (
+                plan.symbols_for(self._feed.feed)
+                if self._feed.venue is None
+                else plan.pairs_for(self._feed.feed, self._feed.venue)
+            )
             for stream in self._feed.streams
         )
         held = set(adapter.subscribed_pairs())

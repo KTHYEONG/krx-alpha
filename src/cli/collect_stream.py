@@ -39,6 +39,7 @@ from src.realtime.session import (
 from src.realtime.streamer import RealtimeStreamer
 from src.realtime.streaming_child import HandoverSettings, resolve_clock_overrides, run_streaming_child
 from src.realtime.ws_lease import Lease, LeaseRole, LeaseUnavailable, WsLeaseLedger
+from src.storage.layout import L0_VENDOR_TOSS
 from src.universe.intraday import read_dynamic_admissions
 from src.universe.ipc import CandidateFileError, read_candidates
 
@@ -117,6 +118,8 @@ def _lease_ledger(
         max_connections = settings.ls_max_sessions
     elif vendor == "db":
         max_connections = settings.db_max_sessions
+    elif vendor == L0_VENDOR_TOSS:
+        max_connections = settings.toss_max_sessions
     else:
         return None
     return WsLeaseLedger(
@@ -168,6 +171,11 @@ async def _run_lease_guarded(stream: Awaitable[None], ledger: WsLeaseLedger, lea
 def _armed_when_subscribed(limit: Callable[[], float | None], subscribed: Callable[[], bool]) -> Callable[[], float | None]:
     """Silence watchdog that stays disarmed until the child holds at least one subscribed pair."""
     return lambda: limit() if subscribed() else None
+
+
+def vendor_streams(settings: CollectorSettings, vendor: str) -> tuple[str, ...]:
+    """Logical stream ids a vendor's child subscribes; Toss defaults to trade only."""
+    return tuple(settings.toss_streams) if vendor == L0_VENDOR_TOSS else tuple(settings.streams)
 
 
 def _warm_static_pairs(
@@ -247,18 +255,21 @@ def _warm_dynamic_watch(
 ) -> DynamicPairWatcher:
     """Dynamic watcher of a warm-standby connection; admissions of feed `<vendor>:<index>` come from `plan_path`."""
     feed = feed_id_for(vendor, "krx", session_index)
+    streams = vendor_streams(settings, vendor)
     initial = [
         (symbol, stream)
         for symbol in dict.fromkeys(read_dynamic_admissions(plan_path).symbols_for(feed))
-        for stream in settings.streams
+        for stream in streams
     ]
     return DynamicPairWatcher(
         feed=DynamicFeed(
             vendor=vendor,
             feed=feed,
-            streams=tuple(settings.streams),
+            streams=streams,
             ipc_path=plan_path,
             membership_path=settings.paths.membership_path(session_date),
+            # A unified feed serves both venues, so it consumes admissions of either.
+            venue=None if vendor == L0_VENDOR_TOSS else "krx",
         ),
         session=session,
         static_pairs=static_pairs,
@@ -359,7 +370,7 @@ async def run_regular_stream(
             ntp_host=overrides.ntp_host,
             slot_budget=profile.slot_budget,
             max_clock_offset_ns=overrides.max_clock_offset_ns,
-            desired_streams=settings.streams,
+            desired_streams=vendor_streams(settings, profile.vendor),
             vendor=profile.vendor,
             degraded_reason=getattr(args, "degraded_reason", None),
             ntp_fallback_hosts=settings.ntp_fallback_hosts,
@@ -395,10 +406,16 @@ async def run_regular_stream(
             logger.info("[DATA] stage=ls_shard index=%d symbols=%d", shard_index, len(shard_symbols), extra=EVENT)
         feed_id = feed_id_for(profile.vendor, "krx", shard_index)
         health_tracker = build_feed_health_tracker(
-            feed_id=feed_id, vendor=profile.vendor, venue="krx", session="regular", session_date=session_date
+            feed_id=feed_id,
+            vendor=profile.vendor,
+            venue=profile.route.venue.value if profile.route is not None else "krx",
+            session="regular",
+            session_date=session_date,
         )
         if profile.warm_standby:
-            static_pairs = _warm_static_pairs(session.replay_pairs(), settings.streams, profile.hot_symbols)
+            static_pairs = _warm_static_pairs(
+                session.replay_pairs(), vendor_streams(settings, profile.vendor), profile.hot_symbols
+            )
             warm_watch = _warm_dynamic_watch(
                 session=session,
                 session_date=session_date,

@@ -155,7 +155,7 @@ from src.storage.feed_quality import digest_lines as feed_digest_lines
 from src.storage.feed_quality import feed_health_archive_dir
 from src.storage.l0_audit import AuditStatus, SessionAudit, derive_session_audit, write_session_audit
 from src.storage.l0_repair import RepairState, derive_day_repair, l0_hold_reason
-from src.storage.layout import L0_VENDOR_DB, L0_VENDOR_KIWOOM, l0_day_journal_glob
+from src.storage.layout import L0_VENDOR_DB, L0_VENDOR_KIWOOM, L0_VENDOR_TOSS, l0_day_journal_glob
 from src.storage.remote import RemoteArchiveError
 from src.storage.retention import check_disk_watermark
 from src.storage.snapshot_store import SnapshotStore
@@ -1040,6 +1040,29 @@ def _snapshot_cmd(today: dt.date, paths: DataPaths) -> list[str]:
     ]
 
 
+def _toss_cmd(today: dt.date, paths: DataPaths, *, session_index: int = 0, hot_symbols: int = 0) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "src.cli.main",
+        "collect-stream-toss",
+        "--session-date",
+        today.isoformat(),
+        "--journal-root",
+        str(paths.journal_root),
+        "--manifest-path",
+        str(paths.toss_manifest_path(today, session_index)),
+        "--candidates-path",
+        str(paths.candidates),
+        "--dynamic-plan-path",
+        str(paths.dynamic_admissions(today)),
+        "--toss-session-index",
+        str(session_index),
+        "--hot-symbols",
+        str(hot_symbols),
+    ]
+
+
 def _db_crosscheck_cmd(today: dt.date, paths: DataPaths, *, session_index: int = 0, hot_symbols: int = 0) -> list[str]:
     return [
         sys.executable,
@@ -1186,6 +1209,8 @@ class StreamChildKey(StrEnum):
     SNAPSHOT = "snapshot"
     DB_CROSSCHECK = "db_crosscheck"
     DB_CROSSCHECK_B = "db_crosscheck_b"
+    TOSS_SECONDARY_A = "toss_secondary_a"
+    TOSS_SECONDARY_B = "toss_secondary_b"
     KIWOOM_CROSSCHECK = "kiwoom_crosscheck"
     AFTERMARKET = "aftermarket"
     PREMARKET = "premarket"
@@ -1197,6 +1222,12 @@ class StreamChildKey(StrEnum):
 _DB_CROSSCHECK_SESSION_INDEX: Final[Mapping[StreamChildKey, int]] = {
     StreamChildKey.DB_CROSSCHECK: 0,
     StreamChildKey.DB_CROSSCHECK_B: 1,
+}
+
+
+_TOSS_SESSION_INDEX: Final[Mapping[StreamChildKey, int]] = {
+    StreamChildKey.TOSS_SECONDARY_A: 0,
+    StreamChildKey.TOSS_SECONDARY_B: 1,
 }
 
 
@@ -1351,8 +1382,10 @@ class DaemonState:
         return value
 
     def set_child_result(self, key: StreamChildKey, value: str | None) -> None:
-        """Store the last supervise result of a SESSION child."""
-        setattr(self, self._CHILD_RESULT_FIELDS[key], value)
+        """Store the last supervise result of a SESSION child; children without a result field (Toss) are not tracked."""
+        field_name = self._CHILD_RESULT_FIELDS.get(key)
+        if field_name is not None:
+            setattr(self, field_name, value)
 
 
 @dataclass
@@ -1415,6 +1448,22 @@ class DaemonChildren:
     @db_crosscheck_b.setter
     def db_crosscheck_b(self, supervisor: ProcessSupervisor | None) -> None:
         self.set(StreamChildKey.DB_CROSSCHECK_B, supervisor)
+
+    @property
+    def toss_secondary_a(self) -> ProcessSupervisor | None:
+        return self.get(StreamChildKey.TOSS_SECONDARY_A)
+
+    @toss_secondary_a.setter
+    def toss_secondary_a(self, supervisor: ProcessSupervisor | None) -> None:
+        self.set(StreamChildKey.TOSS_SECONDARY_A, supervisor)
+
+    @property
+    def toss_secondary_b(self) -> ProcessSupervisor | None:
+        return self.get(StreamChildKey.TOSS_SECONDARY_B)
+
+    @toss_secondary_b.setter
+    def toss_secondary_b(self, supervisor: ProcessSupervisor | None) -> None:
+        self.set(StreamChildKey.TOSS_SECONDARY_B, supervisor)
 
     @property
     def kiwoom_crosscheck(self) -> ProcessSupervisor | None:
@@ -1709,6 +1758,11 @@ class DaemonRunner:
         circuit_open="[DAEMON] stage=db_crosscheck status=FAIL reason=circuit_open",
         circuit_level=logging.WARNING,
     )
+    _TOSS_LOGS: ClassVar[SupervisionLogs] = SupervisionLogs(
+        restarted="[DAEMON] stage=toss_secondary status=RESTARTED exit_code=%s",
+        circuit_open="[DAEMON] stage=toss_secondary status=FAIL reason=circuit_open",
+        circuit_level=logging.WARNING,
+    )
     _STREAM_SPECS: ClassVar[tuple[StreamChildSpec, ...]] = (
         StreamChildSpec(
             key=StreamChildKey.REGULAR,
@@ -1768,6 +1822,30 @@ class DaemonRunner:
             requires_primary=True,
             journal_vendor=lambda cfg: L0_VENDOR_DB,
             manifest_path=lambda paths, day: paths.db_crosscheck_manifest_path(day, 1),
+        ),
+        StreamChildSpec(
+            key=StreamChildKey.TOSS_SECONDARY_A,
+            role=StreamRole.CROSSCHECK,
+            lifecycle=ChildLifecycle.SESSION,
+            enabled=lambda runtime: "toss:0" in runtime.feed_control.secondary_feeds,
+            cmd=lambda today, paths, reason: _toss_cmd(today, paths, session_index=0),
+            active=lambda runtime, now, anchors: now.astimezone(_KST).time() < anchors.regular_close,
+            logs=_TOSS_LOGS,
+            requires_primary=True,
+            journal_vendor=lambda cfg: L0_VENDOR_TOSS,
+            manifest_path=lambda paths, day: paths.toss_manifest_path(day, 0),
+        ),
+        StreamChildSpec(
+            key=StreamChildKey.TOSS_SECONDARY_B,
+            role=StreamRole.CROSSCHECK,
+            lifecycle=ChildLifecycle.SESSION,
+            enabled=lambda runtime: "toss:1" in runtime.feed_control.secondary_feeds,
+            cmd=lambda today, paths, reason: _toss_cmd(today, paths, session_index=1),
+            active=lambda runtime, now, anchors: now.astimezone(_KST).time() < anchors.regular_close,
+            logs=_TOSS_LOGS,
+            requires_primary=True,
+            journal_vendor=lambda cfg: L0_VENDOR_TOSS,
+            manifest_path=lambda paths, day: paths.toss_manifest_path(day, 1),
         ),
         StreamChildSpec(
             key=StreamChildKey.KIWOOM_CROSSCHECK,
@@ -2098,6 +2176,8 @@ class DaemonRunner:
             ch.snapshot,
             ch.db_crosscheck,
             ch.db_crosscheck_b,
+            ch.toss_secondary_a,
+            ch.toss_secondary_b,
             ch.kiwoom_crosscheck,
             ch.premarket,
         ]
@@ -4028,6 +4108,10 @@ class DaemonRunner:
             index = _DB_CROSSCHECK_SESSION_INDEX[spec.key]
             hot = dict(self._runtime.feed_control.hot_symbols).get(f"db:{index}", 0)
             return _db_crosscheck_cmd(today, self._paths, session_index=index, hot_symbols=hot)
+        if spec.key in _TOSS_SESSION_INDEX:
+            index = _TOSS_SESSION_INDEX[spec.key]
+            hot = dict(self._runtime.feed_control.hot_symbols).get(f"toss:{index}", 0)
+            return _toss_cmd(today, self._paths, session_index=index, hot_symbols=hot)
         if spec.key is not StreamChildKey.REGULAR:
             assert spec.cmd is not None
             return spec.cmd(today, self._paths, reason)

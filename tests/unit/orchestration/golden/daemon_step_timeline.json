@@ -2422,6 +2422,8 @@
     "[DAEMON] stage=streamer status=STARTED",
     "[DAEMON] stage=streamer status=STOP_STALE_DAY stop_result=%s",
     "[DAEMON] stage=streamer_stop result=%s",
+    "[DAEMON] stage=toss_secondary status=FAIL reason=circuit_open",
+    "[DAEMON] stage=toss_secondary status=RESTARTED exit_code=%s",
     "[DATA] stage=aftermarket_coverage status=%s zero=%d shards=%d date=%s",
     "[DATA] stage=aftermarket_coverage status=UNVERIFIABLE venue=%s shard=%d reason=%s",
     "[DATA] stage=aftermarket_coverage status=ZERO_FRAMES venue=%s shard=%d accepted=%d zero=%d symbols=%s",

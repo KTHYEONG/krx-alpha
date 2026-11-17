@@ -16,7 +16,7 @@ from src.realtime.adapters.registry import (
 
 
 def test_registry_keys_exact() -> None:
-    assert set(ADAPTERS.keys()) == {"ls", "db", "kiwoom"}
+    assert set(ADAPTERS.keys()) == {"ls", "db", "kiwoom", "toss"}
     with pytest.raises(TypeError):
         ADAPTERS["xx"] = None  # type: ignore[index]
 
@@ -108,3 +108,21 @@ def test_registry_patch_points_are_module_globals(monkeypatch, tmp_path, vendor)
     else:
         expected.update(capacity_pairs=12, ack_timeout_s=3, subscribe_spacing_s=0.2, connect_gate=None)
     assert seen["adapter"] == expected
+
+
+def test_toss_entry_builds_adapter_on_the_shared_token_path(monkeypatch, tmp_path) -> None:
+    from src.marketdata.toss_token_store import toss_token_path
+    from src.realtime.adapters.toss import TossRealtimeAdapter
+
+    monkeypatch.setenv("TOSS_APP_KEY", "key")
+    monkeypatch.setenv("TOSS_APP_SECRET", "secret")
+    entry = regular_vendor("toss")
+    assert entry.requires_market_map is False
+    creds = entry.load_credentials()
+    assert creds == AppCredentials("key", "secret")
+    settings = CollectorSettings(toss_capacity_pairs=60, toss_ack_timeout_s=4, toss_declare_spacing_s=0.3)
+    adapter = entry.build(creds, RegularAdapterContext(object(), settings, tmp_path, None))  # type: ignore[arg-type]
+    assert isinstance(adapter, TossRealtimeAdapter)
+    assert adapter.capacity_pairs == 60
+    assert adapter._token_store._path == toss_token_path(tmp_path, "key")  # noqa: SLF001 - shared-file identity with kca
+    assert adapter._declare_spacing_s == 0.3  # noqa: SLF001

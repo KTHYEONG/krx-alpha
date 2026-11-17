@@ -208,6 +208,12 @@ class DataPaths:
         suffix = "" if session_index == 0 else ".1"
         return self.manifest_dir / f"{day.isoformat()}.db{suffix}.json"
 
+    def toss_manifest_path(self, day: dt.date, session_index: int = 0) -> pathlib.Path:
+        if session_index not in (0, 1):
+            raise ValueError(f"toss session_index must be 0 or 1, got {session_index}")
+        suffix = "" if session_index == 0 else ".1"
+        return self.manifest_dir / f"{day.isoformat()}.toss{suffix}.json"
+
     def kiwoom_crosscheck_manifest_path(self, day: dt.date) -> pathlib.Path:
         return self.manifest_dir / f"{day.isoformat()}.kiwoom.json"
 
