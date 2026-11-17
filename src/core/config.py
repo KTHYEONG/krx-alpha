@@ -863,7 +863,7 @@ class ShardWatchdogSettings(BaseSettings):
 
 
 _FEED_CONTROL_GROUP_RE = re.compile(r"(ls|kis-krx|kis-nxt):[0-9]+")
-_FEED_CONTROL_SECONDARY_FEEDS = frozenset({"db:0", "db:1", "toss:0", "toss:1", "kis:5"})
+_FEED_CONTROL_SECONDARY_FEEDS = frozenset({"db:0", "db:1", "toss:0", "toss:1", "kis:5", "ls-nxt:0"})
 
 
 class FeedControlSettings(BaseSettings):

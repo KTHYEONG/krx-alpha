@@ -351,3 +351,38 @@ def test_summary_and_rows_count_mixed_selected_minutes_for_both_venues(paths) ->
         only_toss[1]: ("toss", True),
         "2026-11-16T09:12": ("ls", False),
     }
+
+
+def _ls_nxt_book_raw(symbol: str) -> str:
+    body: dict[str, str] = {"shcode": symbol, "hotime": "093000", "totofferrem": "10", "totbidrem": "10"}
+    for level in range(1, 11):
+        body.update({f"offerho{level}": str(70000 + level * 100), f"bidho{level}": str(70000 - level * 100)})
+        body.update({f"offerrem{level}": "1", f"bidrem{level}": "1"})
+    return json.dumps({"header": {"tr_cd": "NH1", "tr_key": f"N{symbol}   "}, "body": body})
+
+
+def test_selection_reads_ls_nxt_candidate(paths) -> None:
+    minutes = ["2026-11-16T09:10", "2026-11-16T09:11"]
+    walls = [int(dt.datetime.fromisoformat(m).replace(tzinfo=KST).timestamp() * 1e9) for m in minutes]
+    _write_symbol_rows(paths, "kis", "nxt", "H0NXCNT0", [("005930", minutes[0])])
+    _write_symbol_rows(paths, "ls", "nxt", "H0NXCNT0", [("005930", m) for m in minutes for _ in range(3)])
+    kis_book = "^".join(["005930", "093000", *["1"] * 70])
+    for vendor, raw in (("kis", kis_book), ("ls", _ls_nxt_book_raw("005930"))):
+        path = paths.archive_root / vendor / "nxt" / "regular" / "H0NXASP0" / f"dt={DAY.isoformat()}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows = [w for w in walls for _ in range(3)] if vendor == "ls" else walls[:1]
+        pq.write_table(pa.table({"raw": [raw] * len(rows), "recv_wall_ns": pa.array(rows, pa.int64())}), path)
+    admit_wall = _minute_wall(minutes[1])
+    log_path = paths.feed_control_log_path(DAY)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        json.dumps({"kind": "ADMIT", "feed": "ls-nxt:0", "mode": "active", "symbols": ["005930"], "wall": admit_wall}) + "\n",
+        encoding="utf-8",
+    )
+    build_feed_selection(DAY, paths=paths, spec=SPEC)
+    rows = [row for row in pq.read_table(fs.selection_partition_path(paths, DAY)).to_pylist() if row["venue"] == "nxt"]
+    by_kind = {(row["kind"], row["minute_kst"]): row for row in rows}
+    for kind in ("tick", "book"):
+        assert by_kind[(kind, minutes[0])]["selected_vendor"] == "kis"
+        assert by_kind[(kind, minutes[1])]["selected_vendor"] == "ls"
+        assert by_kind[(kind, minutes[1])]["primary_vendor"] == "kis"

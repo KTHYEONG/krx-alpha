@@ -20,6 +20,7 @@ from src.core.config import AuditSettings, CollectorSettings, DataPaths, Intrada
 from src.core.errors import KrxAlphaError
 from src.core.observability import EVENT
 from src.core.session_anchors import resolve_session_anchors
+from src.realtime.adapters.ls import LS_NXT_STREAMS
 from src.realtime.adapters.registry import RegularAdapterContext, regular_vendor
 from src.realtime.connect_guard import ConnectRateGuard
 from src.realtime.connection_handover import SwapRequest
@@ -173,8 +174,10 @@ def _armed_when_subscribed(limit: Callable[[], float | None], subscribed: Callab
     return lambda: limit() if subscribed() else None
 
 
-def vendor_streams(settings: CollectorSettings, vendor: str) -> tuple[str, ...]:
-    """Logical stream ids a vendor's child subscribes; Toss defaults to trade only."""
+def vendor_streams(settings: CollectorSettings, vendor: str, venue: str = "krx") -> tuple[str, ...]:
+    """Logical stream ids a vendor's child subscribes; Toss defaults to trade only and LS-NXT uses the NXT ids."""
+    if vendor == "ls" and venue == "nxt":
+        return LS_NXT_STREAMS
     return tuple(settings.toss_streams) if vendor == L0_VENDOR_TOSS else tuple(settings.streams)
 
 
@@ -206,6 +209,12 @@ class RegularStreamProfile:
     # Warm standby: subscribes `hot_symbols` statically, the rest only via the dynamic plan, watchdog disarmed until subscribed.
     warm_standby: bool = False
     hot_symbols: int = 0
+    # Registry key when it differs from `vendor` (the journal vendor), e.g. "ls-nxt" journals as "ls".
+    adapter: str | None = None
+
+
+def _profile_venue(profile: RegularStreamProfile) -> str:
+    return profile.route.venue.value if profile.route is not None else "krx"
 
 
 def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -252,15 +261,16 @@ def _warm_dynamic_watch(
     plan_path: pathlib.Path,
     static_pairs: list[tuple[str, str]],
     observer: StreamObserver | None = None,
+    venue: str = "krx",
 ) -> DynamicPairWatcher:
     """Dynamic watcher of a warm-standby connection; admissions of feed `<vendor>:<index>` come from `plan_path`."""
-    feed = feed_id_for(vendor, "krx", session_index)
-    streams = vendor_streams(settings, vendor)
-    initial = [
-        (symbol, stream)
-        for symbol in dict.fromkeys(read_dynamic_admissions(plan_path).symbols_for(feed))
-        for stream in streams
-    ]
+    feed = feed_id_for(vendor, venue, session_index)
+    streams = vendor_streams(settings, vendor, venue)
+    # A unified feed serves both venues, so it consumes admissions of either.
+    feed_venue = None if vendor == L0_VENDOR_TOSS else venue
+    plan = read_dynamic_admissions(plan_path)
+    admitted = plan.symbols_for(feed) if feed_venue is None else plan.pairs_for(feed, feed_venue)
+    initial = [(symbol, stream) for symbol in dict.fromkeys(admitted) for stream in streams]
     return DynamicPairWatcher(
         feed=DynamicFeed(
             vendor=vendor,
@@ -268,8 +278,7 @@ def _warm_dynamic_watch(
             streams=streams,
             ipc_path=plan_path,
             membership_path=settings.paths.membership_path(session_date),
-            # A unified feed serves both venues, so it consumes admissions of either.
-            venue=None if vendor == L0_VENDOR_TOSS else "krx",
+            venue=feed_venue,
         ),
         session=session,
         static_pairs=static_pairs,
@@ -327,7 +336,8 @@ async def run_regular_stream(
         shard_index, shard_symbols = profile.session_index, None
     else:
         shard_index, shard_symbols = _shard_request(args)
-    entry = regular_vendor(profile.vendor)
+    entry = regular_vendor(profile.adapter or profile.vendor)
+    venue = _profile_venue(profile)
     creds = entry.load_credentials()
     session_date = dt.date.fromisoformat(str(args.session_date))
     anchors = resolve_session_anchors(settings.paths.session_calendar_dir, session_date)
@@ -342,7 +352,7 @@ async def run_regular_stream(
     candidates_path = pathlib.Path(str(args.candidates_path))
     token_cache_dir = KisTokenSettings().token_cache_dir
     ledger = _lease_ledger(profile.vendor, settings, token_cache_dir, creds.app_key)
-    owner = f"{profile.vendor}-shard-{shard_index}-{os.getpid()}"
+    owner = f"{profile.adapter or profile.vendor}-shard-{shard_index}-{os.getpid()}"
     primary: Lease | None = None
     if ledger is not None:
         try:
@@ -370,7 +380,7 @@ async def run_regular_stream(
             ntp_host=overrides.ntp_host,
             slot_budget=profile.slot_budget,
             max_clock_offset_ns=overrides.max_clock_offset_ns,
-            desired_streams=vendor_streams(settings, profile.vendor),
+            desired_streams=vendor_streams(settings, profile.vendor, venue),
             vendor=profile.vendor,
             degraded_reason=getattr(args, "degraded_reason", None),
             ntp_fallback_hosts=settings.ntp_fallback_hosts,
@@ -398,23 +408,24 @@ async def run_regular_stream(
             standby_lead_s=settings.regular_open_standby_lead_s,
             standby_hold_s=settings.regular_open_standby_hold_s,
             after_close_limit_s=settings.after_close_silence_limit_s
-            if profile.vendor == "ls" and settings.after_close_silence_enabled
+            if profile.vendor == "ls" and profile.route is None and settings.after_close_silence_enabled
             else None,
+            trade_stream=vendor_streams(settings, profile.vendor, venue)[0],
         )
         swap_request = SwapRequest()
         if shard_symbols is not None:
             logger.info("[DATA] stage=ls_shard index=%d symbols=%d", shard_index, len(shard_symbols), extra=EVENT)
-        feed_id = feed_id_for(profile.vendor, "krx", shard_index)
+        feed_id = feed_id_for(profile.vendor, venue, shard_index)
         health_tracker = build_feed_health_tracker(
             feed_id=feed_id,
             vendor=profile.vendor,
-            venue=profile.route.venue.value if profile.route is not None else "krx",
+            venue=venue,
             session="regular",
             session_date=session_date,
         )
         if profile.warm_standby:
             static_pairs = _warm_static_pairs(
-                session.replay_pairs(), vendor_streams(settings, profile.vendor), profile.hot_symbols
+                session.replay_pairs(), vendor_streams(settings, profile.vendor, venue), profile.hot_symbols
             )
             warm_watch = _warm_dynamic_watch(
                 session=session,
@@ -425,6 +436,7 @@ async def run_regular_stream(
                 plan_path=pathlib.Path(str(args.dynamic_plan_path)),
                 static_pairs=static_pairs,
                 observer=health_tracker,
+                venue=venue,
             )
             live_watch: DynamicPairWatcher | None = warm_watch
             silence_limit = _armed_when_subscribed(open_watch.silence_limit, lambda: bool(warm_watch.pairs()))

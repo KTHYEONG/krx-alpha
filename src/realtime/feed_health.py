@@ -36,6 +36,8 @@ def feed_id_for(vendor: str, venue: str, shard_index: int, slot: str | None = No
         if venue not in ("krx", "nxt"):
             raise ValueError(f"unknown kis venue {venue!r}")
         return f"kis-{venue}:{shard_index}"
+    if vendor == "ls" and venue == "nxt":
+        return f"ls-nxt:{shard_index}"
     if vendor in ("ls", "db", "kiwoom", "toss"):
         return f"{vendor}:{shard_index}"
     raise ValueError(f"unknown vendor {vendor!r}")

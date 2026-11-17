@@ -16,7 +16,7 @@ from src.realtime.adapters.registry import (
 
 
 def test_registry_keys_exact() -> None:
-    assert set(ADAPTERS.keys()) == {"ls", "db", "kiwoom", "toss"}
+    assert set(ADAPTERS.keys()) == {"ls", "ls-nxt", "db", "kiwoom", "toss"}
     with pytest.raises(TypeError):
         ADAPTERS["xx"] = None  # type: ignore[index]
 
@@ -126,3 +126,16 @@ def test_toss_entry_builds_adapter_on_the_shared_token_path(monkeypatch, tmp_pat
     assert adapter.capacity_pairs == 60
     assert adapter._token_store._path == toss_token_path(tmp_path, "key")  # noqa: SLF001 - shared-file identity with kca
     assert adapter._declare_spacing_s == 0.3  # noqa: SLF001
+
+
+def test_ls_nxt_entry_journals_as_ls_and_needs_no_market_map(monkeypatch, tmp_path) -> None:
+    from src.realtime.adapters.ls import LsNxtRealtimeAdapter
+
+    entry = regular_vendor("ls-nxt")
+    assert entry.vendor == "ls"
+    assert entry.requires_market_map is False
+    adapter = entry.build(
+        AppCredentials("key", "secret"),
+        RegularAdapterContext(object(), CollectorSettings(), tmp_path, None),  # type: ignore[arg-type]
+    )
+    assert isinstance(adapter, LsNxtRealtimeAdapter)

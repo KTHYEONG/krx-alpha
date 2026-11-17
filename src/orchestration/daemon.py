@@ -164,7 +164,7 @@ from src.universe.aftermarket import (
     aftermarket_candidate_session,
     refresh_aftermarket_candidates,
 )
-from src.universe.intraday import DynamicPlan, read_dynamic_admissions
+from src.universe.intraday import DynamicAdmissionsFileError, DynamicPlan, read_dynamic_admissions
 from src.universe.ipc import CandidateFileError, read_candidate_snapshot, read_candidates
 from src.universe.membership import MembershipFileError, MembershipRow, append_membership, read_membership
 from src.universe.policy import ineligible_security_symbols
@@ -1193,6 +1193,43 @@ def _resolve_trading_day_with_cache(
     return None
 
 
+_LS_NXT_FEED: Final[str] = "ls-nxt:0"
+
+
+def _ls_nxt_admitted(paths: DataPaths, day: dt.date) -> bool:
+    """True when the controller's plan holds NXT admissions for the LS-NXT feed; an unreadable plan means no demand."""
+    try:
+        return bool(read_dynamic_admissions(paths.dynamic_admissions(day)).pairs_for(_LS_NXT_FEED, "nxt"))
+    except (OSError, DynamicAdmissionsFileError):
+        return False
+
+
+def _ls_nxt_window(runtime: CollectorRuntime, now: dt.datetime, anchors: SessionAnchors) -> bool:
+    kis = getattr(runtime, "regular_kis", None) or RegularKisSettings()
+    return regular_nxt_collection_due(
+        now, anchors=anchors, start_lead_s=kis.nxt_start_lead_s, close_grace_s=kis.close_grace_s
+    )
+
+
+def _ls_nxt_cmd(today: dt.date, paths: DataPaths) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "src.cli.main",
+        "collect-stream-ls-nxt",
+        "--session-date",
+        today.isoformat(),
+        "--journal-root",
+        str(paths.journal_root),
+        "--manifest-path",
+        str(paths.ls_nxt_manifest_path(today)),
+        "--candidates-path",
+        str(paths.regular_nxt_candidates(today)),
+        "--dynamic-plan-path",
+        str(paths.dynamic_admissions(today)),
+    ]
+
+
 class StreamRole(StrEnum):
     PRIMARY = "primary"
     CROSSCHECK = "crosscheck"
@@ -1211,6 +1248,7 @@ class StreamChildKey(StrEnum):
     DB_CROSSCHECK_B = "db_crosscheck_b"
     TOSS_SECONDARY_A = "toss_secondary_a"
     TOSS_SECONDARY_B = "toss_secondary_b"
+    LS_NXT_SECONDARY = "ls_nxt_secondary"
     KIWOOM_CROSSCHECK = "kiwoom_crosscheck"
     AFTERMARKET = "aftermarket"
     PREMARKET = "premarket"
@@ -1264,6 +1302,8 @@ class StreamChildSpec:
     silent_on_degraded_upgrade: bool = False
     journal_vendor: Callable[[CollectorSettings], str] | None = None
     manifest_path: Callable[[DataPaths, dt.date], pathlib.Path] | None = None
+    # On-demand child: installed only while this returns True for the session day, so an idle feed holds no vendor slot.
+    demand: Callable[[DataPaths, dt.date], bool] | None = None
 
     def __post_init__(self) -> None:
         is_session = self.lifecycle is ChildLifecycle.SESSION
@@ -1285,6 +1325,8 @@ class StreamChildSpec:
             self.requires_primary or self.starts_in_degraded or self.silent_on_degraded_upgrade
         ):
             raise ValueError(f"{self.key.value} must not set primary-only supervision flags")
+        if self.demand is not None and (self.role is not StreamRole.CROSSCHECK or not is_session):
+            raise ValueError(f"{self.key.value} on-demand start is only defined for SESSION crosscheck children")
         journals_session = self.role in (StreamRole.PRIMARY, StreamRole.CROSSCHECK)
         has_journal_fields = self.journal_vendor is not None and self.manifest_path is not None
         if journals_session and not has_journal_fields:
@@ -1763,6 +1805,11 @@ class DaemonRunner:
         circuit_open="[DAEMON] stage=toss_secondary status=FAIL reason=circuit_open",
         circuit_level=logging.WARNING,
     )
+    _LS_NXT_LOGS: ClassVar[SupervisionLogs] = SupervisionLogs(
+        restarted="[DAEMON] stage=ls_nxt_secondary status=RESTARTED exit_code=%s",
+        circuit_open="[DAEMON] stage=ls_nxt_secondary status=FAIL reason=circuit_open",
+        circuit_level=logging.WARNING,
+    )
     _STREAM_SPECS: ClassVar[tuple[StreamChildSpec, ...]] = (
         StreamChildSpec(
             key=StreamChildKey.REGULAR,
@@ -1846,6 +1893,19 @@ class DaemonRunner:
             requires_primary=True,
             journal_vendor=lambda cfg: L0_VENDOR_TOSS,
             manifest_path=lambda paths, day: paths.toss_manifest_path(day, 1),
+        ),
+        StreamChildSpec(
+            key=StreamChildKey.LS_NXT_SECONDARY,
+            role=StreamRole.CROSSCHECK,
+            lifecycle=ChildLifecycle.SESSION,
+            enabled=lambda runtime: _LS_NXT_FEED in runtime.feed_control.secondary_feeds,
+            cmd=lambda today, paths, reason: _ls_nxt_cmd(today, paths),
+            active=_ls_nxt_window,
+            logs=_LS_NXT_LOGS,
+            requires_primary=True,
+            journal_vendor=lambda cfg: "ls",
+            manifest_path=lambda paths, day: paths.ls_nxt_manifest_path(day),
+            demand=_ls_nxt_admitted,
         ),
         StreamChildSpec(
             key=StreamChildKey.KIWOOM_CROSSCHECK,
@@ -2758,6 +2818,8 @@ class DaemonRunner:
             st.regular_kis_plan_day = None
         self._ensure_ls_shard_plan(today)
         for spec in self._session_specs():
+            if spec.demand is not None:
+                continue
             self._install_stream_child(
                 spec.key, self._session_child_cmd(spec, today, None), replaces_degraded=replacing_degraded
             )
@@ -2836,9 +2898,25 @@ class DaemonRunner:
             self._state.set_child_result(key, result)
 
     def _supervise_session_children(self, now: dt.datetime, anchors: SessionAnchors) -> None:
-        """Supervise every enabled SESSION child in table order."""
+        """Supervise every enabled SESSION child in table order; on-demand children are installed first when due."""
         for spec in self._session_specs():
+            if spec.demand is not None:
+                self._start_on_demand_child(spec, now, anchors)
             self._supervise_stream_child(spec.key, now, anchors)
+
+    def _start_on_demand_child(self, spec: StreamChildSpec, now: dt.datetime, anchors: SessionAnchors) -> None:
+        """Install an on-demand SESSION child once its window is open, the primary runs and the plan holds demand."""
+        assert spec.demand is not None
+        assert spec.active is not None
+        assert spec.cmd is not None
+        ch = self._children
+        today = now.astimezone(_KST).date()
+        if ch.get(spec.key) is not None or ch.regular is None or self._state.orchestrated_for != today:
+            return
+        if not spec.active(self._runtime, now, anchors) or not spec.demand(self._paths, today):
+            return
+        self._install_stream_child(spec.key, spec.cmd(today, self._paths, None))
+        logger.info("[DAEMON] stage=on_demand_child status=STARTED child=%s", spec.key.value, extra=EVENT)
 
     def _stop_stream_child(self, key: StreamChildKey) -> str | None:
         """Stop and drop a single-instance child; returns the stop result or None when absent."""
@@ -2981,7 +3059,7 @@ class DaemonRunner:
         paths = self._paths
         today = day.date
         for spec in self._session_specs():
-            if spec.role is not StreamRole.CROSSCHECK:
+            if spec.role is not StreamRole.CROSSCHECK or spec.demand is not None:
                 continue
             if self._children.get(spec.key) is None:
                 continue
@@ -5003,7 +5081,7 @@ class DaemonRunner:
         paths = self._paths
         outcomes: dict[StreamChildKey, str] = {}
         for spec in self._session_specs():
-            if spec.role is not StreamRole.CROSSCHECK:
+            if spec.role is not StreamRole.CROSSCHECK or spec.demand is not None:
                 continue
             if day.status is not TradingDayStatus.BUSINESS or self._state.orchestrated_for != ref_day:
                 outcomes[spec.key] = "skipped"

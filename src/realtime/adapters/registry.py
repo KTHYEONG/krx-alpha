@@ -26,10 +26,13 @@ from src.marketdata.host_token_store import AsyncRotatingTokenStore, kiwoom_issu
 from src.marketdata.toss_token_store import TossTokenStore, toss_token_path
 from src.realtime.adapters.db import DbRealtimeAdapter
 from src.realtime.adapters.kiwoom import KiwoomRealtimeAdapter
-from src.realtime.adapters.ls import LsRealtimeAdapter
+from src.realtime.adapters.ls import LsNxtRealtimeAdapter, LsRealtimeAdapter
 from src.realtime.adapters.toss import TossRealtimeAdapter
 from src.realtime.contracts import VendorAdapter
 from src.storage.layout import L0_VENDOR_DB, L0_VENDOR_KIWOOM, L0_VENDOR_TOSS
+
+# Registry key of the NXT-venue LS adapter; its journal vendor stays "ls".
+LS_NXT_ADAPTER = "ls-nxt"
 
 
 @dataclass(frozen=True)
@@ -75,21 +78,35 @@ def _load_toss_credentials() -> AppCredentials:
     return AppCredentials(app_key=creds.toss_app_key, app_secret=creds.toss_app_secret)
 
 
-def _build_ls(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAdapter:
-    if ctx.market_of is None:
-        raise ValueError("market_of is required for ls adapter")
-    store = AsyncRotatingTokenStore(
+def _ls_token_store(creds: AppCredentials, ctx: RegularAdapterContext) -> AsyncRotatingTokenStore:
+    return AsyncRotatingTokenStore(
         token_record_path(ctx.token_cache_dir, "ls", creds.app_key),
         vendor="ls",
         rotation_cooldown_s=ctx.settings.ls_token_rotation_cooldown_s,
         clock=lambda: dt.datetime.now(dt.UTC),
     )
+
+
+def _build_ls(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAdapter:
+    if ctx.market_of is None:
+        raise ValueError("market_of is required for ls adapter")
     return LsRealtimeAdapter(
         app_key=creds.app_key,
         app_secret=creds.app_secret,
         http=ctx.http,
         market_of=ctx.market_of,
-        token_store=store,
+        token_store=_ls_token_store(creds, ctx),
+        capacity_pairs=ctx.settings.ls_max_subscriptions_per_session,
+    )
+
+
+def _build_ls_nxt(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAdapter:
+    # Same host-shared token store as the KRX LS sessions: one issuer per key.
+    return LsNxtRealtimeAdapter(
+        app_key=creds.app_key,
+        app_secret=creds.app_secret,
+        http=ctx.http,
+        token_store=_ls_token_store(creds, ctx),
         capacity_pairs=ctx.settings.ls_max_subscriptions_per_session,
     )
 
@@ -161,6 +178,7 @@ def _build_kiwoom(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAd
 ADAPTERS: Mapping[str, RegularVendor] = MappingProxyType(
     {
         "ls": RegularVendor(vendor="ls", load_credentials=_load_ls_credentials, build=_build_ls, requires_market_map=True),
+        LS_NXT_ADAPTER: RegularVendor(vendor="ls", load_credentials=_load_ls_credentials, build=_build_ls_nxt, requires_market_map=False),
         L0_VENDOR_DB: RegularVendor(vendor=L0_VENDOR_DB, load_credentials=_load_db_credentials, build=_build_db, requires_market_map=False),
         L0_VENDOR_TOSS: RegularVendor(vendor=L0_VENDOR_TOSS, load_credentials=_load_toss_credentials, build=_build_toss, requires_market_map=False),
         L0_VENDOR_KIWOOM: RegularVendor(vendor=L0_VENDOR_KIWOOM, load_credentials=_load_kiwoom_credentials, build=_build_kiwoom, requires_market_map=False),
@@ -176,4 +194,4 @@ def regular_vendor(vendor: str) -> RegularVendor:
         raise KrxAlphaError(f"unsupported realtime vendor: {vendor}") from None
 
 
-__all__: list[str] = ["ADAPTERS", "AppCredentials", "RegularAdapterContext", "RegularVendor", "regular_vendor"]
+__all__: list[str] = ["ADAPTERS", "LS_NXT_ADAPTER", "AppCredentials", "RegularAdapterContext", "RegularVendor", "regular_vendor"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -10,7 +11,14 @@ from src.core.config import LS_MAX_SUBSCRIPTIONS_PER_SESSION
 from src.marketdata.host_token_store import AsyncRotatingTokenStore
 from src.marketdata.toss_token_store import TossTokenStore
 from src.realtime.adapters.json_ws import JsonWsOAuthAdapter
-from src.realtime.contracts import L0Frame, VendorAck, VendorAuthRejected, VendorDisconnected
+from src.realtime.contracts import (
+    L0Frame,
+    MarketSession,
+    MarketVenue,
+    VendorAck,
+    VendorAuthRejected,
+    VendorDisconnected,
+)
 
 LS_TOKEN_URL = "https://openapi.ls-sec.co.kr:8080/oauth2/token"  # noqa: S105 - public endpoint, not a secret
 LS_WS_URL = "wss://openapi.ls-sec.co.kr:9443/websocket"
@@ -23,6 +31,11 @@ LS_TR_CD: dict[tuple[str, str], str] = {
 }
 
 _REV_TR_CD: dict[str, str] = {v: k[0] for k, v in LS_TR_CD.items()}
+
+LS_NXT_STREAMS: tuple[str, str] = ("H0NXCNT0", "H0NXASP0")
+_NXT_TR_BY_STREAM: dict[str, str] = {"H0NXCNT0": "NS3", "H0NXASP0": "NH1"}
+_NXT_STREAM_BY_TR: dict[str, str] = {tr: stream for stream, tr in _NXT_TR_BY_STREAM.items()}
+_NXT_SYMBOL = re.compile(r"\d{6}")
 
 
 class LsRealtimeAdapter(JsonWsOAuthAdapter):
@@ -115,3 +128,37 @@ class LsRealtimeAdapter(JsonWsOAuthAdapter):
         if not isinstance(header, dict):
             return False
         return header.get("tr_cd") in _REV_TR_CD and "tr_key" in header
+
+
+class LsNxtRealtimeAdapter(LsRealtimeAdapter):
+    """LS adapter for NXT trades (NS3) and the 10-level book (NH1); KRX TR frames are ignored.
+
+    LS keys NXT symbols as ``N<code>`` padded with three spaces; frames carry the logical NXT stream ids.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("streams", LS_NXT_STREAMS)
+        kwargs.setdefault("market_of", {})
+        super().__init__(**kwargs)
+
+    def _subscribe_body(self, symbol: str, stream: str) -> dict[str, str]:
+        if _NXT_SYMBOL.fullmatch(symbol) is None:
+            raise ValueError(f"NXT symbol must be 6 digits: {symbol!r}")
+        return {"tr_cd": _NXT_TR_BY_STREAM[stream], "tr_key": f"N{symbol}   "}
+
+    def _data_frame(self, o: dict[str, Any], header: dict[str, Any], raw: str) -> L0Frame | None:
+        if "rsp_cd" in header or header.get("tr_cd") not in _NXT_STREAM_BY_TR or "tr_key" not in header:
+            return None
+        key = str(header["tr_key"]).strip()
+        return L0Frame(
+            "ls",
+            _NXT_STREAM_BY_TR[str(header["tr_cd"])],
+            key[1:] if key[:1] in ("N", "U") else key,
+            raw,
+            time.monotonic_ns(),
+            time.time_ns(),
+            self._next_seq(),
+            conn_id=self._conn_id,
+            venue=MarketVenue.NXT,
+            session=MarketSession.REGULAR,
+        )

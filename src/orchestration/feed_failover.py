@@ -59,6 +59,7 @@ class SecondaryRoute:
     pair_capacity: int
     # A unified feed carries both venues at once, so the one-venue-per-day lock of a shared slot does not apply.
     unified_venue: bool = False
+    # Candidates of a group are tried in `secondary_feeds` order, so listing `ls-nxt:0` before `kis:5` prefers LS-NXT for NXT groups.
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +90,9 @@ def _secondary_routes(
         routes[feed] = SecondaryRoute(
             feed, "toss", frozenset({"krx", "nxt"}), max(0, free_symbols) * len(collector.streams), unified_venue=True
         )
+    routes["ls-nxt:0"] = SecondaryRoute(
+        "ls-nxt:0", "ls", frozenset({"nxt"}), collector.ls_max_subscriptions_per_session
+    )
     return routes
 
 

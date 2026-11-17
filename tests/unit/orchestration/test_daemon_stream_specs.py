@@ -63,6 +63,7 @@ def test_spec_table_order_and_roles() -> None:
         daemon_mod.StreamChildKey.DB_CROSSCHECK_B,
         daemon_mod.StreamChildKey.TOSS_SECONDARY_A,
         daemon_mod.StreamChildKey.TOSS_SECONDARY_B,
+        daemon_mod.StreamChildKey.LS_NXT_SECONDARY,
         daemon_mod.StreamChildKey.KIWOOM_CROSSCHECK,
         daemon_mod.StreamChildKey.INTRADAY_DISCOVERY,
         daemon_mod.StreamChildKey.AFTERMARKET,
@@ -82,6 +83,7 @@ def test_spec_table_order_and_roles() -> None:
         daemon_mod.StreamChildKey.DB_CROSSCHECK_B,
         daemon_mod.StreamChildKey.TOSS_SECONDARY_A,
         daemon_mod.StreamChildKey.TOSS_SECONDARY_B,
+        daemon_mod.StreamChildKey.LS_NXT_SECONDARY,
         daemon_mod.StreamChildKey.KIWOOM_CROSSCHECK,
         daemon_mod.StreamChildKey.INTRADAY_DISCOVERY,
     ]

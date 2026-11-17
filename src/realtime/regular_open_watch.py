@@ -39,6 +39,7 @@ class RegularOpenWatch:
         standby_hold_s: float,
         now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
         after_close_limit_s: float | None = None,
+        trade_stream: str = _TRADE_STREAM,
     ) -> None:
         if silence_limit_s <= 0 or alert_after_s <= 0:
             raise ValueError("silence_limit_s and alert_after_s must be positive")
@@ -56,6 +57,7 @@ class RegularOpenWatch:
         self._standby_hold_s = standby_hold_s
         self._now = now
         self._after_close_limit_s = after_close_limit_s
+        self._trade_stream = trade_stream
         self._first_trade_seen = False
         self._alerted = False
 
@@ -66,7 +68,7 @@ class RegularOpenWatch:
 
     def observe(self, frame: L0Frame) -> None:
         """End the open grace on the first trade frame received at or after the scheduled open."""
-        if self._first_trade_seen or frame.stream != _TRADE_STREAM:
+        if self._first_trade_seen or frame.stream != self._trade_stream:
             return
         try:
             since_open = self._since_open_s(dt.datetime.fromtimestamp(frame.recv_wall_ns / _NS, tz=dt.UTC))

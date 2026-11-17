@@ -205,7 +205,11 @@ def _count_frames(path: pathlib.Path, decode: Decoder) -> dict[tuple[str, str], 
     reader = pq.ParquetFile(path)
     for batch in reader.iter_batches(batch_size=_CHUNK_ROWS, columns=["raw", "recv_wall_ns"]):
         frame = pl.DataFrame(pa.Table.from_batches([batch]))
-        decoded = decode(frame).filter(pl.col("shcode").is_not_null())
+        decoded = decode(frame)
+        if "recv_wall_ns" not in decoded.columns:
+            # Quote decoders keep one row per frame but drop the receive stamp.
+            decoded = decoded.with_columns(frame["recv_wall_ns"])
+        decoded = decoded.filter(pl.col("shcode").is_not_null())
         grouped = decoded.with_columns(
             (pl.col("recv_wall_ns") // _MINUTE_NS).alias("minute")
         ).group_by(["shcode", "minute"]).len()
@@ -257,7 +261,7 @@ def _controller_windows(
             for symbol in max(known, key=lambda entry: entry[0])[1]:
                 demoted[symbol] = min(demoted.get(symbol, at), at)
         elif kind == "ADMIT" and row.get("mode") == "active" and isinstance(row.get("feed"), str):
-            vendor = row["feed"].split(":", 1)[0]
+            vendor = row["feed"].split(":", 1)[0].removesuffix("-nxt")
             symbols = row.get("symbols") or ()
             for symbol in symbols:
                 windows[(vendor, str(symbol))].append((float(row["wall"]), close_wall))
