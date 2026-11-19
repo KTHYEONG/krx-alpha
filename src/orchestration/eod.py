@@ -6,6 +6,7 @@ import datetime as dt
 import functools
 import json
 import logging
+import os
 import pathlib
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
@@ -32,7 +33,7 @@ from src.storage.layout import (
 from src.storage.market_phase import MarketPhase
 from src.storage.normalize_worker import run_isolated_normalize
 from src.storage.remote import GDriveArchiver, PurgeStats, RcloneArchiver, RemoteArchiveError, SyncStats
-from src.storage.retention import prune_local_l1, prune_old_journals
+from src.storage.retention import prune_local_l1, prune_old_journals, unconfirmed_expired_l1
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,37 @@ def run_eod_maintenance(
     )
 
 
+PRUNE_BACKLOG_NAME = "prune_backlog.json"
+
+
+def _write_prune_backlog(
+    archive_root: pathlib.Path,
+    *,
+    retain_days: int,
+    reference_date: dt.date | None,
+    confirmed: AbstractSet[str],
+    purged: int,
+) -> None:
+    """Record the offsite-confirmation backlog for the host disk watcher; never affects EOD."""
+    path = archive_root.parent / PRUNE_BACKLOG_NAME
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        day = reference_date or dt.datetime.now(_KST).date()
+        expired = unconfirmed_expired_l1(
+            archive_root, retain_days=retain_days, reference_date=day, confirmed_remote=confirmed
+        )
+        payload = {
+            "day": day.isoformat(),
+            "l1_partitions_unconfirmed": len(expired),
+            "oldest_unconfirmed_date": min(expired).isoformat() if expired else None,
+            "purged": purged,
+        }
+        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, ValueError):
+        logger.warning("[DATA] stage=prune_backlog status=WRITE_FAILED path=%s", str(path), exc_info=True)
+
+
 def run_eod_offload(
     archive_root: pathlib.Path,
     manifest_root: pathlib.Path | None = None,
@@ -127,6 +159,13 @@ def run_eod_offload(
         }
     purged = prune_local_l1(
         archive_root, retain_days=retain_days, reference_date=reference_date, confirmed_remote=confirmed
+    )
+    _write_prune_backlog(
+        pathlib.Path(archive_root),
+        retain_days=retain_days,
+        reference_date=reference_date,
+        confirmed=confirmed,
+        purged=purged,
     )
     return EodOffloadResult(
         l1=l1_stats, manifests=manifests_stats, verified_remote_l1=frozenset(verified), purged=purged

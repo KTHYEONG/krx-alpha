@@ -83,6 +83,88 @@ def test_run_eod_offload_syncs_and_prunes_with_injected_archiver(tmp_path) -> No
     assert not old_pq.exists()
 
 
+class _BacklogArc:
+    def __init__(self, confirmed):
+        self._confirmed = confirmed
+
+    def sync_l1_tree(self, archive_root, *, progress=None):
+        from src.storage.remote import SyncStats
+
+        return SyncStats(uploaded=0, skipped_verified=0, failed_verification=0)
+
+    def sync_manifest_tree(self, manifest_root):
+        from src.storage.remote import SyncStats
+
+        return SyncStats(uploaded=0, skipped_verified=0, failed_verification=0)
+
+    def remote_files(self, prefix):
+        return set(self._confirmed)
+
+    def verified_paths(self, local_root, remote_prefix="l1/"):
+        return set()
+
+
+def _two_old_partitions(tmp_path):
+    root = tmp_path / "data" / "l1" / "kis" / "H0STCNT0"
+    root.mkdir(parents=True)
+    for day in ("2026-07-01", "2026-07-05"):
+        (root / f"dt={day}.parquet").write_bytes(b"x")
+    return tmp_path / "data"
+
+
+def test_run_eod_offload_writes_prune_backlog_after_prune(tmp_path) -> None:
+    import datetime as dt
+    import json
+    from src.orchestration.eod import run_eod_offload
+
+    data = _two_old_partitions(tmp_path)
+    arc = _BacklogArc({"l1/kis/H0STCNT0/dt=2026-07-01.parquet"})
+
+    result = run_eod_offload(data / "l1", archiver=arc, reference_date=dt.date(2026, 9, 8))
+
+    payload = json.loads((data / "prune_backlog.json").read_text(encoding="utf-8"))
+    assert payload == {
+        "day": "2026-09-08",
+        "l1_partitions_unconfirmed": 1,
+        "oldest_unconfirmed_date": "2026-07-05",
+        "purged": 1,
+    }
+    assert result.purged == 1
+    assert not (data / "prune_backlog.json.tmp").exists()
+
+
+def test_run_eod_offload_backlog_write_failure_never_fails_eod(tmp_path, caplog, monkeypatch) -> None:
+    import datetime as dt
+    import logging
+    import os
+    from src.orchestration.eod import run_eod_offload
+
+    data = _two_old_partitions(tmp_path)
+    arc = _BacklogArc({"l1/kis/H0STCNT0/dt=2026-07-01.parquet", "l1/kis/H0STCNT0/dt=2026-07-05.parquet"})
+
+    def _boom(src, dst):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(os, "replace", _boom)
+    with caplog.at_level(logging.WARNING):
+        result = run_eod_offload(data / "l1", archiver=arc, reference_date=dt.date(2026, 9, 8))
+
+    assert result.purged == 2
+    assert not (data / "prune_backlog.json").exists()
+    assert sum("stage=prune_backlog" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_run_eod_offload_without_archiver_writes_no_backlog(tmp_path, monkeypatch) -> None:
+    from src.orchestration.eod import run_eod_offload
+
+    data = _two_old_partitions(tmp_path)
+    monkeypatch.setattr("src.storage.remote.RcloneArchiver.try_from_env", staticmethod(lambda: None))
+
+    run_eod_offload(data / "l1")
+
+    assert not (data / "prune_backlog.json").exists()
+
+
 def test_run_eod_offload_returns_zeros_when_archiver_missing(tmp_path, caplog, monkeypatch) -> None:
     import logging
     from src.orchestration.eod import run_eod_offload

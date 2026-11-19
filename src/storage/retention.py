@@ -7,7 +7,7 @@ import logging
 import pathlib
 import re
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from collections.abc import Set as AbstractSet
 from typing import Final
 from zoneinfo import ZoneInfo
@@ -283,21 +283,12 @@ def prune_old_journals(
     )
 
 
-def prune_local_l1(
-    archive_root: pathlib.Path,
-    *,
-    retain_days: int = 30,
-    reference_date: dt.date | None = None,
-    confirmed_remote: set[str] | None = None,
-) -> int:
-    if confirmed_remote is None:
-        return 0
-    ref = reference_date or dt.datetime.now(_KST).date()
+def _expired_l1_files(
+    root: pathlib.Path, *, retain_days: int, ref: dt.date
+) -> Iterator[tuple[pathlib.Path, dt.date]]:
     cutoff = ref - dt.timedelta(days=retain_days)
     minute_cutoff = ref - dt.timedelta(days=max(retain_days, HISTORY_MINUTE_RETAIN_DAYS))
-    root = pathlib.Path(archive_root)
     minute_root = root / "history" / "minute"
-    purged = 0
     for pq_file in sorted(root.rglob("*.parquet")):
         m = _DT_RE.search(pq_file.name)
         if m is None and pq_file.is_relative_to(root / "history" / "tick_tape" / "kiwoom"):
@@ -308,9 +299,42 @@ def prune_local_l1(
         part_date = dt.date.fromisoformat(m.group(0)[3:]) if m else None
         if part_date is None or part_date >= (minute_cutoff if is_minute else cutoff):
             continue
+        yield pq_file, part_date
+
+
+def prune_local_l1(
+    archive_root: pathlib.Path,
+    *,
+    retain_days: int = 30,
+    reference_date: dt.date | None = None,
+    confirmed_remote: set[str] | None = None,
+) -> int:
+    if confirmed_remote is None:
+        return 0
+    ref = reference_date or dt.datetime.now(_KST).date()
+    root = pathlib.Path(archive_root)
+    purged = 0
+    for pq_file, _ in _expired_l1_files(root, retain_days=retain_days, ref=ref):
         rel = l1_repo_path(pq_file.relative_to(root))
         if rel not in confirmed_remote:
             continue
         pq_file.unlink()
         purged += 1
     return purged
+
+
+def unconfirmed_expired_l1(
+    archive_root: pathlib.Path,
+    *,
+    retain_days: int,
+    reference_date: dt.date | None,
+    confirmed_remote: AbstractSet[str],
+) -> list[dt.date]:
+    """Partition dates of local L1 files past retention that offsite confirmation has not yet released."""
+    ref = reference_date or dt.datetime.now(_KST).date()
+    root = pathlib.Path(archive_root)
+    return [
+        part_date
+        for pq_file, part_date in _expired_l1_files(root, retain_days=retain_days, ref=ref)
+        if l1_repo_path(pq_file.relative_to(root)) not in confirmed_remote
+    ]
