@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from src.realtime.contracts import L0Frame, VendorAdapter
 from src.realtime.lag_monitor import event_second_of
-from src.realtime.ls_limits import classify_ls_close_reason
+from src.realtime.ls_limits import classify_ls_close_reason, describe_disconnect
 from src.realtime.ws_lease import Lease, LeaseRole, LeaseUnavailable, WsLeaseLedger
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,10 @@ def _now_kst() -> dt.datetime:
 
 # Duplicate-suppression memory: only payloads still in flight on the lagging connection matter, so the oldest quarter is dropped beyond this.
 _SEEN_CAP = 400_000
+
+
+def _fmt_s(value: float | None) -> str:
+    return "na" if value is None else f"{value:.1f}"
 
 
 class SwapRequest:
@@ -127,6 +131,7 @@ class Handover:
         self._seen: dict[int, int] = {}
         self._standby_owner = 0
         self._primary_event_s = -1
+        self._primary_frame_at: float | None = None
         self._dropped = 0
         self._ledger = lease_ledger
         self._owner = owner
@@ -213,9 +218,11 @@ class Handover:
                 await self._close(adapter)
             raise
         except Exception as exc:  # noqa: BLE001 - a standby failure must never touch the live connection
+            described = describe_disconnect(exc)
             logger.warning(
-                "[DATA] stage=stream_handover status=OPEN_FAILED error_type=%s reason=%s",
-                type(exc).__name__,
+                "[DATA] stage=stream_handover status=OPEN_FAILED error_type=%s close_code=%s reason=%s",
+                described["error_type"],
+                described["close_code"],
                 classify_ls_close_reason(str(exc)),
             )
             if adapter is not None:
@@ -230,6 +237,8 @@ class Handover:
 
     def admit(self, frame: L0Frame, *, from_standby: bool) -> bool:
         """Account `frame` and return False when the other connection already recorded the same payload."""
+        if not from_standby:
+            self._primary_frame_at = self._monotonic()
         if self._standby is None and not self._refresh_overlap:
             return True
         event_s = event_second_of(frame)
@@ -289,7 +298,8 @@ class Handover:
         if standby is None:
             return None
         if standby.recv_task.done() and standby.recv_task in done and standby.recv_task.exception() is not None:
-            await self._lose_standby(classify_ls_close_reason(str(standby.recv_task.exception())))
+            cause = standby.recv_task.exception()
+            await self._lose_standby(classify_ls_close_reason(str(cause)), cause)
             return None
         if self._window is not None and self._window():
             return None
@@ -316,18 +326,40 @@ class Handover:
             return None
         return standby.recv_task.result()
 
-    async def on_primary_failure(self) -> CutOver | None:
+    async def on_primary_failure(self, cause: BaseException | None = None) -> CutOver | None:
         """Promote a live standby when the old connection died; None when there is no standby."""
         if self._standby is None:
             return None
-        return await self._cut_over("primary_failed")
+        return await self._cut_over("primary_failed", cause)
 
-    async def _cut_over(self, reason: str) -> CutOver:
+    def _primary_silence_s(self) -> float | None:
+        if self._primary_frame_at is None:
+            return None
+        return max(0.0, self._monotonic() - self._primary_frame_at)
+
+    async def _cut_over(self, reason: str, cause: BaseException | None = None) -> CutOver:
         standby = self._standby
         assert standby is not None  # noqa: S101 - callers check
-        logger.warning(
-            "[DATA] stage=stream_handover status=CUT_OVER reason=%s dropped_duplicates=%d", reason, self._dropped
-        )
+        silence = _fmt_s(self._primary_silence_s())
+        if reason == "primary_failed":
+            described = describe_disconnect(cause)
+            logger.warning(
+                "[DATA] stage=stream_handover status=CUT_OVER reason=%s dropped_duplicates=%d error_type=%s"
+                " close_code=%s primary_silence_s=%s close_reason=%s",
+                reason,
+                self._dropped,
+                described["error_type"],
+                described["close_code"],
+                silence,
+                described["close_reason"],
+            )
+        else:
+            logger.warning(
+                "[DATA] stage=stream_handover status=CUT_OVER reason=%s dropped_duplicates=%d primary_silence_s=%s",
+                reason,
+                self._dropped,
+                silence,
+            )
         self._standby = None
         self._seen.clear()
         # The swap a pending request asked for has just happened; keeping it would open a spurious standby.
@@ -374,9 +406,48 @@ class Handover:
         logger.warning("[DATA] stage=stream_handover status=STARTED")
         return True
 
-    async def _lose_standby(self, reason: str) -> None:
-        logger.warning("[DATA] stage=stream_handover status=STANDBY_LOST reason=%s", reason)
+    async def _lose_standby(self, reason: str, cause: BaseException | None = None) -> None:
+        described = describe_disconnect(cause)
+        standby = self._standby
+        age = None if standby is None else max(0.0, self._monotonic() - standby.started)
+        logger.warning(
+            "[DATA] stage=stream_handover status=STANDBY_LOST reason=%s error_type=%s close_code=%s"
+            " standby_age_s=%s standby_lag_s=%s close_reason=%s",
+            reason,
+            described["error_type"],
+            described["close_code"],
+            _fmt_s(age),
+            _fmt_s(self._safe_standby_lag_s()),
+            described["close_reason"],
+        )
         await self._drop_standby()
+
+    def _safe_standby_lag_s(self) -> float | None:
+        try:
+            return self.standby_lag_s()
+        except Exception:  # noqa: BLE001 - a diagnostic must never raise into the receive loop
+            logger.debug("[DATA] stage=handover_state status=LAG_UNAVAILABLE", exc_info=True)
+            return None
+
+    def state_line(self) -> str:
+        """One-line standby/primary status for periodic logging; empty when formatting fails."""
+        try:
+            standby = self._standby
+            if standby is not None:
+                presence = "present"
+            elif self._opening is not None:
+                presence = "opening"
+            else:
+                presence = "absent"
+            age = None if standby is None else max(0.0, self._monotonic() - standby.started)
+            return (
+                f"[DATA] stage=handover_state standby={presence} standby_age_s={_fmt_s(age)}"
+                f" standby_lag_s={_fmt_s(self.standby_lag_s())} primary_silence_s={_fmt_s(self._primary_silence_s())}"
+                f" dropped_duplicates={self._dropped}"
+            )
+        except Exception:  # noqa: BLE001 - a diagnostic must never raise into the receive loop
+            logger.debug("[DATA] stage=handover_state status=FORMAT_FAILED", exc_info=True)
+            return ""
 
     async def _tend_leases(self) -> None:
         """Renew held leases at most once per ttl/3; a lost standby is dropped and a lost primary slot is re-acquired."""

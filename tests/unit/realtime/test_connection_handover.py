@@ -680,3 +680,156 @@ async def test_primary_does_not_rerecord_dropped_standby_payloads_after_refresh(
         primary.cancel()
         await asyncio.gather(primary, return_exceptions=True)
         await handover.aclose()
+
+
+def _records(caplog: pytest.LogCaptureFixture, needle: str) -> list[str]:
+    return [r.getMessage() for r in caplog.records if needle in r.getMessage()]
+
+
+@_sync
+async def test_cut_over_logs_cause_and_silence(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("DEBUG")
+    rig = _Rig(new=_Adapter())
+    rig.start()
+    await rig.first_frame()
+    rig.request.request()
+    await _until(lambda: rig.new.subscribed)
+    await asyncio.sleep(0.05)
+    rig.old.q.put_nowait(VendorDisconnected("8:code=1006:reason=abnormal closure"))
+    await _until(lambda: rig.old.closed)
+    rig.new.q.put_nowait(_frame("n1", "090030", "new"))
+    await _until(lambda: "n1" in rig.sink.raws)
+    assert await rig.finish() == "stopped"
+    (line,) = _records(caplog, "status=CUT_OVER")
+    assert "reason=primary_failed" in line
+    assert "error_type=VendorDisconnected close_code=1006" in line
+    assert "primary_silence_s=" in line
+    assert "primary_silence_s=na" not in line
+    assert "close_reason=abnormal closure" in line
+    assert "dropped_duplicates=0" in line
+
+
+@_sync
+async def test_standby_lost_logs_cause(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("DEBUG")
+    rig = _Rig(new=_Adapter())
+    rig.start()
+    await rig.first_frame()
+    rig.request.request()
+    await _until(lambda: rig.new.subscribed)
+    rig.new.q.put_nowait(VendorDisconnected("8:code=1008:reason=policy"))
+    await _until(lambda: bool(_records(caplog, "status=STANDBY_LOST")))
+    assert await rig.finish() == "stopped"
+    (line,) = _records(caplog, "status=STANDBY_LOST")
+    assert "reason=unknown" in line
+    assert "error_type=VendorDisconnected close_code=1008" in line
+    assert "standby_age_s=" in line
+    assert "standby_lag_s=" in line
+
+
+@_sync
+async def test_open_failed_logs_error_type_and_code(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("DEBUG")
+    rig = _Rig(new=_Adapter(connect_error=VendorDisconnected("8:code=1011:reason=x")))
+    rig.start()
+    await rig.first_frame()
+    rig.request.request()
+    await _until(lambda: rig.calls == 1 and not rig.handover.active)
+    assert await rig.finish() == "stopped"
+    (line,) = _records(caplog, "status=OPEN_FAILED")
+    assert "error_type=VendorDisconnected" in line
+    assert "close_code=1011" in line
+
+
+@_sync
+async def test_state_line_present_absent_opening() -> None:
+    handover, _request, made = _refresh_handover()
+    assert "standby=absent" in handover.state_line()
+    assert "standby_lag_s=na" in handover.state_line()
+    primary: asyncio.Task[Any] = asyncio.ensure_future(asyncio.Event().wait())
+    handover._request.request()  # noqa: SLF001
+    handover.maybe_start(eligible=True)
+    assert "standby=opening" in handover.state_line()
+    await asyncio.wait({handover._opening})  # type: ignore[arg-type]  # noqa: SLF001
+    await handover.step({handover._opening}, primary)  # type: ignore[arg-type]  # noqa: SLF001
+    line = handover.state_line()
+    assert "standby=present" in line
+    assert "stage=handover_state" in line
+    assert "dropped_duplicates=0" in line
+    assert len(made) == 1
+    primary.cancel()
+    await handover.aclose()
+
+
+@_sync
+async def test_state_line_failure_never_raises(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("DEBUG")
+
+    def _broken() -> Any:
+        raise RuntimeError("clock")
+
+    handover, _request, made = _refresh_handover(wall_clock=_broken)
+    primary: asyncio.Task[Any] = asyncio.ensure_future(asyncio.Event().wait())
+    await _adopt_standby(handover, made, primary)
+    handover.admit(_frame("s1", "090000", "new"), from_standby=True)
+    assert handover.state_line() == ""
+    assert len(_records(caplog, "FORMAT_FAILED")) == 1
+    primary.cancel()
+    await handover.aclose()
+
+
+@_sync
+async def test_state_line_rate_limited(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO")
+    rig = _Rig(new=_Adapter())
+    rig.start()
+    await rig.first_frame()
+    await asyncio.sleep(0.15)
+    assert await rig.finish() == "stopped"
+    assert len(_records(caplog, "stage=handover_state")) == 1
+
+
+@_sync
+async def test_primary_failure_passes_exception_to_handover() -> None:
+    rig = _Rig(new=_Adapter())
+    seen: list[BaseException | None] = []
+    original = rig.handover.on_primary_failure
+
+    async def _spy(cause: BaseException | None = None) -> Any:
+        seen.append(cause)
+        return await original(cause)
+
+    rig.handover.on_primary_failure = _spy  # type: ignore[method-assign]
+    rig.start()
+    await rig.first_frame()
+    rig.request.request()
+    await _until(lambda: rig.new.subscribed)
+    await asyncio.sleep(0.05)
+    boom = VendorDisconnected("closed")
+    rig.old.q.put_nowait(boom)
+    await _until(lambda: rig.old.closed)
+    assert seen == [boom]
+    assert await rig.finish() == "stopped"
+
+
+@_sync
+async def test_standby_lost_survives_broken_lag_source(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("DEBUG")
+
+    def _broken() -> Any:
+        raise RuntimeError("clock")
+
+    handover, _request, made = _refresh_handover(wall_clock=_broken)
+    primary: asyncio.Task[Any] = asyncio.ensure_future(asyncio.Event().wait())
+    await _adopt_standby(handover, made, primary)
+    handover.admit(_frame("s1", "090000", "new"), from_standby=True)
+    await handover._lose_standby("unknown", VendorDisconnected("8:code=1006:reason=x"))  # noqa: SLF001
+    (line,) = _records(caplog, "status=STANDBY_LOST")
+    assert "standby_lag_s=na" in line
+    assert not handover.active
+    primary.cancel()
+
+
+def test_state_interval_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="handover_state_interval_s"):
+        RealtimeStreamer(adapter=_Adapter(), sink=_Sink(), replay_pairs=_PAIRS, handover_state_interval_s=0.0)

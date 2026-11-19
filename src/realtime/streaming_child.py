@@ -35,6 +35,7 @@ class HandoverSettings:
     owner: str = ""
     primary_lease: Lease | None = None
     lease_ttl_s: float = 0.0
+    state_interval_s: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,7 @@ async def run_streaming_child(
                 lease_ttl_s=handover.lease_ttl_s,
             )
             extra["handover"] = handover_state
+            extra["handover_state_interval_s"] = handover.state_interval_s
         streamer = streamer_factory(
             adapter=adapter,
             sink=sink,

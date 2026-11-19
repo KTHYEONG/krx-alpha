@@ -468,6 +468,7 @@ async def run_regular_stream(
                 owner=owner,
                 primary_lease=primary,
                 lease_ttl_s=settings.ws_lease_ttl_s,
+                state_interval_s=settings.handover_state_interval_s,
             )
             if profile.proactive_handover or (ledger is not None and not profile.warm_standby)
             else None

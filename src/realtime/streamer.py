@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 SILENCE_LIMIT_S: float = 30.0
 # Bounds watchdog re-arm latency after a watch window opens; 1 Hz wakeups are negligible vs tick rate.
 SILENCE_POLL_INTERVAL_S: float = 1.0
+HANDOVER_STATE_INTERVAL_S: float = 60.0
 OUTAGE_CRITICAL_S: float = 300.0
 AUTH_BACKOFF_MAX_S: float = 300.0
 _KST = ZoneInfo("Asia/Seoul")
@@ -193,6 +194,7 @@ class RealtimeStreamer:
         silence_limit: Callable[[], float | None] | None = None,
         handover: Handover | None = None,
         silence_poll_interval_s: float = SILENCE_POLL_INTERVAL_S,
+        handover_state_interval_s: float = HANDOVER_STATE_INTERVAL_S,
         backoff_max_s: float = 60.0,
         rng: Callable[[], float] = random.random,
         wall_ns: Callable[[], int] = time.time_ns,
@@ -203,6 +205,8 @@ class RealtimeStreamer:
     ) -> None:
         if silence_poll_interval_s <= 0:
             raise ValueError(f"silence_poll_interval_s must be positive, got {silence_poll_interval_s}")
+        if handover_state_interval_s <= 0:
+            raise ValueError(f"handover_state_interval_s must be positive, got {handover_state_interval_s}")
         self._adapter = adapter
         self._sink = sink
         self._replay_pairs = replay_pairs
@@ -214,6 +218,7 @@ class RealtimeStreamer:
         self._silence_limit = silence_limit
         self._handover = handover
         self._silence_poll_interval_s = silence_poll_interval_s
+        self._handover_state_interval_s = handover_state_interval_s
         self._backoff_max_s = backoff_max_s
         self._rng = rng
         self._wall_ns = wall_ns
@@ -344,6 +349,7 @@ class RealtimeStreamer:
                 )
             last_flush = self._monotonic()
             silent_since = last_flush
+            state_logged_at: float | None = None
             armed = False
             recv_task = asyncio.ensure_future(self._adapter.recv())
             stop_task = asyncio.ensure_future(stop.wait())
@@ -369,6 +375,12 @@ class RealtimeStreamer:
                     handover = self._handover
                     if handover is not None:
                         handover.maybe_start(eligible=frames > 0, live_connections=2 if handover.active else 1)
+                        tick = self._monotonic()
+                        if state_logged_at is None or tick - state_logged_at >= self._handover_state_interval_s:
+                            state_logged_at = tick
+                            state = handover.state_line()
+                            if state:
+                                logger.info(state)
                     waiting = {recv_task, stop_task} | (handover.tasks() if handover is not None else set())
                     done, _ = await asyncio.wait(waiting, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
                     if handover is not None:
@@ -388,8 +400,8 @@ class RealtimeStreamer:
                     if recv_task in done:
                         try:
                             frame = recv_task.result()
-                        except Exception:
-                            cut = await handover.on_primary_failure() if handover is not None else None
+                        except Exception as exc:
+                            cut = await handover.on_primary_failure(exc) if handover is not None else None
                             if cut is None:
                                 raise
                             await self._retire_adapter()

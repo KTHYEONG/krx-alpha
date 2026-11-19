@@ -91,6 +91,7 @@ class CollectorSettings(BaseSettings):
     regular_open_alert_after_s: float = Field(default=30.0, gt=0)
     regular_open_standby_lead_s: float = Field(default=120.0, gt=0)
     regular_open_standby_hold_s: float = Field(default=300.0, gt=0)
+    handover_state_interval_s: float = Field(default=60.0, gt=0)
     lag_handover_enabled: bool = True
     lag_handover_max_s: float = Field(default=120.0, gt=0)
     lag_handover_cooldown_s: float = Field(default=300.0, ge=0)

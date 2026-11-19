@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol, cast
@@ -104,6 +105,32 @@ def is_vendor_close_detail(detail: str | None) -> bool:
     return "WSMsgType.CLOSE" in text or ("code=" in text and "reason=" in text)
 
 
+_CLOSE_CODE = re.compile(r"code=(-?\d+)")
+_CLOSE_REASON = re.compile(r"reason=(.*)", re.DOTALL)
+_CLOSE_REASON_MAX = 120
+
+
+def describe_disconnect(exc: BaseException | None) -> dict[str, str]:
+    """Extract ``error_type``/``close_code``/``close_reason`` from a disconnect exception; ``na`` when absent, never raises."""
+    fields = {"error_type": "na", "close_code": "na", "close_reason": "na"}
+    if exc is None:
+        return fields
+    try:
+        fields["error_type"] = type(exc).__name__
+        text = str(exc)
+        code = _CLOSE_CODE.search(text)
+        if code is not None:
+            fields["close_code"] = code.group(1)
+        reason = _CLOSE_REASON.search(text)
+        if reason is not None:
+            collapsed = " ".join(reason.group(1).split())[:_CLOSE_REASON_MAX]
+            if collapsed:
+                fields["close_reason"] = collapsed
+    except Exception:  # noqa: BLE001 - a diagnostic must never raise into the receive loop
+        return fields
+    return fields
+
+
 def stream_disconnect_reason(pump_reason: str, detail: str | None) -> str:
     """Map a vendor close to its limit classification; leave local failures untouched."""
     if pump_reason == "disconnect" and is_vendor_close_detail(detail):
@@ -159,6 +186,7 @@ __all__: list[str] = [
     "LsGuardConfig",
     "apply_ls_subscription_guard",
     "classify_ls_close_reason",
+    "describe_disconnect",
     "is_vendor_close_detail",
     "ls_limit_status",
     "prioritize_ls_pairs",

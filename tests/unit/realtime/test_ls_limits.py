@@ -508,3 +508,33 @@ def test_streaming_child_skips_guard_for_non_ls_adapter(monkeypatch) -> None:
                 streamer_factory=_streamer,
             )
         )
+
+
+def test_describe_disconnect_parses_close_frame() -> None:
+    from src.realtime.contracts import VendorDisconnected
+    from src.realtime.ls_limits import describe_disconnect
+
+    exc = VendorDisconnected("WSMsgType.CLOSED code=1006 reason=abnormal   closure https://x.example/ws?token=SECRET")
+    fields = describe_disconnect(exc)
+    assert fields["error_type"] == "VendorDisconnected"
+    assert fields["close_code"] == "1006"
+    assert fields["close_reason"].startswith("abnormal closure")
+    assert len(fields["close_reason"]) <= 120
+    real = describe_disconnect(VendorDisconnected("8:code=1000:reason=bye"))
+    assert (real["close_code"], real["close_reason"]) == ("1000", "bye")
+    assert set(fields) == {"error_type", "close_code", "close_reason"}
+
+
+def test_describe_disconnect_none_and_garbage() -> None:
+    from src.realtime.ls_limits import describe_disconnect
+
+    na = {"error_type": "na", "close_code": "na", "close_reason": "na"}
+    assert describe_disconnect(None) == na
+    assert describe_disconnect(ValueError(""))["close_code"] == "na"
+    assert describe_disconnect(ValueError("257"))["close_reason"] == "na"
+
+    class _BadError(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("boom")
+
+    assert describe_disconnect(_BadError())["close_code"] == "na"
