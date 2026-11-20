@@ -155,3 +155,5 @@ LAYER_RANK["src/cli/lake_catalog.py"] = 7
 LAYER_RANK["src/marketdata/kiwoom_ranking.py"] = 1
 LAYER_RANK["src/universe/intraday.py"] = 2
 LAYER_RANK["src/cli/collect_intraday_discovery.py"] = 7
+LAYER_RANK["src/core/market_calendar_tags.py"] = 0
+LAYER_RANK["src/core/sell_tax.py"] = 0
