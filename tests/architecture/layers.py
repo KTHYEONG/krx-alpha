@@ -83,6 +83,7 @@ LAYER_RANK["src/orchestration/trading_day_gate.py"] = 5
 LAYER_RANK["src/core/symbols.py"] = 0
 LAYER_RANK["src/core/paths.py"] = 0
 LAYER_RANK["src/storage/market_phase.py"] = 2
+LAYER_RANK["src/storage/microstructure.py"] = 2
 LAYER_RANK["src/storage/normalization.py"] = 2
 LAYER_RANK["src/storage/quality_ls.py"] = 2
 LAYER_RANK["src/storage/quality_kis.py"] = 2
