@@ -58,6 +58,7 @@ LAYER_RANK["src/cli/provision_kis_keypool.py"] = 7
 LAYER_RANK["src/universe/aftermarket.py"] = 4
 LAYER_RANK["src/universe/status_policy.py"] = 1
 LAYER_RANK["src/universe/membership.py"] = 1
+LAYER_RANK["src/universe/research_visibility.py"] = 1
 LAYER_RANK["src/realtime/ls_sharding.py"] = 1
 LAYER_RANK["src/universe/premarket.py"] = 4
 LAYER_RANK["src/universe/regular_nxt.py"] = 4
