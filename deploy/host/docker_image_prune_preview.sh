@@ -31,7 +31,8 @@ in_use() {
 
 age_days() {
   local created_epoch now_epoch
-  created_epoch=$(date -d "$1" +%s 2>/dev/null) || { echo 0; return; }
+  # GNU date rejects docker's "+0000 UTC" double zone suffix; the numeric offset alone is unambiguous.
+  created_epoch=$(date -d "${1% UTC}" +%s 2>/dev/null) || { echo 0; return; }
   now_epoch=$(date +%s)
   echo $(((now_epoch - created_epoch) / 86400))
 }
