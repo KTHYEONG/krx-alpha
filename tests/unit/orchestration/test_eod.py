@@ -1271,6 +1271,42 @@ def test_check_host_backup_freshness_treats_future_last_ok_as_fresh(tmp_path) ->
     assert check_host_backup_freshness(status_path=status, now=now, max_age=dt.timedelta(hours=36)) is None
 
 
+def test_offload_uses_sync_sets_without_relisting(tmp_path) -> None:
+    import datetime as dt
+
+    from src.orchestration.eod import run_eod_offload
+    from src.storage.remote import SyncStats
+
+    root = tmp_path / "l1" / "kis" / "H0STCNT0"
+    root.mkdir(parents=True)
+    old_pq = root / "dt=2026-07-01.parquet"
+    old_pq.write_bytes(b"x")
+    repo = "l1/kis/H0STCNT0/dt=2026-07-01.parquet"
+
+    class _Arc:
+        def sync_l1_tree(self, archive_root, *, progress=None):
+            return SyncStats(
+                uploaded=1,
+                remote_verified=frozenset({repo}),
+                remote_paths=frozenset({repo, "manifests/x.json"}),
+            )
+
+        def sync_manifest_tree(self, manifest_root):
+            return SyncStats()
+
+        def remote_files(self, prefix):
+            raise AssertionError("remote_files must not be relisted after a sync")
+
+        def verified_paths(self, local_root, remote_prefix="l1/"):
+            raise AssertionError("verified_paths must not be relisted after a sync")
+
+    stats = run_eod_offload(tmp_path / "l1", archiver=_Arc(), reference_date=dt.date(2026, 9, 8))
+
+    assert stats.verified_remote_l1 == frozenset({repo})
+    assert stats.purged == 1
+    assert not old_pq.exists()
+
+
 def test_run_eod_offload_rclone_timeout_follows_failure_path(tmp_path) -> None:
     import datetime as dt
     import subprocess

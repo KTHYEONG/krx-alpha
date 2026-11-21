@@ -539,6 +539,8 @@ class RcloneArchiveSettings(BaseSettings):
     rclone_timeout_s: float = 600.0
     # Kept well under rclone_timeout_s so a stalled transfer is retried by rclone itself before the call is killed.
     rclone_io_idle_timeout_s: float = Field(default=60.0, gt=0)
+    # Parallel uploads per batched copy; matches the host backup's transfer count.
+    rclone_transfers: int = Field(default=4, ge=1, le=16)
 
 
 class KisCredentials(BaseSettings):

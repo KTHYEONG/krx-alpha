@@ -5,10 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
+import os
 import pathlib
 import shutil
 import subprocess
-from collections.abc import Callable
+import tempfile
+from collections.abc import Callable, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Any
@@ -40,6 +43,10 @@ class SyncStats:
     uploaded: int = 0
     skipped_verified: int = 0
     failed_verification: int = 0
+    # Repo paths verified in size+md5 after the pass; None when the tree sync does not report them.
+    remote_verified: frozenset[str] | None = None
+    # Every remote path under the synced prefix from the final listing (plus recovered uploads).
+    remote_paths: frozenset[str] | None = None
 
 
 @dataclass
@@ -64,6 +71,8 @@ class RemoteObject:
 _STDERR_BRIEF_CHARS = 300
 _HASH_FLAGS = ["--hash", "--hash-type", "md5"]
 _MD5_CHUNK = 1024 * 1024
+# A chunk is one rclone call; bounding it keeps the per-call liveness ping inside the dead-man grace.
+_BATCH_FILES_PER_TRANSFER = 4
 
 
 def _brief(stderr: str | None) -> str:
@@ -84,6 +93,7 @@ class GDriveArchiver:
         runner: Callable[..., Any] | None = None,
         timeout_s: float = 600.0,
         io_idle_timeout_s: float | None = None,
+        transfers: int = 4,
     ) -> None:
         cfg_name = getattr(config, "remote_name", None) if config is not None else None
         cfg_path = getattr(config, "remote_path", None) if config is not None else None
@@ -94,6 +104,7 @@ class GDriveArchiver:
         )
         self._runner = runner if runner is not None else (cfg_runner or subprocess.run)
         self._timeout_s = timeout_s
+        self._transfers = transfers
         self._idle_flags = [] if io_idle_timeout_s is None else ["--timeout", f"{io_idle_timeout_s:g}s"]
         self._progress: Callable[[], None] | None = None
         self._md5_cache: dict[pathlib.Path, tuple[int, int, str]] = {}
@@ -112,13 +123,15 @@ class GDriveArchiver:
             remote_path=settings.remote_path,
             timeout_s=settings.rclone_timeout_s,
             io_idle_timeout_s=settings.rclone_io_idle_timeout_s,
+            transfers=settings.rclone_transfers,
         )
 
-    def _run(self, cmd: list[str]) -> Any:
+    def _run(self, cmd: list[str], *, timeout_s: float | None = None) -> Any:
         """Run one rclone call; a timeout surfaces as a non-zero result."""
         cmd = [*cmd, *self._idle_flags]
+        timeout = self._timeout_s if timeout_s is None else timeout_s
         try:
-            return self._runner(cmd, capture_output=True, text=True, check=False, timeout=self._timeout_s)
+            return self._runner(cmd, capture_output=True, text=True, check=False, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             return subprocess.CompletedProcess(cmd, 124, stdout="", stderr=f"rclone timed out after {exc.timeout}s")
         finally:
@@ -230,6 +243,18 @@ class GDriveArchiver:
                 verified.add(rel)
         return verified
 
+    def _verify_reason(self, remote: RemoteObject | None, local: pathlib.Path, local_size: int) -> str | None:
+        """Why the remote object does not match the local file in size and md5, or None when it is verified."""
+        if remote is None:
+            return "verify_missing"
+        if remote.duplicate:
+            return "duplicate_remote_name"
+        if remote.size != local_size:
+            return f"size_mismatch remote={remote.size} local={local_size}"
+        if remote.md5 is None or remote.md5 != self.local_md5(local):
+            return f"md5_mismatch remote={remote.md5}"
+        return None
+
     def _upload_verified(self, local: pathlib.Path, repo_path: str, local_size: int) -> str | None:
         """Upload one object and verify its remote size and md5; return a failure reason or None when verified."""
         dest = f"{self._remote_name}:{self._remote_path}/{repo_path}"
@@ -242,30 +267,74 @@ class GDriveArchiver:
             return f"verify_transport rc={exc.returncode} detail={exc.detail}"
         except RemoteArchiveError:
             return "verify_missing"
-        if remote.duplicate:
-            return "duplicate_remote_name"
-        if remote.size != local_size:
-            return f"size_mismatch remote={remote.size} local={local_size}"
-        if remote.md5 is None or remote.md5 != self.local_md5(local):
-            return f"md5_mismatch remote={remote.md5}"
-        return None
+        return self._verify_reason(remote, local, local_size)
+
+    def _copy_batch(
+        self, local_root: pathlib.Path, remote_prefix: str, rel_paths: Sequence[str], *, stage: str
+    ) -> tuple[int, str]:
+        """Parallel ``rclone copy`` of ``rel_paths`` in bounded chunks; returns the first failing (rc, brief stderr) or (0, "-").
+
+        Never raises on rclone failure; each failed chunk logs one BATCH_FAIL warning under ``stage``.
+        """
+        chunk_size = self._transfers * _BATCH_FILES_PER_TRANSFER
+        worst = (0, "-")
+        for start in range(0, len(rel_paths), chunk_size):
+            rc, detail = self._copy_chunk(local_root, remote_prefix, rel_paths[start : start + chunk_size])
+            if rc != 0:
+                logger.warning("[DATA] stage=%s status=BATCH_FAIL rc=%d detail=%s", stage, rc, detail)
+                if worst[0] == 0:
+                    worst = (rc, detail)
+        return worst
+
+    def _copy_chunk(self, local_root: pathlib.Path, remote_prefix: str, rel_paths: Sequence[str]) -> tuple[int, str]:
+        fd, list_name = tempfile.mkstemp(prefix="rclone-files-", suffix=".txt")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write("".join(f"{rel}\n" for rel in rel_paths))
+            batches = max(1, math.ceil(len(rel_paths) / self._transfers))
+            dest = f"{self._remote_name}:{self._remote_path}/{remote_prefix}"
+            result = self._run(
+                [
+                    "rclone", "copy", str(local_root), dest,
+                    "--files-from", list_name, "--transfers", str(self._transfers), "--no-traverse",
+                ],
+                timeout_s=self._timeout_s * batches,
+            )
+            return result.returncode, _brief(result.stderr)
+        finally:
+            pathlib.Path(list_name).unlink(missing_ok=True)
 
     def sync_l1_tree(self, local_root: pathlib.Path, *, progress: Callable[[], None] | None = None) -> SyncStats:
-        """Upload L1 objects whose remote size differs; a failed object is retried once after the pass."""
+        """Batch-upload L1 objects not verified in size and md5; a failed object is retried once per file after the pass."""
         root = pathlib.Path(local_root)
         objects = self.remote_objects(L1_REPO_PREFIX)
         stats = SyncStats()
-        retry: list[tuple[pathlib.Path, str, int]] = []
+        verified: set[str] = set()
+        pending: list[tuple[pathlib.Path, str, int]] = []
         for pq in sorted(root.rglob("*.parquet")):
             try:
                 repo_path = self.repo_path_for(root, pq)
-                local_size = pq.stat().st_size
                 if self.matches(objects.get(repo_path), pq):
                     stats.skipped_verified += 1
-                    continue
-                reason = self._upload_verified(pq, repo_path, local_size)
+                    verified.add(repo_path)
+                else:
+                    pending.append((pq, repo_path, pq.stat().st_size))
+            finally:
+                if progress is not None:
+                    progress()
+        listing = objects
+        if pending:
+            self._copy_batch(
+                root, "l1", [pq.relative_to(root).as_posix() for pq, _, _ in pending], stage="rclone_offload"
+            )
+            listing = self.remote_objects(L1_REPO_PREFIX)
+        retry: list[tuple[pathlib.Path, str, int]] = []
+        for pq, repo_path, local_size in pending:
+            try:
+                reason = self._verify_reason(listing.get(repo_path), pq, local_size)
                 if reason is None:
                     stats.uploaded += 1
+                    verified.add(repo_path)
                     continue
                 # Drive and network faults are often transient; retrying after the pass spaces the attempts apart.
                 logger.warning("[DATA] stage=rclone_offload status=RETRY path=%s reason=%s", repo_path, reason)
@@ -273,11 +342,13 @@ class GDriveArchiver:
             finally:
                 if progress is not None:
                     progress()
+        recovered: set[str] = set()
         for pq, repo_path, local_size in retry:
             try:
                 reason = self._upload_verified(pq, repo_path, local_size)
                 if reason is None:
                     stats.uploaded += 1
+                    recovered.add(repo_path)
                     logger.info("[DATA] stage=rclone_offload status=RECOVERED path=%s", repo_path)
                     continue
                 logger.critical("[DATA] stage=rclone_offload status=FAIL path=%s reason=%s", repo_path, reason)
@@ -285,21 +356,32 @@ class GDriveArchiver:
             finally:
                 if progress is not None:
                     progress()
+        stats.remote_verified = frozenset(verified | recovered)
+        stats.remote_paths = frozenset(listing) | frozenset(recovered)
         return stats
 
     def sync_manifest_tree(self, manifest_root: pathlib.Path) -> SyncStats:
-        """Upload manifests whose remote size differs; a failed one is retried once after the pass, then raises."""
+        """Batch-upload manifests not verified in size and md5; a file still unverified after its retry raises."""
         root = pathlib.Path(manifest_root)
         objects = self.remote_objects("manifests/")
         stats = SyncStats()
-        retry: list[tuple[pathlib.Path, str, int]] = []
+        pending: list[tuple[pathlib.Path, str, int]] = []
         for jf in sorted(path for path in root.rglob("*") if path.is_file() and path.suffix in {".json", ".jsonl"}):
             repo_path = self.manifest_repo_path_for(root, jf)
             local_size = jf.stat().st_size
             if self.matches(objects.get(repo_path), jf):
                 stats.skipped_verified += 1
                 continue
-            reason = self._upload_verified(jf, repo_path, local_size)
+            pending.append((jf, repo_path, local_size))
+        listing = objects
+        if pending:
+            self._copy_batch(
+                root, "manifests", [jf.relative_to(root).as_posix() for jf, _, _ in pending], stage="manifest_offload"
+            )
+            listing = self.remote_objects("manifests/")
+        retry: list[tuple[pathlib.Path, str, int]] = []
+        for jf, repo_path, local_size in pending:
+            reason = self._verify_reason(listing.get(repo_path), jf, local_size)
             if reason is None:
                 stats.uploaded += 1
                 continue

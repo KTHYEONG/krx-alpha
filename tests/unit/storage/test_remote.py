@@ -232,10 +232,10 @@ def test_sync_l1_tree_retries_transient_failure_once(tmp_path, caplog) -> None:
     def _runner(args, **kwargs):
         if "--recursive" in args:
             return SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr="")
+        if args[1] == "copy":
+            return SimpleNamespace(returncode=124, stdout="", stderr="rclone timed out after 600.0s")
         if args[1] == "copyto":
             copies.append(1)
-            if len(copies) == 1:
-                return SimpleNamespace(returncode=124, stdout="", stderr="rclone timed out after 600.0s")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         entry = {"Path": "x", "Size": 50, "IsDir": False, "Hashes": {"md5": _md5(b"a" * 50)}}
         return SimpleNamespace(returncode=0, stdout=json.dumps([entry]), stderr="")
@@ -245,7 +245,8 @@ def test_sync_l1_tree_retries_transient_failure_once(tmp_path, caplog) -> None:
         stats = arc.sync_l1_tree(tmp_path / "l1")
 
     assert (stats.uploaded, stats.failed_verification) == (1, 0)
-    assert len(copies) == 2
+    assert len(copies) == 1
+    assert "status=BATCH_FAIL" in caplog.text
     assert "status=RETRY" in caplog.text
     assert "timed out after 600.0s" in caplog.text
     assert "status=FAIL" not in caplog.text
@@ -385,6 +386,12 @@ class _FakeRcloneState:
         self.remote_sizes: dict[str, int] = {}
         self.remote_md5: dict[str, str] = {}
         self.upload_order: list[str] = []
+        self.calls: list[list[str]] = []
+        self.batch_lists: list[list[str]] = []
+        self.listings = 0
+        self.copy_rc = 0
+        self.copy_drop: set[str] = set()
+        self.bad_md5: set[str] = set()
         self.config = SimpleNamespace(
             remote_name="gdrive",
             remote_path="quant-lake/live/krx-alpha/data",
@@ -392,12 +399,38 @@ class _FakeRcloneState:
         )
         self._json = json
 
+    def _store(self, repo_path: str, data: bytes) -> None:
+        self.remote_sizes[repo_path] = len(data)
+        self.remote_md5[repo_path] = "0" * 32 if repo_path in self.bad_md5 else _md5(data)
+        if repo_path.startswith("manifests/"):
+            self.upload_order.append(repo_path.split("/", 1)[1])
+
+    def _copy_batch(self, args):
+        from pathlib import Path as _P
+        from types import SimpleNamespace
+
+        root = _P(args[2])
+        remote_prefix = args[3].split("quant-lake/live/krx-alpha/data/", 1)[1]
+        list_path = _P(args[args.index("--files-from") + 1])
+        rels = [line for line in list_path.read_text(encoding="utf-8").splitlines() if line]
+        self.batch_lists.append(rels)
+        for rel in rels:
+            repo_path = f"{remote_prefix}/{rel}"
+            if repo_path not in self.copy_drop:
+                self._store(repo_path, (root / rel).read_bytes())
+        stderr = "copy failed" if self.copy_rc else ""
+        return SimpleNamespace(returncode=self.copy_rc, stdout="", stderr=stderr)
+
     def _runner(self, args, **kwargs):
         from types import SimpleNamespace
 
+        self.calls.append(list(args))
+        if args[1] == "copy":
+            return self._copy_batch(args)
         # lsjson recursive listing: return current remote_sizes plus
         # non-file entries exercising the IsDir/prefix guards.
         if "lsjson" in args and "--recursive" in args:
+            self.listings += 1
             entries = [
                 {"Path": path, "Size": size, "IsDir": False, "Hashes": {"md5": self.remote_md5.get(path, "")}}
                 for path, size in sorted(self.remote_sizes.items())
@@ -428,10 +461,7 @@ class _FakeRcloneState:
             # so resolve via remote dest suffix after base prefix.
             prefix = "quant-lake/live/krx-alpha/data/"
             repo_path = dest.split(prefix, 1)[1] if prefix in dest else local.name
-            self.remote_sizes[repo_path] = len(data)
-            self.remote_md5[repo_path] = _md5(data)
-            if repo_path.startswith("manifests/") or repo_path.startswith("manifest/"):
-                self.upload_order.append(repo_path.split("/", 1)[1])
+            self._store(repo_path, data)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return SimpleNamespace(returncode=1, stdout="", stderr="unsupported")
 
@@ -606,7 +636,20 @@ def test_sync_l1_tree_lists_l1_prefix_once_with_fast_list(tmp_path) -> None:
         if "--recursive" in args:
             assert args[2].endswith("/l1")
             assert "--fast-list" in args
-            return SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr="")
+            listed = [
+                {"Path": p, "Size": remote_sizes[p], "IsDir": False, "Hashes": {"md5": remote_md5[p]}}
+                for p in sorted(remote_sizes)
+            ]
+            return SimpleNamespace(returncode=0, stdout=json.dumps(listed), stderr="")
+        if args[1] == "copy":
+            import pathlib as _pl
+
+            prefix = args[3].split("quant-lake/live/krx-alpha/data/", 1)[1]
+            for rel in _pl.Path(args[args.index("--files-from") + 1]).read_text(encoding="utf-8").split():
+                local = _pl.Path(args[2]) / rel
+                remote_sizes[f"{prefix}/{rel}"] = local.stat().st_size
+                remote_md5[f"{prefix}/{rel}"] = _hashes(local)["md5"]
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         if args[1] == "copyto":
             import pathlib as _pl
 
@@ -625,9 +668,10 @@ def test_sync_l1_tree_lists_l1_prefix_once_with_fast_list(tmp_path) -> None:
 
     recursive = [c for c in calls if "--recursive" in c]
     singles = [c for c in calls if len(c) > 1 and c[1] == "lsjson" and "--recursive" not in c]
-    assert len(recursive) == 1
+    assert len(recursive) == 2
+    assert sum(1 for c in calls if c[1] == "copy") == 1
     assert stats.uploaded == 3
-    assert len(singles) == 3
+    assert singles == []
 
 
 def test_sync_manifest_tree_retries_transient_failure_once(tmp_path) -> None:
@@ -642,56 +686,40 @@ def test_sync_manifest_tree_retries_transient_failure_once(tmp_path) -> None:
     def _runner(args, **kwargs):
         if "--recursive" in args:
             return SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr="")
+        if args[1] == "copy":
+            return SimpleNamespace(returncode=1, stdout="", stderr="network down")
         if args[1] == "copyto":
             copies.append(1)
-            return SimpleNamespace(returncode=1 if len(copies) == 1 else 0, stdout="", stderr="network down")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         entry = {"Path": "x", "Size": 2, "IsDir": False, "Hashes": {"md5": _md5(b"{}")}}
         return SimpleNamespace(returncode=0, stdout=json.dumps([entry]), stderr="")
 
     stats = GDriveArchiver(remote_name="gdrive", remote_path="q", runner=_runner).sync_manifest_tree(tmp_path)
 
     assert stats.uploaded == 1
-    assert len(copies) == 2
+    assert len(copies) == 1
 
 
-def test_sync_manifest_tree_lists_manifests_prefix_once_sorted(tmp_path) -> None:
-    import json
-    from types import SimpleNamespace
-
+def test_sync_manifest_tree_lists_manifests_prefix_once_sorted(tmp_path, fake_rclone) -> None:
     from src.storage.remote import GDriveArchiver
 
     for name in ("b.json", "a.json"):
         (tmp_path / name).write_text("{}", encoding="utf-8")
-    calls: list[list[str]] = []
-    uploaded: list[str] = []
+    listed: list[list[str]] = []
 
-    def _runner(args, **kwargs):
-        calls.append(args)
+    def _recording(args, **kwargs):
         if "--recursive" in args:
             assert args[2].endswith("/manifests")
             assert "--fast-list" in args
-            return SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr="")
-        if args[1] == "copyto":
-            uploaded.append(args[3].rsplit("/", 1)[-1])
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-        dest = args[2]
-        repo_path = dest.split("quant-lake/live/krx-alpha/data/", 1)[1]
-        import pathlib as _pl
+            listed.append(list(args))
+        return fake_rclone._runner(args, **kwargs)
 
-        # single-object verify: find local size by name
-        local = tmp_path / repo_path.split("/", 1)[1]
-        return SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps([{"Path": repo_path, "Size": _pl.Path(local).stat().st_size, "IsDir": False, "Hashes": _hashes(local)}]),
-            stderr="",
-        )
-
-    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_recording)
     stats = arc.sync_manifest_tree(tmp_path)
 
     assert stats.uploaded == 2
-    assert uploaded == ["a.json", "b.json"]
-    assert sum(1 for c in calls if "--recursive" in c) == 1
+    assert fake_rclone.upload_order == ["a.json", "b.json"]
+    assert len(listed) == 2
 
 
 def test_missing_remote_prefix_returns_empty_listing(tmp_path) -> None:
@@ -702,7 +730,7 @@ def test_missing_remote_prefix_returns_empty_listing(tmp_path) -> None:
     def _runner(args, **kwargs):
         if "--recursive" in args:
             return SimpleNamespace(returncode=3, stdout="", stderr="directory not found")
-        if args[1] == "copyto":
+        if args[1] in ("copy", "copyto"):
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         import json
 
@@ -949,7 +977,7 @@ def test_sync_l1_tree_calls_progress_per_upload_attempt(tmp_path) -> None:
     stats = arc.sync_l1_tree(tmp_path / "l1", progress=lambda: progress_calls.append(None))
 
     assert stats.failed_verification == 2
-    assert len(progress_calls) == 4
+    assert len(progress_calls) >= 4
 
 
 def test_purge_superseded_l0_calls_progress_per_dir(tmp_path) -> None:
@@ -1363,3 +1391,249 @@ def test_feed_derived_and_manifest_paths_are_offloaded(tmp_path, fake_rclone):
     assert stats.uploaded == 2
     assert "manifests/feed_control/2026-11-16.jsonl" in fake_rclone.remote_sizes
     assert "manifests/feed_quality/2026-11-16.health/ls__0.json" in fake_rclone.remote_sizes
+
+
+def _write_day_parquets(root, days: range) -> dict[str, bytes]:
+    part_dir = root / "kis" / "H0STCNT0"
+    part_dir.mkdir(parents=True, exist_ok=True)
+    data: dict[str, bytes] = {}
+    for day in days:
+        name = f"dt=2026-09-{day:02d}.parquet"
+        data[name] = name.encode() * 4
+        (part_dir / name).write_bytes(data[name])
+    return data
+
+
+def _remote_seed(fake_rclone, repo_path: str, data: bytes) -> None:
+    fake_rclone.remote_sizes[repo_path] = len(data)
+    fake_rclone.remote_md5[repo_path] = _md5(data)
+
+
+def test_l1_batch_uploads_pending_in_one_copy(tmp_path, fake_rclone) -> None:
+    from src.storage.remote import GDriveArchiver
+
+    data = _write_day_parquets(tmp_path / "l1", range(1, 6))
+    for name in ("dt=2026-09-01.parquet", "dt=2026-09-02.parquet"):
+        _remote_seed(fake_rclone, f"l1/kis/H0STCNT0/{name}", data[name])
+
+    stats = GDriveArchiver(fake_rclone.config).sync_l1_tree(tmp_path / "l1")
+
+    assert fake_rclone.batch_lists == [[f"kis/H0STCNT0/dt=2026-09-{day:02d}.parquet" for day in (3, 4, 5)]]
+    assert fake_rclone.listings == 2
+    assert (stats.uploaded, stats.skipped_verified, stats.failed_verification) == (3, 2, 0)
+
+
+def test_batch_copy_passes_transfers_and_no_traverse(tmp_path, fake_rclone) -> None:
+    from src.storage.remote import GDriveArchiver
+
+    _write_l1(tmp_path, b"1234")
+
+    GDriveArchiver(fake_rclone.config, transfers=6).sync_l1_tree(tmp_path)
+
+    (copy_args,) = [c for c in fake_rclone.calls if c[1] == "copy"]
+    assert copy_args[copy_args.index("--transfers") + 1] == "6"
+    assert "--no-traverse" in copy_args
+
+
+def test_batch_failure_still_verifies_landed_objects(tmp_path, fake_rclone, caplog) -> None:
+    import logging
+
+    from src.storage.remote import GDriveArchiver
+
+    data = _write_day_parquets(tmp_path / "l1", range(1, 4))
+    third = "l1/kis/H0STCNT0/dt=2026-09-03.parquet"
+    fake_rclone.copy_rc = 1
+    fake_rclone.copy_drop = {third}
+
+    with caplog.at_level(logging.INFO):
+        stats = GDriveArchiver(fake_rclone.config).sync_l1_tree(tmp_path / "l1")
+
+    assert (stats.uploaded, stats.failed_verification) == (3, 0)
+    assert len([c for c in fake_rclone.calls if c[1] == "copyto"]) == 1
+    assert "status=BATCH_FAIL rc=1" in caplog.text
+    assert f"status=RETRY path={third}" in caplog.text
+    assert f"status=RECOVERED path={third}" in caplog.text
+
+
+def test_md5_mismatch_after_batch_is_retried_then_failed(tmp_path, fake_rclone, caplog) -> None:
+    import logging
+
+    from src.storage.remote import GDriveArchiver
+
+    _write_day_parquets(tmp_path / "l1", range(1, 3))
+    bad = "l1/kis/H0STCNT0/dt=2026-09-02.parquet"
+    fake_rclone.bad_md5 = {bad}
+
+    with caplog.at_level(logging.CRITICAL):
+        stats = GDriveArchiver(fake_rclone.config).sync_l1_tree(tmp_path / "l1")
+
+    assert (stats.uploaded, stats.failed_verification, stats.skipped_verified) == (1, 1, 0)
+    assert f"status=FAIL path={bad} reason=md5_mismatch" in caplog.text
+
+
+def test_sync_reports_remote_sets_from_final_listing(tmp_path, fake_rclone) -> None:
+    from src.storage.remote import GDriveArchiver
+
+    data = _write_day_parquets(tmp_path / "l1", range(1, 3))
+    verified = "l1/kis/H0STCNT0/dt=2026-09-01.parquet"
+    pending = "l1/kis/H0STCNT0/dt=2026-09-02.parquet"
+    stray = "l1/kis/H0STCNT0/dt=2026-08-01.parquet"
+    _remote_seed(fake_rclone, verified, data["dt=2026-09-01.parquet"])
+    fake_rclone.remote_sizes[stray] = 3
+    fake_rclone.remote_md5[stray] = _md5(b"old")
+
+    stats = GDriveArchiver(fake_rclone.config).sync_l1_tree(tmp_path / "l1")
+
+    assert stats.remote_verified == frozenset({verified, pending})
+    assert stats.remote_paths == frozenset({verified, pending, stray})
+
+
+def test_sync_with_nothing_pending_issues_no_copy(tmp_path, fake_rclone) -> None:
+    from src.storage.remote import GDriveArchiver
+
+    local = _write_l1(tmp_path, b"1234")
+    _remote_seed(fake_rclone, _relative(local), b"1234")
+
+    stats = GDriveArchiver(fake_rclone.config).sync_l1_tree(tmp_path)
+
+    assert [c for c in fake_rclone.calls if c[1] in ("copy", "copyto")] == []
+    assert fake_rclone.listings == 1
+    assert stats.remote_paths == frozenset({_relative(local)})
+
+
+def test_manifest_batch_raises_when_unverified_after_retry(tmp_path, fake_rclone) -> None:
+    from src.storage.remote import GDriveArchiver, RemoteArchiveError
+
+    _write_manifests(tmp_path, ["a.json"])
+    fake_rclone.bad_md5 = {"manifests/a.json"}
+
+    with pytest.raises(RemoteArchiveError, match="md5_mismatch"):
+        GDriveArchiver(fake_rclone.config).sync_manifest_tree(tmp_path)
+
+
+def test_batch_timeout_scales_with_batch_size(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    _write_day_parquets(tmp_path, range(1, 10))
+    timeouts: list[float] = []
+
+    def _runner(args, **kwargs):
+        if args[1] == "copy":
+            timeouts.append(kwargs["timeout"])
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    GDriveArchiver(remote_name="gdrive", remote_path="q", runner=_runner, timeout_s=600.0, transfers=4).sync_l1_tree(
+        tmp_path
+    )
+
+    assert timeouts == [1800]
+
+
+@pytest.mark.parametrize("copy_rc", [0, 1])
+def test_batch_files_from_list_is_removed(tmp_path, copy_rc) -> None:
+    import pathlib
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    _write_l1(tmp_path, b"1234")
+    lists: list[str] = []
+
+    def _runner(args, **kwargs):
+        if args[1] == "copy":
+            lists.append(args[args.index("--files-from") + 1])
+            return SimpleNamespace(returncode=copy_rc, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    GDriveArchiver(remote_name="gdrive", remote_path="q", runner=_runner).sync_l1_tree(tmp_path)
+
+    assert len(lists) == 1
+    assert not pathlib.Path(lists[0]).exists()
+
+
+def test_try_from_env_passes_rclone_transfers_setting(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from src.storage import remote
+
+    monkeypatch.setattr(remote.shutil, "which", lambda name: "/usr/bin/rclone")
+    monkeypatch.setenv("KRX_ALPHA_BACKUP_RCLONE_TRANSFERS", "6")
+    _write_l1(tmp_path, b"1234")
+    calls: list[list[str]] = []
+
+    def _runner(args, **kwargs):
+        calls.append(list(args))
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    archiver = remote.GDriveArchiver.try_from_env()
+    assert archiver is not None
+    archiver._runner = _runner  # noqa: SLF001 - capture the argv without a real rclone
+    archiver.sync_l1_tree(tmp_path)
+
+    (copy_args,) = [c for c in calls if c[1] == "copy"]
+    assert copy_args[copy_args.index("--transfers") + 1] == "6"
+
+
+def _write_flat_parquets(root, count: int) -> None:
+    part_dir = root / "kis" / "H0STCNT0"
+    part_dir.mkdir(parents=True, exist_ok=True)
+    for index in range(count):
+        (part_dir / f"part-{index:02d}.parquet").write_bytes(b"x" * (index + 1))
+
+
+def test_batch_uploads_chunk_calls(tmp_path, fake_rclone) -> None:
+    from src.storage.remote import GDriveArchiver
+
+    _write_flat_parquets(tmp_path / "l1", 45)
+
+    stats = GDriveArchiver(fake_rclone.config, transfers=4).sync_l1_tree(tmp_path / "l1")
+
+    assert [len(batch) for batch in fake_rclone.batch_lists] == [16, 16, 13]
+    assert fake_rclone.listings == 2
+    assert stats.uploaded == 45
+
+
+def test_batch_timeout_scales_per_chunk(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    _write_flat_parquets(tmp_path, 45)
+    timeouts: list[float] = []
+
+    def _runner(args, **kwargs):
+        if args[1] == "copy":
+            timeouts.append(kwargs["timeout"])
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    GDriveArchiver(remote_name="gdrive", remote_path="q", runner=_runner, timeout_s=600.0, transfers=4).sync_l1_tree(
+        tmp_path
+    )
+
+    assert timeouts == [2400, 2400, 2400]
+
+
+def test_batch_failure_warns_once_per_failed_chunk_and_removes_lists(tmp_path, caplog) -> None:
+    import logging
+    import pathlib
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    _write_flat_parquets(tmp_path / "l1", 45)
+    lists: list[str] = []
+
+    def _runner(args, **kwargs):
+        if args[1] == "copy":
+            lists.append(args[args.index("--files-from") + 1])
+            return SimpleNamespace(returncode=1, stdout="", stderr="quota exceeded")
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    with caplog.at_level(logging.WARNING):
+        GDriveArchiver(remote_name="gdrive", remote_path="q", runner=_runner, transfers=4).sync_l1_tree(tmp_path / "l1")
+
+    assert len(lists) == 3
+    assert not any(pathlib.Path(path).exists() for path in lists)
+    assert caplog.text.count("status=BATCH_FAIL rc=1 detail=quota exceeded") == 3

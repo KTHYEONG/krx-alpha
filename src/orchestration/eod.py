@@ -147,8 +147,12 @@ def run_eod_offload(
             f"offload verification failed: l1={l1_stats.failed_verification} manifests={manifests_stats.failed_verification}"
         )
     # L0 deletion is authorized only by remote copies identical in size and md5 to the local L1.
-    verified = arc.verified_paths(pathlib.Path(archive_root))
-    confirmed = arc.remote_files(L1_REPO_PREFIX)
+    if l1_stats.remote_verified is not None and l1_stats.remote_paths is not None:
+        verified = set(l1_stats.remote_verified)
+        confirmed = {path for path in l1_stats.remote_paths if path.startswith(L1_REPO_PREFIX)}
+    else:
+        verified = arc.verified_paths(pathlib.Path(archive_root))
+        confirmed = arc.remote_files(L1_REPO_PREFIX)
     if journal_root is not None:
         # Keep verified bytes until the second maintenance pass has removed their inputs.
         confirmed = {

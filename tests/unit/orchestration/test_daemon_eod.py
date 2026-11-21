@@ -1554,6 +1554,9 @@ def test_housekeeping_preserves_invalidated_inputs_until_reverified(tmp_path, mo
         def run(self, cmd, **kwargs):
             if cmd[1] == "purge":
                 self.remote_l0_exists = False
+            if cmd[1] == "lsjson" and "--recursive" in cmd and cmd[2].endswith("/l0") and self.remote_l0_exists:
+                listing = [{"Path": "kis/H0STCNT0/dt=2026-09-01/part.jsonl.zst", "Size": 1, "IsDir": False}]
+                return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(listing), stderr="")
             return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
 
         def sync_l1_tree(self, root, *, progress=None):
