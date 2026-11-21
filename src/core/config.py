@@ -130,7 +130,7 @@ class CollectorSettings(BaseSettings):
     min_free_disk_gb: float = 3.0
     orchestration_retry_s: float = 300.0
     degraded_candidates_max_age_days: int = 7
-    # 야간 23:30 KST 백업은 20:00 EOD 점검 시점에 보통 20.5시간 전 성공이다.
+    # 야간 01:30 KST 백업은 20:00 EOD 점검 시점에 보통 18.5시간 전 성공이다.
     # 36시간이면 하룻밤 누락을 감지하면서 다음날 아침까지 끝나는 재시도는 허용한다.
     host_backup_max_age_h: float = 36.0
     # A one-night miss self-heals on the next run; only a multi-day failure pages the operator.

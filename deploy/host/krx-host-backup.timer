@@ -2,7 +2,7 @@
 Description=krx-alpha host Drive backup nightly
 
 [Timer]
-OnCalendar=*-*-* 23:30:00 Asia/Seoul
+OnCalendar=*-*-* 01:30:00 Asia/Seoul
 Persistent=true
 AccuracySec=10min
 

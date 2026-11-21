@@ -16,7 +16,7 @@ EXIT_PROCEED: int = 0
 EXIT_DEFER: int = 10
 # 스트리머 기동(08:20) 직전 재기동이 세션 시작을 밀지 않도록 앞당겨 막는다.
 DEPLOY_BUSY_LEAD: dt.timedelta = dt.timedelta(minutes=10)
-# 애프터마켓 EOD(20:30) + 오프로드/퍼지 여유 뒤, 호스트 백업(23:30) 전. 타이머 OnCalendar 와 같아야 한다.
+# 애프터마켓 EOD(20:30) + 오프로드/퍼지 여유 뒤, 야간 틱테이프 윈도우(23:30)와 호스트 백업(01:30) 전. 타이머 OnCalendar 와 같아야 한다.
 DEFERRED_RECREATE_KST: dt.time = dt.time(22, 0)
 
 _KST = ZoneInfo("Asia/Seoul")

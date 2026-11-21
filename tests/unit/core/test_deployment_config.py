@@ -303,12 +303,12 @@ def test_retire_guard_retires_shared_timer_when_krx_only(tmp_path) -> None:
     assert (retired, disabled) == (True, True)
 
 
-def test_timer_keeps_nightly_kst_slot() -> None:
+def test_host_backup_runs_after_nightly_repair_window_start() -> None:
     from pathlib import Path
 
     timer = Path("deploy/host/krx-host-backup.timer").read_text(encoding="utf-8")
 
-    assert "OnCalendar=*-*-* 23:30:00 Asia/Seoul" in timer
+    assert "OnCalendar=*-*-* 01:30:00 Asia/Seoul" in timer
     assert "Persistent=true" in timer
 
 
