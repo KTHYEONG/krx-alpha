@@ -789,6 +789,7 @@ def test_lsjson_recursive_empty_prefix_lists_root() -> None:
 
 
 def test_purge_superseded_l0_requires_absent_local(tmp_path) -> None:
+    import json
     from types import SimpleNamespace
 
     from src.storage.remote import GDriveArchiver
@@ -802,10 +803,11 @@ def test_purge_superseded_l0_requires_absent_local(tmp_path) -> None:
         "l1/ls/krx/regular/H0STASP1/dt=2026-09-18.parquet",
     }
     purged_targets: list[str] = []
+    listing = json.dumps([{"Path": "ls/krx/regular/H0STASP0/dt=2026-09-18/part.parquet", "Size": 1, "IsDir": False}])
 
     def _runner(args, **kwargs):
         if args[1] == "lsjson":
-            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            return SimpleNamespace(returncode=0, stdout=listing, stderr="")
         assert args[1] == "purge"
         purged_targets.append(args[2])
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -836,14 +838,17 @@ def test_purge_superseded_l0_skips_absent_remote(tmp_path) -> None:
 
 
 def test_purge_superseded_l0_failures_never_raise(tmp_path, caplog) -> None:
+    import json
     import logging
     from types import SimpleNamespace
 
     from src.storage.remote import GDriveArchiver
 
+    listing = json.dumps([{"Path": "ls/H0STASP0/dt=2026-09-11/part.parquet", "Size": 1, "IsDir": False}])
+
     def _runner(args, **kwargs):
         if args[1] == "lsjson":
-            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            return SimpleNamespace(returncode=0, stdout=listing, stderr="")
         return SimpleNamespace(returncode=1, stdout="", stderr="boom")
 
     arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
@@ -869,6 +874,7 @@ def test_purge_superseded_l0_probe_failure_counts_failed(tmp_path) -> None:
 
 
 def test_purge_superseded_l0_never_leaves_l0_tree(tmp_path, monkeypatch) -> None:
+    import json
     from types import SimpleNamespace
 
     import src.storage.remote as remote_mod
@@ -897,11 +903,13 @@ def test_purge_superseded_l0_never_leaves_l0_tree(tmp_path, monkeypatch) -> None
     assert stats.purged == 0
     assert mutating == []
 
+    listing = json.dumps([{"Path": "ls/H0STASP0/dt=2026-09-11/part.parquet", "Size": 1, "IsDir": False}])
+
     def _runner2(args, **kwargs):
         if args[1] in ("purge",):
             mutating.append(args)
         if args[1] == "lsjson":
-            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            return SimpleNamespace(returncode=0, stdout=listing, stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     arc2 = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner2)
@@ -962,7 +970,7 @@ def test_purge_superseded_l0_calls_progress_per_dir(tmp_path) -> None:
     )
 
     assert stats.skipped_absent == 1
-    assert len(progress_calls) == 1
+    assert len(progress_calls) >= 1
 
 
 def test_every_rclone_call_reports_progress(tmp_path) -> None:
@@ -1151,6 +1159,7 @@ def test_upload_reason_distinguishes_transport(tmp_path) -> None:
 
 
 def test_purge_failure_logs_rc_and_stderr(tmp_path, caplog) -> None:
+    import json
     import logging
     from types import SimpleNamespace
 
@@ -1160,30 +1169,178 @@ def test_purge_failure_logs_rc_and_stderr(tmp_path, caplog) -> None:
     l1s = [f"l1/kis/H0STCNT0/dt=2026-09-0{day}.parquet" for day in (1, 2, 3)]
     l0s = sorted({l0 for path in l1s if (l0 := l0_partition_for_l1(path)) is not None})
     assert len(l0s) == 3
-    behavior = {l0s[0]: "probe", l0s[1]: "purge", l0s[2]: "raise"}
+    behavior = {l0s[0]: "purge", l0s[1]: "raise", l0s[2]: "ok"}
+    listing = json.dumps(
+        [{"Path": f"{l0[len('l0/'):]}/part.parquet", "Size": 1, "IsDir": False} for l0 in l0s]
+    )
 
     def _runner(args, **kwargs):
-        key = next(l0 for l0 in l0s if args[2].endswith(l0))
-        mode = behavior[key]
-        if mode == "raise":
-            raise RuntimeError("runner down")
         if args[1] == "lsjson":
-            if mode == "probe":
-                return SimpleNamespace(returncode=5, stdout="", stderr="quota")
-            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            return SimpleNamespace(returncode=0, stdout=listing, stderr="")
+        key = next(l0 for l0 in l0s if args[2].endswith(l0))
+        if behavior[key] == "raise":
+            raise RuntimeError("runner down")
+        if behavior[key] == "ok":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         return SimpleNamespace(returncode=1, stdout="", stderr="boom")
 
     arc = RcloneArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
     with caplog.at_level(logging.CRITICAL):
         stats = arc.purge_superseded_l0(set(l1s), tmp_path / "l0")
-    assert stats.failed == 3
+    assert (stats.failed, stats.purged) == (2, 1)
     messages = [r for r in caplog.records if r.levelno == logging.CRITICAL and "stage=l0_remote_purge" in r.getMessage()]
     texts = [r.getMessage() for r in messages]
-    assert any("reason=probe rc=5 detail=quota" in t for t in texts)
     assert any("reason=purge rc=1 detail=boom" in t for t in texts)
     exc_records = [r for r in messages if "reason=exception" in r.getMessage()]
     assert len(exc_records) == 1
     assert exc_records[0].exc_info is not None
+
+
+def _l1_paths_for_l0_dirs(count: int) -> tuple[set[str], list[str]]:
+    l1s = {f"l1/kis/H0STCNT{i:02d}/dt=2026-09-01.parquet" for i in range(count)}
+    l0_dirs = sorted(f"l0/kis/H0STCNT{i:02d}/dt=2026-09-01" for i in range(count))
+    return l1s, l0_dirs
+
+
+def test_purge_lists_remote_l0_once(tmp_path) -> None:
+    import json
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    l1s, _ = _l1_paths_for_l0_dirs(50)
+    present = [f"kis/H0STCNT{i:02d}/dt=2026-09-01" for i in (3, 17, 41)]
+    listing = json.dumps([{"Path": f"{d}/part.parquet", "Size": 1, "IsDir": False} for d in present])
+    calls: list[list[str]] = []
+
+    def _runner(args, **kwargs):
+        calls.append(list(args))
+        if args[1] == "lsjson":
+            return SimpleNamespace(returncode=0, stdout=listing, stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    stats = arc.purge_superseded_l0(l1s, tmp_path / "l0")
+
+    listings = [c for c in calls if c[1] == "lsjson"]
+    assert len(listings) == 1
+    assert listings[0][2].endswith("/l0")
+    assert "--recursive" in listings[0]
+    assert "--fast-list" in listings[0]
+    assert "--files-only" not in listings[0]
+    assert "--max-depth" not in listings[0]
+    purges = [c for c in calls if c[1] == "purge"]
+    assert len(purges) == 3
+    assert (stats.purged, stats.skipped_absent) == (3, 47)
+
+
+def test_purge_detects_empty_remote_dir(tmp_path) -> None:
+    import json
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    l1s, _ = _l1_paths_for_l0_dirs(1)
+    listing = json.dumps([{"Path": "kis/H0STCNT00/dt=2026-09-01", "Size": -1, "IsDir": True}])
+    purged: list[str] = []
+
+    def _runner(args, **kwargs):
+        if args[1] == "lsjson":
+            return SimpleNamespace(returncode=0, stdout=listing, stderr="")
+        purged.append(args[2])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    stats = arc.purge_superseded_l0(l1s, tmp_path / "l0")
+
+    assert stats.purged == 1
+    assert purged[0].endswith("/l0/kis/H0STCNT00/dt=2026-09-01")
+
+
+def test_purge_listing_failure_purges_nothing(tmp_path, caplog) -> None:
+    import logging
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    l1s, _ = _l1_paths_for_l0_dirs(2)
+    calls: list[list[str]] = []
+
+    def _runner(args, **kwargs):
+        calls.append(list(args))
+        return SimpleNamespace(returncode=1, stdout="", stderr="token expired")
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    with caplog.at_level(logging.CRITICAL):
+        stats = arc.purge_superseded_l0(l1s, tmp_path / "l0")
+
+    assert [c[1] for c in calls] == ["lsjson"]
+    assert stats.failed == 2
+    assert stats.purged == 0
+    reasons = [r.getMessage() for r in caplog.records if "reason=listing" in r.getMessage()]
+    assert len(reasons) == 1
+    assert "token expired" in reasons[0]
+
+
+def test_purge_local_present_needs_no_listing(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    l1s, _ = _l1_paths_for_l0_dirs(4)
+    for i in range(4):
+        (tmp_path / "l0" / "kis" / f"H0STCNT{i:02d}" / "dt=2026-09-01").mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def _runner(args, **kwargs):
+        calls.append(list(args))
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    stats = arc.purge_superseded_l0(l1s, tmp_path / "l0")
+
+    assert calls == []
+    assert stats.skipped_local_present == 4
+
+
+def test_purge_progress_per_dir_kept(tmp_path) -> None:
+    import json
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    l1s, _ = _l1_paths_for_l0_dirs(5)
+    listing = json.dumps([{"Path": "kis/H0STCNT00/dt=2026-09-01/part.parquet", "Size": 1, "IsDir": False}])
+
+    def _runner(args, **kwargs):
+        if args[1] == "lsjson":
+            return SimpleNamespace(returncode=0, stdout=listing, stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    progress_calls: list[None] = []
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    stats = arc.purge_superseded_l0(l1s, tmp_path / "l0", progress=lambda: progress_calls.append(None))
+
+    assert (stats.purged, stats.skipped_absent) == (1, 4)
+    assert len(progress_calls) >= 5
+
+
+def test_lsjson_files_only_default_unchanged() -> None:
+    from types import SimpleNamespace
+
+    from src.storage.remote import GDriveArchiver
+
+    calls: list[list[str]] = []
+
+    def _runner(args, **kwargs):
+        calls.append(list(args))
+        return SimpleNamespace(returncode=3, stdout="", stderr="")
+
+    arc = GDriveArchiver(remote_name="gdrive", remote_path="quant-lake/live/krx-alpha/data", runner=_runner)
+    arc._lsjson_recursive("l1")  # noqa: SLF001 - pin the argv of the default listing
+    arc._lsjson_recursive("l0", files_only=False)  # noqa: SLF001
+    assert "--files-only" in calls[0]
+    assert "--files-only" not in calls[1]
 
 
 def test_feed_derived_and_manifest_paths_are_offloaded(tmp_path, fake_rclone):

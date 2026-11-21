@@ -172,10 +172,12 @@ class GDriveArchiver:
             raise RemoteArchiveError(f"upload failed: {repo_path} {result.stderr}")
         return self.matches(self._remote_object(repo_path), local)
 
-    def _lsjson_recursive(self, prefix: str = "", *, with_hash: bool = False) -> list[dict[str, Any]]:
+    def _lsjson_recursive(
+        self, prefix: str = "", *, with_hash: bool = False, files_only: bool = True
+    ) -> list[dict[str, Any]]:
         norm = prefix.rstrip("/")
         dest = f"{self._remote_name}:{self._remote_path}/{norm}" if norm else f"{self._remote_name}:{self._remote_path}"
-        cmd = ["rclone", "lsjson", dest, "--recursive", "--fast-list", "--files-only"]
+        cmd = ["rclone", "lsjson", dest, "--recursive", "--fast-list", *(["--files-only"] if files_only else [])]
         result = self._run([*cmd, *_HASH_FLAGS] if with_hash else cmd)
         if result.returncode == 3:
             return []
@@ -333,6 +335,12 @@ class GDriveArchiver:
             {l0_dir for path in verified_remote_l1 if (l0_dir := l0_partition_for_l1(path)) is not None}
         )
         base = pathlib.Path(journal_root)
+        candidates = [
+            l0_dir
+            for l0_dir in l0_dirs
+            if l0_dir.startswith(L0_REPO_PREFIX) and not (base / l0_dir[len(L0_REPO_PREFIX) :]).exists()
+        ]
+        remote_present = self._l0_remote_presence() if candidates else set()
         for l0_dir in l0_dirs:
             try:
                 if not l0_dir.startswith(L0_REPO_PREFIX):
@@ -341,18 +349,13 @@ class GDriveArchiver:
                     if (base / l0_dir[len(L0_REPO_PREFIX) :]).exists():
                         stats.skipped_local_present += 1
                         continue
-                    dest = f"{self._remote_name}:{self._remote_path}/{l0_dir}"
-                    probe = self._run(["rclone", "lsjson", dest, "--max-depth", "1"])
-                    if probe.returncode == 3:
+                    if remote_present is None:
+                        stats.failed += 1
+                        continue
+                    if l0_dir not in remote_present:
                         stats.skipped_absent += 1
                         continue
-                    if probe.returncode != 0:
-                        stats.failed += 1
-                        logger.critical(
-                            "[DATA] stage=l0_remote_purge part=%s status=FAIL reason=probe rc=%d detail=%s",
-                            l0_dir, probe.returncode, _brief(probe.stderr),
-                        )
-                        continue
+                    dest = f"{self._remote_name}:{self._remote_path}/{l0_dir}"
                     purged = self._run(["rclone", "purge", dest])
                     if purged.returncode != 0:
                         stats.failed += 1
@@ -382,6 +385,23 @@ class GDriveArchiver:
             stats.failed,
         )
         return stats
+
+    def _l0_remote_presence(self) -> set[str] | None:
+        """Remote L0 paths and their ancestor directories from one recursive listing; None when the listing failed."""
+        try:
+            entries = self._lsjson_recursive(L0_REPO_PREFIX.rstrip("/"), files_only=False)
+        except Exception as exc:
+            logger.critical(
+                "[DATA] stage=l0_remote_purge status=FAIL reason=listing detail=%s",
+                _brief(str(exc)),
+                exc_info=True,
+            )
+            return None
+        present: set[str] = set()
+        for entry in entries:
+            parts = str(entry.get("Path", "")).split("/")
+            present.update("/".join(parts[:depth]) for depth in range(1, len(parts) + 1))
+        return present
 
 
 def _objects_by_path(entries: list[dict[str, Any]], remote_prefix: str) -> dict[str, RemoteObject]:
