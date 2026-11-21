@@ -24,6 +24,7 @@ import pyarrow.parquet as pq
 from src.core.paths import DataPaths
 from src.core.session_anchors import resolve_session_anchors
 from src.storage.layout import l0_partition_key, l0_partition_relpath, l1_relpath_for_l0_partition
+from src.storage.parquet_options import l1_parquet_writer_kwargs
 from src.storage.quality_db import decode_db_quotes, decode_db_ticks
 from src.storage.quality_kis import decode_kis_quotes, decode_kis_ticks
 from src.storage.quality_ls import decode_ls_quotes, decode_ls_ticks
@@ -272,7 +273,7 @@ def _write_partition(path: pathlib.Path, rows: Iterable[SelectionRow]) -> None:
     table = pa.Table.from_pylist([dataclasses.asdict(row) for row in rows], schema=_SCHEMA)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    pq.write_table(table, tmp, compression="zstd")
+    pq.write_table(table, tmp, **l1_parquet_writer_kwargs(table.schema))
     os.replace(tmp, path)
 
 

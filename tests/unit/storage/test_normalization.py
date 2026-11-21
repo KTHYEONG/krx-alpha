@@ -320,3 +320,72 @@ def test_multibatch_output_matches_legacy_oracle(tmp_path, monkeypatch) -> None:
     assert norm.normalize_l0_partition(part, reference) == 15
     assert pl.read_parquet(out).equals(pl.read_parquet(reference))
     assert pq.read_metadata(out).metadata == pq.read_metadata(reference).metadata
+
+
+def test_l1_v2_writer_options_applied(tmp_path) -> None:
+    import pyarrow.parquet as pq
+
+    from src.storage.normalization import normalize_l0_partition
+
+    part = _write_records(tmp_path / "l0" / "kis" / "H0STCNT0" / "dt=2026-09-01", [_rec("a", 1, "aa", 1), _rec("b", 2, "aa", 2)])
+    out = tmp_path / "v2.parquet"
+    assert normalize_l0_partition(part, out) == 2
+
+    parquet = pq.ParquetFile(out)
+    meta = parquet.metadata
+    assert meta.metadata[b"krx_l1_encoding"] == b"v2"
+    int_columns = {field.name for field in parquet.schema_arrow if str(field.type).startswith("int")}
+    assert int_columns
+    for index in range(meta.num_columns):
+        column = meta.row_group(0).column(index)
+        if column.path_in_schema in int_columns:
+            assert "DELTA_BINARY_PACKED" in column.encodings
+        if column.path_in_schema == "raw":
+            assert not column.has_dictionary_page
+        assert column.compression == "ZSTD"
+
+
+def test_l1_v2_content_identical(tmp_path, monkeypatch) -> None:
+    import pyarrow.parquet as pq
+
+    import src.storage.normalization as norm
+
+    part = _write_records(
+        tmp_path / "l0" / "kis" / "H0STCNT0" / "dt=2026-09-01",
+        [_rec("dup", 300, "zz", 1), _rec("dup", 100, "zz", 1), _rec("other", 200, "aa", 1)],
+    )
+    v2 = tmp_path / "v2.parquet"
+    assert norm.normalize_l0_partition(part, v2) == 2
+    monkeypatch.setattr(norm, "l1_parquet_writer_kwargs", lambda schema: {"compression": "zstd"})
+    legacy = tmp_path / "legacy.parquet"
+    assert norm.normalize_l0_partition(part, legacy) == 2
+    assert pq.read_table(v2).equals(pq.read_table(legacy))
+
+
+def test_l1_v2_existing_metadata_kept(tmp_path) -> None:
+    import pyarrow.parquet as pq
+
+    from src.storage.market_phase import MARKET_PHASE_METADATA_KEY
+    from src.storage.normalization import normalize_l0_partition
+
+    part = _write_records(tmp_path / "l0" / "kis" / "H0STCNT0" / "dt=2026-09-01", [_rec("a", 1, "aa", 1)])
+    out = tmp_path / "meta.parquet"
+    normalize_l0_partition(part, out)
+    metadata = pq.read_metadata(out).metadata
+    assert MARKET_PHASE_METADATA_KEY.encode() in metadata
+    assert metadata[b"krx_l1_encoding"] == b"v2"
+
+
+def test_l1_v2_metadata_kept_without_dq_verdict(tmp_path) -> None:
+    import pyarrow.parquet as pq
+
+    from src.storage.market_phase import MARKET_PHASE_METADATA_KEY
+    from src.storage.normalization import normalize_l0_partition
+
+    record = {**_rec("a", 1, "aa", 1), "tr_id": "H0UNKNOWN"}
+    part = _write_records(tmp_path / "l0" / "kis" / "H0UNKNOWN" / "dt=2026-09-01", [record])
+    out = tmp_path / "nodq.parquet"
+    assert normalize_l0_partition(part, out) == 1
+    metadata = pq.read_metadata(out).metadata
+    assert MARKET_PHASE_METADATA_KEY.encode() in metadata
+    assert metadata[b"krx_l1_encoding"] == b"v2"

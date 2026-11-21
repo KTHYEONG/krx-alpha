@@ -22,6 +22,7 @@ from src.core.config import DataQualitySettings
 from src.core.errors import KrxAlphaError
 from src.storage.layout import L0_JOURNAL_GLOB, route_for_l0_partition
 from src.storage.market_phase import MARKET_PHASE_METADATA_KEY, MARKET_PHASE_WINDOWS, PhaseWindow, annotate_market_phase
+from src.storage.parquet_options import l1_encoding_metadata, l1_parquet_writer_kwargs
 from src.storage.quality import (
     DqStatus,
     QuoteQualitySummary,
@@ -313,7 +314,7 @@ def normalize_l0_partition(
                 fields.write_parquet(tick_dir / f"{ci:06d}.parquet")
             table = chunk.to_arrow(compat_level=pl.CompatLevel.oldest())
             if writer is None:
-                writer = pq.ParquetWriter(tmp_path, table.schema, compression="zstd")
+                writer = pq.ParquetWriter(tmp_path, table.schema, **l1_parquet_writer_kwargs(table.schema))
             writer.write_table(table)
         assert writer is not None
         del reader, chunk, table, fields
@@ -334,7 +335,9 @@ def normalize_l0_partition(
         phases_json = json.dumps(phase_counts, sort_keys=True, separators=(",", ":"))
         if tick_summary is not None or quote_summary is not None:
             verdict = evaluate_stream_quality(tick_summary, quote_summary, settings=settings, vendors=vendors)
-            writer.add_key_value_metadata({**verdict.to_metadata(), MARKET_PHASE_METADATA_KEY: phases_json})
+            writer.add_key_value_metadata(
+                {**verdict.to_metadata(), MARKET_PHASE_METADATA_KEY: phases_json, **l1_encoding_metadata()}
+            )
             writer.close()
             writer = None
             if verdict.status is DqStatus.FAIL:
@@ -387,7 +390,7 @@ def normalize_l0_partition(
                     ",".join(verdict.skipped),
                 )
         else:
-            writer.add_key_value_metadata({MARKET_PHASE_METADATA_KEY: phases_json})
+            writer.add_key_value_metadata({MARKET_PHASE_METADATA_KEY: phases_json, **l1_encoding_metadata()})
             writer.close()
             writer = None
         os.replace(tmp_path, out)

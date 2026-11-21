@@ -32,6 +32,7 @@ from src.storage.l0_audit import (
     _tick_body,
 )
 from src.storage.layout import L0_JOURNAL_GLOB, l0_partition_key, l0_partition_relpath
+from src.storage.parquet_options import l1_encoding_metadata, l1_parquet_writer_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -374,10 +375,11 @@ def _apply_tape_topup(paths: DataPaths, day: dt.date, merged_path: pathlib.Path)
     )
     rewritten = merged_path.parent / f".{merged_path.name}.{os.getpid()}.topup"
     try:
-        with pq.ParquetFile(merged_path) as source, pq.ParquetWriter(rewritten, _OUTPUT_SCHEMA, compression="zstd") as out:
+        with pq.ParquetFile(merged_path) as source, pq.ParquetWriter(rewritten, _OUTPUT_SCHEMA, **l1_parquet_writer_kwargs(_OUTPUT_SCHEMA)) as out:
             for batch in source.iter_batches(batch_size=250_000):
                 out.write_table(pa.Table.from_batches([batch], schema=_OUTPUT_SCHEMA))
             out.write_table(extra)
+            out.add_key_value_metadata(l1_encoding_metadata())
         os.replace(rewritten, merged_path)
     except BaseException:
         rewritten.unlink(missing_ok=True)
@@ -523,7 +525,7 @@ def _build_repaired_ticks(
     overfill_dropped = 0
     try:
         try:
-            writer = pq.ParquetWriter(tmp, _OUTPUT_SCHEMA, compression="zstd")
+            writer = pq.ParquetWriter(tmp, _OUTPUT_SCHEMA, **l1_parquet_writer_kwargs(_OUTPUT_SCHEMA))
             for tick in _iter_live_ticks(pathlib.Path(journal_root), vendor, day):
                 inserted_live = db.execute("INSERT OR IGNORE INTO counters VALUES (?, ?)", (tick.symbol, tick.cum))
                 if inserted_live.rowcount and inside_gap(tick.symbol, tick.cum):
@@ -595,6 +597,7 @@ def _build_repaired_ticks(
                     flush(writer)
         finally:
             if writer is not None:
+                writer.add_key_value_metadata(l1_encoding_metadata())
                 writer.close()
     except BaseException:
         tmp.unlink(missing_ok=True)
