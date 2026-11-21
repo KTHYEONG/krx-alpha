@@ -30,7 +30,8 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--candidates-path", required=True)
     parser.add_argument("--dynamic-plan-path", required=True)
     parser.add_argument("--db-session-index", type=int, choices=_DB_SESSION_INDEXES, default=0)
-    parser.add_argument("--hot-symbols", type=int, default=0, help="top-priority symbols subscribed at start; 0 = warm standby")
+    parser.add_argument("--hot-symbols", type=int, default=0, help="symbols subscribed at start; 0 = warm standby")
+    parser.add_argument("--hot-symbol-list", default=None, help="comma-separated fixed symbols; absent = candidate top-N")
     parser.add_argument("--ntp-host", default=None)
     parser.add_argument("--max-clock-offset-ns", type=int, default=None)
     parser.add_argument("--max-cycles", type=int, default=None)
@@ -43,6 +44,19 @@ def run(args: argparse.Namespace) -> int:
     return asyncio.run(_run_stream(args))
 
 
+def _parse_hot_symbol_list(raw: str | None, hot: int) -> tuple[str, ...] | None:
+    if raw is None:
+        return None
+    symbols = tuple(raw.split(","))
+    if any(not symbol for symbol in symbols):
+        raise KrxAlphaError("hot-symbol-list must not contain empty entries")
+    if len(set(symbols)) != len(symbols):
+        raise KrxAlphaError("hot-symbol-list must not contain duplicates")
+    if len(symbols) != hot:
+        raise KrxAlphaError(f"hot-symbol-list has {len(symbols)} entries but hot-symbols is {hot}")
+    return symbols
+
+
 async def _run_stream(args: argparse.Namespace) -> int:
     settings = CollectorSettings()
     hot = int(args.hot_symbols)
@@ -50,6 +64,7 @@ async def _run_stream(args: argparse.Namespace) -> int:
         raise KrxAlphaError(
             f"hot-symbols {hot} x streams {len(settings.streams)} exceeds db_capacity_pairs {settings.db_capacity_pairs}"
         )
+    static_symbols = _parse_hot_symbol_list(getattr(args, "hot_symbol_list", None), hot)
     profile = RegularStreamProfile(
         vendor=L0_VENDOR_DB,
         slot_budget=settings.db_capacity_pairs,
@@ -60,6 +75,7 @@ async def _run_stream(args: argparse.Namespace) -> int:
         session_index=int(args.db_session_index),
         warm_standby=True,
         hot_symbols=hot,
+        static_symbols=static_symbols,
     )
     logger.info(
         "[DATA] stage=db_child status=START session=%d hot_symbols=%d", profile.session_index, hot, extra=EVENT

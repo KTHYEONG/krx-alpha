@@ -147,7 +147,7 @@ def test_db_session_index_paths_and_command_wiring(tmp_path) -> None:
     with pytest.raises(ValueError, match="session_index"):
         paths.db_crosscheck_manifest_path(DAY, 2)
 
-    cmd = daemon_mod._db_crosscheck_cmd(DAY, paths, session_index=1, hot_symbols=5)
+    cmd = daemon_mod._db_crosscheck_cmd(DAY, paths, session_index=1, hot_symbol_list=("A1", "A2", "A3", "A4", "A5"))
     assert cmd[cmd.index("--db-session-index") + 1] == "1"
     assert cmd[cmd.index("--hot-symbols") + 1] == "5"
     assert cmd[cmd.index("--manifest-path") + 1] == str(paths.manifest_dir / "2026-09-08.db.1.json")
@@ -364,3 +364,32 @@ def test_warm_child_exits_with_shard_denied_code_when_lease_is_lost(tmp_path, mo
         )
     )
     assert code == collect_stream.SHARD_DENIED_EXIT
+
+
+def test_hot_symbol_list_sets_static_pairs(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    async def _run_regular(args, settings, profile, **kwargs) -> int:
+        seen["profile"] = profile
+        return 0
+
+    monkeypatch.setattr(collect_stream, "run_regular_stream", _run_regular)
+    args = argparse.Namespace(db_session_index=0, hot_symbols=2, hot_symbol_list="000660,035420")
+    assert asyncio.run(collect_stream_db._run_stream(args)) == 0
+    profile = seen["profile"]
+    assert profile.static_symbols == ("000660", "035420")
+    assert profile.hot_symbols == 2
+
+
+@pytest.mark.parametrize(
+    ("hot", "raw"),
+    [(3, "000660,035420"), (2, "000660,000660"), (2, "000660,")],
+)
+def test_hot_symbol_list_rejects_mismatch_duplicate_or_empty(monkeypatch, hot, raw) -> None:
+    async def _run_regular(args, settings, profile, **kwargs) -> int:
+        raise AssertionError("must fail before the stream starts")
+
+    monkeypatch.setattr(collect_stream, "run_regular_stream", _run_regular)
+    args = argparse.Namespace(db_session_index=0, hot_symbols=hot, hot_symbol_list=raw)
+    with pytest.raises(KrxAlphaError):
+        asyncio.run(collect_stream_db._run_stream(args))

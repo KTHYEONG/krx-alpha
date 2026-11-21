@@ -308,3 +308,98 @@ def test_db_specs_enabled_only_by_secondary_feeds(tmp_path, monkeypatch) -> None
         daemon_mod.StreamChildKey.DB_CROSSCHECK: False,
         daemon_mod.StreamChildKey.DB_CROSSCHECK_B: True,
     }
+
+
+def _hot_runner(tmp_path, monkeypatch, *, regular_kis: bool):
+    import pathlib
+
+    from src.core.config import CollectorSettings, FeedControlSettings, RegularKisSettings, resolve_collector_runtime
+    from src.orchestration import daemon as daemon_mod
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(data_root=pathlib.Path(tmp_path) / "data")
+    feed = FeedControlSettings(
+        watch_groups=("ls:0",),
+        secondary_feeds=("db:0", "db:1"),
+        hot_symbols=(("db:0", 25), ("db:1", 25)),
+    )
+    rk = RegularKisSettings(enabled=True, credential_slots=("1",), pair_capacity_per_connection=41) if regular_kis else None
+    runtime = resolve_collector_runtime(collector=settings, feed_control=feed, regular_kis=rk)
+    return daemon_mod, daemon_mod.DaemonRunner(runtime=runtime, shutdown=None, now=lambda: None, sleep=lambda s: None)
+
+
+def _capture_supervisors(monkeypatch, daemon_mod) -> None:
+    class _FakeSup:
+        def __init__(self, *, cmd, breaker=None):
+            self.cmd = list(cmd)
+
+        def ensure_running(self):
+            return "started"
+
+        def stop(self, *, timeout_s=15.0):
+            return "graceful"
+
+    monkeypatch.setattr(daemon_mod, "ProcessSupervisor", _FakeSup)
+
+
+def _ranked_candidates(path, count: int) -> None:
+    from src.universe.ipc import write_candidates
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_candidates(path, [{"symbol": f"{i:06d}", "selection_reasons": ["limit_up"]} for i in range(count)], rev=1)
+
+
+def _hot_list(cmd: list[str]) -> tuple[str, ...]:
+    return tuple(cmd[cmd.index("--hot-symbol-list") + 1].split(","))
+
+
+def test_db_hot_lists_disjoint_and_exclude_kis_plan(tmp_path, monkeypatch) -> None:
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+
+    daemon_mod, runner = _hot_runner(tmp_path, monkeypatch, regular_kis=True)
+    _capture_supervisors(monkeypatch, daemon_mod)
+    day = dt.date(2026, 9, 14)
+    _ranked_candidates(runner._paths.candidates, 60)
+    kis_symbols = tuple(f"{i:06d}" for i in range(20))
+    runner.state.regular_kis_plan = (AftermarketShard(MarketVenue.KRX, 0, kis_symbols, ("H0STCNT0", "H0STASP0"), "1", "id1"),)
+    runner.state.regular_kis_plan_day = day
+
+    runner._start_ready_children(day)
+
+    db0 = runner.children.db_crosscheck.cmd
+    db1 = runner.children.db_crosscheck_b.cmd
+    list0, list1 = _hot_list(db0), _hot_list(db1)
+    assert list0 == tuple(f"{i:06d}" for i in range(20, 45))
+    assert list1 == tuple(f"{i:06d}" for i in range(45, 60))
+    assert not set(list0) & set(list1)
+    assert db0[db0.index("--hot-symbols") + 1] == str(len(list0))
+    assert db1[db1.index("--hot-symbols") + 1] == str(len(list1))
+
+
+def test_db_hot_without_regular_kis_uses_candidate_order(tmp_path, monkeypatch) -> None:
+    daemon_mod, runner = _hot_runner(tmp_path, monkeypatch, regular_kis=False)
+    _capture_supervisors(monkeypatch, daemon_mod)
+    day = dt.date(2026, 9, 14)
+    _ranked_candidates(runner._paths.candidates, 60)
+
+    runner._start_ready_children(day)
+
+    assert _hot_list(runner.children.db_crosscheck.cmd) == tuple(f"{i:06d}" for i in range(25))
+    assert _hot_list(runner.children.db_crosscheck_b.cmd) == tuple(f"{i:06d}" for i in range(25, 50))
+
+
+def test_db_hot_plan_failure_falls_back_to_warm_standby(tmp_path, monkeypatch, caplog) -> None:
+    daemon_mod, runner = _hot_runner(tmp_path, monkeypatch, regular_kis=False)
+    _capture_supervisors(monkeypatch, daemon_mod)
+    day = dt.date(2026, 9, 14)
+    runner._paths.candidates.parent.mkdir(parents=True, exist_ok=True)
+    runner._paths.candidates.write_text("{not json", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        runner._start_ready_children(day)
+
+    assert any("stage=db_hot_plan status=FAIL" in r.getMessage() for r in caplog.records)
+    for cmd in (runner.children.db_crosscheck.cmd, runner.children.db_crosscheck_b.cmd):
+        assert cmd[cmd.index("--hot-symbols") + 1] == "0"
+        assert "--hot-symbol-list" not in cmd

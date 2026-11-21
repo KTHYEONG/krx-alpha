@@ -119,6 +119,7 @@ from src.orchestration.premarket import (
 )
 from src.orchestration.regular_kis import (
     candidate_symbols_and_tiers,
+    disjoint_hot_symbol_sets,
     regular_kis_collection_due,
     regular_kis_dynamic_stream_cmd,
     regular_kis_ls_plan_inputs,
@@ -1063,8 +1064,10 @@ def _toss_cmd(today: dt.date, paths: DataPaths, *, session_index: int = 0, hot_s
     ]
 
 
-def _db_crosscheck_cmd(today: dt.date, paths: DataPaths, *, session_index: int = 0, hot_symbols: int = 0) -> list[str]:
-    return [
+def _db_crosscheck_cmd(
+    today: dt.date, paths: DataPaths, *, session_index: int = 0, hot_symbol_list: tuple[str, ...] = ()
+) -> list[str]:
+    cmd = [
         sys.executable,
         "-m",
         "src.cli.main",
@@ -1082,8 +1085,11 @@ def _db_crosscheck_cmd(today: dt.date, paths: DataPaths, *, session_index: int =
         "--db-session-index",
         str(session_index),
         "--hot-symbols",
-        str(hot_symbols),
+        str(len(hot_symbol_list)),
     ]
+    if hot_symbol_list:
+        cmd += ["--hot-symbol-list", ",".join(hot_symbol_list)]
+    return cmd
 
 
 def _intraday_discovery_cmd(today: dt.date, paths: DataPaths) -> list[str]:
@@ -1399,6 +1405,8 @@ class DaemonState:
     regular_nxt_pool_failed_day: dt.date | None = None
     regular_kis_plan: tuple[AftermarketShard, ...] = ()
     regular_kis_plan_day: dt.date | None = None
+    db_hot_symbol_sets: dict[int, tuple[str, ...]] = field(default_factory=dict)
+    db_hot_plan_day: dt.date | None = None
     regular_kis_circuit_alerted: set[str] = field(default_factory=set)
     regular_nxt_plan: tuple[AftermarketShard, ...] = ()
     regular_nxt_plan_day: dt.date | None = None
@@ -2816,7 +2824,9 @@ class DaemonRunner:
         replacing_degraded = self._children.regular_is_degraded
         if replacing_degraded:
             st.regular_kis_plan_day = None
+            st.db_hot_plan_day = None
         self._ensure_ls_shard_plan(today)
+        self._ensure_db_hot_plan(today)
         for spec in self._session_specs():
             if spec.demand is not None:
                 continue
@@ -4072,6 +4082,51 @@ class DaemonRunner:
                 today.isoformat(),
             )
 
+    def _ensure_db_hot_plan(self, today: dt.date) -> None:
+        """Assign each DB session a disjoint hot symbol list outside the KIS regular plan; falls back to warm standby on failure."""
+        st = self._state
+        if st.db_hot_plan_day == today:
+            return
+        indices = sorted(set(_DB_CROSSCHECK_SESSION_INDEX.values()))
+        hot = dict(self._runtime.feed_control.hot_symbols)
+        counts = tuple(hot.get(f"db:{index}", 0) for index in indices)
+        if not any(counts):
+            st.db_hot_symbol_sets = {}
+            st.db_hot_plan_day = today
+            return
+        try:
+            cfg = getattr(self._runtime, "regular_kis", None) or RegularKisSettings()
+            excluded: frozenset[str] = frozenset()
+            if cfg.enabled:
+                self._ensure_regular_kis_plan(today)
+                excluded = frozenset(symbol for shard in st.regular_kis_plan for symbol in shard.symbols)
+            priority, _ = candidate_symbols_and_tiers(self._paths.candidates)
+            sets = disjoint_hot_symbol_sets(priority, excluded, counts)
+        except (KrxAlphaError, OSError, ValueError) as exc:
+            logger.warning("[DATA] stage=db_hot_plan status=FAIL reason=%s", exc, extra=EVENT)
+            st.db_hot_symbol_sets = {}
+            st.db_hot_plan_day = today
+            return
+        st.db_hot_symbol_sets = dict(zip(indices, sets, strict=True))
+        st.db_hot_plan_day = today
+        for index, count, chunk in zip(indices, counts, sets, strict=True):
+            logger.info(
+                "[DATA] stage=db_hot_plan session=%d symbols=%d excluded_kis=%d first=%s",
+                index,
+                len(chunk),
+                len(excluded),
+                chunk[0] if chunk else "-",
+                extra=EVENT,
+            )
+            if count > 0 and len(chunk) < count:
+                logger.warning(
+                    "[DATA] stage=db_hot_plan session=%d status=SHORT configured=%d symbols=%d",
+                    index,
+                    count,
+                    len(chunk),
+                    extra=EVENT,
+                )
+
     def _ensure_ls_shard_plan(self, today: dt.date) -> tuple[LsShard, ...]:
         """Plan LS shards once per session day from the candidates and record their tiers; returns () when planning fails."""
         st = self._state
@@ -4184,8 +4239,9 @@ class DaemonRunner:
         """Return a SESSION child command; the primary receives its shard-0 symbol set once LS sharding is active."""
         if spec.key in _DB_CROSSCHECK_SESSION_INDEX:
             index = _DB_CROSSCHECK_SESSION_INDEX[spec.key]
-            hot = dict(self._runtime.feed_control.hot_symbols).get(f"db:{index}", 0)
-            return _db_crosscheck_cmd(today, self._paths, session_index=index, hot_symbols=hot)
+            return _db_crosscheck_cmd(
+                today, self._paths, session_index=index, hot_symbol_list=self._state.db_hot_symbol_sets.get(index, ())
+            )
         if spec.key in _TOSS_SESSION_INDEX:
             index = _TOSS_SESSION_INDEX[spec.key]
             hot = dict(self._runtime.feed_control.hot_symbols).get(f"toss:{index}", 0)

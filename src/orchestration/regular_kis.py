@@ -20,6 +20,7 @@ _KST = ZoneInfo("Asia/Seoul")
 
 __all__ = [
     "candidate_symbols_and_tiers",
+    "disjoint_hot_symbol_sets",
     "ls_shard_blocks",
     "regular_kis_collection_due",
     "regular_kis_dynamic_stream_cmd",
@@ -42,6 +43,24 @@ def candidate_symbols_and_tiers(path: pathlib.Path) -> tuple[tuple[str, ...], di
     symbols = tuple(str(row["symbol"]) for row in rows)
     tiers = {str(row["symbol"]): str(row.get("tier", "event")) for row in rows}
     return symbols, tiers
+
+
+def disjoint_hot_symbol_sets(
+    priority_symbols: tuple[str, ...], excluded: frozenset[str], counts: tuple[int, ...]
+) -> tuple[tuple[str, ...], ...]:
+    """Split priority order minus `excluded` into consecutive non-overlapping slices sized by `counts`; short when exhausted."""
+    if len(set(priority_symbols)) != len(priority_symbols):
+        raise KrxAlphaError("priority_symbols must be unique")
+    if any(count < 0 for count in counts):
+        raise KrxAlphaError(f"hot symbol counts must be non-negative: {counts}")
+    remaining = tuple(symbol for symbol in priority_symbols if symbol not in excluded)
+    sets: list[tuple[str, ...]] = []
+    start = 0
+    for count in counts:
+        chunk = remaining[start : start + count]
+        sets.append(chunk)
+        start += len(chunk)
+    return tuple(sets)
 
 
 def ls_shard_blocks(candidates_path: pathlib.Path, collector: CollectorSettings) -> tuple[tuple[str, ...], ...]:

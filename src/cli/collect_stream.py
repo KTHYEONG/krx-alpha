@@ -209,6 +209,8 @@ class RegularStreamProfile:
     # Warm standby: subscribes `hot_symbols` statically, the rest only via the dynamic plan, watchdog disarmed until subscribed.
     warm_standby: bool = False
     hot_symbols: int = 0
+    # A fixed symbol set for a session-indexed vendor; None selects candidate top-N.
+    static_symbols: tuple[str, ...] | None = None
     # Registry key when it differs from `vendor` (the journal vendor), e.g. "ls-nxt" journals as "ls".
     adapter: str | None = None
 
@@ -333,7 +335,7 @@ async def run_regular_stream(
 ) -> int:
     """Run one regular-session streamer for profile.vendor; return 0 after a graceful stop, or SHARD_DENIED_EXIT on a denied shard lease."""
     if profile.session_index is not None:
-        shard_index, shard_symbols = profile.session_index, None
+        shard_index, shard_symbols = profile.session_index, profile.static_symbols
     else:
         shard_index, shard_symbols = _shard_request(args)
     entry = regular_vendor(profile.adapter or profile.vendor)
@@ -413,7 +415,7 @@ async def run_regular_stream(
             trade_stream=vendor_streams(settings, profile.vendor, venue)[0],
         )
         swap_request = SwapRequest()
-        if shard_symbols is not None:
+        if shard_symbols is not None and profile.vendor == "ls":
             logger.info("[DATA] stage=ls_shard index=%d symbols=%d", shard_index, len(shard_symbols), extra=EVENT)
         feed_id = feed_id_for(profile.vendor, venue, shard_index)
         health_tracker = build_feed_health_tracker(

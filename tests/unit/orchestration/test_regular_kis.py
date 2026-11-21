@@ -6,6 +6,8 @@ import datetime as dt
 import sys
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from src.core.session_anchors import standard_session_anchors
 from src.orchestration.regular_kis import regular_kis_collection_due, regular_kis_stream_cmd
 from src.realtime.contracts import MarketVenue
@@ -85,3 +87,27 @@ def test_nxt_collection_due_window_and_shifted_day() -> None:
         regular_close=dt.time(15, 30), after_market_end=dt.time(18, 0), source=AnchorSource.DEFAULT,
     )
     assert due(9, 0, a=shifted) is False
+
+
+def test_disjoint_sets_skip_excluded_in_order() -> None:
+    from src.orchestration.regular_kis import disjoint_hot_symbol_sets
+
+    result = disjoint_hot_symbol_sets(tuple("abcdefgh"), frozenset("ab"), (2, 3))
+    assert result == (("c", "d"), ("e", "f", "g"))
+
+
+def test_disjoint_sets_short_when_exhausted() -> None:
+    from src.orchestration.regular_kis import disjoint_hot_symbol_sets
+
+    result = disjoint_hot_symbol_sets(("x", "y", "z"), frozenset(), (2, 2))
+    assert result == (("x", "y"), ("z",))
+
+
+def test_disjoint_sets_reject_duplicates_or_negative() -> None:
+    from src.core.errors import KrxAlphaError
+    from src.orchestration.regular_kis import disjoint_hot_symbol_sets
+
+    with pytest.raises(KrxAlphaError):
+        disjoint_hot_symbol_sets(("a", "a"), frozenset(), (1,))
+    with pytest.raises(KrxAlphaError):
+        disjoint_hot_symbol_sets(("a", "b"), frozenset(), (-1,))
