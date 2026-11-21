@@ -38,7 +38,7 @@ services:
       - KRX_ALPHA_REGULAR_KIS_PAIR_CAPACITY_PER_CONNECTION=41
       - KRX_ALPHA_REGULAR_KIS_ENABLED=true
       # 피드 전환 컨트롤러: secondary_feeds가 차면 활성 모드. 개장 공백(11-18 123 s, 11-20 79 s)은 감지-편입 지연(약 1분)보다 짧아
-      # 반응형 편입으로는 못 막으므로, DB 2세션을 거래대금 상위 25종목씩 장 시작부터 핫 구독해 호가·체결을 이중 수신한다(세션당 50쌍=검증 한도).
+      # 반응형 편입으로는 못 막으므로, DB 2세션이 KIS 중복 종목을 뺀 거래대금 상위 종목을 25종목씩 겹치지 않게 장 시작부터 핫 구독해 호가·체결을 이중 수신한다(세션당 50쌍=검증 한도).
       - KRX_ALPHA_FEED_CONTROL_WATCH_GROUPS=["ls:0","ls:1","kis-krx:0","kis-krx:1","kis-nxt:0","kis-nxt:1"]
       - KRX_ALPHA_FEED_CONTROL_SECONDARY_FEEDS=["db:0","db:1"]
       - KRX_ALPHA_FEED_CONTROL_HOT_SYMBOLS=[["db:0",25],["db:1",25]]
