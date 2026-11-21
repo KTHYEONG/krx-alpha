@@ -192,7 +192,7 @@ def test_settings_defaults_are_inert() -> None:
     assert settings.kis_dynamic_slots == ("5",)
 
 
-@pytest.mark.parametrize("slots", [("3", "3"), ("6",)])
+@pytest.mark.parametrize("slots", [("3", "3"), ("7",)])
 def test_settings_reject_invalid_kis_dynamic_slots(slots) -> None:
     with pytest.raises(ValidationError):
         IntradayAdmissionSettings(kis_dynamic_slots=slots)
