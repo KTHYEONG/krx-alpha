@@ -331,7 +331,7 @@ class RegularKisSettings(BaseSettings):
             raise ValueError(f"nxt_credential_slots must be duplicate-free: {self.nxt_credential_slots}")
         invalid = [slot for slot in self.nxt_credential_slots if slot not in _KIS_CREDENTIAL_SLOTS]
         if invalid:
-            raise ValueError(f"nxt_credential_slots entries must be within '1'..'5': {invalid}")
+            raise ValueError(f"nxt_credential_slots entries must be within '1'..'6': {invalid}")
         overlap = sorted(set(self.nxt_credential_slots) & set(self.credential_slots))
         if overlap:
             raise ValueError(f"nxt_credential_slots must not overlap credential_slots: {overlap}")
@@ -352,7 +352,7 @@ class RegularKisSettings(BaseSettings):
         return len(self.nxt_credential_slots) * (self.pair_capacity_per_connection // len(self.nxt_streams))
 
 
-_KIS_CREDENTIAL_SLOTS: frozenset[str] = frozenset({"1", "2", "3", "4", "5"})
+_KIS_CREDENTIAL_SLOTS: frozenset[str] = frozenset({"1", "2", "3", "4", "5", "6"})
 
 
 class IntradayAdmissionSettings(BaseSettings):
@@ -384,12 +384,12 @@ class IntradayAdmissionSettings(BaseSettings):
 
     @model_validator(mode="after")
     def check_kis_dynamic_slots(self) -> IntradayAdmissionSettings:
-        """Each dynamic KIS shard needs its own distinct credential slot 1..5."""
+        """Each dynamic KIS shard needs its own distinct credential slot 1..6."""
         if len(set(self.kis_dynamic_slots)) != len(self.kis_dynamic_slots):
             raise ValueError(f"kis_dynamic_slots must be unique: {self.kis_dynamic_slots}")
         invalid = [slot for slot in self.kis_dynamic_slots if slot not in _KIS_CREDENTIAL_SLOTS]
         if invalid:
-            raise ValueError(f"kis_dynamic_slots entries must be within '1'..'5': {invalid}")
+            raise ValueError(f"kis_dynamic_slots entries must be within '1'..'6': {invalid}")
         return self
 
 

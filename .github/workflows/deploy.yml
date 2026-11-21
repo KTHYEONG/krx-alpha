@@ -242,14 +242,14 @@ jobs:
             fi
             unexpected_key="\$(awk -F= '
               /^[[:space:]]*(#|$)/ { next }
-              \$1 !~ /^KIS_(DATA_SLOTS|HOST_DATA_SLOTS|DATA_[1-5]_(APP_KEY|APP_SECRET|HTS_ID))$/ { print \$1; exit 1 }
+              \$1 !~ /^KIS_(DATA_SLOTS|HOST_DATA_SLOTS|DATA_[1-6]_(APP_KEY|APP_SECRET|HTS_ID))$/ { print \$1; exit 1 }
             ' "\$file")"
             if [ -n "\$unexpected_key" ]; then
               echo "Shared KIS data env contains an unexpected key: \$unexpected_key" >&2
               return 1
             fi
             slots_value="\$(awk -F= '\$1 == "KIS_DATA_SLOTS" { print substr(\$0, index(\$0, "=") + 1); exit }' "\$file")"
-            expected_slots_line="KIS_DATA_SLOTS=1,2,3,4,5"
+            expected_slots_line="KIS_DATA_SLOTS=1,2,3,4,5,6"
             if [ "\$slots_value" != "\${expected_slots_line#*=}" ]; then
               echo "Shared KIS data env has unexpected KIS_DATA_SLOTS assignment" >&2
               return 1
@@ -265,7 +265,8 @@ jobs:
               KIS_DATA_2_APP_KEY KIS_DATA_2_APP_SECRET KIS_DATA_2_HTS_ID \
               KIS_DATA_3_APP_KEY KIS_DATA_3_APP_SECRET KIS_DATA_3_HTS_ID \
               KIS_DATA_4_APP_KEY KIS_DATA_4_APP_SECRET KIS_DATA_4_HTS_ID \
-              KIS_DATA_5_APP_KEY KIS_DATA_5_APP_SECRET KIS_DATA_5_HTS_ID; do
+              KIS_DATA_5_APP_KEY KIS_DATA_5_APP_SECRET KIS_DATA_5_HTS_ID \
+              KIS_DATA_6_APP_KEY KIS_DATA_6_APP_SECRET KIS_DATA_6_HTS_ID; do
               credential_value="\$(awk -F= -v key="\$required_key" '\$1 == key { print substr(\$0, index(\$0, "=") + 1); exit }' "\$file")"
               if [ -z "\$credential_value" ]; then
                 echo "Missing required shared KIS data key: \$required_key" >&2
@@ -273,7 +274,7 @@ jobs:
                 return 1
               fi
             done
-            echo "Shared KIS data env validated: 17 keys"
+            echo "Shared KIS data env validated: 20 keys"
           }
           vps_stage validate_env
           validate_shared_keypool "\$DATA_ENV_FILE"

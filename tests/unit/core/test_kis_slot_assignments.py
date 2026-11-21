@@ -157,7 +157,7 @@ def test_krx_rows_exact() -> None:
     assert krx["regular_nxt_ws"]["window_kst"] == ["08:58", "15:22"]
 
     assert krx["regular_kis_ws"]["channel"] == "ws"
-    assert krx["regular_kis_ws"]["slots"] == ["3", "4"]
+    assert krx["regular_kis_ws"]["slots"] == ["3", "4", "6"]
     assert krx["regular_kis_ws"]["window_kst"] == ["08:28", "15:32"]
 
     assert krx["regular_kis_dynamic_ws"]["channel"] == "ws"
@@ -195,7 +195,7 @@ def test_compose_regular_kis_slots_match_table(monkeypatch) -> None:
             monkeypatch.setenv(key, value)
     resolved = RegularKisSettings()
     assert resolved.enabled is True
-    assert resolved.credential_slots == ("3", "4")
+    assert resolved.credential_slots == ("3", "4", "6")
     assert resolved.nxt_credential_slots == ("1", "2")
 
 
@@ -251,4 +251,4 @@ def test_regular_slots_disjoint() -> None:
 def test_canonical_table_hash_pinned() -> None:
     raw = TABLE_PATH.read_bytes()
     assert raw.splitlines()[0] == b"# canonical: krx-alpha/deploy/shared/kis_slot_assignments.toml schema=1"
-    assert hashlib.sha256(raw).hexdigest() == "c33b94f0bd72dc713dfe423645de4e2912f977228d6263a6cabbbecc250214b2"
+    assert hashlib.sha256(raw).hexdigest() == "83190436dd6e3fa003a1d5f53916b2b33dc8299923bb95e8ad2791afde2dcfbc"

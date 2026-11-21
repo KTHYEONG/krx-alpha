@@ -1499,7 +1499,7 @@ def test_regular_kis_nxt_slots_capacity_and_derived_count() -> None:
 
 @pytest.mark.parametrize(
     "nxt_slots",
-    [("2", "2"), ("6",), ("1",), ("0",)],
+    [("2", "2"), ("7",), ("1",), ("0",)],
 )
 def test_regular_kis_nxt_slots_reject_duplicates_out_of_range_and_overlap(nxt_slots) -> None:
     from src.core.config import RegularKisSettings
@@ -1576,3 +1576,14 @@ def test_nxt_window_must_end_strictly_before_nxt_prearm_moment() -> None:
     assert _resolve(1139.0).regular_kis.close_grace_s == 1139.0
     with pytest.raises(ValueError, match="NXT regular window must end strictly before"):
         _resolve(1140.0)
+
+
+@pytest.mark.parametrize(("slots", "ok"), [(("6",), True), (("7",), False), (("5", "5"), False)])
+def test_intraday_kis_dynamic_slots_accept_pool_1_to_6_only(slots, ok) -> None:
+    from src.core.config import IntradayAdmissionSettings
+
+    if ok:
+        assert IntradayAdmissionSettings(kis_dynamic_slots=slots).kis_dynamic_slots == slots
+    else:
+        with pytest.raises(ValueError, match="kis_dynamic_slots"):
+            IntradayAdmissionSettings(kis_dynamic_slots=slots)

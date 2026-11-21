@@ -448,11 +448,11 @@ def test_keypool_slot_keys_match_ci_validation_exactly_once() -> None:
     for key in ACCEPTED_KEYS:
         assert body.count(key) == 1
 
-    slot_pattern = re.compile(r"KIS_DATA_[1-5]_(APP_KEY|APP_SECRET|HTS_ID)")
+    slot_pattern = re.compile(r"KIS_DATA_[1-6]_(APP_KEY|APP_SECRET|HTS_ID)")
     assert all(slot_pattern.fullmatch(key) for key in ACCEPTED_KEYS)
     assert f'expected_slots_line="{CANONICAL_SLOTS_LINE}"' in body
     assert f'expected_host_slots_line="{CANONICAL_HOST_SLOTS_LINE}"' in body
-    assert len(ACCEPTED_KEYS) + 2 == 17
+    assert len(ACCEPTED_KEYS) + 2 == 20
 
     echo_lines = [line for line in body.splitlines() if "echo" in line]
     assert not any("credential_value" in line for line in echo_lines)

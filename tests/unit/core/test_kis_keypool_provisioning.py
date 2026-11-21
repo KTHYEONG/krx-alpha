@@ -3,7 +3,7 @@ def test_build_shared_fragment_orders_canonical_keys_and_excludes_accounts(tmp_p
 
     source = tmp_path / ".quant.env"
     lines = ["export KIS_DATA_1_ACCOUNT_NO=account", "export KIS_TRADE_APP_KEY=trade"]
-    for slot in range(1, 6):
+    for slot in range(1, 7):
         lines.extend(
             [
                 f"export KIS_DATA_{slot}_APP_KEY=key-{slot}",
@@ -11,20 +11,23 @@ def test_build_shared_fragment_orders_canonical_keys_and_excludes_accounts(tmp_p
                 f"export KIS_DATA_{slot}_HTS_ID=hts-{slot}",
             ]
         )
+    lines.extend(["export KIS_DATA_7_APP_KEY=key-7", "export KIS_DATA_7_APP_SECRET=secret-7", "export KIS_DATA_7_HTS_ID=hts-7"])
     source.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     fragment = build_shared_fragment(source)
 
     expected_names = ["KIS_DATA_SLOTS", "KIS_HOST_DATA_SLOTS"]
-    for slot in range(1, 6):
+    for slot in range(1, 7):
         expected_names.extend(
             [f"KIS_DATA_{slot}_APP_KEY", f"KIS_DATA_{slot}_APP_SECRET", f"KIS_DATA_{slot}_HTS_ID"]
         )
     assert [line.partition("=")[0] for line in fragment.splitlines()] == expected_names
-    assert fragment.startswith("KIS_DATA_SLOTS=1,2,3,4,5\nKIS_HOST_DATA_SLOTS=1,2,3,4\n")
+    assert fragment.startswith("KIS_DATA_SLOTS=1,2,3,4,5,6\nKIS_HOST_DATA_SLOTS=1,2,3,4\n")
     assert "ACCOUNT_NO" not in fragment
     assert "KIS_TRADE_" not in fragment
     assert "secret-1" in fragment
+    assert "KIS_DATA_7" not in fragment
+    assert "secret-7" not in fragment
 
 def test_build_shared_fragment_rejects_missing_credential(tmp_path) -> None:
     import pytest
@@ -34,7 +37,7 @@ def test_build_shared_fragment_rejects_missing_credential(tmp_path) -> None:
 
     source = tmp_path / ".quant.env"
     lines: list[str] = []
-    for slot in range(1, 6):
+    for slot in range(1, 7):
         lines.extend([f"KIS_DATA_{slot}_APP_KEY=key-{slot}", f"KIS_DATA_{slot}_HTS_ID=hts-{slot}"])
         if slot != 1:
             lines.append(f"KIS_DATA_{slot}_APP_SECRET=secret-{slot}")
@@ -51,7 +54,7 @@ def test_build_shared_fragment_rejects_duplicate_credential(tmp_path) -> None:
 
     source = tmp_path / ".quant.env"
     lines: list[str] = []
-    for slot in range(1, 6):
+    for slot in range(1, 7):
         lines.extend(
             [
                 f"KIS_DATA_{slot}_APP_KEY=key-{slot}",

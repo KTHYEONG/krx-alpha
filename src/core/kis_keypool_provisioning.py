@@ -25,9 +25,9 @@ _VAR_REF_RE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 logger = logging.getLogger(__name__)
 
 REMOTE_ENV_PATH = "/home/ubuntu/quant-secrets/kis-data.env"
-CANONICAL_SLOTS_LINE = "KIS_DATA_SLOTS=1,2,3,4,5"
+CANONICAL_SLOTS_LINE = "KIS_DATA_SLOTS=1,2,3,4,5,6"
 CANONICAL_HOST_SLOTS_LINE = "KIS_HOST_DATA_SLOTS=1,2,3,4"
-DATA_SLOTS = (1, 2, 3, 4, 5)
+DATA_SLOTS = (1, 2, 3, 4, 5, 6)
 DATA_FIELDS = ("APP_KEY", "APP_SECRET", "HTS_ID")
 ACCEPTED_KEYS: tuple[str, ...] = tuple(
     f"KIS_DATA_{slot}_{field}" for slot in DATA_SLOTS for field in DATA_FIELDS
@@ -100,7 +100,7 @@ def parse_workstation_assignments(source_path: Path, accepted_keys: frozenset[st
 def build_shared_fragment(source_path: Path) -> str:
     """Build the canonical 17-line shared fragment from a workstation source file.
 
-    Only ``KIS_DATA_<1..5>_{APP_KEY,APP_SECRET,HTS_ID}`` assignments are
+    Only ``KIS_DATA_<1..6>_{APP_KEY,APP_SECRET,HTS_ID}`` assignments are
     accepted, with or without an ``export `` prefix. Comments, blank lines,
     selectors, account fields, trade keys, primary keys, and unrelated
     settings are ignored. Selectors copied from a local-host allocation are
