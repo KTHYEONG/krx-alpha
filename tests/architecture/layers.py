@@ -44,6 +44,7 @@ LAYER_RANK: dict[str, int] = {
     "src/cli/collect_aftermarket.py": 7,
     "src/cli/universe_plan.py": 7,
     "src/cli/order.py": 7,
+    "src/cli/l1_reencode.py": 7,
 }
 LAYER_RANK["src/marketdata/toss_calendar.py"] = 1
 LAYER_RANK["src/marketdata/toss_token_store.py"] = 1
@@ -51,6 +52,7 @@ LAYER_RANK["src/marketdata/host_token_store.py"] = 1
 LAYER_RANK["src/realtime/kis_sharding.py"] = 1
 LAYER_RANK["src/realtime/kis_lease.py"] = 1
 LAYER_RANK["src/storage/normalize_worker.py"] = 3
+LAYER_RANK["src/storage/l1_reencode.py"] = 3
 LAYER_RANK["src/core/observability.py"] = 0
 LAYER_RANK["src/core/kis_keypool_provisioning.py"] = 0
 LAYER_RANK["src/core/runtime_env_provisioning.py"] = 0

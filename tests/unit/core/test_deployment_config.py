@@ -1039,3 +1039,15 @@ def test_disk_watch_units_and_wiring() -> None:
     assert "deploy/host/vps_disk_watch.py" in workflow
     assert "vps-disk-watch.timer" in workflow
     assert "enable --now vps-disk-watch.timer" in workflow
+
+
+def test_l1_reencode_timer_installed() -> None:
+    from pathlib import Path
+
+    workflow = Path(".github/workflows/deploy.yml").read_text(encoding="utf-8")
+    assert "deploy/host/krx-l1-reencode.service deploy/host/krx-l1-reencode.timer" in workflow
+    assert '"\\$STAGING_DIR/krx-l1-reencode.service"' in workflow
+    assert '"\\$STAGING_DIR/krx-l1-reencode.timer"' in workflow
+    assert "systemctl --user enable --now krx-l1-reencode.timer" in workflow
+    timer = Path("deploy/host/krx-l1-reencode.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=Sat *-*-* 10:00:00 Asia/Seoul" in timer

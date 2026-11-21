@@ -33,6 +33,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
         collect_stream_ls_nxt,
         collect_stream_toss,
         gapfill_ticks,
+        l1_reencode,
         order,
         probe_db_stream,
         repair_ticks,
@@ -63,6 +64,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
     collect_snapshots.add_parser(subparsers)
     bars_refresh.add_parser(subparsers)
     toss_program_trades_backfill.add_parser(subparsers)
+    l1_reencode.add_parser(subparsers)
     order.add_parser(subparsers)
 
 

@@ -1,0 +1,13 @@
+[Unit]
+Description=KRX L1 backlog re-encode (weekend lane)
+OnFailure=kca-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker exec krx-collector nice -n 10 ionice -c3 /app/.venv/bin/python -m src.cli.main l1-reencode --budget-minutes 420
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=8h
+
+[Install]
+WantedBy=default.target
