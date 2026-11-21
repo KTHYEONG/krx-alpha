@@ -126,6 +126,8 @@ class CollectorSettings(BaseSettings):
     # 61거래행 + 최장 KRX 휴장(약 10일)을 여유 있게 cover: 150역일은 약 100거래일.
     selection_lookback_calendar_days: int = Field(default=150, ge=100)
     journal_retain_days: int = 3
+    l0_recompress_level: int = Field(default=9, ge=1, le=19)
+    l0_recompress_seal_grace_s: float = Field(default=600.0, gt=0)
     archive_retain_days: int = 30
     min_free_disk_gb: float = 3.0
     orchestration_retry_s: float = 300.0

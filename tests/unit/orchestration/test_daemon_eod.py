@@ -807,6 +807,66 @@ def test_eod_remote_l0_purge_runs_after_pruning_and_cannot_fail_eod(tmp_path, mo
     assert "deleted_partitions=0 uploaded=1 purged=0 status=OK" in caplog.text
 
 
+@pytest.mark.parametrize("behavior", ["raises", "partial_failures"])
+def test_eod_l0_recompress_runs_before_normalize_and_failure_keeps_maintenance(
+    tmp_path, monkeypatch, caplog, behavior
+) -> None:
+    import datetime as dt
+    import logging
+    import pathlib
+    from zoneinfo import ZoneInfo
+
+    from src.core.config import CollectorSettings
+    from src.orchestration import daemon as daemon_mod
+    from src.storage.l0_recompress import L0RecompressReport
+
+    monkeypatch.chdir(tmp_path)
+    settings = CollectorSettings(
+        data_root=pathlib.Path(tmp_path) / "data",
+        host_backup_status_path=_host_status_path(tmp_path),
+    )
+    order: list[str] = []
+
+    def _recompress(journal_root, **kw):
+        order.append("recompress")
+        if behavior == "raises":
+            raise RuntimeError("recompress boom")
+        return L0RecompressReport(
+            files=2, recompressed=0, skipped_not_smaller=0, skipped_unsealed=0, failed=2,
+            bytes_before=0, bytes_after=0,
+        )
+
+    def _maintenance(journal_root, **kw):
+        order.append("maintenance")
+        return 0
+
+    class _Offload:
+        verified_remote_l1 = frozenset()
+        l1 = type("S", (), {"uploaded": 0})()
+        purged = 0
+
+    monkeypatch.setattr(daemon_mod, "recompress_sealed_day", _recompress)
+    monkeypatch.setattr(daemon_mod, "run_eod_maintenance", _maintenance)
+    monkeypatch.setattr(daemon_mod, "run_eod_offload", lambda *a, **kw: _Offload())
+    monkeypatch.setattr(daemon_mod, "run_eod_remote_l0_purge", lambda *a, **kw: None)
+    monkeypatch.setattr(daemon_mod, "check_session_reconciliation", lambda **kw: True)
+    monkeypatch.setattr(daemon_mod, "check_backup_freshness", lambda **kw: [])
+    eod_time = dt.datetime(2026, 9, 14, 15, 45, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    _write_eod_host_status(settings, eod_time, 20)
+    with caplog.at_level(logging.INFO):
+        daemon_mod.run_collector_daemon(
+            settings=settings, sleep_fn=lambda s: None, max_cycles=1, now_fn=lambda: eod_time
+        )
+
+    assert order[0] == "recompress"
+    assert "maintenance" in order
+    assert "stage=eod_maintenance status=FAIL" not in caplog.text
+    if behavior == "raises":
+        assert "step=housekeeping_l0_recompress status=FAIL" in caplog.text
+    else:
+        assert "stage=l0_recompress status=PARTIAL day=2026-09-14 failed=2" in caplog.text
+
+
 def test_daemon_holiday_eod_runs_housekeeping_without_alerts(tmp_path, monkeypatch, caplog) -> None:
     import datetime as dt
     import logging
@@ -2482,6 +2542,7 @@ def test_nonbusiness_audit_derivation_skips_all_io(tmp_path, monkeypatch, status
 _BUSINESS_EOD_STEPS = (
     "session_audit_ls",
     "session_audit_kis",
+    "housekeeping_l0_recompress",
     "housekeeping_normalize",
     "housekeeping_offload",
     "housekeeping_verified_maintenance",
@@ -2492,6 +2553,7 @@ _BUSINESS_EOD_STEPS = (
     "repair_summary",
 )
 _HOLIDAY_EOD_STEPS = (
+    "housekeeping_l0_recompress",
     "housekeeping_normalize",
     "housekeeping_offload",
     "housekeeping_verified_maintenance",
@@ -2622,7 +2684,7 @@ def test_run_collector_daemon_eod_step_failure_logs_fail_and_reraises(tmp_path, 
         )
 
     lines = _eod_step_lines(caplog)
-    assert lines[-1] == ("reconcile_regular", "FAIL", "7.0")
+    assert lines[-1] == ("reconcile_regular", "FAIL", "8.0")
 
 
 def test_eod_step_start_logged_before_body_and_fail_keeps_start(monkeypatch, caplog) -> None:

@@ -155,6 +155,7 @@ from src.realtime.streamer import aftermarket_open_time
 from src.storage.feed_quality import digest_lines as feed_digest_lines
 from src.storage.feed_quality import feed_health_archive_dir
 from src.storage.l0_audit import AuditStatus, SessionAudit, derive_session_audit, write_session_audit
+from src.storage.l0_recompress import recompress_sealed_day
 from src.storage.l0_repair import RepairState, derive_day_repair, l0_hold_reason
 from src.storage.layout import L0_VENDOR_DB, L0_VENDOR_KIWOOM, L0_VENDOR_TOSS, l0_day_journal_glob
 from src.storage.remote import RemoteArchiveError
@@ -658,6 +659,7 @@ def _repair_overdue(
 
 _EOD_STEP_SESSION_AUDIT_LS: Final[str] = "session_audit_ls"
 _EOD_STEP_SESSION_AUDIT_KIS: Final[str] = "session_audit_kis"
+_EOD_STEP_HOUSEKEEPING_L0_RECOMPRESS: Final[str] = "housekeeping_l0_recompress"
 _EOD_STEP_HOUSEKEEPING_NORMALIZE: Final[str] = "housekeeping_normalize"
 _EOD_STEP_HOUSEKEEPING_OFFLOAD: Final[str] = "housekeeping_offload"
 _EOD_STEP_HOUSEKEEPING_VERIFIED_MAINTENANCE: Final[str] = "housekeeping_verified_maintenance"
@@ -726,6 +728,23 @@ def _run_eod_housekeeping(
         maintenance_ok = False
     try:
         if disk_ok:
+            try:
+                with _eod_step(_EOD_STEP_HOUSEKEEPING_L0_RECOMPRESS):
+                    recompressed = recompress_sealed_day(
+                        paths.journal_root,
+                        day=ref_day,
+                        now_ns=time.time_ns(),
+                        level=cfg.l0_recompress_level,
+                        seal_grace_s=cfg.l0_recompress_seal_grace_s,
+                    )
+                if recompressed.failed > 0:
+                    logger.warning(
+                        "[DATA] stage=l0_recompress status=PARTIAL day=%s failed=%d",
+                        ref_day.isoformat(),
+                        recompressed.failed,
+                    )
+            except Exception as exc:  # noqa: BLE001 - recompression is an optional space saver; originals stay intact
+                logger.warning("[DATA] stage=l0_recompress status=FAIL day=%s error=%s", ref_day.isoformat(), exc)
             _kw: dict[str, object] = {"hold": hold} if hold is not None else {}
             with _eod_step(_EOD_STEP_HOUSEKEEPING_NORMALIZE):
                 deleted = run_eod_maintenance(
