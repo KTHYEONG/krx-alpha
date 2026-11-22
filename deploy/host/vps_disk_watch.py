@@ -54,6 +54,8 @@ TRACKED_PATHS: Final[tuple[tuple[str, str], ...]] = (
     ("ops_scratch", "ops-scratch"),
 )
 SYSTEM_PATHS: Final[tuple[tuple[str, Path], ...]] = (("journal", Path("/var/log/journal")),)
+# Operator roots that exist only while a runbook needs them; absent means 0 bytes, not a failed measurement.
+TRANSIENT_PARTS: Final[frozenset[str]] = frozenset({"repair_preserve", "ops_scratch"})
 # Non-nested roots; their sum with ``other`` covers used bytes without double counting.
 TOP_LEVEL_PARTS: Final[frozenset[str]] = frozenset(
     {
@@ -332,6 +334,9 @@ def measure_host(
     degraded = False
     roots = [(name, home / rel) for name, rel in TRACKED_PATHS] + [(name, path) for name, path in system_paths]
     for name, path in roots:
+        if name in TRANSIENT_PARTS and not path.exists():
+            parts[name] = 0
+            continue
         size, ok = _du_bytes(path)
         parts[name] = size
         degraded = degraded or not ok

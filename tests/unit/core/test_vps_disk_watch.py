@@ -193,6 +193,19 @@ def test_missing_tracked_path_degraded_not_fatal(tmp_path: Path, monkeypatch: py
     assert measurement.sample.total_b > 0
 
 
+def test_absent_transient_root_is_zero_not_degraded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, rel in watch.TRACKED_PATHS:
+        if name not in watch.TRANSIENT_PARTS:
+            (tmp_path / rel).mkdir(parents=True, exist_ok=True)
+    _fake_docker(monkeypatch, stdout=_DOCKER_DF_OK)
+
+    measurement = watch.measure_host(tmp_path, day=TODAY.isoformat(), system_paths=())
+
+    assert measurement.degraded is False
+    assert all(measurement.sample.parts[name] == 0 for name in watch.TRANSIENT_PARTS)
+    assert watch.TRANSIENT_PARTS <= watch.TOP_LEVEL_PARTS
+
+
 def _stub_measure(used_pct: float, *, degraded: bool = False, oldest: dict[str, str] | None = None):
     def _measure(home: Path, *, day: str):
         total = 100 * GIB
