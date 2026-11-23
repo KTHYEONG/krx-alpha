@@ -29,8 +29,8 @@ def _krx_rows() -> dict[str, dict[str, object]]:
     for row in _load_rows():
         if row["project"] != "krx":
             continue
-        if row["channel"] == "rest" and row.get("purpose") == "minute_history_rest":
-            name = "minute_history_rest"
+        if row["channel"] == "rest" and row.get("purpose") in ("minute_history_rest", "market_sweep_rest"):
+            name = str(row["purpose"])
             group = groups.setdefault(name, {"channel": row["channel"], "slots": [], "window_kst": row["windows"]})
             assert row["windows"] == group["window_kst"]
             group["slots"].append(str(row["slot"]))
@@ -133,6 +133,7 @@ def test_krx_rows_exact() -> None:
     assert set(krx) == {
         "snapshot_rest",
         "minute_history_rest",
+        "market_sweep_rest",
         "premarket_ws",
         "regular_nxt_ws",
         "regular_kis_ws",
@@ -147,6 +148,10 @@ def test_krx_rows_exact() -> None:
     assert krx["minute_history_rest"]["channel"] == "rest"
     assert krx["minute_history_rest"]["slots"] == ["5"]
     assert krx["minute_history_rest"]["window_kst"] == ["23:30-24:00", "00:00-05:30"]
+
+    assert krx["market_sweep_rest"]["channel"] == "rest"
+    assert krx["market_sweep_rest"]["slots"] == ["6"]
+    assert krx["market_sweep_rest"]["window_kst"] == ["08:40-09:00", "09:35-15:39"]
 
     assert krx["premarket_ws"]["channel"] == "ws"
     assert krx["premarket_ws"]["slots"] == ["5"]
@@ -172,6 +177,7 @@ def test_krx_rows_exact() -> None:
 def test_compose_snapshot_slot_matches_table() -> None:
     env = _compose_env()
     assert [env["KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT"]] == _krx_rows()["snapshot_rest"]["slots"]
+    assert [env["KRX_ALPHA_MARKET_SWEEP_KIS_DATA_SLOT"]] == _krx_rows()["market_sweep_rest"]["slots"]
 
 
 def test_compose_premarket_slot_matches_table() -> None:
@@ -251,4 +257,4 @@ def test_regular_slots_disjoint() -> None:
 def test_canonical_table_hash_pinned() -> None:
     raw = TABLE_PATH.read_bytes()
     assert raw.splitlines()[0] == b"# canonical: krx-alpha/deploy/shared/kis_slot_assignments.toml schema=1"
-    assert hashlib.sha256(raw).hexdigest() == "83190436dd6e3fa003a1d5f53916b2b33dc8299923bb95e8ad2791afde2dcfbc"
+    assert hashlib.sha256(raw).hexdigest() == "26f0060e7889a66c3f936c1fdbfa9a5cb5689269bd80324512177ce96d7b2be5"
