@@ -15,7 +15,7 @@ from src.core.errors import KrxAlphaError, MissingCredentialsError, SlotBudgetEx
 from src.core.observability import EVENT
 from src.core.session_anchors import resolve_session_anchors
 from src.marketdata.toss_calendar import load_trading_day_cache, trading_day_from_cache
-from src.orchestration.regular_kis import ls_shard_blocks, regular_kis_ls_plan_inputs
+from src.orchestration.regular_kis import ls_shard_blocks, prior_ls_frame_loads, regular_kis_ls_plan_inputs
 from src.realtime.adapters.kis import KisRealtimeAdapter
 from src.realtime.contracts import MarketSession, MarketVenue
 from src.realtime.feed_health import FeedHealthConfig, build_feed_health_tracker, feed_id_for
@@ -158,7 +158,10 @@ async def _run_stream(args: argparse.Namespace) -> int:
     ls_covered: frozenset[str] | None = None
     ls_blocks: tuple[tuple[str, ...], ...] | None = None
     if venue is MarketVenue.KRX:
-        blocks = ls_shard_blocks(pathlib.Path(str(args.candidates_path)), settings)
+        prior = prior_ls_frame_loads(paths, session_date)
+        blocks = ls_shard_blocks(
+            pathlib.Path(str(args.candidates_path)), settings, loads=prior[1] if prior is not None else None
+        )
         if blocks:
             ls_covered, ls_blocks = regular_kis_ls_plan_inputs(blocks)
     plan = plan_regular_kis_shards(

@@ -136,17 +136,21 @@ def test_two_sessions_spawn_shard_child_with_plan_symbols(tmp_path, monkeypatch)
 
     primary = runner.children.regular
     assert primary is not None
-    assert primary.cmd[primary.cmd.index("--symbols") + 1] == ",".join(symbols[:100])
+    plan = runner.state.ls_shard_plan
+    assert primary.cmd[primary.cmd.index("--symbols") + 1] == ",".join(plan[0].symbols)
     shard_one = runner.children.get(daemon_mod.StreamChildKey.REGULAR_LS_B)
     assert shard_one is not None
     assert shard_one.cmd[shard_one.cmd.index("--ls-shard-index") + 1] == "1"
-    assert shard_one.cmd[shard_one.cmd.index("--symbols") + 1] == ",".join(symbols[100:150])
+    assert shard_one.cmd[shard_one.cmd.index("--symbols") + 1] == ",".join(plan[1].symbols)
+    assert sorted(plan[0].symbols + plan[1].symbols) == sorted(symbols)
     assert str(paths.ls_manifest_path(DAY, 1)) in shard_one.cmd
 
     rows = read_membership(paths.membership_path(DAY))
     assert sum(row.tier == "A" and row.source == "static" for row in rows) == 100
     assert sum(row.tier == "B" and row.source == "static" for row in rows) == 50
-    assert all(row.ls_shard == 1 for row in rows if row.tier == "B")
+    # Tier A is the top 100 by priority even though load balancing spreads them over both shards.
+    assert {row.symbol for row in rows if row.tier == "A"} == set(symbols[:100])
+    assert {row.ls_shard for row in rows if row.tier == "A"} == {0, 1}
     assert all(row.decided_at_ns == WALL_NS for row in rows)
     by_symbol = {row.symbol: row for row in rows}
     assert by_symbol[symbols[0]].trade_value_krw == 100_000_000
@@ -337,7 +341,7 @@ def test_corrupt_membership_ledger_logs_fail_and_keeps_shard_plan(tmp_path, monk
 
     assert "stage=membership status=FAIL" in caplog.text
     assert membership.read_text(encoding="utf-8") == "not-json\n"
-    assert [len(shard.symbols) for shard in runner.state.ls_shard_plan] == [100, 50]
+    assert [len(shard.symbols) for shard in runner.state.ls_shard_plan] == [75, 75]
     assert runner.children.regular is not None
 
 
@@ -451,5 +455,5 @@ def test_unexpected_membership_failure_never_blocks_the_shard_plan(tmp_path, mon
         runner._start_ready_children(DAY)
 
     assert "stage=membership status=FAIL error_type=ValueError" in caplog.text
-    assert [len(shard.symbols) for shard in runner.state.ls_shard_plan] == [100, 50]
+    assert [len(shard.symbols) for shard in runner.state.ls_shard_plan] == [75, 75]
     assert runner.children.regular is not None

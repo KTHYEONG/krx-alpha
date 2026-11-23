@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import pathlib
 import sys
 from zoneinfo import ZoneInfo
@@ -14,9 +15,11 @@ from src.core.session_anchors import SessionAnchors
 from src.realtime.contracts import MarketVenue
 from src.realtime.kis_sharding import AftermarketShard
 from src.realtime.ls_sharding import plan_ls_shards
+from src.realtime.manifest import SessionManifest
 from src.universe.ipc import read_candidates
 
 _KST = ZoneInfo("Asia/Seoul")
+_logger = logging.getLogger(__name__)
 
 __all__ = [
     "candidate_symbols_and_tiers",
@@ -63,8 +66,41 @@ def disjoint_hot_symbol_sets(
     return tuple(sets)
 
 
-def ls_shard_blocks(candidates_path: pathlib.Path, collector: CollectorSettings) -> tuple[tuple[str, ...], ...]:
-    """LS shard symbol blocks as the daemon plans them; () for non-LS vendors or when planning fails."""
+# Calendar days searched back for the last LS session with frame counts (covers weekends and a holiday run).
+LS_LOAD_LOOKBACK_DAYS = 7
+
+
+def prior_ls_frame_loads(paths: DataPaths, today: dt.date) -> tuple[dt.date, dict[str, int]] | None:
+    """(day, frames per symbol over all LS KRX shards and streams) for the latest day before `today` with counts.
+
+    Point-in-time: only days strictly before `today`, so the daemon, a resumed daemon and the KIS child all read
+    the same closed manifests. None when no such day exists or a manifest is unreadable (callers fall back).
+    """
+    for back in range(1, LS_LOAD_LOOKBACK_DAYS + 1):
+        day = today - dt.timedelta(days=back)
+        total: dict[str, int] | None = None
+        try:
+            for path in paths.ls_manifest_paths(day):
+                if not path.is_file():
+                    continue
+                counts = SessionManifest.load(path).frame_counts
+                if counts is None:
+                    continue
+                total = {} if total is None else total
+                for symbol, per_stream in counts.items():
+                    total[symbol] = total.get(symbol, 0) + sum(per_stream.values())
+        except (OSError, ValueError, KeyError, TypeError, KrxAlphaError) as exc:
+            _logger.warning("[DATA] stage=ls_shard_load status=SKIP reason=%s day=%s", type(exc).__name__, day.isoformat())
+            return None
+        if total:
+            return day, total
+    return None
+
+
+def ls_shard_blocks(
+    candidates_path: pathlib.Path, collector: CollectorSettings, *, loads: dict[str, int] | None = None
+) -> tuple[tuple[str, ...], ...]:
+    """LS shard symbol blocks as the daemon plans them (same `loads`); () for non-LS vendors or when planning fails."""
     if collector.vendor != "ls":
         return ()
     try:
@@ -77,6 +113,7 @@ def ls_shard_blocks(candidates_path: pathlib.Path, collector: CollectorSettings)
             pairs_per_session=collector.ls_max_subscriptions_per_session,
             dynamic_reserve_symbols=collector.ls_dynamic_reserve_symbols,
             max_sessions=collector.ls_max_sessions,
+            loads=loads,
         )
     except (KrxAlphaError, OSError, ValueError):
         return ()

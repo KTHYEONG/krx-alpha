@@ -111,3 +111,52 @@ def test_disjoint_sets_reject_duplicates_or_negative() -> None:
         disjoint_hot_symbol_sets(("a", "a"), frozenset(), (1,))
     with pytest.raises(KrxAlphaError):
         disjoint_hot_symbol_sets(("a", "b"), frozenset(), (-1,))
+
+
+def test_prior_ls_frame_loads_reads_latest_closed_day_before_today(tmp_path) -> None:
+    import datetime as dt
+
+    from src.core.paths import DataPaths
+    from src.orchestration.regular_kis import prior_ls_frame_loads
+    from src.realtime.manifest import SessionManifest
+
+    paths = DataPaths(tmp_path)
+    today = dt.date(2026, 11, 24)
+
+    def _write(day: dt.date, shard: int, counts: dict[str, dict[str, int]] | None) -> None:
+        target = paths.manifest_path(day) if shard == 0 else paths.ls_manifest_path(day, shard)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        SessionManifest(session_date=day, clock_offset_ns=0, started_at_ns=0, frame_counts=counts).save(target)
+
+    assert prior_ls_frame_loads(paths, today) is None
+    _write(dt.date(2026, 11, 20), 0, {"000001": {"H0STCNT0": 1, "H0STASP0": 2}})
+    _write(dt.date(2026, 11, 22), 0, None)  # counting off: no load evidence that day
+    _write(dt.date(2026, 11, 23), 0, {"000001": {"H0STCNT0": 5, "H0STASP0": 7}, "000002": {"H0STCNT0": 1}})
+    _write(dt.date(2026, 11, 23), 1, {"000003": {"H0STCNT0": 4}})
+    # Today's (still open) manifest must never feed today's plan: point-in-time.
+    _write(today, 0, {"000001": {"H0STCNT0": 999}})
+    assert prior_ls_frame_loads(paths, today) == (dt.date(2026, 11, 23), {"000001": 12, "000002": 1, "000003": 4})
+    # A day whose manifests track no counts is skipped; the walk back finds the earlier day.
+    assert prior_ls_frame_loads(paths, dt.date(2026, 11, 23)) == (dt.date(2026, 11, 20), {"000001": 3})
+    paths.manifest_path(dt.date(2026, 11, 23)).write_text("not-json", encoding="utf-8")
+    assert prior_ls_frame_loads(paths, today) is None
+    # Outside the lookback window nothing is used.
+    assert prior_ls_frame_loads(paths, dt.date(2026, 12, 5)) is None
+
+
+def test_child_and_daemon_blocks_agree_with_prior_loads(tmp_path) -> None:
+    import json
+
+    from src.core.config import CollectorSettings
+    from src.orchestration.regular_kis import ls_shard_blocks
+
+    symbols = [f"{i:06d}" for i in range(1, 201)]
+    pool = tmp_path / "pool.json"
+    pool.write_text(json.dumps({"candidates": [{"symbol": s, "rank": i} for i, s in enumerate(symbols)]}), encoding="utf-8")
+    collector = CollectorSettings(vendor="ls", ls_active_sessions=2)
+    # One dominant name (as on a theme day) moves its peers; linear loads would coincide with the snake fallback.
+    loads = {s: (100_000 if i == 5 else 1000 - 4 * i) for i, s in enumerate(symbols)}
+    blocks = ls_shard_blocks(pool, collector, loads=loads)
+    assert blocks == ls_shard_blocks(pool, collector, loads=dict(loads))
+    assert blocks != ls_shard_blocks(pool, collector)
+    assert sorted(blocks[0] + blocks[1]) == symbols

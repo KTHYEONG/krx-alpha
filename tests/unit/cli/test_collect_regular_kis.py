@@ -410,7 +410,8 @@ def test_child_recomputes_daemon_plan_with_ls_blocks(monkeypatch, tmp_path) -> N
         collect_regular_kis, "bootstrap_session", lambda cfg: (_ for _ in ()).throw(AssertionError("no bootstrap"))
     )
     blocks = ls_shard_blocks(tmp_path / "pool.json", runtime.collector)
-    assert blocks == (symbols[:20], symbols[20:40])
+    snake = tuple(s for i, s in enumerate(symbols[:40]) if i % 4 in (0, 3))
+    assert blocks == (snake, tuple(s for s in symbols[:40] if s not in snake))
     covered, ls_blocks = regular_kis_ls_plan_inputs(blocks)
     daemon_plan = plan_regular_kis_shards(
         symbols=symbols, credentials=_creds(), credential_slots=("1", "2"),

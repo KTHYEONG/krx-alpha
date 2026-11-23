@@ -120,6 +120,7 @@ from src.orchestration.premarket import (
 from src.orchestration.regular_kis import (
     candidate_symbols_and_tiers,
     disjoint_hot_symbol_sets,
+    prior_ls_frame_loads,
     regular_kis_collection_due,
     regular_kis_dynamic_stream_cmd,
     regular_kis_ls_plan_inputs,
@@ -149,7 +150,7 @@ from src.realtime.kis_sharding import (
     plan_regular_kis_shards,
 )
 from src.realtime.ls_limits import prioritize_ls_pairs
-from src.realtime.ls_sharding import LsShard, plan_ls_shards
+from src.realtime.ls_sharding import LsShard, ls_priority_order, plan_ls_shards
 from src.realtime.manifest import SessionManifest
 from src.realtime.streamer import aftermarket_open_time
 from src.storage.feed_quality import digest_lines as feed_digest_lines
@@ -4154,6 +4155,8 @@ class DaemonRunner:
         st.ls_shard_plan_day = today
         st.ls_shard_plan = ()
         collector = self._runtime.collector
+        prior = prior_ls_frame_loads(self._paths, today)
+        loads = prior[1] if prior is not None else None
         try:
             symbols, tiers = candidate_symbols_and_tiers(self._paths.candidates)
             shards, overflow = plan_ls_shards(
@@ -4164,30 +4167,45 @@ class DaemonRunner:
                 pairs_per_session=collector.ls_max_subscriptions_per_session,
                 dynamic_reserve_symbols=collector.ls_dynamic_reserve_symbols,
                 max_sessions=collector.ls_max_sessions,
+                loads=loads,
             )
+            priority = ls_priority_order(symbols, tiers=tiers, streams=collector.streams)
         except (KrxAlphaError, OSError, ValueError) as exc:
             logger.error("[DATA] stage=ls_shard_plan status=SKIP reason=%s date=%s", str(exc), today.isoformat())
             return ()
         st.ls_shard_plan = shards
+        static_count = sum(len(shard.symbols) for shard in shards)
+        # Tier A stays "the top base-capacity names" now that shard 0 no longer holds exactly those.
+        tier_a = frozenset(priority[: min(static_count, collector.ls_max_subscriptions_per_session // len(collector.streams))])
+        logger.info(
+            "[DATA] stage=ls_shard_plan status=OK date=%s load_day=%s shard_loads=%s shard_symbols=%s",
+            today.isoformat(),
+            prior[0].isoformat() if prior is not None else "none",
+            ",".join(str(sum(loads.get(s, 0) for s in shard.symbols)) for shard in shards) if loads else "na",
+            ",".join(str(len(shard.symbols)) for shard in shards),
+            extra=EVENT,
+        )
         logger.info(
             "[DATA] stage=collection_tiers date=%s tier_a=%d tier_b_static=%d tier_b_reserve=%d tier_c=%d",
             today.isoformat(),
-            len(shards[0].symbols),
-            sum(len(shard.symbols) for shard in shards[1:]),
+            len(tier_a),
+            static_count - len(tier_a),
             sum(shard.dynamic_reserve_symbols for shard in shards),
             len(overflow),
             extra=EVENT,
         )
-        self._record_static_membership(today, shards, overflow)
+        self._record_static_membership(today, shards, overflow, tier_a=tier_a)
         return shards
 
-    def _record_static_membership(self, today: dt.date, shards: tuple[LsShard, ...], overflow: tuple[str, ...]) -> None:
+    def _record_static_membership(
+        self, today: dt.date, shards: tuple[LsShard, ...], overflow: tuple[str, ...], *, tier_a: frozenset[str]
+    ) -> None:
         """Append the day's static tier rows once; existing static rows (daemon restart) make this a no-op."""
         path = self._paths.membership_path(today)
         try:
             if any(row.source == "static" for row in read_membership(path)):
                 return
-            append_membership(path, self._static_membership_rows(shards, overflow))
+            append_membership(path, self._static_membership_rows(shards, overflow, tier_a=tier_a))
         except Exception as exc:  # noqa: BLE001 - research metadata must never block collection planning
             logger.error(
                 "[DATA] stage=membership status=FAIL error_type=%s reason=%s date=%s",
@@ -4197,7 +4215,9 @@ class DaemonRunner:
                 exc_info=True,
             )
 
-    def _static_membership_rows(self, shards: tuple[LsShard, ...], overflow: tuple[str, ...]) -> list[MembershipRow]:
+    def _static_membership_rows(
+        self, shards: tuple[LsShard, ...], overflow: tuple[str, ...], *, tier_a: frozenset[str]
+    ) -> list[MembershipRow]:
         decided_at_ns = self._wall_ns()
         decision = _latest_universe_decision(self._paths)
         universe = None if decision is None else _read_optional_parquet(self._paths.universe_out(decision))
@@ -4208,7 +4228,7 @@ class DaemonRunner:
         rows = [
             MembershipRow(
                 symbol=symbol,
-                tier="A" if shard.shard_index == 0 else "B",
+                tier="A" if symbol in tier_a else "B",
                 source="static",
                 decided_at_ns=decided_at_ns,
                 direction=direction.get(symbol),

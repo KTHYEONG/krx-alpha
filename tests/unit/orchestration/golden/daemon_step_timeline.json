@@ -296,6 +296,17 @@
         ],
         [
           "INFO",
+          "[DATA] stage=ls_shard_plan status=OK date=%s load_day=%s shard_loads=%s shard_symbols=%s",
+          [
+            "2026-09-16",
+            "none",
+            "na",
+            "1"
+          ],
+          true
+        ],
+        [
+          "INFO",
           "[DATA] stage=collection_tiers date=%s tier_a=%d tier_b_static=%d tier_b_reserve=%d tier_c=%d",
           [
             "2026-09-16",
@@ -2212,6 +2223,17 @@
         ],
         [
           "INFO",
+          "[DATA] stage=ls_shard_plan status=OK date=%s load_day=%s shard_loads=%s shard_symbols=%s",
+          [
+            "2026-09-18",
+            "none",
+            "na",
+            "1"
+          ],
+          true
+        ],
+        [
+          "INFO",
           "[DATA] stage=collection_tiers date=%s tier_a=%d tier_b_static=%d tier_b_reserve=%d tier_c=%d",
           [
             "2026-09-18",
@@ -2521,6 +2543,7 @@
     "[DATA] stage=shard_watchdog status=FAIL reason=stale_budget_exhausted key=%s silent_s=%.0f limit_s=%.0f max_restarts=%d",
     "[DATA] stage=shard_watchdog status=WARN reason=venue_wide_silence venue=%s shards=%d silent_s=%.0f limit_s=%.0f",
     "[DATA] stage=shard_watchdog status=WARN reason=venue_wide_silence venue=krx shards=%d silent_s=%.0f limit_s=%.0f",
-    "[SYS] stage=child_restart status=STALE reason=stale_child key=%s silent_s=%.0f limit_s=%.0f stop_result=%s restarts_today=%d"
+    "[SYS] stage=child_restart status=STALE reason=stale_child key=%s silent_s=%.0f limit_s=%.0f stop_result=%s restarts_today=%d",
+    "[DATA] stage=ls_shard_plan status=OK date=%s load_day=%s shard_loads=%s shard_symbols=%s"
   ]
 }
