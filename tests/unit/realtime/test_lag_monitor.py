@@ -182,3 +182,22 @@ def test_db_preopen_placeholder_event_time_is_not_a_lag(caplog: pytest.LogCaptur
     assert not caplog.records
     # A genuine one-second stamp right after midnight is still a valid event time.
     assert event_second_of(_frame(5.0, 1, field=True)) == 1
+
+
+def test_frozen_close_stamped_books_are_not_delivery_lag(caplog: pytest.LogCaptureFixture) -> None:
+    """11-23 15:40: DB books still stamped 1530xx arrive with fresh 1540xx trades; that is no delivery lag."""
+    close, after = 15 * 3600 + 30 * 60, 15 * 3600 + 40 * 60
+    monitor = LagMonitor(threshold_s=10.0, sample_every=1)
+    with caplog.at_level(logging.CRITICAL):
+        for sec in range(after, after + 30):
+            for k in range(6):
+                monitor.observe(_frame(sec + 0.5, close + k if k < 4 else sec, field=True))
+    assert monitor.alerted is False
+    assert not caplog.records
+
+
+def test_uniform_backlog_still_alerts_when_stamps_trail_together(caplog: pytest.LogCaptureFixture) -> None:
+    monitor = LagMonitor(threshold_s=10.0, sample_every=1)
+    with caplog.at_level(logging.CRITICAL):
+        _feed(monitor, 9 * 3600, 30, lag_s=40)
+    assert monitor.alerted is True

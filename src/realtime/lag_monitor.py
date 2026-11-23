@@ -92,6 +92,7 @@ class LagMonitor:
         self._seen = 0
         self._window_id: int | None = None
         self._lags: list[float] = []
+        self._events_s: list[float] = []
         self._lag_conns: list[str] = []
         self._lag_symbols: list[str] = []
         self._alerted = False
@@ -114,6 +115,7 @@ class LagMonitor:
                 self._close_window(frame.stream)
             self._window_id = window_id
             self._lags.append(lag_s)
+            self._events_s.append(frame.recv_wall_ns / _NS - lag_s)
             self._lag_conns.append(frame.conn_id)
             self._lag_symbols.append(frame.symbol)
         except Exception:  # noqa: BLE001 - monitoring must never break the receive loop
@@ -125,6 +127,7 @@ class LagMonitor:
 
     def _close_window(self, stream: str) -> None:
         all_lags, self._lags = self._lags, []
+        events, self._events_s = self._events_s, []
         conns, self._lag_conns = self._lag_conns, []
         symbols, self._lag_symbols = self._lag_symbols, []
         dominant = max(set(conns), key=lambda conn: (conns.count(conn), conn))
@@ -132,7 +135,17 @@ class LagMonitor:
         for conn, symbol in zip(conns, symbols, strict=True):
             symbols_of.setdefault(conn, set()).add(symbol)
         judged = {conn for conn, owned in symbols_of.items() if conn == dominant or owned.isdisjoint(symbols_of[dominant])}
-        lags = [lag for lag, conn in zip(all_lags, conns, strict=True) if conn in judged]
+        # A frame stamped far behind its connection's newest stamp in the window carries a frozen time, not its
+        # delivery time (DB re-sends the closing book stamped 1530xx after 15:30; 11-23 15:40 read as 577 s lag).
+        # A real backlog delays one connection's frames together, so their stamps stay close to each other.
+        newest: dict[str, float] = {}
+        for conn, event in zip(conns, events, strict=True):
+            newest[conn] = max(event, newest.get(conn, event))
+        lags = [
+            lag
+            for lag, conn, event in zip(all_lags, conns, events, strict=True)
+            if conn in judged and event >= newest[conn] - self._threshold_s
+        ]
         if len(lags) < self._min_samples:
             return
         p50 = statistics.median(lags)
