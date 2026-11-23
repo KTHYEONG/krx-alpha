@@ -159,7 +159,7 @@ def test_nxt_plan_from_symbol_file(monkeypatch, tmp_path) -> None:
 
     plan = runner.state.regular_nxt_plan
     assert [shard.venue for shard in plan] == [MarketVenue.NXT, MarketVenue.NXT]
-    assert [shard.symbols for shard in plan] == [NXT_SYMBOLS[:20], NXT_SYMBOLS[20:]]
+    assert [shard.symbols for shard in plan] == [NXT_SYMBOLS[0::2], NXT_SYMBOLS[1::2]]
     assert [shard.credential_slot for shard in plan] == ["2", "3"]
 
     runner._supervise_regular_nxt(_at(DAY, 9, 0), standard_session_anchors(DAY))
@@ -321,7 +321,7 @@ def test_nxt_plan_waits_for_today_orchestration(monkeypatch, tmp_path) -> None:
     runner.state.orchestrated_for = DAY
     runner._ensure_regular_nxt_plan(DAY)
 
-    assert [shard.symbols for shard in runner.state.regular_nxt_plan] == [NXT_SYMBOLS[:20], NXT_SYMBOLS[20:]]
+    assert [shard.symbols for shard in runner.state.regular_nxt_plan] == [NXT_SYMBOLS[0::2], NXT_SYMBOLS[1::2]]
 
 
 def test_nxt_shard_planning_failure_skips_with_empty_plan(monkeypatch, tmp_path, caplog) -> None:

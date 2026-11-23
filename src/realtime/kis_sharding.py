@@ -257,9 +257,15 @@ def plan_regular_kis_shards(
             len(ordered) - capacity,
         )
         ordered = ordered[:capacity]
+    # NXT has no LS quota order to keep: contiguous rank blocks put every top name on shard 0, the only connection
+    # KIS closed mid-session (11-17 once, 11-23 four times, 2.7x shard 1's frames), so ranks are dealt round-robin.
+    used = -(-len(ordered) // per_shard)
     plan: list[AftermarketShard] = []
     for index, cred in enumerate(ordered_creds):
-        chunk = ordered[index * per_shard : (index + 1) * per_shard]
+        if venue is MarketVenue.NXT:
+            chunk = ordered[index::used] if index < used else ()
+        else:
+            chunk = ordered[index * per_shard : (index + 1) * per_shard]
         if not chunk:
             continue
         plan.append(

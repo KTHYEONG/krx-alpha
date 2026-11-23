@@ -461,7 +461,7 @@ def test_nxt_regular_plan_carries_venue_without_ls_coverage(caplog) -> None:
         )
     assert all(shard.venue is MarketVenue.NXT for shard in plan)
     assert [len(shard.symbols) for shard in plan] == [20, 20]
-    assert tuple(sym for shard in plan for sym in shard.symbols) == symbols
+    assert sorted(sym for shard in plan for sym in shard.symbols) == list(symbols)
     assert not [r for r in caplog.records if "regular_feed_coverage" in r.getMessage()]
 
 
@@ -575,3 +575,42 @@ def test_kis_plan_blocks_require_covered_symbols() -> None:
             pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"),
             ls_shard_symbols=(block0, block1),
         )
+
+
+def test_regular_nxt_plan_deals_ranks_round_robin_so_top_names_never_share_one_connection() -> None:
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    keys = tuple(KisDataCredential(str(i), f"key{i}", "secret", f"hts{i}", f"id{i}") for i in (1, 2))
+    ranked = tuple(f"{i:06d}" for i in range(40))
+    plan = plan_regular_kis_shards(
+        symbols=ranked, credentials=keys, credential_slots=("1", "2"),
+        pair_capacity_per_connection=41, streams=("H0NXCNT0", "H0NXASP0"), venue=MarketVenue.NXT,
+    )
+    assert [(s.shard_index, s.credential_slot) for s in plan] == [(0, "1"), (1, "2")]
+    assert [s.symbols for s in plan] == [ranked[0::2], ranked[1::2]]
+    assert sorted(plan[0].symbols + plan[1].symbols) == list(ranked)  # same coverage, only the assignment moved
+    # Fewer symbols than one connection holds keep using a single connection.
+    short = plan_regular_kis_shards(
+        symbols=ranked[:15], credentials=keys, credential_slots=("1", "2"),
+        pair_capacity_per_connection=41, streams=("H0NXCNT0", "H0NXASP0"), venue=MarketVenue.NXT,
+    )
+    assert [(s.shard_index, s.symbols) for s in short] == [(0, ranked[:15])]
+    # Odd counts split as evenly as capacity allows and never exceed one connection's pair limit.
+    odd = plan_regular_kis_shards(
+        symbols=ranked[:21], credentials=keys, credential_slots=("1", "2"),
+        pair_capacity_per_connection=41, streams=("H0NXCNT0", "H0NXASP0"), venue=MarketVenue.NXT,
+    )
+    assert [len(s.symbols) for s in odd] == [11, 10]
+
+
+def test_regular_krx_plan_keeps_contiguous_rank_blocks() -> None:
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    keys = tuple(KisDataCredential(str(i), f"key{i}", "secret", f"hts{i}", f"id{i}") for i in (3, 4))
+    ranked = tuple(f"{i:06d}" for i in range(40))
+    plan = plan_regular_kis_shards(
+        symbols=ranked, credentials=keys, credential_slots=("3", "4"),
+        pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"), log_coverage=False,
+    )
+    assert [s.symbols for s in plan] == [ranked[:20], ranked[20:]]
