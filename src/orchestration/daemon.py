@@ -28,6 +28,7 @@ from src.brokers.kis.data import KisDataClient
 from src.brokers.kis.stack import build_kis_data_slot_stack, build_kis_rest_stack
 from src.core.calendar import SessionState, calc_sleep_seconds, get_target_state, schedule_for
 from src.core.config import (
+    AftermarketSettings,
     AuditMode,
     AuditSettings,
     CollectorRuntime,
@@ -1277,6 +1278,42 @@ def _ls_nxt_cmd(today: dt.date, paths: DataPaths) -> list[str]:
     ]
 
 
+def _ls_after_window(runtime: CollectorRuntime, now: dt.datetime, anchors: SessionAnchors) -> bool:
+    """True from NXT aftermarket arm (open minus prearm lead) until the session's after-market end, KST."""
+    local = now.astimezone(_KST)
+    aftermarket = getattr(runtime, "aftermarket", None) or AftermarketSettings()
+    arm_at = aftermarket_arm_at(
+        local.date(), MarketVenue.NXT, anchors=anchors, prearm_lead_s=aftermarket.prearm_lead_s
+    )
+    end_at = dt.datetime.combine(local.date(), anchors.after_market_end, tzinfo=_KST)
+    return arm_at <= local < end_at
+
+
+def _ls_after_cmd(today: dt.date, paths: DataPaths) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "src.cli.main",
+        "collect-stream-ls-after",
+        "--session-date",
+        today.isoformat(),
+        "--journal-root",
+        str(paths.journal_root),
+        "--manifest-path",
+        str(paths.ls_after_manifest_path(today)),
+        "--market-map",
+        str(paths.market_map),
+        "--krx-candidates-path",
+        str(paths.aftermarket_candidates(today, MarketVenue.KRX)),
+        "--nxt-candidates-path",
+        str(paths.aftermarket_candidates(today, MarketVenue.NXT)),
+        "--membership-path",
+        str(paths.membership_path(today)),
+        "--dynamic-plan-path",
+        str(paths.dynamic_admissions(today)),
+    ]
+
+
 class StreamRole(StrEnum):
     PRIMARY = "primary"
     CROSSCHECK = "crosscheck"
@@ -1298,6 +1335,7 @@ class StreamChildKey(StrEnum):
     TOSS_SECONDARY_A = "toss_secondary_a"
     TOSS_SECONDARY_B = "toss_secondary_b"
     LS_NXT_SECONDARY = "ls_nxt_secondary"
+    LS_AFTER_SECONDARY = "ls_after_secondary"
     KIWOOM_CROSSCHECK = "kiwoom_crosscheck"
     AFTERMARKET = "aftermarket"
     PREMARKET = "premarket"
@@ -1861,6 +1899,11 @@ class DaemonRunner:
         circuit_open="[DAEMON] stage=ls_nxt_secondary status=FAIL reason=circuit_open",
         circuit_level=logging.WARNING,
     )
+    _LS_AFTER_LOGS: ClassVar[SupervisionLogs] = SupervisionLogs(
+        restarted="[DAEMON] stage=ls_after_secondary status=RESTARTED exit_code=%s",
+        circuit_open="[DAEMON] stage=ls_after_secondary status=FAIL reason=circuit_open",
+        circuit_level=logging.WARNING,
+    )
     _STREAM_SPECS: ClassVar[tuple[StreamChildSpec, ...]] = (
         StreamChildSpec(
             key=StreamChildKey.REGULAR,
@@ -1975,6 +2018,18 @@ class DaemonRunner:
             journal_vendor=lambda cfg: "ls",
             manifest_path=lambda paths, day: paths.ls_nxt_manifest_path(day),
             demand=_ls_nxt_admitted,
+        ),
+        StreamChildSpec(
+            key=StreamChildKey.LS_AFTER_SECONDARY,
+            role=StreamRole.CROSSCHECK,
+            lifecycle=ChildLifecycle.SESSION,
+            enabled=lambda runtime: runtime.collector.ls_active_sessions >= 2,
+            cmd=lambda today, paths, reason: _ls_after_cmd(today, paths),
+            active=_ls_after_window,
+            logs=_LS_AFTER_LOGS,
+            requires_primary=True,
+            journal_vendor=lambda cfg: "ls",
+            manifest_path=lambda paths, day: paths.ls_after_manifest_path(day),
         ),
         StreamChildSpec(
             key=StreamChildKey.KIWOOM_CROSSCHECK,

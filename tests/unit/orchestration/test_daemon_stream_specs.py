@@ -7,6 +7,7 @@ import datetime as dt
 import json
 import logging
 import pathlib
+import types
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -65,6 +66,7 @@ def test_spec_table_order_and_roles() -> None:
         daemon_mod.StreamChildKey.TOSS_SECONDARY_A,
         daemon_mod.StreamChildKey.TOSS_SECONDARY_B,
         daemon_mod.StreamChildKey.LS_NXT_SECONDARY,
+        daemon_mod.StreamChildKey.LS_AFTER_SECONDARY,
         daemon_mod.StreamChildKey.KIWOOM_CROSSCHECK,
         daemon_mod.StreamChildKey.INTRADAY_DISCOVERY,
         daemon_mod.StreamChildKey.AFTERMARKET,
@@ -86,6 +88,7 @@ def test_spec_table_order_and_roles() -> None:
         daemon_mod.StreamChildKey.TOSS_SECONDARY_A,
         daemon_mod.StreamChildKey.TOSS_SECONDARY_B,
         daemon_mod.StreamChildKey.LS_NXT_SECONDARY,
+        daemon_mod.StreamChildKey.LS_AFTER_SECONDARY,
         daemon_mod.StreamChildKey.KIWOOM_CROSSCHECK,
         daemon_mod.StreamChildKey.INTRADAY_DISCOVERY,
     ]
@@ -374,3 +377,71 @@ def test_stop_children_order_preserved(tmp_path, monkeypatch) -> None:
         "db_crosscheck",
         "premarket",
     ]
+
+
+def _ls_after_spec():
+    return next(s for s in daemon_mod.DaemonRunner._STREAM_SPECS if s.key is daemon_mod.StreamChildKey.LS_AFTER_SECONDARY)
+
+
+def test_ls_after_spec_shape() -> None:
+    spec = _ls_after_spec()
+    assert spec.role is daemon_mod.StreamRole.CROSSCHECK
+    assert spec.lifecycle is daemon_mod.ChildLifecycle.SESSION
+    assert spec.requires_primary
+    assert spec.demand is None
+    assert spec.journal_vendor(None) == "ls"
+    assert spec.logs.circuit_level == logging.WARNING
+
+
+def test_ls_after_window_bounds() -> None:
+    anchors = _anchors(dt.date(2026, 11, 23))
+    runtime = types.SimpleNamespace()
+    window = daemon_mod._ls_after_window
+    def at(hm):
+        return dt.datetime(2026, 11, 23, hm[0], hm[1], hm[2], tzinfo=_KST)
+
+    assert window(runtime, at((15, 38, 59)), anchors) is False
+    assert window(runtime, at((15, 39, 0)), anchors) is True
+    assert window(runtime, at((19, 59, 59)), anchors) is True
+    assert window(runtime, at((20, 0, 0)), anchors) is False
+
+
+def test_ls_after_window_shifts_with_close_shift() -> None:
+    base = _anchors(dt.date(2026, 11, 23))
+    shifted = dataclasses.replace(
+        base,
+        regular_open=dt.time(10, 0),
+        closing_auction_start=dt.time(16, 20),
+        regular_close=dt.time(16, 30),
+        after_market_end=dt.time(21, 0),
+    )
+    runtime = types.SimpleNamespace()
+    def at(hm):
+        return dt.datetime(2026, 11, 23, hm[0], hm[1], hm[2], tzinfo=_KST)
+
+    assert daemon_mod._ls_after_window(runtime, at((16, 38, 59)), shifted) is False
+    assert daemon_mod._ls_after_window(runtime, at((16, 39, 0)), shifted) is True
+    assert daemon_mod._ls_after_window(runtime, at((20, 59, 59)), shifted) is True
+    assert daemon_mod._ls_after_window(runtime, at((21, 0, 0)), shifted) is False
+
+
+def test_ls_after_disabled_single_session(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    single = resolve_collector_runtime(collector=CollectorSettings(data_root=tmp_path / "data", ls_active_sessions=1))
+    dual = resolve_collector_runtime(collector=CollectorSettings(data_root=tmp_path / "data", ls_active_sessions=2))
+    assert _ls_after_spec().enabled(single) is False
+    assert _ls_after_spec().enabled(dual) is True
+
+
+def test_ls_after_cmd_args(tmp_path) -> None:
+    from src.core.config import DataPaths
+
+    day = dt.date(2026, 11, 23)
+    paths = DataPaths(tmp_path)
+    cmd = daemon_mod._ls_after_cmd(day, paths)
+    assert cmd[cmd.index("--krx-candidates-path") + 1] == str(paths.aftermarket_candidates(day, daemon_mod.MarketVenue.KRX))
+    assert cmd[cmd.index("--nxt-candidates-path") + 1] == str(paths.aftermarket_candidates(day, daemon_mod.MarketVenue.NXT))
+    assert cmd[cmd.index("--membership-path") + 1] == str(paths.membership_path(day))
+    assert cmd[cmd.index("--dynamic-plan-path") + 1] == str(paths.dynamic_admissions(day))
+    assert cmd[cmd.index("--manifest-path") + 1] == str(paths.ls_after_manifest_path(day))
+    assert cmd[cmd.index("--market-map") + 1] == str(paths.market_map)

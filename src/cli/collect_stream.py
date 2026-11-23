@@ -13,7 +13,7 @@ import os
 import pathlib
 import re
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from src.core.config import (
@@ -143,15 +143,21 @@ def _lease_ledger(
 
 
 async def _claim_primary(
-    ledger: WsLeaseLedger, *, owner: str, shard_index: int, ttl_s: float, strict: bool = False
+    ledger: WsLeaseLedger,
+    *,
+    owner: str,
+    shard_index: int,
+    ttl_s: float,
+    strict: bool = False,
+    role: LeaseRole = LeaseRole.PRIMARY,
 ) -> Lease | None:
-    """Acquire the PRIMARY slot; shard 0 proceeds unleased after its retry window unless `strict` or index >= 1."""
+    """Acquire a slot as `role`; shard 0 proceeds unleased after its retry window unless `strict` or index >= 1."""
     if strict or shard_index >= 1:
-        return ledger.acquire(owner, LeaseRole.PRIMARY)
+        return ledger.acquire(owner, role)
     deadline = time.monotonic() + _SHARD0_LEASE_WAIT_TTLS * ttl_s
     while True:
         try:
-            return ledger.acquire(owner, LeaseRole.PRIMARY)
+            return ledger.acquire(owner, role)
         except LeaseUnavailable as exc:
             if time.monotonic() >= deadline:
                 logger.critical("[SYS] stage=ws_lease status=PRIMARY_FORCED reason=%s", exc, extra=EVENT)
@@ -223,6 +229,19 @@ class RegularStreamProfile:
     static_symbols: tuple[str, ...] | None = None
     # Registry key when it differs from `vendor` (the journal vendor), e.g. "ls-nxt" journals as "ls".
     adapter: str | None = None
+    # Explicit symbol -> streams plan (replaces candidate selection); stream_routes journals each stream on its own route.
+    pair_plan: Mapping[str, tuple[str, ...]] | None = None
+    stream_routes: Mapping[str, StreamRoute] | None = None
+    # Lease role of the strict acquire; STANDBY lets a production PRIMARY preempt this child.
+    lease_role: LeaseRole = LeaseRole.PRIMARY
+    # True refuses to run without a lease ledger (SHARD_DENIED_EXIT) instead of running unleased.
+    require_lease: bool = False
+    # Feed role suffix for `feed_id_for` (e.g. "after" -> "ls-after:<index>"); None keeps the vendor feed id.
+    feed_role: str | None = None
+
+
+def _pair_plan_streams(pair_plan: Mapping[str, tuple[str, ...]]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(stream for streams in pair_plan.values() for stream in streams))
 
 
 def _profile_venue(profile: RegularStreamProfile) -> str:
@@ -347,6 +366,7 @@ async def run_regular_stream(
     *,
     bootstrap: Callable[[SessionConfig], CollectorSession],
     streamer_factory: Callable[..., RealtimeStreamer],
+    stop_deadline_ns: int | None = None,
 ) -> int:
     """Run one regular-session streamer for profile.vendor; return 0 after a graceful stop, or SHARD_DENIED_EXIT on a denied shard lease."""
     if profile.session_index is not None:
@@ -366,11 +386,17 @@ async def run_regular_stream(
         kwargs["symbol_limit"] = profile.symbol_limit
     if profile.route is not None:
         kwargs["route"] = profile.route
+    if profile.pair_plan is not None:
+        kwargs["pair_plan"] = profile.pair_plan
+        kwargs["stream_routes"] = profile.stream_routes
     candidates_path = pathlib.Path(str(args.candidates_path))
     token_cache_dir = KisTokenSettings().token_cache_dir
     ledger = _lease_ledger(profile.vendor, settings, token_cache_dir, creds.app_key)
     owner = f"{profile.adapter or profile.vendor}-shard-{shard_index}-{os.getpid()}"
     primary: Lease | None = None
+    if profile.require_lease and ledger is None:
+        logger.error("[SYS] stage=ws_lease status=NO_LEASE_LEDGER owner=%s", owner, extra=EVENT)
+        return SHARD_DENIED_EXIT
     if ledger is not None:
         try:
             primary = await _claim_primary(
@@ -378,7 +404,8 @@ async def run_regular_stream(
                 owner=owner,
                 shard_index=shard_index,
                 ttl_s=settings.ws_lease_ttl_s,
-                strict=profile.warm_standby,
+                strict=profile.warm_standby or profile.require_lease,
+                role=profile.lease_role,
             )
         except LeaseUnavailable as exc:
             logger.error(
@@ -397,14 +424,16 @@ async def run_regular_stream(
             ntp_host=overrides.ntp_host,
             slot_budget=profile.slot_budget,
             max_clock_offset_ns=overrides.max_clock_offset_ns,
-            desired_streams=vendor_streams(settings, profile.vendor, venue),
+            desired_streams=_pair_plan_streams(profile.pair_plan)
+            if profile.pair_plan is not None
+            else vendor_streams(settings, profile.vendor, venue),
             vendor=profile.vendor,
             degraded_reason=getattr(args, "degraded_reason", None),
             ntp_fallback_hosts=settings.ntp_fallback_hosts,
             min_free_disk_gb=settings.min_free_disk_gb,
             journal_retain_days=settings.journal_retain_days,
             ls_guard=ls_guard_config(settings, candidates_path, shard_symbols=shard_symbols)
-            if profile.vendor == "ls"
+            if profile.vendor == "ls" and profile.pair_plan is None
             else None,
             ls_shard_index=shard_index,
             ls_symbols=shard_symbols,
@@ -432,7 +461,7 @@ async def run_regular_stream(
         swap_request = SwapRequest()
         if shard_symbols is not None and profile.vendor == "ls":
             logger.info("[DATA] stage=ls_shard index=%d symbols=%d", shard_index, len(shard_symbols), extra=EVENT)
-        feed_id = feed_id_for(profile.vendor, venue, shard_index)
+        feed_id = feed_id_for(profile.vendor, venue, shard_index, role=profile.feed_role)
         health_tracker = build_feed_health_tracker(
             feed_id=feed_id,
             vendor=profile.vendor,
@@ -489,7 +518,8 @@ async def run_regular_stream(
                 lease_ttl_s=settings.ws_lease_ttl_s,
                 state_interval_s=settings.handover_state_interval_s,
             )
-            if profile.proactive_handover or (ledger is not None and not profile.warm_standby)
+            if profile.proactive_handover
+            or (ledger is not None and not profile.warm_standby and profile.pair_plan is None)
             else None
         )
         connect_gate = (
@@ -528,6 +558,7 @@ async def run_regular_stream(
             market_state_path=settings.paths.market_state_path(session_date)
             if _carries_market_state(profile, venue, shard_index)
             else None,
+            stop_deadline_ns=stop_deadline_ns,
         )
         if ledger is not None and primary is not None and handover_cfg is None:
             if not await _run_lease_guarded(stream, ledger, primary, every_s=settings.ws_lease_ttl_s / 3):

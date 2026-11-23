@@ -247,6 +247,9 @@ class DataPaths:
     def ls_nxt_manifest_path(self, day: dt.date) -> pathlib.Path:
         return self.manifest_dir / f"{day.isoformat()}.ls_nxt.json"
 
+    def ls_after_manifest_path(self, day: dt.date) -> pathlib.Path:
+        return self.manifest_dir / f"{day.isoformat()}.ls_after.json"
+
     def kiwoom_crosscheck_manifest_path(self, day: dt.date) -> pathlib.Path:
         return self.manifest_dir / f"{day.isoformat()}.kiwoom.json"
 

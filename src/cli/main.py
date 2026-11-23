@@ -31,6 +31,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
         collect_stream,
         collect_stream_db,
         collect_stream_kiwoom,
+        collect_stream_ls_after,
         collect_stream_ls_nxt,
         collect_stream_toss,
         gapfill_ticks,
@@ -50,6 +51,7 @@ def register_subcommands(subparsers: argparse._SubParsersAction[argparse.Argumen
     collect_stream.add_parser(subparsers)
     collect_stream_db.add_parser(subparsers)
     collect_stream_kiwoom.add_parser(subparsers)
+    collect_stream_ls_after.add_parser(subparsers)
     collect_stream_ls_nxt.add_parser(subparsers)
     collect_stream_toss.add_parser(subparsers)
     probe_db_stream.add_parser(subparsers)
