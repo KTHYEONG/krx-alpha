@@ -84,6 +84,10 @@ class SessionConfig:
     ls_shard_index: int = 0
     # Restricts candidate rows to one LS shard's symbols; None keeps the full candidate set.
     ls_symbols: tuple[str, ...] | None = None
+    # Explicit symbol -> streams plan; replaces candidate-row selection.
+    pair_plan: Mapping[str, tuple[str, ...]] | None = None
+    # Per-stream journal route; requires `route` for the manifest.
+    stream_routes: Mapping[str, StreamRoute] | None = None
 
 
 @dataclass
@@ -229,6 +233,19 @@ def bootstrap_session(
         raise ValueError(f"ls_shard_index {cfg.ls_shard_index} must be non-negative")
     if cfg.restart_reason not in (None, "restart", "stale_child"):
         raise ValueError(f"restart_reason {cfg.restart_reason!r} must be None, 'restart' or 'stale_child'")
+    if cfg.stream_routes is not None and cfg.route is None:
+        raise ValueError("stream_routes requires route")
+    if cfg.pair_plan is not None:
+        if cfg.shard is not None:
+            raise ValueError("pair_plan and shard are mutually exclusive")
+        if not cfg.pair_plan:
+            raise ValueError("pair_plan must not be empty")
+        for symbol, streams in cfg.pair_plan.items():
+            for stream in streams:
+                if stream not in cfg.desired_streams:
+                    raise ValueError(f"pair_plan stream {stream!r} for {symbol} is not in desired_streams")
+                if cfg.stream_routes is not None and stream not in cfg.stream_routes:
+                    raise ValueError(f"pair_plan stream {stream!r} for {symbol} has no stream_routes entry")
     _apply_process_identity(cfg)
     hosts = (cfg.ntp_host, *cfg.ntp_fallback_hosts)
     offset_ns: int | None = None
@@ -298,6 +315,11 @@ def bootstrap_session(
         manifest.shard_index = cfg.shard.shard_index
         manifest.credential_key_id = cfg.shard.credential_key_id
         desired = {str(symbol): tuple(cfg.shard.streams) for symbol in cfg.shard.symbols}
+    elif cfg.pair_plan is not None:
+        manifest.planned_pairs = [
+            {"symbol": symbol, "tr_id": stream} for symbol, streams in cfg.pair_plan.items() for stream in streams
+        ]
+        desired = {str(symbol): tuple(streams) for symbol, streams in cfg.pair_plan.items()}
     else:
         if cfg.ls_symbols is not None:
             rows = _rows_for_symbols(rows, cfg.ls_symbols)
@@ -315,8 +337,20 @@ def bootstrap_session(
     registry = SubscriptionRegistry(slot_budget=cfg.slot_budget)
     diff: SubscriptionDiff = registry.plan(desired)
     registry.apply(diff)
-    if cfg.route is not None:
+    if cfg.stream_routes is not None:
         journals: dict[tuple[str, ...], L0JournalWriter] = {
+            (route.venue.value, route.session.value, stream): L0JournalWriter(
+                root=cfg.journal_root,
+                vendor=cfg.vendor,
+                venue=route.venue,
+                session=route.session,
+                stream=stream,
+                file_tag=None,
+            )
+            for stream, route in cfg.stream_routes.items()
+        }
+    elif cfg.route is not None:
+        journals = {
             (cfg.route.venue.value, cfg.route.session.value, stream): L0JournalWriter(
                 root=cfg.journal_root,
                 vendor=cfg.vendor,

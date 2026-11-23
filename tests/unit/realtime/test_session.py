@@ -1243,3 +1243,128 @@ def test_nxt_regular_manifest_closes_at_closing_auction(tmp_path, monkeypatch) -
 
     expected = int(dt.datetime(2026, 11, 16, 15, 20, tzinfo=ZoneInfo("Asia/Seoul")).timestamp() * 1_000_000_000)
     assert session.manifest.expected_close_ns == expected
+
+
+def _routed_cfg(tmp_path, **overrides):
+    import datetime as dt
+
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import StreamRoute
+
+    krx_after = StreamRoute(MarketVenue.KRX, MarketSession.KRX_AFTER)
+    nxt_after = StreamRoute(MarketVenue.NXT, MarketSession.NXT_AFTER)
+    fields = {
+        "desired_streams": ("H0STCNT0", "H0STASP0", "H0NXCNT0", "H0NXASP0"),
+        "slot_budget": 10,
+        "route": krx_after,
+        "pair_plan": {"011330": ("H0STCNT0", "H0STASP0"), "005930": ("H0NXCNT0", "H0NXASP0")},
+        "stream_routes": {
+            "H0STCNT0": krx_after,
+            "H0STASP0": krx_after,
+            "H0NXCNT0": nxt_after,
+            "H0NXASP0": nxt_after,
+        },
+        **overrides,
+    }
+    return _identity_cfg(tmp_path, **fields), dt
+
+
+def test_pair_plan_builds_routed_writers(tmp_path, monkeypatch) -> None:
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import bootstrap_session
+
+    _zero_ntp(monkeypatch)
+    cfg, _ = _routed_cfg(tmp_path)
+    session = bootstrap_session(cfg, now_ns=1)
+
+    assert set(session.journals) == {
+        (MarketVenue.KRX.value, MarketSession.KRX_AFTER.value, "H0STCNT0"),
+        (MarketVenue.KRX.value, MarketSession.KRX_AFTER.value, "H0STASP0"),
+        (MarketVenue.NXT.value, MarketSession.NXT_AFTER.value, "H0NXCNT0"),
+        (MarketVenue.NXT.value, MarketSession.NXT_AFTER.value, "H0NXASP0"),
+    }
+    assert len(session.manifest.planned_pairs) == 4
+    assert {(row["symbol"], row["tr_id"]) for row in session.manifest.planned_pairs} == {
+        ("011330", "H0STCNT0"), ("011330", "H0STASP0"), ("005930", "H0NXCNT0"), ("005930", "H0NXASP0"),
+    }
+
+
+def test_routed_frames_land_in_venue_dirs(tmp_path, monkeypatch) -> None:
+    from src.realtime.contracts import MarketSession, MarketVenue
+    from src.realtime.session import bootstrap_session
+
+    _zero_ntp(monkeypatch)
+    cfg, dt = _routed_cfg(tmp_path)
+    session = bootstrap_session(cfg, now_ns=1)
+    recv_wall_ns = 1_794_878_824_988_697_365
+    common = {"vendor": "ls", "recv_mono_ns": 1, "recv_wall_ns": recv_wall_ns, "conn_id": "c", "conn_seq": 1}
+    session.record_frame(
+        stream="H0STCNT0", symbol="011330", raw="{}", venue=MarketVenue.KRX, session=MarketSession.KRX_AFTER, **common
+    )
+    session.record_frame(
+        stream="H0NXCNT0", symbol="005930", raw="{}", venue=MarketVenue.NXT, session=MarketSession.NXT_AFTER, **common
+    )
+    session.flush_journals()
+
+    root = cfg.journal_root
+    for stream_dir in (root / "ls" / "krx" / "krx_after" / "H0STCNT0", root / "ls" / "nxt" / "nxt_after" / "H0NXCNT0"):
+        assert any(path.is_file() for path in stream_dir.rglob("*")), stream_dir
+    assert not (root / "ls" / "krx" / "regular").exists()
+
+
+def test_stream_routes_requires_route(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    from src.realtime.session import bootstrap_session
+
+    _zero_ntp(monkeypatch)
+    cfg, _ = _routed_cfg(tmp_path, route=None, pair_plan=None)
+    with pytest.raises(ValueError, match="stream_routes requires route"):
+        bootstrap_session(cfg, now_ns=1)
+    assert not cfg.manifest_path.exists()
+
+
+def test_pair_plan_stream_not_routed_rejected(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    from src.realtime.session import bootstrap_session
+
+    _zero_ntp(monkeypatch)
+    cfg, _ = _routed_cfg(tmp_path)
+    routes = dict(cfg.stream_routes)
+    del routes["H0NXASP0"]
+    with pytest.raises(ValueError, match="H0NXASP0"):
+        bootstrap_session(_routed_cfg(tmp_path, stream_routes=routes)[0], now_ns=1)
+    assert not cfg.manifest_path.exists()
+
+
+def test_pair_plan_rejects_shard_empty_and_undesired_streams(tmp_path, monkeypatch) -> None:
+    import pytest
+
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import AftermarketShard
+    from src.realtime.session import bootstrap_session
+
+    _zero_ntp(monkeypatch)
+    shard = AftermarketShard(MarketVenue.NXT, 0, ("005930",), ("H0NXCNT0", "H0NXASP0"), "1", "id1")
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        bootstrap_session(_routed_cfg(tmp_path, shard=shard)[0], now_ns=1)
+    with pytest.raises(ValueError, match="must not be empty"):
+        bootstrap_session(_routed_cfg(tmp_path, pair_plan={}, stream_routes=None)[0], now_ns=1)
+    with pytest.raises(ValueError, match="not in desired_streams"):
+        bootstrap_session(
+            _routed_cfg(tmp_path, desired_streams=("H0STCNT0",), stream_routes=None)[0], now_ns=1
+        )
+    assert not _routed_cfg(tmp_path)[0].manifest_path.exists()
+
+
+def test_ls_shard_journal_keys_unchanged(tmp_path, monkeypatch) -> None:
+    from src.realtime.session import bootstrap_session
+
+    _zero_ntp(monkeypatch)
+    cfg, _ = _routed_cfg(
+        tmp_path, route=None, pair_plan=None, stream_routes=None, desired_streams=("H0STCNT0", "H0STASP0"),
+        ls_shard_index=1,
+    )
+    session = bootstrap_session(cfg, now_ns=1)
+    assert set(session.journals) == {("ls", "H0STCNT0"), ("ls", "H0STASP0")}

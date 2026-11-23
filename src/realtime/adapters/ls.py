@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from typing import Any
 
 from src.core.config import LS_MARKET_STATE_PAIRS, LS_MAX_SUBSCRIPTIONS_PER_SESSION
@@ -42,6 +43,43 @@ _NXT_STREAM_BY_TR: dict[str, str] = {tr: stream for stream, tr in _NXT_TR_BY_STR
 _KRX_SHORT_CODE = re.compile(r"[0-9A-Z]{6}")
 # LS rejects a malformed tr_key with 10009 ("tr_key의 길이를 확인해주세요", 2026-11-23 probe), then closes the socket.
 LS_PAIR_REJECT_CODES: frozenset[str] = frozenset({"10009"})
+LS_AFTER_KRX_STREAMS: tuple[str, str] = ("H0STCNT0", "H0STASP0")
+
+
+def _nxt_invalid_key(symbol: str, stream: str) -> str | None:
+    if _KRX_SHORT_CODE.fullmatch(symbol) is None:
+        return "invalid_tr_key"
+    if stream not in _NXT_TR_BY_STREAM:
+        return "unknown_stream"
+    return None
+
+
+def _nxt_subscribe_body(symbol: str, stream: str) -> dict[str, str]:
+    return {"tr_cd": _NXT_TR_BY_STREAM[stream], "tr_key": f"N{symbol}   "}
+
+
+def _nxt_frame(
+    header: dict[str, Any],
+    raw: str,
+    next_seq: Callable[[], int],
+    conn_id: str,
+    session: MarketSession,
+) -> L0Frame | None:
+    if "rsp_cd" in header or header.get("tr_cd") not in _NXT_STREAM_BY_TR or "tr_key" not in header:
+        return None
+    key = str(header["tr_key"]).strip()
+    return L0Frame(
+        "ls",
+        _NXT_STREAM_BY_TR[str(header["tr_cd"])],
+        key[1:] if key[:1] in ("N", "U") else key,
+        raw,
+        time.monotonic_ns(),
+        time.time_ns(),
+        next_seq(),
+        conn_id=conn_id,
+        venue=MarketVenue.NXT,
+        session=session,
+    )
 
 
 class LsRealtimeAdapter(JsonWsOAuthAdapter):
@@ -191,28 +229,41 @@ class LsNxtRealtimeAdapter(LsRealtimeAdapter):
         super().__init__(**kwargs)
 
     def _invalid_key(self, symbol: str, stream: str) -> str | None:
-        if _KRX_SHORT_CODE.fullmatch(symbol) is None:
-            return "invalid_tr_key"
-        if stream not in _NXT_TR_BY_STREAM:
-            return "unknown_stream"
-        return None
+        return _nxt_invalid_key(symbol, stream)
 
     def _subscribe_body(self, symbol: str, stream: str) -> dict[str, str]:
-        return {"tr_cd": _NXT_TR_BY_STREAM[stream], "tr_key": f"N{symbol}   "}
+        return _nxt_subscribe_body(symbol, stream)
 
     def _data_frame(self, o: dict[str, Any], header: dict[str, Any], raw: str) -> L0Frame | None:
-        if "rsp_cd" in header or header.get("tr_cd") not in _NXT_STREAM_BY_TR or "tr_key" not in header:
-            return None
-        key = str(header["tr_key"]).strip()
-        return L0Frame(
-            "ls",
-            _NXT_STREAM_BY_TR[str(header["tr_cd"])],
-            key[1:] if key[:1] in ("N", "U") else key,
-            raw,
-            time.monotonic_ns(),
-            time.time_ns(),
-            self._next_seq(),
-            conn_id=self._conn_id,
-            venue=MarketVenue.NXT,
-            session=MarketSession.REGULAR,
-        )
+        return _nxt_frame(header, raw, self._next_seq, self._conn_id, MarketSession.REGULAR)
+
+
+class LsAftermarketRealtimeAdapter(LsRealtimeAdapter):
+    """One LS connection for KRX aftermarket trades and book (S3_/K3_, H1_/HA_) plus NXT aftermarket (NS3, NH1).
+
+    Frames are stamped with their venue and session from the TR family; market-state TRs are never subscribed here.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("streams", (*LS_AFTER_KRX_STREAMS, *LS_NXT_STREAMS))
+        super().__init__(**kwargs)
+
+    def _invalid_key(self, symbol: str, stream: str) -> str | None:
+        if stream in _NXT_TR_BY_STREAM:
+            return _nxt_invalid_key(symbol, stream)
+        if stream in LS_AFTER_KRX_STREAMS:
+            return super()._invalid_key(symbol, stream)
+        return "unknown_stream"
+
+    def _subscribe_body(self, symbol: str, stream: str) -> dict[str, str]:
+        if stream in _NXT_TR_BY_STREAM:
+            return _nxt_subscribe_body(symbol, stream)
+        return super()._subscribe_body(symbol, stream)
+
+    def _data_frame(self, o: dict[str, Any], header: dict[str, Any], raw: str) -> L0Frame | None:
+        nxt = _nxt_frame(header, raw, self._next_seq, self._conn_id, MarketSession.NXT_AFTER)
+        if nxt is not None:
+            return nxt
+        if header.get("tr_cd") in _REV_TR_CD and self._is_data_frame(o):
+            return replace(self._build_frame(o, raw), venue=MarketVenue.KRX, session=MarketSession.KRX_AFTER)
+        return None

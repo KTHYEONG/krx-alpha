@@ -124,6 +124,12 @@ def test_feed_id_mapping(args, expected) -> None:
     assert feed_id_for(*args[:3], slot=args[3] if len(args) > 3 else None) == expected
 
 
+def test_ls_after_feed_id_and_role_rejects_other_vendors() -> None:
+    assert feed_id_for("ls", "krx", 0, role="after") == "ls-after:0"
+    with pytest.raises(ValueError, match="only defined for ls aftermarket"):
+        feed_id_for("kis", "krx", 0, role="after")
+
+
 def test_feed_id_rejects_unknown_vendor_and_slot_on_non_kis() -> None:
     with pytest.raises(ValueError, match="unknown vendor"):
         feed_id_for("nope", "krx", 0)

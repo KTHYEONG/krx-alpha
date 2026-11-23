@@ -17,7 +17,7 @@ from src.realtime.adapters.registry import (
 
 
 def test_registry_keys_exact() -> None:
-    assert set(ADAPTERS.keys()) == {"ls", "ls-nxt", "db", "kiwoom", "toss"}
+    assert set(ADAPTERS.keys()) == {"ls", "ls-nxt", "ls-after", "db", "kiwoom", "toss"}
     with pytest.raises(TypeError):
         ADAPTERS["xx"] = None  # type: ignore[index]
 
@@ -152,3 +152,28 @@ def test_ls_entries_share_the_process_rejected_pair_hold(tmp_path) -> None:
     creds = AppCredentials("key", "secret")
     built = [regular_vendor(name).build(creds, ctx) for name in ("ls", "ls", "ls-nxt")]
     assert all(adapter._rejected_hold is hold for adapter in built)  # noqa: SLF001 - shared-state identity
+
+
+def test_ls_after_registered_as_ls_with_market_map() -> None:
+    entry = regular_vendor("ls-after")
+    assert entry.vendor == "ls"
+    assert entry.requires_market_map is True
+
+
+def test_ls_after_entry_requires_market_map(tmp_path) -> None:
+    with pytest.raises(ValueError, match="market_of"):
+        regular_vendor("ls-after").build(
+            AppCredentials("key", "secret"),
+            RegularAdapterContext(object(), CollectorSettings(), tmp_path, None),  # type: ignore[arg-type]
+        )
+
+
+def test_ls_after_entry_builds_aftermarket_adapter(tmp_path) -> None:
+    from src.realtime.adapters.ls import LsAftermarketRealtimeAdapter
+
+    entry = regular_vendor("ls-after")
+    adapter = entry.build(
+        AppCredentials("key", "secret"),
+        RegularAdapterContext(object(), CollectorSettings(), tmp_path, {"005930": "KOSPI"}),  # type: ignore[arg-type]
+    )
+    assert isinstance(adapter, LsAftermarketRealtimeAdapter)
