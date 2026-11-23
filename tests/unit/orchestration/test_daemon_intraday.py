@@ -369,6 +369,20 @@ def test_failover_primary_views_and_secondary_stop(monkeypatch, tmp_path) -> Non
     runner._run_feed_failover(dt.datetime(2026, 11, 3, 9, 10, tzinfo=ZoneInfo("Asia/Seoul")), _DAY, _anchors())
 
 
+def test_failover_views_cover_supervised_secondaries(monkeypatch, tmp_path) -> None:
+    runner = _failover_runner(monkeypatch, tmp_path, secondary=True)
+    runner.children.set(daemon_mod.StreamChildKey.DB_CROSSCHECK, _FakeSupervisor(cmd=["collect-stream-db"]))
+    runner.children.set(daemon_mod.StreamChildKey.DB_CROSSCHECK_B, _FakeSupervisor(cmd=["collect-stream-db"]))
+    runner.children.set(daemon_mod.StreamChildKey.TOSS_SECONDARY_A, _FakeSupervisor(cmd=["collect-stream-toss"]))
+    runner.children.set(daemon_mod.StreamChildKey.LS_NXT_SECONDARY, _FakeSupervisor(cmd=["collect-stream-ls-nxt"]))
+
+    views = runner._primary_views()
+
+    assert {"db:0", "db:1", "toss:0", "ls-nxt:0"} <= set(views)
+    assert "toss:1" not in views
+    assert all(views[feed].running for feed in ("db:0", "db:1", "toss:0", "ls-nxt:0"))
+
+
 def _anchors():
     from src.core.session_anchors import standard_session_anchors
 

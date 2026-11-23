@@ -4578,6 +4578,12 @@ class DaemonRunner:
             suppliers[f"kis-nxt:{shard.shard_index}"] = ch.regular_nxt.get(f"nxt-{shard.shard_index:02d}")
         for slot, sup in ch.regular_kis_dynamic.items():
             suppliers[f"kis:{slot}"] = sup
+        # Secondaries need a process view too: health files carry no liveness, so an absent view reads as DEAD.
+        for key, index in _DB_CROSSCHECK_SESSION_INDEX.items():
+            suppliers[f"db:{index}"] = ch.get(key)
+        for key, index in _TOSS_SESSION_INDEX.items():
+            suppliers[f"toss:{index}"] = ch.get(key)
+        suppliers[_LS_NXT_FEED] = ch.get(StreamChildKey.LS_NXT_SECONDARY)
         return {
             feed: PrimaryView(running=bool(sup.is_running()), circuit_open=False, auth_rejected=False)
             for feed, sup in suppliers.items()
