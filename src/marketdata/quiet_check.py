@@ -17,6 +17,7 @@ from src.core.config import (
     QUIET_CHECK_COOLDOWN_S,
     QUIET_CHECK_FILE_STALE_S,
     QUIET_CHECK_MARGIN_S,
+    QUIET_CHECK_SUMMARY_S,
 )
 from src.core.symbols import is_krx_short_code
 
@@ -105,6 +106,8 @@ class QuietCheck:
         self._session_date = session_date
         self._wall = wall
         self._checked_at: dict[str, float] = {}
+        self._totals = {"checked": 0, "LOSS": 0, "QUIET": 0, "UNKNOWN": 0, "failed": 0}
+        self._summary_started: float | None = None
 
     def run(self, source: BookQuoteSource) -> int:
         """Query up to one batch of cooled-down suspects; return the number of quotation calls made."""
@@ -137,15 +140,33 @@ class QuietCheck:
                     suspect.silent_s,
                 )
         if due:
-            logger.info(
-                "[DATA] stage=quiet_check status=OK checked=%d loss=%d quiet=%d unknown=%d failed=%d",
-                len(due),
-                counts["LOSS"],
-                counts["QUIET"],
-                counts["UNKNOWN"],
-                failed,
-            )
+            self._accumulate(len(due), counts, failed, now)
+        self._maybe_summarize(now)
         return len(due)
+
+    def _accumulate(self, checked: int, counts: dict[str, int], failed: int, now: float) -> None:
+        if self._summary_started is None:
+            self._summary_started = now
+        self._totals["checked"] += checked
+        self._totals["failed"] += failed
+        for verdict, count in counts.items():
+            self._totals[verdict] += count
+
+    def _maybe_summarize(self, now: float) -> None:
+        if self._summary_started is None or now - self._summary_started < QUIET_CHECK_SUMMARY_S:
+            return
+        totals = self._totals
+        logger.info(
+            "[DATA] stage=quiet_check status=OK window_s=%.0f checked=%d loss=%d quiet=%d unknown=%d failed=%d",
+            now - self._summary_started,
+            totals["checked"],
+            totals["LOSS"],
+            totals["QUIET"],
+            totals["UNKNOWN"],
+            totals["failed"],
+        )
+        self._totals = dict.fromkeys(totals, 0)
+        self._summary_started = None
 
 
 __all__ = ["BookQuoteSource", "QuietCheck", "QuietSuspect", "classify_book_time", "read_quiet_suspects"]

@@ -59,6 +59,8 @@ QUIET_CHECK_BATCH: Final[int] = 10
 QUIET_CHECK_COOLDOWN_S: Final[float] = 120.0
 QUIET_CHECK_FILE_STALE_S: Final[float] = 30.0
 QUIET_CHECK_MARGIN_S: Final[float] = 3.0
+# The summary line is aggregated over this window so idle polling cannot crowd the 30 MB container log.
+QUIET_CHECK_SUMMARY_S: Final[float] = 60.0
 # 2026-09-14 L0 measurement: off-regular silence reached 450 s on normal days.
 OFF_REGULAR_MAX_NORMAL_SILENCE_S: float = 450.0
 

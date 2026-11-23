@@ -162,3 +162,26 @@ def test_malformed_payload_entries_are_skipped(tmp_path) -> None:
     del broken["silent_s"]
     _write(path, suspects=["not-an-object", broken, {**_entry("000003"), "last_frame_wall": "x"}, _entry("000004")])
     assert [s.symbol for s in read_quiet_suspects(path, DAY, WALL)] == ["000004"]
+
+
+def test_summary_line_aggregates_per_minute(tmp_path, caplog) -> None:
+    import logging
+
+    path = tmp_path / "suspects.json"
+    clock = _Clock(WALL)
+    check = QuietCheck(path, DAY, wall=clock)
+    source = _BookSource()
+    with caplog.at_level(logging.INFO, logger="src.marketdata.quiet_check"):
+        _write(path, updated=clock.now, suspects=[_entry("000001")])
+        check.run(source)
+        clock.now += 30
+        _write(path, updated=clock.now, suspects=[_entry("000002")])
+        check.run(source)
+        clock.now += 29
+        check.run(source)
+        summaries = [r.getMessage() for r in caplog.records if "status=OK" in r.getMessage()]
+        assert summaries == []
+        clock.now += 1
+        check.run(source)
+    summaries = [r.getMessage() for r in caplog.records if "status=OK" in r.getMessage()]
+    assert summaries == ["[DATA] stage=quiet_check status=OK window_s=60 checked=2 loss=0 quiet=2 unknown=0 failed=0"]
