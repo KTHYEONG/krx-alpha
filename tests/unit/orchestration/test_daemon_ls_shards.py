@@ -226,8 +226,15 @@ def test_two_ls_shards_spread_kis_duplicates_and_log_dup_by_ls_shard(tmp_path, m
     ls_blocks = [shard.symbols for shard in runner.state.ls_shard_plan]
     assert len(ls_blocks) == 2
     plan = runner.state.regular_kis_plan
-    assert [shard.symbols for shard in plan] == [ls_blocks[0][:20], ls_blocks[1][:20]]
-    assert "dup_by_ls_shard=20,20" in caplog.text
+    # LS shard 1 gives one symbol to the market-state pairs: the overflow name is KIS-exclusive and planned first,
+    # and the 40 KIS pairs hold 20 duplicates of LS shard 0 and 19 of LS shard 1.
+    assert [len(block) for block in ls_blocks] == [100, 99]
+    assert [shard.symbols for shard in plan] == [
+        ("000200", *ls_blocks[0][:19]),
+        (ls_blocks[0][19], *ls_blocks[1][:19]),
+    ]
+    assert "kis_exclusive=1" in caplog.text
+    assert "dup_by_ls_shard=20,19" in caplog.text
     assert regular_kis_mod.ls_shard_blocks(runner._paths.candidates, runner._runtime.collector) == tuple(ls_blocks)
 
 

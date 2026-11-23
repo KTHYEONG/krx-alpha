@@ -159,4 +159,5 @@ def test_child_and_daemon_blocks_agree_with_prior_loads(tmp_path) -> None:
     blocks = ls_shard_blocks(pool, collector, loads=loads)
     assert blocks == ls_shard_blocks(pool, collector, loads=dict(loads))
     assert blocks != ls_shard_blocks(pool, collector)
-    assert sorted(blocks[0] + blocks[1]) == symbols
+    # The lowest-priority name overflows: shard 1 gives one symbol to the LS market-state pairs.
+    assert sorted(blocks[0] + blocks[1]) == symbols[:199]

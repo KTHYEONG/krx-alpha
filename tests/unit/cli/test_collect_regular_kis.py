@@ -410,8 +410,10 @@ def test_child_recomputes_daemon_plan_with_ls_blocks(monkeypatch, tmp_path) -> N
         collect_regular_kis, "bootstrap_session", lambda cfg: (_ for _ in ()).throw(AssertionError("no bootstrap"))
     )
     blocks = ls_shard_blocks(tmp_path / "pool.json", runtime.collector)
-    snake = tuple(s for i, s in enumerate(symbols[:40]) if i % 4 in (0, 3))
-    assert blocks == (snake, tuple(s for s in symbols[:40] if s not in snake))
+    # Shard 1 gives one symbol to the LS market-state pairs, so the static set is symbols[:39].
+    snake = (*(s for i, s in enumerate(symbols[:38]) if i % 4 in (0, 3)), "000039")
+    assert blocks == (snake, tuple(s for s in symbols[:39] if s not in snake))
+    assert [len(block) for block in blocks] == [20, 19]
     covered, ls_blocks = regular_kis_ls_plan_inputs(blocks)
     daemon_plan = plan_regular_kis_shards(
         symbols=symbols, credentials=_creds(), credential_slots=("1", "2"),
