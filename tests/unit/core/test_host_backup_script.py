@@ -19,10 +19,15 @@ def _write_fake_rclone(path: Path, argv_log: Path) -> Path:
         'cmd="$1"\n'
         'if [ "$cmd" = "copy" ]; then exit "${FAKE_COPY_RC:-0}"; fi\n'
         'if [ "$cmd" = "lsf" ]; then\n'
-        '  printf \'%s\' "${FAKE_LSF_OUTPUT:-}"\n'
-        "  exit \"${FAKE_LSF_RC:-0}\"\n"
+        "  printf '%s' \"${FAKE_LSF_OUTPUT:-}\"\n"
+        '  exit "${FAKE_LSF_RC:-0}"\n'
         "fi\n"
         'if [ "$cmd" = "purge" ]; then exit "${FAKE_PURGE_RC:-0}"; fi\n'
+        'if [ "$cmd" = "lsjson" ]; then\n'
+        '  f="${FAKE_LSJSON_DIR:-/nonexistent}/${2##*/}"\n'
+        '  if [ -f "$f" ]; then cat "$f"; else printf "[]"; fi\n'
+        "  exit 0\n"
+        "fi\n"
         "exit 0\n",
         encoding="utf-8",
     )
@@ -327,9 +332,7 @@ def test_lock_timeout_records_holders_and_keeps_previous_last_ok(tmp_path) -> No
     env["LOCK_WAIT_SEC"] = "1"
     state_dir = Path(env["KRX_HOST_STATE_DIR"])
     state_dir.mkdir(parents=True, exist_ok=True)
-    _status_path(tmp_path).write_text(
-        json.dumps({"last_ok_at": "2026-09-22T14:30:00+00:00"}), encoding="utf-8"
-    )
+    _status_path(tmp_path).write_text(json.dumps({"last_ok_at": "2026-09-22T14:30:00+00:00"}), encoding="utf-8")
     lock_path = Path(env["QUANT_GDRIVE_LOCK"])
     lock_path.touch()
     holder = subprocess.Popen(  # noqa: S603 - hermetic flock holder
@@ -379,9 +382,7 @@ def test_copy_failure_keeps_previous_last_ok(tmp_path) -> None:
     env["FAKE_COPY_RC"] = "1"
     state_dir = Path(env["KRX_HOST_STATE_DIR"])
     state_dir.mkdir(parents=True, exist_ok=True)
-    _status_path(tmp_path).write_text(
-        json.dumps({"last_ok_at": "2026-09-22T14:30:00+00:00"}), encoding="utf-8"
-    )
+    _status_path(tmp_path).write_text(json.dumps({"last_ok_at": "2026-09-22T14:30:00+00:00"}), encoding="utf-8")
 
     result = subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
         ["bash", str(SCRIPT)],  # noqa: S607
@@ -421,9 +422,7 @@ def test_corrupt_previous_status_tolerated(tmp_path) -> None:
 
 def _write_fake_curl(path: Path, argv_log: Path, rc: int = 0) -> Path:
     path.write_text(
-        "#!/usr/bin/env bash\n"
-        f'printf \'%s\\n\' "$*" >> "{argv_log}"\n'
-        f"exit {rc}\n",
+        f'#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "{argv_log}"\nexit {rc}\n',
         encoding="utf-8",
     )
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
@@ -583,3 +582,86 @@ def test_url_never_logged(tmp_path) -> None:
     log_dir = Path(env["LOG_DIR"])
     logged = "".join(p.read_text(encoding="utf-8") for p in log_dir.glob("*.log"))
     assert secret not in logged
+
+
+def _run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - hermetic bash harness with fixed argv
+        ["bash", str(SCRIPT)],  # noqa: S607
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_local_logs_and_digests_pruned_by_file_date(tmp_path) -> None:
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+    log_dir = Path(env["LOG_DIR"])
+    log_dir.mkdir()
+    for name in ("krx-host-backup-2026-08-23.log", "krx-host-backup-2026-08-24.log", "other-2026-01-01.log"):
+        (log_dir / name).write_text("x", encoding="utf-8")
+    digests = Path(env["KRX_ROOT"]) / "data" / "logs" / "eod_digests"
+    digests.mkdir(parents=True)
+    for name in ("2026-07-24.txt", "2026-07-25.txt", "notes.txt"):
+        (digests / name).write_text("x", encoding="utf-8")
+
+    result = _run(env)
+
+    assert result.returncode == 0
+    # today 2026-09-23: host logs keep 30 days (cutoff 08-24), digests keep 60 days (cutoff 07-25).
+    assert sorted(p.name for p in log_dir.iterdir() if p.name.startswith(("krx-host-backup-2026-08", "other"))) == [
+        "krx-host-backup-2026-08-24.log",
+        "other-2026-01-01.log",
+    ]
+    assert sorted(p.name for p in digests.iterdir()) == ["2026-07-25.txt", "notes.txt"]
+    assert "host_logs_removed=1 eod_digests_removed=1" in result.stdout
+
+
+def test_market_events_removed_only_after_matching_offsite_copy(tmp_path) -> None:
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+    events = Path(env["KRX_ROOT"]) / "data" / "market_events" / "ls"
+    events.mkdir(parents=True)
+    for name in ("dt=2026-06-24.jsonl", "dt=2026-06-23.jsonl", "dt=2026-06-22.jsonl", "dt=2026-06-25.jsonl"):
+        (events / name).write_text("abcd", encoding="utf-8")
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    (remote / "dt=2026-06-24.jsonl").write_text('[{"Size": 4, "IsDir": false}]', encoding="utf-8")
+    (remote / "dt=2026-06-23.jsonl").write_text('[{"Size": 3, "IsDir": false}]', encoding="utf-8")
+    env["FAKE_LSJSON_DIR"] = str(remote)
+
+    result = _run(env)
+
+    assert result.returncode == 0
+    # cutoff 2026-06-25 (90 days): 06-24 matches offsite and goes; 06-23 size differs and 06-22 is not offsite, both stay.
+    assert sorted(p.name for p in events.iterdir()) == [
+        "dt=2026-06-22.jsonl",
+        "dt=2026-06-23.jsonl",
+        "dt=2026-06-25.jsonl",
+    ]
+    assert "market_events_removed=1 market_events_kept=2" in result.stdout
+    assert any(
+        line.startswith("lsjson gdrive:test-root/data/market_events/ls/dt=2026-06-24.jsonl")
+        for line in _read_argv(argv_log)
+    )
+
+
+def test_failed_copy_keeps_market_events(tmp_path) -> None:
+    argv_log = tmp_path / "argv.log"
+    env = _base_env(tmp_path, argv_log)
+    env["FAKE_COPY_RC"] = "1"
+    events = Path(env["KRX_ROOT"]) / "data" / "market_events" / "ls"
+    events.mkdir(parents=True)
+    (events / "dt=2026-06-01.jsonl").write_text("abcd", encoding="utf-8")
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    (remote / "dt=2026-06-01.jsonl").write_text('[{"Size": 4, "IsDir": false}]', encoding="utf-8")
+    env["FAKE_LSJSON_DIR"] = str(remote)
+
+    result = _run(env)
+
+    assert result.returncode == 1
+    assert (events / "dt=2026-06-01.jsonl").exists()
+    assert "market_events_kept=skipped" in result.stdout
+    assert not any(line.startswith("lsjson") for line in _read_argv(argv_log))

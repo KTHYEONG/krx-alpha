@@ -7,6 +7,11 @@ REMOTE_ROOT="${REMOTE_ROOT:-gdrive:quant-lake/live/krx-alpha}"
 QUANT_GDRIVE_LOCK="${QUANT_GDRIVE_LOCK:-/run/user/$(id -u)/quant-gdrive.lock}"
 LOCK_WAIT_SEC="${LOCK_WAIT_SEC:-7200}"
 VERSION_RETENTION_DAYS="${VERSION_RETENTION_DAYS:-30}"
+# Local retention (days, by the date in the file name): ops logs are local diagnostics only and never go offsite;
+# market events are research data, so a local file is removed only after its offsite copy matches in size.
+HOST_LOG_RETENTION_DAYS="${HOST_LOG_RETENTION_DAYS:-30}"
+EOD_DIGEST_RETENTION_DAYS="${EOD_DIGEST_RETENTION_DAYS:-60}"
+MARKET_EVENTS_RETENTION_DAYS="${MARKET_EVENTS_RETENTION_DAYS:-90}"
 BACKUP_TODAY_UTC="${BACKUP_TODAY_UTC:-$(date -u +%F)}"
 LOG_DIR="${LOG_DIR:-$HOME/logs}"
 LOG_FILE="$LOG_DIR/krx-host-backup-$BACKUP_TODAY_UTC.log"
@@ -66,6 +71,56 @@ collect_lock_holders() {
       LOCK_HOLDERS+=("$pid ${cmd:0:200}")
     fi
   done
+}
+
+retention_cutoff() {
+  date -u -d "$BACKUP_TODAY_UTC - $1 days" +%F
+}
+
+# Removes <dir>/<prefix>YYYY-MM-DD<suffix> files dated before the cutoff; prints the removed count.
+prune_day_files() {
+  local dir="$1" prefix="$2" suffix="$3" days="$4" cutoff f name day removed=0
+  cutoff="$(retention_cutoff "$days")"
+  [ -d "$dir" ] || { printf '0'; return 0; }
+  for f in "$dir/$prefix"????-??-??"$suffix"; do
+    [ -f "$f" ] || continue
+    name="${f##*/}"
+    day="${name#"$prefix"}"
+    day="${day%"$suffix"}"
+    if [[ "$day" < "$cutoff" ]] && rm -f -- "$f"; then
+      removed=$((removed + 1))
+    fi
+  done
+  printf '%s' "$removed"
+}
+
+remote_size() {
+  "$RCLONE_BIN" lsjson "$1" 2>/dev/null | python3 -c 'import json,sys
+rows = json.load(sys.stdin)
+print(rows[0]["Size"] if len(rows) == 1 and not rows[0].get("IsDir") else "")' 2>/dev/null
+}
+
+# Removes market-event day files older than the cutoff only when the offsite copy has the same size.
+prune_market_events() {
+  local dir="$KRX_ROOT/data/market_events" cutoff f rel name day local_size remote removed=0 kept=0
+  cutoff="$(retention_cutoff "$MARKET_EVENTS_RETENTION_DAYS")"
+  if [ -d "$dir" ]; then
+    while IFS= read -r f; do
+      name="${f##*/}"
+      day="${name#dt=}"
+      day="${day%.jsonl}"
+      [[ "$day" < "$cutoff" ]] || continue
+      rel="${f#"$KRX_ROOT/data/"}"
+      local_size="$(stat -c %s -- "$f")"
+      remote="$(remote_size "$REMOTE_ROOT/data/$rel")"
+      if [ -n "$remote" ] && [ "$remote" = "$local_size" ] && rm -f -- "$f"; then
+        removed=$((removed + 1))
+      else
+        kept=$((kept + 1))
+      fi
+    done < <(find "$dir" -type f -name 'dt=????-??-??.jsonl' | sort)
+  fi
+  printf '%s %s' "$removed" "$kept"
 }
 
 write_status() {
@@ -165,6 +220,17 @@ else
   log "[SYS] stage=gdrive_backup project=krx-alpha step=data status=failed rc=$data_rc"
   overall_rc=1
 fi
+
+host_logs_removed="$(prune_day_files "$LOG_DIR" "krx-host-backup-" ".log" "$HOST_LOG_RETENTION_DAYS")"
+digests_removed="$(prune_day_files "$KRX_ROOT/data/logs/eod_digests" "" ".txt" "$EOD_DIGEST_RETENTION_DAYS")"
+if [ "$data_rc" -eq 0 ]; then
+  read -r events_removed events_kept <<< "$(prune_market_events)"
+else
+  # Without a completed copy the offsite parity is unknown, so market events stay local.
+  events_removed=0
+  events_kept=skipped
+fi
+log "[SYS] stage=gdrive_backup project=krx-alpha step=local_retention status=ok host_logs_removed=$host_logs_removed eod_digests_removed=$digests_removed market_events_removed=$events_removed market_events_kept=$events_kept"
 
 prune_rc=0
 lsf_out=""
