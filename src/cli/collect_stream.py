@@ -16,10 +16,18 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
-from src.core.config import AuditSettings, CollectorSettings, DataPaths, IntradayAdmissionSettings, KisTokenSettings
+from src.core.config import (
+    LS_REJECTED_PAIR_HOLD_S,
+    AuditSettings,
+    CollectorSettings,
+    DataPaths,
+    IntradayAdmissionSettings,
+    KisTokenSettings,
+)
 from src.core.errors import KrxAlphaError
 from src.core.observability import EVENT
 from src.core.session_anchors import resolve_session_anchors
+from src.realtime.adapters.json_ws import RejectedPairHold
 from src.realtime.adapters.ls import LS_NXT_STREAMS
 from src.realtime.adapters.registry import RegularAdapterContext, regular_vendor
 from src.realtime.connect_guard import ConnectRateGuard
@@ -485,10 +493,11 @@ async def run_regular_stream(
             if profile.vendor == "db"
             else None
         )
+        rejected_hold = RejectedPairHold(LS_REJECTED_PAIR_HOLD_S) if profile.vendor == "ls" else None
         stream = run_streaming_child(
             session=session,
             adapter_factory=lambda http: entry.build(
-                creds, RegularAdapterContext(http, settings, token_cache_dir, market_of, connect_gate)
+                creds, RegularAdapterContext(http, settings, token_cache_dir, market_of, connect_gate, rejected_hold)
             ),
             replay_pairs=live_watch.pairs() if live_watch is not None else static_pairs,
             live_watch=live_watch,

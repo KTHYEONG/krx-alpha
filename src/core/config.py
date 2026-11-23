@@ -38,6 +38,8 @@ RUN_ID_ENV: str = "KRX_ALPHA_RUN_ID"
 # Single source for the defaults; env may only override via the settings fields below.
 LS_MAX_SESSIONS: int = 3
 LS_MAX_SUBSCRIPTIONS_PER_SESSION: int = 200
+# LS closes the whole socket after one rejected subscribe (2026-11-23 probe); a rejected pair waits this long before a resend.
+LS_REJECTED_PAIR_HOLD_S: float = 1800.0
 # 2026-09-14 L0 measurement: off-regular silence reached 450 s on normal days.
 OFF_REGULAR_MAX_NORMAL_SILENCE_S: float = 450.0
 

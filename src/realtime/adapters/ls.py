@@ -10,7 +10,7 @@ from typing import Any
 from src.core.config import LS_MAX_SUBSCRIPTIONS_PER_SESSION
 from src.marketdata.host_token_store import AsyncRotatingTokenStore
 from src.marketdata.toss_token_store import TossTokenStore
-from src.realtime.adapters.json_ws import JsonWsOAuthAdapter
+from src.realtime.adapters.json_ws import JsonWsOAuthAdapter, RejectedPairHold
 from src.realtime.contracts import (
     L0Frame,
     MarketSession,
@@ -35,7 +35,10 @@ _REV_TR_CD: dict[str, str] = {v: k[0] for k, v in LS_TR_CD.items()}
 LS_NXT_STREAMS: tuple[str, str] = ("H0NXCNT0", "H0NXASP0")
 _NXT_TR_BY_STREAM: dict[str, str] = {"H0NXCNT0": "NS3", "H0NXASP0": "NH1"}
 _NXT_STREAM_BY_TR: dict[str, str] = {tr: stream for stream, tr in _NXT_TR_BY_STREAM.items()}
-_NXT_SYMBOL = re.compile(r"\d{6}")
+# KRX short codes are six characters; newer listings mix capital letters into digits (e.g. 0088M0).
+_KRX_SHORT_CODE = re.compile(r"[0-9A-Z]{6}")
+# LS rejects a malformed tr_key with 10009 ("tr_key의 길이를 확인해주세요", 2026-11-23 probe), then closes the socket.
+LS_PAIR_REJECT_CODES: frozenset[str] = frozenset({"10009"})
 
 
 class LsRealtimeAdapter(JsonWsOAuthAdapter):
@@ -69,6 +72,7 @@ class LsRealtimeAdapter(JsonWsOAuthAdapter):
         ws_url: str = LS_WS_URL,
         heartbeat_s: float = 10.0,
         ack_timeout_s: float = 10.0,
+        rejected_hold: RejectedPairHold | None = None,
     ) -> None:
         """Bind one LS websocket session to a host-shared token store.
 
@@ -76,6 +80,10 @@ class LsRealtimeAdapter(JsonWsOAuthAdapter):
         unverified, so every process holding the same app key shares one store
         (single issuer) rather than risk revoking a peer's session, and the adapter
         must not resolve its location from ambient env.
+
+        LS answers one rejected subscribe by closing the whole socket, so keys are validated before sending
+        and ``rejected_hold`` (shared by every adapter of the process) keeps a rejected pair from being
+        resent on each reconnect.
         """
         self._market_of = market_of
         super().__init__(
@@ -90,10 +98,21 @@ class LsRealtimeAdapter(JsonWsOAuthAdapter):
             heartbeat_s=heartbeat_s,
             ack_timeout_s=ack_timeout_s,
             subscribe_spacing_s=None,
+            rejected_hold=rejected_hold,
         )
 
     def _subscribe_body(self, symbol: str, stream: str) -> dict[str, str]:
         return {"tr_cd": LS_TR_CD[(stream, self._market_of[symbol])], "tr_key": symbol}
+
+    def _invalid_key(self, symbol: str, stream: str) -> str | None:
+        if _KRX_SHORT_CODE.fullmatch(symbol) is None:
+            return "invalid_tr_key"
+        if (stream, self._market_of.get(symbol)) not in LS_TR_CD:
+            return "unknown_market"
+        return None
+
+    def _is_pair_rejection(self, code: str) -> bool:
+        return code in LS_PAIR_REJECT_CODES
 
     def _data_frame(self, o: dict[str, Any], header: dict[str, Any], raw: str) -> L0Frame | None:
         return self._build_frame(o, raw) if self._is_data_frame(o) else None
@@ -141,9 +160,14 @@ class LsNxtRealtimeAdapter(LsRealtimeAdapter):
         kwargs.setdefault("market_of", {})
         super().__init__(**kwargs)
 
+    def _invalid_key(self, symbol: str, stream: str) -> str | None:
+        if _KRX_SHORT_CODE.fullmatch(symbol) is None:
+            return "invalid_tr_key"
+        if stream not in _NXT_TR_BY_STREAM:
+            return "unknown_stream"
+        return None
+
     def _subscribe_body(self, symbol: str, stream: str) -> dict[str, str]:
-        if _NXT_SYMBOL.fullmatch(symbol) is None:
-            raise ValueError(f"NXT symbol must be 6 digits: {symbol!r}")
         return {"tr_cd": _NXT_TR_BY_STREAM[stream], "tr_key": f"N{symbol}   "}
 
     def _data_frame(self, o: dict[str, Any], header: dict[str, Any], raw: str) -> L0Frame | None:

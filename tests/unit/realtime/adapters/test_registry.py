@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from src.core.config import CollectorSettings
+from src.core.config import LS_REJECTED_PAIR_HOLD_S, CollectorSettings
 from src.core.errors import KrxAlphaError
 from src.realtime.adapters import registry
+from src.realtime.adapters.json_ws import RejectedPairHold
 from src.realtime.adapters.registry import (
     ADAPTERS,
     AppCredentials,
@@ -105,6 +106,9 @@ def test_registry_patch_points_are_module_globals(monkeypatch, tmp_path, vendor)
     if vendor == "ls":
         expected["market_of"] = market_of
         expected["capacity_pairs"] = settings.ls_max_subscriptions_per_session
+        hold = seen["adapter"].pop("rejected_hold")
+        assert isinstance(hold, RejectedPairHold)
+        assert hold.hold_s == LS_REJECTED_PAIR_HOLD_S
     else:
         expected.update(capacity_pairs=12, ack_timeout_s=3, subscribe_spacing_s=0.2, connect_gate=None)
     assert seen["adapter"] == expected
@@ -139,3 +143,12 @@ def test_ls_nxt_entry_journals_as_ls_and_needs_no_market_map(monkeypatch, tmp_pa
         RegularAdapterContext(object(), CollectorSettings(), tmp_path, None),  # type: ignore[arg-type]
     )
     assert isinstance(adapter, LsNxtRealtimeAdapter)
+
+
+def test_ls_entries_share_the_process_rejected_pair_hold(tmp_path) -> None:
+    """Primary and standby adapters built from one context share the hold, so a standby never resends a bad pair."""
+    hold = RejectedPairHold(LS_REJECTED_PAIR_HOLD_S)
+    ctx = RegularAdapterContext(object(), CollectorSettings(), tmp_path, {"005930": "KOSPI"}, None, hold)  # type: ignore[arg-type]
+    creds = AppCredentials("key", "secret")
+    built = [regular_vendor(name).build(creds, ctx) for name in ("ls", "ls", "ls-nxt")]
+    assert all(adapter._rejected_hold is hold for adapter in built)  # noqa: SLF001 - shared-state identity

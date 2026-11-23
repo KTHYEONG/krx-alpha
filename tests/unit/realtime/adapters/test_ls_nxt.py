@@ -6,7 +6,6 @@ import json
 import pathlib
 
 import polars as pl
-import pytest
 
 from src.realtime.adapters.ls import LsNxtRealtimeAdapter
 from src.realtime.contracts import MarketSession, MarketVenue
@@ -37,9 +36,10 @@ def test_ls_nxt_adapter_subscribes_ns3_nh1_with_n_prefix() -> None:
     adapter = _adapter()
     assert adapter._subscribe_body("005930", "H0NXCNT0") == {"tr_cd": "NS3", "tr_key": "N005930   "}
     assert adapter._subscribe_body("005930", "H0NXASP0") == {"tr_cd": "NH1", "tr_key": "N005930   "}
-    for bad in ("5930", "0059300", "A05930", "N005930"):
-        with pytest.raises(ValueError, match="6 digits"):
-            adapter._subscribe_body(bad, "H0NXCNT0")
+    # Malformed keys are refused before sending (LS closes the socket on one bad key); letter codes are KRX-valid.
+    for bad in ("5930", "0059300", "a05930", "N005930", "00593 "):
+        assert adapter._invalid_key(bad, "H0NXCNT0") == "invalid_tr_key"
+    assert adapter._invalid_key("0088M0", "H0NXASP0") is None
 
 
 def test_ls_nxt_frames_logical_ids_and_venue() -> None:

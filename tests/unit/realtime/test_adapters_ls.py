@@ -208,15 +208,16 @@ def test_ls_adapter_recv_raises_vendor_disconnected_on_close(tmp_path) -> None:
 
     with pytest.raises(VendorDisconnected):
         asyncio.run(adapter.recv())
-def test_ls_adapter_subscribe_unknown_market_raises_keyerror(tmp_path) -> None:
+def test_ls_adapter_subscribe_unknown_market_is_rejected_without_sending(tmp_path) -> None:
     from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
     import asyncio
-    import pytest
     from src.realtime.adapters.ls import LsRealtimeAdapter
 
     class _WS:
+        def __init__(self):
+            self.sent = []
         async def send_str(self, s):
-            self.last = s
+            self.sent.append(s)
         async def receive_str(self):
             return '{}'
         async def close(self):
@@ -226,8 +227,9 @@ def test_ls_adapter_subscribe_unknown_market_raises_keyerror(tmp_path) -> None:
     adapter._ws = _WS()  # type: ignore[attr-defined]
     adapter._token = 'TOK'  # type: ignore[attr-defined]
 
-    with pytest.raises(KeyError):
-        asyncio.run(adapter.subscribe([('999999', 'H0STCNT0')]))
+    acks = asyncio.run(adapter.subscribe([('999999', 'H0STCNT0')]))
+    assert [(a.accepted, a.code) for a in acks] == [(False, 'local:unknown_market')]
+    assert adapter._ws.sent == []
 
 
 def test_ls_adapter_recv_echoes_ws_ping(tmp_path) -> None:
@@ -1622,3 +1624,185 @@ def test_ls_subscribe_stale_token_rotates_once_on_reset(tmp_path) -> None:
 
     assert json.loads(http.ws.sent[0])["header"]["token"] == "NEW"
     assert posts == ["TOK", "NEW"]
+
+
+def _hold_adapter(tmp_path, ws, *, market_of=None, hold=None, nxt: bool = False):
+    from src.marketdata.toss_token_store import TossTokenStore, ls_token_path
+    from src.realtime.adapters.ls import LsNxtRealtimeAdapter, LsRealtimeAdapter
+
+    kwargs = {
+        "app_key": "k",
+        "app_secret": "s",
+        "http": object(),
+        "token_store": TossTokenStore(ls_token_path(tmp_path, "k")),
+        "rejected_hold": hold,
+    }
+    if nxt:
+        adapter = LsNxtRealtimeAdapter(**kwargs)
+    else:
+        adapter = LsRealtimeAdapter(market_of=market_of if market_of is not None else {"005930": "KOSPI"}, **kwargs)
+    adapter._ws = ws  # type: ignore[attr-defined]
+    adapter._token = "TOK"  # type: ignore[attr-defined]
+    return adapter
+
+
+class _ClosingAckWs:
+    """Serves the given ack codes, then behaves like LS after an error ack: the next read is a close frame."""
+
+    def __init__(self, codes):
+        import json
+
+        self._q = [json.dumps({"header": {"tr_cd": "S3_", "rsp_cd": c}, "body": {}}) for c in codes]
+        self.sent: list[str] = []
+
+    async def send_str(self, s):
+        self.sent.append(s)
+
+    async def receive_str(self):
+        if not self._q:
+            raise TypeError("Received message 8:1000 is not str")
+        return self._q.pop(0)
+
+
+def test_ls_invalid_keys_are_rejected_locally_and_never_sent(tmp_path) -> None:
+    import asyncio
+    import json
+    from unittest.mock import AsyncMock
+
+    ws = _ack_ws(["00000"])
+    adapter = _hold_adapter(tmp_path, ws, market_of={"005930": "KOSPI", "0088M0": "KOSDAQ", "A01612": "KOSPI"})
+    adapter._token_store.areplace_rejected = AsyncMock(side_effect=AssertionError("must not rotate"))  # type: ignore[attr-defined]
+    pairs = [("A01612X", "H0STCNT0"), ("999999", "H0STCNT0"), ("0088M0", "H0STCNT0"), ("00593", "H0STCNT0")]
+    acks = asyncio.run(adapter.subscribe(pairs))
+    assert [(a.symbol, a.accepted, a.code) for a in acks] == [
+        ("A01612X", False, "local:invalid_tr_key"),
+        ("999999", False, "local:unknown_market"),
+        ("0088M0", True, "00000"),
+        ("00593", False, "local:invalid_tr_key"),
+    ]
+    assert [json.loads(s)["body"]["tr_key"] for s in ws.sent] == ["0088M0"]
+    assert adapter.subscribed_pairs() == (("0088M0", "H0STCNT0"),)
+
+
+def test_ls_all_local_rejections_never_rotate_the_shared_token(tmp_path) -> None:
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    ws = _ack_ws([])
+    adapter = _hold_adapter(tmp_path, ws, market_of={})
+    adapter._token_store.areplace_rejected = AsyncMock(side_effect=AssertionError("must not rotate"))  # type: ignore[attr-defined]
+    acks = asyncio.run(adapter.subscribe([("005930", "H0STCNT0"), ("bad", "H0STCNT0")]))
+    assert [a.code for a in acks] == ["local:unknown_market", "local:invalid_tr_key"]
+    assert ws.sent == []
+
+
+def test_ls_key_length_rejection_is_held_across_reconnect_then_retried(tmp_path) -> None:
+    """One 10009 makes LS close the socket; the reconnect must skip that pair so the shard is not trapped."""
+    import asyncio
+    import json
+
+    import pytest
+
+    from src.realtime.adapters.json_ws import RejectedPairHold
+    from src.realtime.contracts import VendorDisconnected
+
+    now = [0.0]
+    hold = RejectedPairHold(1800.0, clock=lambda: now[0])
+    market = {"005930": "KOSPI", "000660": "KOSPI"}
+    pairs = [("005930", "H0STCNT0"), ("000660", "H0STCNT0")]
+    first = _hold_adapter(tmp_path, _ClosingAckWs(["10009"]), market_of=market, hold=hold)
+    with pytest.raises(VendorDisconnected, match="subscribe_non_text"):
+        asyncio.run(first.subscribe(pairs))
+    assert hold.held_code(("005930", "H0STCNT0")) == "10009"
+
+    # The standby (or the reconnect) shares the hold and resends only the healthy pair.
+    ws = _ack_ws(["00000"])
+    second = _hold_adapter(tmp_path, ws, market_of=market, hold=hold)
+    acks = asyncio.run(second.subscribe(pairs))
+    assert [(a.symbol, a.accepted, a.code) for a in acks] == [
+        ("005930", False, "local:held:10009"),
+        ("000660", True, "00000"),
+    ]
+    assert [json.loads(s)["body"]["tr_key"] for s in ws.sent] == ["000660"]
+
+    now[0] = 1800.0
+    assert hold.held_code(("005930", "H0STCNT0")) is None
+
+
+def test_ls_unknown_code_is_held_only_after_a_peer_pair_was_accepted(tmp_path) -> None:
+    import asyncio
+
+    from src.realtime.adapters.json_ws import RejectedPairHold
+
+    hold = RejectedPairHold(1800.0, clock=lambda: 0.0)
+    market = {"005930": "KOSPI", "000660": "KOSPI", "035720": "KOSDAQ"}
+    adapter = _hold_adapter(tmp_path, _ack_ws(["IGW00001", "00000", "IGW00001"]), market_of=market, hold=hold)
+    acks = asyncio.run(
+        adapter.subscribe([("005930", "H0STCNT0"), ("000660", "H0STCNT0"), ("035720", "H0STCNT0")])
+    )
+    assert [a.accepted for a in acks] == [False, True, False]
+    # Before any accepted pair the rejection may be the token's, so the first pair is not held.
+    assert hold.held_code(("005930", "H0STCNT0")) is None
+    assert hold.held_code(("035720", "H0STCNT0")) == "IGW00001"
+
+
+def test_ls_unknown_code_on_every_pair_still_reports_auth_rejection(tmp_path) -> None:
+    import asyncio
+
+    import pytest
+
+    from src.realtime.adapters.json_ws import RejectedPairHold
+    from src.realtime.contracts import VendorAuthRejected
+
+    hold = RejectedPairHold(1800.0, clock=lambda: 0.0)
+    adapter, _ = _cooldown_adapter(tmp_path, _ack_ws(["01234", "01234"]), age_s=5.0)
+    adapter._rejected_hold = hold  # type: ignore[attr-defined]
+    with pytest.raises(VendorAuthRejected, match=r"all_acks_rejected:01234"):
+        asyncio.run(adapter.subscribe([("005930", "H0STCNT0"), ("000660", "H0STCNT0")]))
+    assert hold.held_code(("005930", "H0STCNT0")) is None
+
+
+def test_ls_live_key_length_rejection_is_held_and_never_rotates_token(tmp_path) -> None:
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from src.realtime.adapters.json_ws import RejectedPairHold
+
+    hold = RejectedPairHold(1800.0, clock=lambda: 0.0)
+    class _LiveWs:
+        """Answers each live subscribe with 10009 through the recv-side ack router, as LS would."""
+
+        async def send_str(self, s):
+            asyncio.get_running_loop().call_soon(adapter._route_live_ack, {"rsp_cd": "10009"})
+
+    adapter = _hold_adapter(tmp_path, _LiveWs(), market_of={"005930": "KOSPI", "000660": "KOSPI"}, hold=hold)
+    adapter._token_store.areplace_rejected = AsyncMock(side_effect=AssertionError("must not rotate"))  # type: ignore[attr-defined]
+    adapter._subscribed = [("005930", "H0STCNT0")]  # type: ignore[attr-defined]
+
+    acks = asyncio.run(adapter.subscribe_live([("000660", "H0STCNT0"), ("bad", "H0STCNT0")]))
+    assert [(a.accepted, a.code) for a in acks] == [(False, "10009"), (False, "local:invalid_tr_key")]
+    assert hold.held_code(("000660", "H0STCNT0")) == "10009"
+
+
+def test_ls_nxt_invalid_symbol_is_rejected_locally(tmp_path) -> None:
+    import asyncio
+    import json
+
+    ws = _ack_ws(["00000"])
+    adapter = _hold_adapter(tmp_path, ws, nxt=True)
+    acks = asyncio.run(adapter.subscribe([("00593", "H0NXCNT0"), ("005930", "H0NXCNT0"), ("005930", "H0STCNT0")]))
+    assert [(a.accepted, a.code) for a in acks] == [
+        (False, "local:invalid_tr_key"),
+        (True, "00000"),
+        (False, "local:unknown_stream"),
+    ]
+    assert [json.loads(s)["body"]["tr_key"] for s in ws.sent] == ["N005930   "]
+
+
+def test_rejected_pair_hold_rejects_non_positive_duration() -> None:
+    import pytest
+
+    from src.realtime.adapters.json_ws import RejectedPairHold
+
+    with pytest.raises(ValueError, match="hold_s must be positive"):
+        RejectedPairHold(0.0)

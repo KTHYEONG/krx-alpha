@@ -13,6 +13,7 @@ import aiohttp
 
 from deploy.shared.host_broker_contract import token_record_path
 from src.core.config import (
+    LS_REJECTED_PAIR_HOLD_S,
     CollectorSettings,
     DbCredentials,
     KisTokenSettings,
@@ -25,6 +26,7 @@ from src.core.errors import KrxAlphaError
 from src.marketdata.host_token_store import AsyncRotatingTokenStore, kiwoom_issued, make_kiwoom_store
 from src.marketdata.toss_token_store import TossTokenStore, toss_token_path
 from src.realtime.adapters.db import DbRealtimeAdapter
+from src.realtime.adapters.json_ws import RejectedPairHold
 from src.realtime.adapters.kiwoom import KiwoomRealtimeAdapter
 from src.realtime.adapters.ls import LsNxtRealtimeAdapter, LsRealtimeAdapter
 from src.realtime.adapters.toss import TossRealtimeAdapter
@@ -48,6 +50,12 @@ class RegularAdapterContext:
     token_cache_dir: pathlib.Path
     market_of: Mapping[str, str] | None
     connect_gate: Callable[[], Awaitable[None]] | None = None
+    # One per process so standby adapters inherit what the primary learned; None gives each adapter its own.
+    rejected_hold: RejectedPairHold | None = None
+
+
+def _ls_rejected_hold(ctx: RegularAdapterContext) -> RejectedPairHold:
+    return ctx.rejected_hold if ctx.rejected_hold is not None else RejectedPairHold(LS_REJECTED_PAIR_HOLD_S)
 
 
 @dataclass(frozen=True)
@@ -97,6 +105,7 @@ def _build_ls(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAdapte
         market_of=ctx.market_of,
         token_store=_ls_token_store(creds, ctx),
         capacity_pairs=ctx.settings.ls_max_subscriptions_per_session,
+        rejected_hold=_ls_rejected_hold(ctx),
     )
 
 
@@ -108,6 +117,7 @@ def _build_ls_nxt(creds: AppCredentials, ctx: RegularAdapterContext) -> VendorAd
         http=ctx.http,
         token_store=_ls_token_store(creds, ctx),
         capacity_pairs=ctx.settings.ls_max_subscriptions_per_session,
+        rejected_hold=_ls_rejected_hold(ctx),
     )
 
 

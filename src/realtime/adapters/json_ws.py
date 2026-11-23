@@ -7,6 +7,7 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any, ClassVar
 
 import aiohttp
@@ -22,6 +23,40 @@ from src.marketdata.host_token_store import AsyncRotatingTokenStore, TokenStoreF
 from src.marketdata.toss_token_store import IssuedToken as TossIssuedToken
 from src.marketdata.toss_token_store import TokenStoreLockTimeout, TossTokenStore
 from src.realtime.contracts import L0Frame, VendorAck, VendorAuthRejected, VendorDisconnected
+
+LOCAL_REJECT_PREFIX = "local:"
+
+
+class RejectedPairHold:
+    """Remembers vendor-rejected (symbol, stream) pairs so reconnects stop resending them until the hold expires.
+
+    Share one instance across every adapter of a process (primary and standby) so a standby never resends a pair
+    the primary already learned is rejected.
+    """
+
+    def __init__(self, hold_s: float, *, clock: Callable[[], float] = time.monotonic) -> None:
+        if hold_s <= 0:
+            raise ValueError(f"hold_s must be positive, got {hold_s}")
+        self._hold_s = hold_s
+        self._clock = clock
+        self._until: dict[tuple[str, str], tuple[float, str]] = {}
+
+    @property
+    def hold_s(self) -> float:
+        return self._hold_s
+
+    def hold(self, pair: tuple[str, str], code: str) -> None:
+        self._until[pair] = (self._clock() + self._hold_s, code)
+
+    def held_code(self, pair: tuple[str, str]) -> str | None:
+        """Vendor code that put `pair` on hold, or None when it is not held (an expired hold is dropped)."""
+        entry = self._until.get(pair)
+        if entry is None:
+            return None
+        if self._clock() >= entry[0]:
+            del self._until[pair]
+            return None
+        return entry[1]
 
 
 class JsonWsOAuthAdapter(ABC):
@@ -53,6 +88,7 @@ class JsonWsOAuthAdapter(ABC):
         heartbeat_s: float,
         ack_timeout_s: float,
         subscribe_spacing_s: float | None,
+        rejected_hold: RejectedPairHold | None = None,
     ) -> None:
         """Bind one websocket session to a host-shared token store; no I/O."""
         self.name = self.VENDOR
@@ -78,6 +114,7 @@ class JsonWsOAuthAdapter(ABC):
         self._live_waiter: asyncio.Future[str] | None = None
         self._late_acks = 0
         self._subscribed: list[tuple[str, str]] = []
+        self._rejected_hold = rejected_hold
 
     @property
     def _logger(self) -> logging.Logger:
@@ -103,6 +140,50 @@ class JsonWsOAuthAdapter(ABC):
 
     def _counts_as_unparsable(self, header: dict[str, Any]) -> bool:
         return False
+
+    def _invalid_key(self, symbol: str, stream: str) -> str | None:
+        """Reason a pair must never be sent (the vendor would reject it), or None when it is sendable."""
+        return None
+
+    def _is_pair_rejection(self, code: str) -> bool:
+        """True when `code` rejects only the pair (bad key), never the session or token."""
+        return False
+
+    def _local_reject(self, symbol: str, stream: str) -> VendorAck | None:
+        """Reject a pair without sending it: invalid key, or still on hold after a vendor rejection."""
+        reason = self._invalid_key(symbol, stream)
+        if reason is None and self._rejected_hold is not None:
+            held = self._rejected_hold.held_code((symbol, stream))
+            if held is not None:
+                reason = f"held:{held}"
+        if reason is None:
+            return None
+        return VendorAck(symbol, stream, False, f"{LOCAL_REJECT_PREFIX}{reason}")
+
+    def _note_vendor_rejection(self, ack: VendorAck, *, session_proven: bool) -> None:
+        """Hold a vendor-rejected pair when the rejection is pair-specific (bad-key code, or a peer pair was accepted)."""
+        if self._rejected_hold is None or ack.accepted or ack.code == "timeout":
+            return
+        if not (session_proven or self._is_pair_rejection(ack.code)):
+            return
+        self._rejected_hold.hold((ack.symbol, ack.stream), ack.code)
+        self._logger.warning(
+            "[DATA] stage=subscribe_hold status=HELD vendor=%s conn_id=%s symbol=%s stream=%s code=%s hold_s=%.0f",
+            self.VENDOR,
+            self._conn_id,
+            ack.symbol,
+            ack.stream,
+            ack.code,
+            self._rejected_hold.hold_s,
+        )
+
+    def _auth_suspects(self, acks: list[VendorAck]) -> list[VendorAck]:
+        """Answered vendor rejections that may mean a bad token (local and pair-specific rejections excluded)."""
+        return [
+            a
+            for a in acks
+            if a.code != "timeout" and not a.code.startswith(LOCAL_REJECT_PREFIX) and not self._is_pair_rejection(a.code)
+        ]
 
     async def _on_subscribe_send_failure(self, acks: list[VendorAck], exc: Exception) -> VendorDisconnected:
         return VendorDisconnected(f"subscribe_failed:{type(exc).__name__}")
@@ -200,9 +281,15 @@ class JsonWsOAuthAdapter(ABC):
         """Subscribe pairs sequentially and return acks in send order; raises VendorDisconnected / VendorAuthRejected."""
         self._check_capacity(pairs)
         acks: list[VendorAck] = []
-        for idx, (symbol, stream) in enumerate(pairs):
-            if self._subscribe_spacing_s is not None and idx > 0:
+        sent = 0
+        for symbol, stream in pairs:
+            local = self._local_reject(symbol, stream)
+            if local is not None:
+                acks.append(local)
+                continue
+            if self._subscribe_spacing_s is not None and sent > 0:
                 await asyncio.sleep(self._subscribe_spacing_s)
+            sent += 1
             try:
                 await self._ws.send_str(
                     json.dumps(
@@ -251,10 +338,13 @@ class JsonWsOAuthAdapter(ABC):
                     resp = o
             rsp_cd = str(resp["header"].get("rsp_cd"))
             self._check_ack_code(rsp_cd)
-            acks.append(VendorAck(symbol, stream, rsp_cd == "00000", rsp_cd))
+            ack = VendorAck(symbol, stream, rsp_cd == "00000", rsp_cd)
+            acks.append(ack)
+            self._note_vendor_rejection(ack, session_proven=any(a.accepted for a in acks))
         self._subscribed.extend((a.symbol, a.stream) for a in acks if a.accepted)
-        if acks and not any(a.accepted for a in acks) and self._all_rejected_is_auth(acks):
-            codes = ",".join(sorted({a.code for a in acks}))
+        suspects = self._auth_suspects(acks)
+        if suspects and not any(a.accepted for a in acks) and self._all_rejected_is_auth(suspects):
+            codes = ",".join(sorted({a.code for a in suspects}))
             if self._token is not None:
                 await self._replace_rejected_token(self._token)
             raise VendorAuthRejected(f"auth_rejected:all_acks_rejected:{codes}")
@@ -276,9 +366,15 @@ class JsonWsOAuthAdapter(ABC):
                     f"live subscribe exceeds capacity: {len(self._subscribed)}+{len(pairs)}>{self.capacity_pairs}"
                 )
             acks: list[VendorAck] = []
-            for idx, (symbol, stream) in enumerate(pairs):
-                if self._subscribe_spacing_s is not None and idx > 0:
+            sent = 0
+            for symbol, stream in pairs:
+                local = self._local_reject(symbol, stream)
+                if local is not None:
+                    acks.append(local)
+                    continue
+                if self._subscribe_spacing_s is not None and sent > 0:
                     await asyncio.sleep(self._subscribe_spacing_s)
+                sent += 1
                 try:
                     await self._ws.send_str(
                         json.dumps(
@@ -294,9 +390,11 @@ class JsonWsOAuthAdapter(ABC):
                 acks.append(ack)
                 if ack.accepted:
                     self._subscribed.append((symbol, stream))
-            answered = [a for a in acks if a.code != "timeout"]
-            if answered and not any(a.accepted for a in answered) and self._all_rejected_is_auth(answered):
-                codes = ",".join(sorted({a.code for a in answered}))
+                # A live connection already carries accepted pairs, so a rejection here is pair-specific.
+                self._note_vendor_rejection(ack, session_proven=bool(self._subscribed))
+            suspects = self._auth_suspects(acks)
+            if suspects and not any(a.accepted for a in acks) and self._all_rejected_is_auth(suspects):
+                codes = ",".join(sorted({a.code for a in suspects}))
                 if self._token is not None:
                     await self._replace_rejected_token(self._token)
                 raise VendorAuthRejected(f"auth_rejected:all_acks_rejected:{codes}")
