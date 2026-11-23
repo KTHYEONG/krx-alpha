@@ -89,6 +89,9 @@ def test_host_copy_excludes_container_owned_trees(tmp_path) -> None:
     assert text.index("- /l1/**") < text.index("+ **")
     assert text.index("- /manifest/**") < text.index("+ **")
     assert text.index("- /work/**") < text.index("+ **")
+    # Ops logs are local, rotated diagnostics only; they never go offsite.
+    assert "- /logs/**" in text
+    assert text.index("- /logs/**") < text.index("+ **")
 
 
 def test_version_prune_keys_on_folder_date_only(tmp_path) -> None:
