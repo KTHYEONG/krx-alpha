@@ -9,6 +9,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from itertools import pairwise
 from typing import Any, Final, TypeVar
 
 from pydantic import AliasChoices, Field, ValidationError, model_validator
@@ -706,6 +707,101 @@ class SnapshotSettings(BaseSettings):
         return self
 
 
+# kca and kse own KIS slots 3, 4 and 5 for REST inside both auction windows
+# (deploy/shared/kis_slot_assignments.toml); a sweep there would exceed the per-key TPS cap.
+MARKET_SWEEP_RESERVED_SLOTS: Final[frozenset[str]] = frozenset({"3", "4", "5"})
+
+
+def _check_ascending(name: str, times: tuple[dt.time, ...]) -> None:
+    if len(times) == 0:
+        raise ValueError(f"{name} must not be empty")
+    if any(later <= earlier for earlier, later in pairwise(times)):
+        raise ValueError(f"{name} must be strictly ascending")
+
+
+def validate_market_sweep_order(settings: MarketSweepSettings, *, market_close: dt.time) -> None:
+    """Check that sweep windows are disjoint and polling ends before the day's close transition.
+
+    Raises:
+        ValueError: If the open auction, intraday investor estimates, closing auction,
+            close-time estimate and run end are not ordered before ``market_close``.
+    """
+    if not (
+        max(settings.auction_open_times) < settings.auction_open_deadline <= min(settings.investor_estimate_times)
+        and max(settings.investor_estimate_times) < min(settings.auction_close_times)
+        and max(settings.auction_close_times)
+        < settings.auction_close_deadline
+        <= settings.investor_estimate_close_time
+        < settings.run_end
+        < market_close
+    ):
+        raise ValueError(
+            "market sweep order must satisfy auction_open < open_deadline <= investor_estimate < auction_close"
+            " < close_deadline <= investor_estimate_close_time < run_end < market_close"
+        )
+
+
+class MarketSweepSettings(BaseSettings):
+    """Full-market auction book and investor-estimate REST sweep (env_prefix='KRX_ALPHA_MARKET_SWEEP_').
+
+    Disabled by default; enabling requires an explicit data slot outside
+    ``MARKET_SWEEP_RESERVED_SLOTS``. Times are KST wall-clock times on the session
+    date and the sweep ends before the session EOD offload, like snapshots.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_MARKET_SWEEP_", extra="ignore")
+
+    enabled: bool = False
+    kis_data_slot: str | None = None
+    rest_rate_per_s: float = Field(default=18.0, gt=0, allow_inf_nan=False)
+    request_timeout_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    transport_retry_backoff_s: float = Field(default=0.5, ge=0, allow_inf_nan=False)
+    # Host-wide KIS pacing reservation lead (standard work, same as snapshots).
+    rest_max_lead_s: float = Field(default=1.0, gt=0)
+    markets: tuple[str, ...] = ("KOSPI", "KOSDAQ")
+    auction_open_times: tuple[dt.time, ...] = (
+        dt.time(8, 40),
+        dt.time(8, 43),
+        dt.time(8, 46),
+        dt.time(8, 49),
+        dt.time(8, 52),
+        dt.time(8, 55),
+    )
+    auction_open_deadline: dt.time = dt.time(9, 0)
+    auction_close_times: tuple[dt.time, ...] = (
+        dt.time(15, 20, 30),
+        dt.time(15, 23),
+        dt.time(15, 25, 30),
+        dt.time(15, 28),
+    )
+    auction_close_deadline: dt.time = dt.time(15, 30)
+    investor_estimate_times: tuple[dt.time, ...] = (
+        dt.time(9, 35),
+        dt.time(10, 5),
+        dt.time(11, 25),
+        dt.time(13, 25),
+        dt.time(14, 35),
+    )
+    investor_estimate_close_time: dt.time = dt.time(15, 35)
+    run_end: dt.time = dt.time(15, 39)
+    idle_sleep_cap_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def check_market_sweep_contract(self) -> MarketSweepSettings:
+        if self.kis_data_slot in MARKET_SWEEP_RESERVED_SLOTS:
+            raise ValueError(
+                f"kis_data_slot {self.kis_data_slot} is reserved for other REST users in the auction windows"
+            )
+        if self.enabled and not self.kis_data_slot:
+            raise ValueError("kis_data_slot must be set when enabled")
+        if len(self.markets) == 0:
+            raise ValueError("markets must not be empty")
+        for name in ("auction_open_times", "auction_close_times", "investor_estimate_times"):
+            _check_ascending(name, getattr(self, name))
+        validate_market_sweep_order(self, market_close=SessionSchedule().market_close)
+        return self
+
+
 class ExecutionSettings(BaseSettings):
     """주문집행 설정 (env_prefix='KRX_ALPHA_EXEC_')."""
 
@@ -1050,6 +1146,7 @@ class CollectorRuntime:
     repair: RepairSettings = field(default_factory=lambda: RepairSettings())
     intraday: IntradayAdmissionSettings = field(default_factory=lambda: IntradayAdmissionSettings())
     feed_control: FeedControlSettings = field(default_factory=lambda: FeedControlSettings())
+    market_sweep: MarketSweepSettings = field(default_factory=lambda: MarketSweepSettings())
 
 
 def resolve_collector_runtime(
@@ -1065,6 +1162,7 @@ def resolve_collector_runtime(
     repair: RepairSettings | None = None,
     intraday: IntradayAdmissionSettings | None = None,
     feed_control: FeedControlSettings | None = None,
+    market_sweep: MarketSweepSettings | None = None,
 ) -> CollectorRuntime:
     """Resolve one coherent collector configuration before child processes start.
 
@@ -1083,6 +1181,7 @@ def resolve_collector_runtime(
     Raises:
         ValueError: Explicit aftermarket enablement conflicts with collector enablement.
         ValueError: Enabled premarket shares the snapshot REST data slot.
+        ValueError: Enabled market sweep shares the snapshot REST data slot.
         ValueError: Enabled watchdog stale limit does not exceed the in-process silence limit.
         ValueError: Enabled regular KIS overlaps the premarket window or the aftermarket prearm.
     """
@@ -1101,6 +1200,9 @@ def resolve_collector_runtime(
         resolved_aftermarket = aftermarket
     if resolved_premarket.enabled and resolved_premarket.credential_slot == resolved_snapshot.kis_data_slot:
         raise ValueError("premarket credential_slot must not equal snapshot kis_data_slot")
+    resolved_market_sweep = market_sweep if market_sweep is not None else MarketSweepSettings()
+    if resolved_market_sweep.enabled and resolved_market_sweep.kis_data_slot == resolved_snapshot.kis_data_slot:
+        raise ValueError("market_sweep kis_data_slot must not equal snapshot kis_data_slot")
     if resolved_watchdog.enabled:
         if resolved_watchdog.aftermarket_stale_limit_s <= resolved_aftermarket.silence_limit_s:
             raise ValueError("aftermarket_stale_limit_s must exceed aftermarket silence_limit_s")
@@ -1166,6 +1268,7 @@ def resolve_collector_runtime(
         repair=resolved_repair,
         intraday=resolved_intraday,
         feed_control=resolved_feed_control,
+        market_sweep=resolved_market_sweep,
     )
 
 

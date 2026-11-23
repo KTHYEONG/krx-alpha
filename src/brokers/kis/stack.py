@@ -14,7 +14,7 @@ from src.brokers.kis.data import KisDataClient
 from src.brokers.kis.http import KisGetTransport
 from src.brokers.kis.rate import HostPacedRateLimiter, kis_state_path
 from src.brokers.kis.trading import KisTradingClient, venue_base_url
-from src.core.config import KisCredentials, KisTokenSettings, KisVenue, SnapshotSettings
+from src.core.config import KisCredentials, KisTokenSettings, KisVenue, MarketSweepSettings, SnapshotSettings
 from src.core.errors import MissingCredentialsError
 from src.realtime.kis_sharding import KisDataCredential
 
@@ -125,13 +125,13 @@ def build_kis_rest_stack(
 
 def build_kis_data_slot_stack(
     *,
-    snapshot: SnapshotSettings,
+    snapshot: SnapshotSettings | MarketSweepSettings,
     credentials: Sequence[KisDataCredential],
     token_settings: KisTokenSettings,
     session: Any,
     now: Callable[[], dt.datetime],
 ) -> tuple[KisRestStack, str]:
-    """Assemble the account-free REST stack for the snapshot data slot.
+    """Assemble the account-free REST stack for a snapshot or market-sweep data slot.
 
     Selects the credential whose ``slot`` equals ``snapshot.kis_data_slot`` and builds it
     with the snapshot pacing (``rest_rate_per_s``, ``rest_max_lead_s``) and

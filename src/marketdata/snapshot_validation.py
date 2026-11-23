@@ -46,7 +46,7 @@ def snapshot_row_violations(dataset: SnapshotDataset, frame: pl.DataFrame) -> pl
     height = frame.height
     if height == 0:
         return pl.Series([], dtype=pl.Boolean)
-    if dataset in (SnapshotDataset.INVESTOR_ESTIMATE, SnapshotDataset.NEWS_TITLE):
+    if dataset in (SnapshotDataset.INVESTOR_ESTIMATE, SnapshotDataset.INVESTOR_ESTIMATE_MARKET, SnapshotDataset.NEWS_TITLE):
         return pl.Series([False] * height, dtype=pl.Boolean)
     if dataset is SnapshotDataset.SECURITY_STATUS:
         expr = (
@@ -69,7 +69,7 @@ def snapshot_row_violations(dataset: SnapshotDataset, frame: pl.DataFrame) -> pl
                 & ((pl.col("base_price") < pl.col("lower_limit")) | (pl.col("base_price") > pl.col("upper_limit")))
             )
         )
-    elif dataset is SnapshotDataset.AUCTION_BOOK:
+    elif dataset in (SnapshotDataset.AUCTION_BOOK, SnapshotDataset.AUCTION_BOOK_MARKET):
         expr = (
             (pl.col("expected_price").is_not_null() & (pl.col("expected_price") < 0))
             | (pl.col("expected_volume").is_not_null() & (pl.col("expected_volume") < 0))

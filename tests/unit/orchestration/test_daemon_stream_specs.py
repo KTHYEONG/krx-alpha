@@ -59,6 +59,7 @@ def test_spec_table_order_and_roles() -> None:
     assert keys == [
         daemon_mod.StreamChildKey.REGULAR,
         daemon_mod.StreamChildKey.SNAPSHOT,
+        daemon_mod.StreamChildKey.MARKET_SWEEP,
         daemon_mod.StreamChildKey.DB_CROSSCHECK,
         daemon_mod.StreamChildKey.DB_CROSSCHECK_B,
         daemon_mod.StreamChildKey.TOSS_SECONDARY_A,
@@ -79,6 +80,7 @@ def test_spec_table_order_and_roles() -> None:
     assert sessions == [
         daemon_mod.StreamChildKey.REGULAR,
         daemon_mod.StreamChildKey.SNAPSHOT,
+        daemon_mod.StreamChildKey.MARKET_SWEEP,
         daemon_mod.StreamChildKey.DB_CROSSCHECK,
         daemon_mod.StreamChildKey.DB_CROSSCHECK_B,
         daemon_mod.StreamChildKey.TOSS_SECONDARY_A,

@@ -75,6 +75,7 @@ from src.core.session_anchors import (
 from src.execution.contracts import KisApiError
 from src.marketdata.kiwoom_ticks import KiwoomTickTapeError
 from src.marketdata.krx_bars import KrxBarsError
+from src.marketdata.market_sweep import shift_market_sweep_settings
 from src.marketdata.partitioned_store import (
     PartitionedStoreError,
     latest_partition_date,
@@ -1061,6 +1062,19 @@ def _snapshot_cmd(today: dt.date, paths: DataPaths) -> list[str]:
     ]
 
 
+def _market_sweep_cmd(today: dt.date, paths: DataPaths) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "src.cli.main",
+        "collect-market-sweep",
+        "--session-date",
+        today.isoformat(),
+        "--market-map-path",
+        str(paths.market_map),
+    ]
+
+
 def _toss_cmd(today: dt.date, paths: DataPaths, *, session_index: int = 0, hot_symbols: int = 0) -> list[str]:
     return [
         sys.executable,
@@ -1260,6 +1274,7 @@ class StreamRole(StrEnum):
     PRIMARY = "primary"
     CROSSCHECK = "crosscheck"
     SNAPSHOT = "snapshot"
+    MARKET_SWEEP = "market_sweep"
     AFTERMARKET = "aftermarket"
     PREMARKET = "premarket"
     REGULAR_KIS = "regular_kis"
@@ -1270,6 +1285,7 @@ class StreamRole(StrEnum):
 class StreamChildKey(StrEnum):
     REGULAR = "regular"
     SNAPSHOT = "snapshot"
+    MARKET_SWEEP = "market_sweep"
     DB_CROSSCHECK = "db_crosscheck"
     DB_CROSSCHECK_B = "db_crosscheck_b"
     TOSS_SECONDARY_A = "toss_secondary_a"
@@ -1870,6 +1886,24 @@ class DaemonRunner:
                 circuit_open="[DAEMON] stage=snapshots status=FAIL reason=circuit_open",
                 circuit_level=logging.CRITICAL,
             ),
+            starts_in_degraded=True,
+            silent_on_degraded_upgrade=True,
+        ),
+        StreamChildSpec(
+            key=StreamChildKey.MARKET_SWEEP,
+            role=StreamRole.MARKET_SWEEP,
+            lifecycle=ChildLifecycle.SESSION,
+            enabled=lambda runtime: runtime.market_sweep.enabled,
+            cmd=lambda today, paths, reason: _market_sweep_cmd(today, paths),
+            active=lambda runtime, now, anchors: (
+                now.astimezone(_KST).time() < shift_market_sweep_settings(runtime.market_sweep, anchors).run_end
+            ),
+            logs=SupervisionLogs(
+                restarted="[DAEMON] stage=market_sweep status=RESTARTED exit_code=%s",
+                circuit_open="[DAEMON] stage=market_sweep status=FAIL reason=circuit_open",
+                circuit_level=logging.CRITICAL,
+            ),
+            # The sweep reads the full listing, not candidates, so a degraded primary must not withhold it.
             starts_in_degraded=True,
             silent_on_degraded_upgrade=True,
         ),

@@ -23,6 +23,10 @@ services:
       # 스냅샷 REST(08:00~15:39, 18TPS)는 DATA_2 전용. DATA_1은 k-closing-alpha 15:20 결정창·
       # 15:30 종가확정 전용이라 공유 시 앱키당 20TPS를 넘어 EGW00201이 난다(실측 09-23 77건).
       - KRX_ALPHA_SNAPSHOT_KIS_DATA_SLOT=2
+      # 전종목 동시호가 예상체결·투자자 추정 REST 스윕(08:40~09:00, 09:35~15:39, 18TPS)은 DATA_6 전용.
+      # 슬롯 6은 krx 정규장 WS만 쓰고(REST 한도 미소모) 08:30~09:00·15:20~15:30에 다른 REST 사용자가 없다. 슬롯 3·4·5는 kca/kse REST 점유.
+      - KRX_ALPHA_MARKET_SWEEP_ENABLED=true
+      - KRX_ALPHA_MARKET_SWEEP_KIS_DATA_SLOT=6
       # KIS 리테일 웹소켓 커넥션당 41스트림쌍 하드캡(docs/architecture/engineering-decisions.md 검증치)
       - KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION=41
       # NXT 프리마켓(08:00~08:50) 단일 WS 커넥션. 스냅샷 REST=슬롯 2, k-closing-alpha 15:20 결정창 REST=슬롯 1·5(KIS_DECISION_SHARD_SLOTS=1,5).

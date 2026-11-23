@@ -20,6 +20,8 @@ class SnapshotDataset(StrEnum):
     INDEX_MINUTE_BAR = "index_minute_bar"
     NEWS_TITLE = "news_title"
     STOCK_MINUTE_BAR = "stock_minute_bar"
+    AUCTION_BOOK_MARKET = "auction_book_market"
+    INVESTOR_ESTIMATE_MARKET = "investor_estimate_market"
 
 
 COMMON_SNAPSHOT_COLUMNS: dict[str, Any] = {
@@ -139,6 +141,11 @@ SNAPSHOT_SCHEMAS: dict[SnapshotDataset, dict[str, Any]] = {
     },
 }
 
+# Full-market sweep datasets mirror the candidate schemas under their own names so the
+# sweep and candidate children never share a partition writer.
+SNAPSHOT_SCHEMAS[SnapshotDataset.AUCTION_BOOK_MARKET] = SNAPSHOT_SCHEMAS[SnapshotDataset.AUCTION_BOOK]
+SNAPSHOT_SCHEMAS[SnapshotDataset.INVESTOR_ESTIMATE_MARKET] = SNAPSHOT_SCHEMAS[SnapshotDataset.INVESTOR_ESTIMATE]
+
 SNAPSHOT_DEDUP_KEYS: dict[SnapshotDataset, tuple[str, ...]] = {
     SnapshotDataset.SECURITY_STATUS: ("symbol", "observed_at_ns"),
     SnapshotDataset.AUCTION_BOOK: ("symbol", "observed_at_ns"),
@@ -149,6 +156,8 @@ SNAPSHOT_DEDUP_KEYS: dict[SnapshotDataset, tuple[str, ...]] = {
     SnapshotDataset.INDEX_MINUTE_BAR: ("index_code", "bar_time"),
     SnapshotDataset.NEWS_TITLE: ("news_id",),
     SnapshotDataset.STOCK_MINUTE_BAR: ("symbol", "bar_time"),
+    SnapshotDataset.AUCTION_BOOK_MARKET: ("symbol", "observed_at_ns"),
+    SnapshotDataset.INVESTOR_ESTIMATE_MARKET: ("symbol", "bucket", "observed_at_ns"),
 }
 
 

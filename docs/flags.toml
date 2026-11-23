@@ -150,6 +150,15 @@ review_by = ""
 couples = ["RegularKisSettings.credential_slots", "RegularKisSettings.pair_capacity_per_connection"]
 
 [[flag]]
+name = "MarketSweepSettings.enabled"
+kind = "deployed_component"
+default = false
+reason = "Full-market auction and investor-estimate REST sweep; needs a dedicated KIS data slot free of other REST users in the auction windows."
+exit_condition = ""
+review_by = ""
+couples = ["MarketSweepSettings.kis_data_slot"]
+
+[[flag]]
 name = "CollectorSettings.kiwoom_crosscheck_enabled"
 kind = "experiment"
 default = false

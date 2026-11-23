@@ -20,6 +20,7 @@ import src.core.config as config_module
 from src.core.config import (
     AftermarketSettings,
     CollectorSettings,
+    MarketSweepSettings,
     PremarketSettings,
     RegularKisSettings,
     resolve_collector_runtime,
@@ -70,6 +71,11 @@ DEPLOYED_COUPLING: dict[str, tuple[Callable[[dict[str, Any]], object], dict[str,
         {"enabled": True, "credential_slots": ("3", "4"), "pair_capacity_per_connection": 41},
         ("RegularKisSettings.credential_slots", "RegularKisSettings.pair_capacity_per_connection"),
     ),
+    "MarketSweepSettings.enabled": (
+        lambda kwargs: MarketSweepSettings(**kwargs),
+        {"enabled": True, "kis_data_slot": "6"},
+        ("MarketSweepSettings.kis_data_slot",),
+    ),
 }
 COLLECTOR_AFTER_MARKET = "CollectorSettings.after_market_enabled"
 MISSING_COUPLING_MESSAGES: dict[str, str] = {
@@ -78,6 +84,7 @@ MISSING_COUPLING_MESSAGES: dict[str, str] = {
     "PremarketSettings.pair_capacity_per_connection": "pair_capacity_per_connection must be a positive",
     "RegularKisSettings.credential_slots": "credential_slots must be non-empty",
     "RegularKisSettings.pair_capacity_per_connection": "pair_capacity_per_connection must be a positive",
+    "MarketSweepSettings.kis_data_slot": "kis_data_slot must be set when enabled",
 }
 AFTERMARKET_CAPACITY_ENV = "KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION"
 

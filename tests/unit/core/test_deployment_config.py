@@ -473,6 +473,7 @@ def _accepted_typed_env_names() -> set[str]:
         config_module.RepairSettings,
         config_module.MinuteBackfillSettings,
         config_module.SnapshotSettings,
+        config_module.MarketSweepSettings,
         config_module.ExecutionSettings,
         config_module.DataQualitySettings,
         config_module.KisTokenSettings,
