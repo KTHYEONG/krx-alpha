@@ -21,6 +21,7 @@ from src.marketdata.market_sweep import (
     run_market_sweep_session,
     shift_market_sweep_settings,
 )
+from src.marketdata.quiet_check import QuietCheck
 from src.realtime.kis_sharding import load_kis_data_credentials
 from src.storage.snapshot_store import SnapshotStore
 
@@ -71,5 +72,6 @@ def run(args: argparse.Namespace) -> int:
         now_fn=now_fn,
         sleep_fn=time.sleep,
         max_iterations=args.max_iterations,
+        quiet_check=QuietCheck(runtime.paths.quiet_suspects_path(), session_date),
     )
     return 0

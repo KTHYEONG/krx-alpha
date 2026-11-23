@@ -54,6 +54,11 @@ SYMBOL_SILENCE_OPEN_GRACE_S: Final[float] = 60.0
 SYMBOL_SILENCE_FEED_STALE_S: Final[float] = 30.0
 SYMBOL_SILENCE_REPORT_S: Final[float] = 60.0
 SYMBOL_SILENCE_SUSPECT_CAP: Final[int] = 20
+# REST confirmation of quiet suspects on the market-sweep child (observe-only).
+QUIET_CHECK_BATCH: Final[int] = 10
+QUIET_CHECK_COOLDOWN_S: Final[float] = 120.0
+QUIET_CHECK_FILE_STALE_S: Final[float] = 30.0
+QUIET_CHECK_MARGIN_S: Final[float] = 3.0
 # 2026-09-14 L0 measurement: off-regular silence reached 450 s on normal days.
 OFF_REGULAR_MAX_NORMAL_SILENCE_S: float = 450.0
 

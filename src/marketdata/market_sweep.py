@@ -43,6 +43,12 @@ class MarketSweepSource(Protocol):
     def get_investor_estimate(self, symbol: str) -> tuple[dict[str, object], ...]: ...
 
 
+class QuietCheckRunner(Protocol):
+    """Idle-iteration hook that may confirm quiet suspects through the sweep's read-only source."""
+
+    def run(self, source: MarketSweepSource) -> int: ...
+
+
 class MarketMapError(KrxAlphaError):
     """The full-market symbol source is missing, unreadable or holds no eligible symbol."""
 
@@ -230,6 +236,7 @@ def run_market_sweep_session(
     sleep_fn: Callable[[float], None],
     wall_ns: Callable[[], int] = time.time_ns,
     max_iterations: int | None = None,
+    quiet_check: QuietCheckRunner | None = None,
 ) -> SnapshotSessionResult:
     """Run the sweep plan until ``run_end``; jobs whose window already closed expire without vendor calls."""
     run_end = _aware(session_date, settings.run_end)
@@ -275,6 +282,9 @@ def run_market_sweep_session(
                 failed_jobs += 1
             _log_job(result, symbols=len(symbols), offset=offset)
         if not due:
+            if quiet_check is not None:
+                quiet_check.run(source)
+                now = now_fn()
             waits = [settings.idle_sleep_cap_s, (run_end - now).total_seconds()]
             waits.extend(
                 (job.due_at - now).total_seconds() for job in jobs if job.job_id not in completed and job.due_at > now

@@ -412,3 +412,36 @@ def test_idle_until_run_end_sleeps_without_calls() -> None:
 
     assert clock.now == _t(15, 39)
     idle_until_run_end(MarketSweepSettings(), DAY, now_fn=clock.now_fn, sleep_fn=clock.sleep, max_iterations=0)
+
+
+class _QuietSpy:
+    """Records how many sweep calls had already happened each time the idle quiet check ran."""
+
+    def __init__(self) -> None:
+        self.seen: list[int] = []
+
+    def run(self, source: _FakeSweepSource) -> int:
+        self.seen.append(len(source.calls))
+        return 0
+
+
+def test_quiet_check_only_when_idle(tmp_path) -> None:
+    clock = _Clock(_t(8, 40))
+    source = _FakeSweepSource(clock)
+    spy = _QuietSpy()
+
+    result = run_market_sweep_session(
+        settings=MarketSweepSettings(),
+        session_date=DAY,
+        source=source,
+        store=_store(tmp_path),
+        symbols=_symbols(3),
+        now_fn=clock.now_fn,
+        sleep_fn=clock.sleep,
+        wall_ns=clock.wall_ns,
+        max_iterations=2,
+        quiet_check=spy,
+    )
+
+    assert result.executed > 0
+    assert spy.seen == [len(source.calls)]
