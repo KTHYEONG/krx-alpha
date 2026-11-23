@@ -580,6 +580,20 @@ class RcloneArchiveSettings(BaseSettings):
     rclone_transfers: int = Field(default=4, ge=1, le=16)
 
 
+class SecondaryPatchSettings(BaseSettings):
+    """Secondary-feed patch backup (env_prefix='KRX_ALPHA_SECONDARY_PATCH_').
+
+    `vendors` names duplicate feeds whose full L1 stays local; `margin_s` widens each
+    primary-loss window so the kept rows cover the trades the primary missed.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="KRX_ALPHA_SECONDARY_PATCH_", extra="ignore")
+
+    vendors: tuple[str, ...] = ("kis", "db")
+    margin_s: float = Field(default=30.0, gt=0)
+    local_retain_days: int = Field(default=14, ge=1)
+
+
 class KisCredentials(BaseSettings):
     """KIS 실전 자격증명 (필수, 빈 기본값 금지)."""
 

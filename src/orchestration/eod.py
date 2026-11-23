@@ -16,7 +16,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from src.core.alerts import PageKind, page
-from src.core.config import AuditMode, AuditSettings
+from src.core.config import AuditMode, AuditSettings, SecondaryPatchSettings
+from src.core.paths import DataPaths
 from src.core.session_anchors import STANDARD_AFTER_MARKET_END, SessionAnchors
 from src.realtime.kis_sharding import AftermarketShard
 from src.realtime.manifest import SessionManifest
@@ -62,10 +63,14 @@ def run_eod_maintenance(
     normalize: bool = True,
     reuse_fresh_l1: bool = False,
     hold: Callable[[pathlib.Path], str | None] | None = None,
+    data_paths: DataPaths | None = None,
 ) -> int:
     kwargs: dict[str, object] = {}
     if hold is not None:
         kwargs["hold"] = hold
+    if data_paths is not None:
+        kwargs["data_paths"] = data_paths
+        kwargs["secondary"] = SecondaryPatchSettings()
     return prune_old_journals(
         journal_root,
         archive_root=archive_root,

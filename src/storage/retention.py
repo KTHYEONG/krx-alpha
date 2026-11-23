@@ -9,13 +9,17 @@ import re
 import shutil
 from collections.abc import Callable, Iterator
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 from typing import Final
 from zoneinfo import ZoneInfo
 
+import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from src.core.config import SecondaryPatchSettings
 from src.core.errors import KrxAlphaError
+from src.core.paths import DataPaths
 from src.storage.layout import l1_relpath_for_l0_partition, l1_repo_path
 from src.storage.normalization import (
     _BATCH_BYTES,
@@ -26,6 +30,7 @@ from src.storage.normalization import (
     _iter_line_batches,
     normalize_l0_partition,
 )
+from src.storage.secondary_patch import SecondaryInputs, publish_secondary_l1, secondary_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +139,68 @@ def _reusable_l1_rows(part: pathlib.Path, out_path: pathlib.Path) -> int | None:
     return int(num_rows)
 
 
+@dataclass(frozen=True, slots=True)
+class _SecondaryContext:
+    """Patch-backup plan of one secondary L0 partition; the patch object is the deletion gate."""
+
+    archive_root: pathlib.Path
+    vendor: str
+    venue: str
+    session: str
+    stream: str
+    day: dt.date
+    inputs: SecondaryInputs
+    patch: pathlib.Path
+    local: pathlib.Path
+    audit: pathlib.Path
+
+
+def _secondary_context(
+    part: pathlib.Path,
+    journal_base: pathlib.Path,
+    out_rel: pathlib.PurePosixPath,
+    part_date: dt.date,
+    paths: DataPaths | None,
+    settings: SecondaryPatchSettings | None,
+) -> _SecondaryContext | None:
+    if paths is None or settings is None:
+        return None
+    rel = part.relative_to(journal_base).parts
+    if len(rel) != 5:
+        return None
+    vendor, venue, session, stream, _ = rel
+    inputs = secondary_inputs(paths, part_date, vendor, venue, session, settings)
+    if inputs is None:
+        return None
+    return _SecondaryContext(
+        archive_root=paths.archive_root,
+        vendor=vendor,
+        venue=venue,
+        session=session,
+        stream=stream,
+        day=part_date,
+        inputs=inputs,
+        patch=paths.secondary_patch_l1(vendor, venue, session, stream, part_date),
+        local=paths.l1_local_root / out_rel,
+        audit=paths.session_audit_path(part_date, "ls"),
+    )
+
+
+def _reusable_secondary_rows(part: pathlib.Path, ctx: _SecondaryContext) -> int | None:
+    """Local full-L1 row count when the patch object and local L1 are both complete and not older than inputs."""
+    rows = _reusable_l1_rows(part, ctx.local)
+    if rows is None:
+        return None
+    try:
+        patch_mtime = ctx.patch.stat().st_mtime_ns
+        if ctx.audit.stat().st_mtime_ns > patch_mtime:
+            return None
+        pq.read_metadata(ctx.patch)
+    except (OSError, pa.ArrowException):
+        return None
+    return rows
+
+
 def prune_old_journals(
     journal_root: pathlib.Path,
     *,
@@ -147,6 +214,8 @@ def prune_old_journals(
     normalize: bool = True,
     reuse_fresh_l1: bool = False,
     hold: Callable[[pathlib.Path], str | None] | None = None,
+    data_paths: DataPaths | None = None,
+    secondary: SecondaryPatchSettings | None = None,
 ) -> PruneStats:
     """Normalize eligible L0 partitions and delete only remotely verified inputs.
 
@@ -169,6 +238,9 @@ def prune_old_journals(
             usual, so a failed earlier attempt is retried. Ignored when
             ``normalize`` is False. Rebuilt L1 files must be remotely verified
             again before their L0 inputs can be deleted.
+        hold: Optional repair-gate callback returning a hold reason for a partition.
+        data_paths: Enables secondary-feed patch backup when given together with ``secondary``.
+        secondary: Secondary-feed patch settings; None keeps every partition on the full-L1 rule.
 
     Returns:
         Prune counts and L1 paths whose prior remote verification was invalidated.
@@ -191,10 +263,17 @@ def prune_old_journals(
         if part_date is None or part_date >= cutoff:
             continue
         try:
-            out_path = archive_base / l1_relpath_for_l0_partition(part.relative_to(journal_base))
+            out_rel = l1_relpath_for_l0_partition(part.relative_to(journal_base))
+            out_path = archive_base / out_rel
+            ctx = _secondary_context(part, journal_base, out_rel, part_date, data_paths, secondary)
+            if ctx is not None:
+                gate_path = ctx.patch
+                gate_rel = l1_repo_path(ctx.patch.relative_to(ctx.archive_root))
+            else:
+                gate_path = out_path
+                gate_rel = l1_repo_path(out_path.relative_to(archive_base))
             if not normalize:
-                rel = l1_repo_path(out_path.relative_to(archive_base))
-                if out_path.exists() and verified_remote_l1 is not None and rel in verified_remote_l1:
+                if gate_path.exists() and verified_remote_l1 is not None and gate_rel in verified_remote_l1:
                     if hold is not None:
                         reason = hold(part.relative_to(journal_base))
                         if reason is not None:
@@ -205,24 +284,25 @@ def prune_old_journals(
                     deleted += sum(1 for f in part.rglob("*") if f.is_file())
                     shutil.rmtree(part)
                 continue
-            if reuse_fresh_l1:
-                fresh_rows = _reusable_l1_rows(part, out_path)
+            if ctx is not None or reuse_fresh_l1:
+                fresh_rows = (
+                    _reusable_secondary_rows(part, ctx) if ctx is not None else _reusable_l1_rows(part, out_path)
+                )
                 if fresh_rows is not None:
                     logger.info("[DATA] stage=prune status=REUSED part=%s rows=%d", str(part), fresh_rows)
                     normalized += 1
                     reused += 1
-                    rel = l1_repo_path(out_path.relative_to(archive_base))
-                    if verified_remote_l1 is None or rel not in verified_remote_l1:
+                    if verified_remote_l1 is None or gate_rel not in verified_remote_l1:
                         continue
                     if hold is not None:
                         reason = hold(part.relative_to(journal_base))
                         if reason is not None:
-                            held.add(rel)
+                            held.add(gate_rel)
                             continue
                     deleted += sum(1 for f in part.rglob("*") if f.is_file())
                     shutil.rmtree(part)
                     continue
-                invalidated_remote_l1.add(l1_repo_path(out_path.relative_to(archive_base)))
+                invalidated_remote_l1.add(gate_rel)
             try:
                 normalize_fn = normalizer if normalizer is not None else normalize_l0_partition
                 rows = normalize_fn(part, out_path)
@@ -256,17 +336,36 @@ def prune_old_journals(
             if rows <= 0 or not out_path.exists():
                 logger.critical("[DATA] stage=prune status=FAIL reason=unverified part=%s", str(part))
                 continue
+            if ctx is not None:
+                assert data_paths is not None
+                try:
+                    publish_secondary_l1(
+                        data_paths,
+                        ctx.inputs,
+                        day=ctx.day,
+                        vendor=ctx.vendor,
+                        venue=ctx.venue,
+                        session=ctx.session,
+                        stream=ctx.stream,
+                        full_l1=out_path,
+                        settings=secondary,  # type: ignore[arg-type]
+                    )
+                except (OSError, ValueError, pa.ArrowException, pl.exceptions.PolarsError) as exc:
+                    logger.critical(
+                        "[DATA] stage=prune status=FAIL reason=secondary_patch part=%s error=%s", str(part), str(exc)
+                    )
+                    failed += 1
+                    continue
             normalized += 1
             if reuse_fresh_l1:
                 # Remote verification predates this rewrite and cannot justify deletion.
                 continue
-            rel = l1_repo_path(out_path.relative_to(archive_base))
-            if verified_remote_l1 is None or rel not in verified_remote_l1:
+            if verified_remote_l1 is None or gate_rel not in verified_remote_l1:
                 continue
             if hold is not None:
                 reason = hold(part.relative_to(journal_base))
                 if reason is not None:
-                    held.add(rel)
+                    held.add(gate_rel)
                     continue
             deleted += sum(1 for f in part.rglob("*") if f.is_file())
             shutil.rmtree(part)
@@ -320,6 +419,24 @@ def prune_local_l1(
             continue
         pq_file.unlink()
         purged += 1
+    return purged
+
+
+def prune_local_secondary(paths: DataPaths, today: dt.date | None, settings: SecondaryPatchSettings) -> int:
+    """Delete local-only full secondary L1 partitions older than `settings.local_retain_days`; the only deletion without a remote copy."""
+    ref = today or dt.datetime.now(_KST).date()
+    purged = 0
+    freed = 0
+    for pq_file, _ in _expired_l1_files(paths.l1_local_root, retain_days=settings.local_retain_days, ref=ref):
+        freed += pq_file.stat().st_size
+        pq_file.unlink()
+        purged += 1
+    logger.info(
+        "[DATA] stage=secondary_local_prune status=OK partitions=%d bytes=%d retain_days=%d",
+        purged,
+        freed,
+        settings.local_retain_days,
+    )
     return purged
 
 

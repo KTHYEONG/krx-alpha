@@ -71,6 +71,30 @@ class DataPaths:
         return self.root / "l1"
 
     @property
+    def l1_local_root(self) -> pathlib.Path:
+        """Local-only L1 tree for full secondary-feed partitions; never uploaded."""
+        return self.root / "l1_local"
+
+    def secondary_patch_l1(
+        self, vendor: str, venue: str, session: str, stream: str, day: dt.date
+    ) -> pathlib.Path:
+        """Return `l1/derived/secondary_patch/<vendor>/<venue>/<session>/<stream>/dt=<day>.parquet`; pure path algebra."""
+        return (
+            self.archive_root
+            / "derived"
+            / "secondary_patch"
+            / vendor
+            / venue
+            / session
+            / stream
+            / f"dt={day.isoformat()}.parquet"
+        )
+
+    def secondary_l1_candidates(self, l1_relpath: pathlib.PurePath) -> tuple[pathlib.Path, pathlib.Path]:
+        """Return the archive and local-only L1 locations of one archive-relative partition, in that order."""
+        return self.archive_root / l1_relpath, self.l1_local_root / l1_relpath
+
+    @property
     def tick_tape_root(self) -> pathlib.Path:
         return self.archive_root / "history" / "tick_tape" / "kiwoom"
 
@@ -234,6 +258,17 @@ class DataPaths:
         """Return `manifest/regular_kis/<day>.<venue>.shard-<NN>.json`; pure path algebra."""
         venue_s = str(getattr(venue, "value", venue))
         return self.manifest_dir / "regular_kis" / f"{day.isoformat()}.{venue_s}.shard-{shard_index:02d}.json"
+
+    def regular_kis_manifest_paths(self, day: dt.date, venue: object = "krx") -> tuple[pathlib.Path, ...]:
+        """Return every existing `regular_kis` shard manifest of `day` for `venue`, in shard order."""
+        venue_s = str(getattr(venue, "value", venue))
+        prefix = f"{day.isoformat()}.{venue_s}.shard-"
+        shards: list[tuple[int, pathlib.Path]] = []
+        for path in (self.manifest_dir / "regular_kis").glob(f"{prefix}*.json"):
+            digits = path.name[len(prefix) : -len(".json")]
+            if digits.isdigit() and path.is_file():
+                shards.append((int(digits), path))
+        return tuple(path for _, path in sorted(shards, key=lambda item: item[0]))
 
     def regular_nxt_candidates(self, day: dt.date) -> pathlib.Path:
         """Return the NXT regular symbol file written by Part 3b; pure path algebra."""

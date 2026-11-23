@@ -92,6 +92,9 @@ def test_host_copy_excludes_container_owned_trees(tmp_path) -> None:
     assert "- /manifest/**" in text
     assert "- /work/**" in text
     assert text.index("- /l1/**") < text.index("+ **")
+    # Secondary full L1 stays on the VPS; only the patch under l1/ goes offsite.
+    assert "- /l1_local/**" in text
+    assert text.index("- /l1_local/**") < text.index("+ **")
     assert text.index("- /manifest/**") < text.index("+ **")
     assert text.index("- /work/**") < text.index("+ **")
     # Ops logs are local, rotated diagnostics only; they never go offsite.

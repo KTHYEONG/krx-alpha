@@ -93,6 +93,7 @@ def test_run_collector_daemon_eod_passes_quarantine_root(tmp_path, monkeypatch) 
         progress=None,
         normalize=True,
         reuse_fresh_l1=False,
+        data_paths=None,
     ):
         seen.update({"quarantine_root": quarantine_root, "archive_root": archive_root, "work_root": work_root})
         return 0

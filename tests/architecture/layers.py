@@ -16,6 +16,7 @@ LAYER_RANK: dict[str, int] = {
     "src/execution/ticks.py": 1,
     "src/storage/journal.py": 2,
     "src/storage/retention.py": 2,
+    "src/storage/secondary_patch.py": 2,
     "src/storage/remote.py": 2,
     "src/storage/quality.py": 2,
     "src/universe/ipc.py": 2,

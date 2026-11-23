@@ -42,6 +42,7 @@ from src.core.config import (
     ObservabilitySettings,
     RegularKisSettings,
     RepairSettings,
+    SecondaryPatchSettings,
     ShardWatchdogSettings,
     SnapshotSettings,
     TickTapeBackfillSettings,
@@ -162,7 +163,7 @@ from src.storage.l0_recompress import recompress_sealed_day
 from src.storage.l0_repair import RepairState, derive_day_repair, l0_hold_reason
 from src.storage.layout import L0_VENDOR_DB, L0_VENDOR_KIWOOM, L0_VENDOR_TOSS, l0_day_journal_glob
 from src.storage.remote import RemoteArchiveError
-from src.storage.retention import check_disk_watermark
+from src.storage.retention import check_disk_watermark, prune_local_secondary
 from src.storage.snapshot_store import SnapshotStore
 from src.universe.aftermarket import (
     AftermarketUniverseError,
@@ -759,6 +760,7 @@ def _run_eod_housekeeping(
                     work_root=paths.work_root,
                     verified_remote_l1=None,
                     progress=progress,
+                    data_paths=paths,
                     **_kw,  # type: ignore[arg-type]
                 )
             if getattr(deleted, "failed", 0) > 0:
@@ -792,6 +794,7 @@ def _run_eod_housekeeping(
     except Exception as e:  # noqa: BLE001
         offload_ok = False
         logger.error("[DAEMON] stage=eod_maintenance error=%s", str(e), exc_info=True)
+    prune_local_secondary(paths, ref_day, SecondaryPatchSettings())
     if offload_ok:
         try:
             verified = offload.verified_remote_l1 if hasattr(offload, "verified_remote_l1") else frozenset()
@@ -809,6 +812,7 @@ def _run_eod_housekeeping(
                     progress=progress,
                     normalize=disk_ok,
                     reuse_fresh_l1=True,
+                    data_paths=paths,
                     **_kw2,  # type: ignore[arg-type]
                 )
             if getattr(post_deleted, "failed", 0) > 0:

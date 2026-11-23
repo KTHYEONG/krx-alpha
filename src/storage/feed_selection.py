@@ -222,8 +222,8 @@ def _count_frames(path: pathlib.Path, decode: Decoder) -> dict[tuple[str, str], 
 def _l1_partition(paths: DataPaths, day: dt.date, vendor: str, venue: str, stream: str) -> pathlib.Path | None:
     key = l0_partition_key(vendor, venue, _SESSION, stream, day)
     assert key is not None, "routes name valid venues and the regular session"
-    path = paths.archive_root / l1_relpath_for_l0_partition(l0_partition_relpath(key))
-    return path if path.is_file() else None
+    rel = l1_relpath_for_l0_partition(l0_partition_relpath(key))
+    return next((path for path in paths.secondary_l1_candidates(rel) if path.is_file()), None)
 
 
 def _read_controller_log(path: pathlib.Path) -> list[dict[str, Any]]:
