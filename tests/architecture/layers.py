@@ -92,6 +92,7 @@ LAYER_RANK["src/storage/microstructure.py"] = 2
 LAYER_RANK["src/storage/normalization.py"] = 2
 LAYER_RANK["src/storage/quality_ls.py"] = 2
 LAYER_RANK["src/storage/quality_kis.py"] = 2
+LAYER_RANK["src/realtime/trade_continuity.py"] = 3
 LAYER_RANK["src/storage/quality_db.py"] = 2
 LAYER_RANK["src/storage/quality_toss.py"] = 2
 LAYER_RANK["src/brokers/kis/rate.py"] = 2

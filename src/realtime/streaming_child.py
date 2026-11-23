@@ -19,6 +19,7 @@ from src.realtime.contracts import L0Frame, VendorAck, VendorAdapter
 from src.realtime.feed_health import FeedHealthConfig, FeedHealthPublisher, FeedHealthSink
 from src.realtime.lag_monitor import LagMonitor
 from src.realtime.streamer import FrameSink, LiveSubscriptionWatch, RealtimeStreamer, SessionFrameSink
+from src.realtime.trade_continuity import TRADE_CONTINUITY_VENDORS, TradeContinuityWatch
 from src.realtime.ws_lease import Lease, WsLeaseLedger
 
 
@@ -123,6 +124,9 @@ async def run_streaming_child(
         sink: FrameSink = SessionFrameSink(session=session)
         if lag_monitor is not None:
             sink = LagMonitoringSink(sink, lag_monitor)
+        vendor = getattr(adapter, "name", "")
+        if vendor in TRADE_CONTINUITY_VENDORS:
+            sink = LagMonitoringSink(sink, TradeContinuityWatch(vendor=vendor))
         for observer in frame_observers:
             sink = LagMonitoringSink(sink, observer)
         extra: dict[str, Any] = {}

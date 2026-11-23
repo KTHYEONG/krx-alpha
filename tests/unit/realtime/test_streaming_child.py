@@ -358,3 +358,39 @@ def test_runner_feeds_recorded_frames_to_the_lag_monitor(monkeypatch) -> None:
     sink = captured["sink"]
     assert isinstance(sink, LagMonitoringSink)
     assert sink._monitor is monitor  # noqa: SLF001 - wiring guard: every recorded frame reaches the monitor
+
+
+@pytest.mark.parametrize(("vendor", "observed"), [("kis", True), ("db", False)])
+def test_runner_wires_trade_continuity_for_ls_and_kis_only(monkeypatch, vendor, observed) -> None:
+    from types import SimpleNamespace
+
+    from src.realtime.streaming_child import LagMonitoringSink
+    from src.realtime.trade_continuity import TradeContinuityWatch
+
+    _make_http(monkeypatch)
+    captured: dict[str, object] = {}
+
+    class _FakeStreamer:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        async def run_forever(self, stop, *, max_cycles=None) -> None:
+            return None
+
+    asyncio.run(run_streaming_child(
+        session=SimpleNamespace(),
+        adapter_factory=lambda http: SimpleNamespace(capacity_pairs=10, name=vendor),
+        replay_pairs=[("005930", "trade")],
+        silence_limit=lambda: None,
+        max_cycles=1,
+        streamer_factory=_FakeStreamer,
+    ))
+
+    sink = captured["sink"]
+    watches = []
+    node = sink
+    while isinstance(node, LagMonitoringSink):
+        if isinstance(node._monitor, TradeContinuityWatch):  # noqa: SLF001 - wiring guard
+            watches.append(node._monitor)  # noqa: SLF001
+        node = node._inner  # noqa: SLF001
+    assert bool(watches) is observed
