@@ -130,6 +130,7 @@ LAYER_RANK["src/orchestration/feed_control/model.py"] = 5
 LAYER_RANK["src/orchestration/feed_control/controller.py"] = 5
 LAYER_RANK["src/orchestration/feed_failover.py"] = 5
 LAYER_RANK["src/orchestration/feed_status_export.py"] = 5
+LAYER_RANK["src/orchestration/symbol_silence.py"] = 5
 LAYER_RANK["src/storage/l0_audit.py"] = 2
 LAYER_RANK["src/storage/l0_recompress.py"] = 2
 LAYER_RANK["src/realtime/adapters/registry.py"] = 4

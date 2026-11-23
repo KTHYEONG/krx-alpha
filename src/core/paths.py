@@ -143,6 +143,9 @@ class DataPaths:
     def feed_control_status_path(self) -> pathlib.Path:
         return self.work_root / "status" / "feed_control.json"
 
+    def quiet_suspects_path(self) -> pathlib.Path:
+        return self.work_root / "status" / "quiet_suspects.json"
+
     def feed_control_log_path(self, day: dt.date) -> pathlib.Path:
         return self.manifest_dir / "feed_control" / f"{day.isoformat()}.jsonl"
 

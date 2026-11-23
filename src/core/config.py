@@ -46,6 +46,14 @@ LS_REJECTED_PAIR_HOLD_S: float = 1800.0
 LS_MARKET_STATE_SHARD: Final[int] = 1
 LS_MARKET_STATE_PAIRS: Final[tuple[tuple[str, str], ...]] = (("0", "LS_JIF"), ("000000", "LS_VI"))
 LS_MARKET_STATE_STREAMS: Final[frozenset[str]] = frozenset({stream for _, stream in LS_MARKET_STATE_PAIRS})
+# Per-symbol silence watch (observe-only): cross-source gap thresholds in seconds, by stream kind.
+SYMBOL_SILENCE_CROSS_GAP_S: Final[Mapping[str, float]] = {"trade": 15.0, "quote": 20.0}
+SYMBOL_SILENCE_SINGLE_MIN_S: Final[float] = 90.0
+SYMBOL_SILENCE_SINGLE_K: Final[float] = 12.0
+SYMBOL_SILENCE_OPEN_GRACE_S: Final[float] = 60.0
+SYMBOL_SILENCE_FEED_STALE_S: Final[float] = 30.0
+SYMBOL_SILENCE_REPORT_S: Final[float] = 60.0
+SYMBOL_SILENCE_SUSPECT_CAP: Final[int] = 20
 # 2026-09-14 L0 measurement: off-regular silence reached 450 s on normal days.
 OFF_REGULAR_MAX_NORMAL_SILENCE_S: float = 450.0
 

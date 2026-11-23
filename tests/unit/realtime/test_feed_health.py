@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.realtime.contracts import L0Frame, VendorAck, VendorDisconnected
+from src.realtime.contracts import L0Frame, MarketVenue, VendorAck, VendorDisconnected
 from src.realtime.feed_health import (
     FeedHealthPublisher,
     FeedHealthSink,
@@ -43,6 +43,7 @@ _EXPECTED_KEYS = {
     "frames_total",
     "last_frame_wall",
     "stream_last_frame_wall",
+    "symbol_last_frame_wall",
     "window_s",
     "window_frames",
     "lag_p50_s",
@@ -589,3 +590,22 @@ def test_failed_serialization_leaves_no_temp_file(tmp_path) -> None:
 
     assert not path.exists()
     assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def _symbol_frame(stream: str, symbol: str, offset_s: float, venue: MarketVenue = MarketVenue.UNKNOWN) -> L0Frame:
+    return L0Frame(
+        "kis", stream, symbol, "{}", 1, _recv_ns(offset_s), 1, "kis-1", venue=venue
+    )
+
+
+def test_symbol_last_by_kind() -> None:
+    tracker = _tracker()
+    tracker.observe(_symbol_frame(_CNT, "005930", 1.0))
+    tracker.observe(_symbol_frame(_ASP, "005930", 2.0))
+    tracker.observe(_symbol_frame("H0NXASP0", "005930", 3.0, MarketVenue.NXT))
+    tracker.observe(_symbol_frame("H0ZZZZ", "005930", 4.0))
+    snap = tracker.snapshot(_BASE_S + 10.0)["symbol_last_frame_wall"]
+    assert set(snap["trade"]) == {"krx|005930"}
+    assert set(snap["quote"]) == {"krx|005930", "nxt|005930"}
+    assert snap["quote"]["nxt|005930"] == pytest.approx(_BASE_S + 3.0, abs=1e-3)
+

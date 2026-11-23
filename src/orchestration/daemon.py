@@ -140,6 +140,7 @@ from src.orchestration.shard_watchdog import (
     shard_window,
 )
 from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker, stop_supervisors
+from src.orchestration.symbol_silence import SymbolSilenceWatch
 from src.orchestration.trading_day_gate import TradingDayGate, TradingDayStatus, TradingDayView
 from src.realtime.contracts import MarketSession, MarketVenue
 from src.realtime.kis_lease import KisWebSocketLease
@@ -2075,6 +2076,7 @@ class DaemonRunner:
             regular_kis=_regular_kis_cfg,
             stop_secondary=self._stop_feed_secondary,
         )
+        self._symbol_silence = SymbolSilenceWatch(self._paths)
         _tiers = getattr(runtime, "universe_tiers", None)
         self._universe_tiers = _tiers if _tiers is not None else UniverseTierSettings()
         _wd = getattr(runtime, "shard_watchdog", None)
@@ -2623,6 +2625,7 @@ class DaemonRunner:
         self._supervise_regular_ls_shard(today)
         self._watch_ls_shards(now, state, today, anchors)
         self._run_feed_failover(now, today, anchors)
+        self._run_symbol_silence(now, today, anchors)
         self._run_ingest_watchdog(now, state, day, anchors)
         self._run_first_frame_watchdog(now, state, day, anchors)
         self._run_crosscheck_watchdogs(now, state, day, anchors)
@@ -4618,6 +4621,9 @@ class DaemonRunner:
             nxt_plan=st.regular_nxt_plan,
             primaries=self._primary_views(),
         )
+
+    def _run_symbol_silence(self, now: dt.datetime, today: dt.date, anchors: SessionAnchors) -> None:
+        self._symbol_silence.tick(now, today, anchors)
 
     def _primary_views(self) -> dict[str, PrimaryView]:
         ch = self._children

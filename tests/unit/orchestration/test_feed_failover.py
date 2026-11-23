@@ -744,3 +744,14 @@ def test_status_never_written_when_inert(paths, monkeypatch) -> None:
     sup = _supervisor(paths, FeedControlSettings(), clock, _Stops())
     _run_healthy_ls(sup, paths, clock, T0, 60)
     assert writes == []
+
+
+def test_large_health_file_readable(paths) -> None:
+    _write_health(paths, "ls:0", T0, last_frame=T0)
+    path = paths.feed_health_path("ls:0")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["symbol_last_frame_wall"] = {"quote": {f"krx|{index:06d}": T0 for index in range(4000)}, "trade": {}}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert path.stat().st_size > 100 * 1024
+    assert ff.read_feed_health(path, DAY) is not None
+

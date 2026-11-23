@@ -13,9 +13,9 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
-from src.realtime.contracts import L0Frame, VendorAck
+from src.realtime.contracts import L0Frame, MarketVenue, VendorAck
 from src.realtime.lag_monitor import delivery_lag_s
 
 logger = logging.getLogger(__name__)
@@ -24,6 +24,8 @@ SCHEMA = "feed-health.v1"
 LAG_MIN_SAMPLES = 20
 _WARN_EVERY_S = 60.0
 _NS = 1_000_000_000
+TRADE_STREAMS: Final = frozenset({"H0STCNT0", "H0NXCNT0"})
+QUOTE_STREAMS: Final = frozenset({"H0STASP0", "H0NXASP0"})
 
 
 def feed_id_for(vendor: str, venue: str, shard_index: int, slot: str | None = None) -> str:
@@ -41,6 +43,14 @@ def feed_id_for(vendor: str, venue: str, shard_index: int, slot: str | None = No
     if vendor in ("ls", "db", "kiwoom", "toss"):
         return f"{vendor}:{shard_index}"
     raise ValueError(f"unknown vendor {vendor!r}")
+
+
+def _symbol_kind(stream: str) -> str | None:
+    if stream in TRADE_STREAMS:
+        return "trade"
+    if stream in QUOTE_STREAMS:
+        return "quote"
+    return None
 
 
 def _nearest_rank(sorted_values: list[float], percent: int) -> float:
@@ -82,6 +92,7 @@ class FeedHealthTracker:
         self._frames_total = 0
         self._last_frame_wall: float | None = None
         self._stream_last: dict[str, float] = {}
+        self._symbol_last: dict[str, dict[str, float]] = {"trade": {}, "quote": {}}
         self._second_counts: deque[list[int]] = deque()
         self._window_frames = 0
         self._lags: deque[tuple[float, float]] = deque(maxlen=max_samples)
@@ -100,6 +111,10 @@ class FeedHealthTracker:
         self._frames_total += 1
         self._last_frame_wall = recv_s
         self._stream_last[frame.stream] = recv_s
+        kind = _symbol_kind(frame.stream)
+        if kind is not None:
+            venue = self._venue if frame.venue is MarketVenue.UNKNOWN else frame.venue.value
+            self._symbol_last[kind][f"{venue}|{frame.symbol}"] = recv_s
         second = frame.recv_wall_ns // _NS
         if self._second_counts and self._second_counts[-1][0] == second:
             self._second_counts[-1][1] += 1
@@ -166,6 +181,9 @@ class FeedHealthTracker:
             "frames_total": self._frames_total,
             "last_frame_wall": self._last_frame_wall,
             "stream_last_frame_wall": dict(self._stream_last),
+            "symbol_last_frame_wall": {
+                kind: {key: round(value, 3) for key, value in last.items()} for kind, last in self._symbol_last.items()
+            },
             "window_s": self._window_s,
             "window_frames": self._window_frames,
             "lag_p50_s": _nearest_rank(lags, 50) if enough else None,
