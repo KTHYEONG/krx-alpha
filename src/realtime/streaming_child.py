@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import pathlib
 import signal
 import time
 from collections.abc import Callable
@@ -18,6 +19,7 @@ from src.realtime.connection_handover import Handover, SwapRequest
 from src.realtime.contracts import L0Frame, VendorAck, VendorAdapter
 from src.realtime.feed_health import FeedHealthConfig, FeedHealthPublisher, FeedHealthSink
 from src.realtime.lag_monitor import LagMonitor
+from src.realtime.market_state import MarketStateSink
 from src.realtime.streamer import FrameSink, LiveSubscriptionWatch, RealtimeStreamer, SessionFrameSink
 from src.realtime.trade_continuity import TRADE_CONTINUITY_VENDORS, TradeContinuityWatch
 from src.realtime.ws_lease import Lease, WsLeaseLedger
@@ -97,6 +99,7 @@ async def run_streaming_child(
     handover: HandoverSettings | None = None,
     live_watch: LiveSubscriptionWatch | None = None,
     feed_health: FeedHealthConfig | None = None,
+    market_state_path: pathlib.Path | None = None,
 ) -> None:
     """Drive one bootstrapped session until SIGTERM/deadline/max_cycles, then persist."""
     stop = asyncio.Event()
@@ -136,6 +139,8 @@ async def run_streaming_child(
             health_task = asyncio.ensure_future(
                 FeedHealthPublisher(feed_health.tracker, feed_health.path, interval_s=feed_health.interval_s).run()
             )
+        if market_state_path is not None:
+            sink = MarketStateSink(sink, market_state_path)
         if live_watch is not None:
             extra["pairs_provider"] = live_watch.pairs
             extra["live_watch"] = live_watch

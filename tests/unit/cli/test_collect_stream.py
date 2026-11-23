@@ -556,7 +556,8 @@ def test_ls_shard_holds_its_primary_slot_while_streaming(tmp_path, monkeypatch, 
     held = captured["ledger_during"]
     assert [(row["owner"].startswith(f"ls-shard-{index}-"), row["role"]) for row in held] == [(True, "primary")]
     assert _ledger_rows(ledger_file) == []
-    assert {symbol for symbol, _ in captured["replay_pairs"]} == {"005930"}
+    expected_symbols = {"005930", "0", "000000"} if index == 1 else {"005930"}
+    assert {symbol for symbol, _ in captured["replay_pairs"]} == expected_symbols
     assert journal_tags
     assert set(journal_tags) == {expected_tag}
     assert f"[DATA] stage=ls_shard index={index} symbols=1" in caplog.text
@@ -764,3 +765,24 @@ def test_non_ls_collect_stream_never_arms_after_close_limit(tmp_path, monkeypatc
                               ntp_host="h", max_clock_offset_ns=2_000_000_000, max_cycles=1)
     assert collect_stream.run(args) == 0
     assert seen["silence_limit"]() is None
+
+
+@pytest.mark.parametrize(("index", "expected_market"), [(0, False), (1, True)])
+def test_market_state_pairs_ride_only_the_market_shard(tmp_path, monkeypatch, index, expected_market) -> None:
+    from src.core.config import LS_MARKET_STATE_PAIRS
+    from src.realtime.market_state import MarketStateSink
+
+    env = {"KRX_ALPHA_LS_ACTIVE_SESSIONS": "2", "KRX_ALPHA_LS_MAX_SESSIONS": "3"}
+    rc, captured, _tags, _ledger = _run_shard(tmp_path, monkeypatch, index=index, symbols="005930", env=env)
+
+    assert rc == 0
+    pairs = set(captured["replay_pairs"])
+    assert (set(LS_MARKET_STATE_PAIRS) <= pairs) is expected_market
+    assert isinstance(captured["sink"], MarketStateSink) == expected_market
+
+
+def test_ls_subscription_budget_reserves_the_market_symbol() -> None:
+    from src.core.config import CollectorSettings
+
+    settings = CollectorSettings(vendor="ls", ls_active_sessions=2, ls_capacity_pairs=400)
+    assert settings.subscription_symbol_budget == 399

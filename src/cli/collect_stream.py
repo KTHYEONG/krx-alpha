@@ -17,6 +17,8 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
 from src.core.config import (
+    LS_MARKET_STATE_PAIRS,
+    LS_MARKET_STATE_SHARD,
     LS_REJECTED_PAIR_HOLD_S,
     AuditSettings,
     CollectorSettings,
@@ -297,6 +299,11 @@ def _warm_dynamic_watch(
     )
 
 
+def _carries_market_state(profile: RegularStreamProfile, venue: str, shard_index: int) -> bool:
+    """True only for the KRX LS regular child on the market-state shard; never shard 0, standby or NXT."""
+    return profile.vendor == "ls" and profile.route is None and venue == "krx" and shard_index == LS_MARKET_STATE_SHARD
+
+
 def _ls_dynamic_watch(
     *,
     session: CollectorSession,
@@ -452,6 +459,8 @@ async def run_regular_stream(
             silence_limit = _armed_when_subscribed(open_watch.silence_limit, lambda: bool(warm_watch.pairs()))
         else:
             static_pairs = session.replay_pairs()
+            if _carries_market_state(profile, venue, shard_index):
+                static_pairs = [*static_pairs, *LS_MARKET_STATE_PAIRS]
             live_watch = _ls_dynamic_watch(
                 session=session,
                 session_date=session_date,
@@ -516,6 +525,9 @@ async def run_regular_stream(
                 interval_s=settings.feed_health_interval_s,
             ),
             handover=handover_cfg,
+            market_state_path=settings.paths.market_state_path(session_date)
+            if _carries_market_state(profile, venue, shard_index)
+            else None,
         )
         if ledger is not None and primary is not None and handover_cfg is None:
             if not await _run_lease_guarded(stream, ledger, primary, every_s=settings.ws_lease_ttl_s / 3):

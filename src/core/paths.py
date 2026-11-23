@@ -134,6 +134,9 @@ class DataPaths:
     def feed_health_path(self, feed_id: str) -> pathlib.Path:
         return self.work_root / "feed_status" / f"{feed_id.replace(':', '__')}.json"
 
+    def market_state_path(self, day: dt.date) -> pathlib.Path:
+        return self.root / "market_events" / "ls" / f"dt={day}.jsonl"
+
     def feed_controller_state_path(self) -> pathlib.Path:
         return self.work_root / "feed_controller.json"
 

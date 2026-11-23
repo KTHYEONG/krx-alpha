@@ -1377,8 +1377,9 @@ def test_ls_sharded_budget_is_active_capacity_minus_reserve() -> None:
 
     settings = CollectorSettings(ls_active_sessions=2, ls_dynamic_reserve_symbols=40)
 
-    assert settings.subscription_symbol_budget == 160
-    assert settings.universe_slot_budget == 160
+    # One symbol of shard 1 is reserved for the market-state pairs (JIF + VI_).
+    assert settings.subscription_symbol_budget == 159
+    assert settings.universe_slot_budget == 159
 
 
 def test_ls_active_sessions_must_leave_one_standby_session() -> None:
@@ -1587,3 +1588,14 @@ def test_intraday_kis_dynamic_slots_accept_pool_1_to_6_only(slots, ok) -> None:
     else:
         with pytest.raises(ValueError, match="kis_dynamic_slots"):
             IntradayAdmissionSettings(kis_dynamic_slots=slots)
+
+
+def test_market_state_symbols_cost_one_symbol_and_reject_empty_streams() -> None:
+    import pytest
+
+    from src.core.config import ls_market_state_symbols
+
+    assert ls_market_state_symbols(2) == 1
+    assert ls_market_state_symbols(1) == 2
+    with pytest.raises(ValueError, match="stream_count"):
+        ls_market_state_symbols(0)

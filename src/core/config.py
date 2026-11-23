@@ -41,8 +41,20 @@ LS_MAX_SESSIONS: int = 3
 LS_MAX_SUBSCRIPTIONS_PER_SESSION: int = 200
 # LS closes the whole socket after one rejected subscribe (2026-11-23 probe); a rejected pair waits this long before a resend.
 LS_REJECTED_PAIR_HOLD_S: float = 1800.0
+# Market-state frames (JIF status, VI_ volatility interruption) ride one symbol on this LS shard; the symbol is the
+# only subscription budget the market lane costs.
+LS_MARKET_STATE_SHARD: Final[int] = 1
+LS_MARKET_STATE_PAIRS: Final[tuple[tuple[str, str], ...]] = (("0", "LS_JIF"), ("000000", "LS_VI"))
+LS_MARKET_STATE_STREAMS: Final[frozenset[str]] = frozenset({stream for _, stream in LS_MARKET_STATE_PAIRS})
 # 2026-09-14 L0 measurement: off-regular silence reached 450 s on normal days.
 OFF_REGULAR_MAX_NORMAL_SILENCE_S: float = 450.0
+
+
+def ls_market_state_symbols(stream_count: int) -> int:
+    """Symbol slots the market-state pairs occupy in one LS session carrying ``stream_count`` streams per symbol."""
+    if stream_count < 1:
+        raise ValueError(f"stream_count {stream_count} must be >= 1")
+    return -(-len(LS_MARKET_STATE_PAIRS) // stream_count)
 
 
 class KisVenue(StrEnum):
@@ -163,7 +175,12 @@ class CollectorSettings(BaseSettings):
 
     @property
     def subscription_symbol_budget(self) -> int:
-        return self.ls_capacity_pairs * self.ls_active_sessions // len(self.streams) - self.ls_dynamic_reserve_symbols
+        market_reserve = ls_market_state_symbols(len(self.streams)) if self.ls_active_sessions >= 2 else 0
+        return (
+            self.ls_capacity_pairs * self.ls_active_sessions // len(self.streams)
+            - self.ls_dynamic_reserve_symbols
+            - market_reserve
+        )
 
     @property
     def kiwoom_crosscheck_symbol_budget(self) -> int:

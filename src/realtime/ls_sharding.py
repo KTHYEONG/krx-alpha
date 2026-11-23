@@ -6,7 +6,7 @@ import statistics
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from src.core.config import LS_MAX_SESSIONS
+from src.core.config import LS_MARKET_STATE_SHARD, LS_MAX_SESSIONS, ls_market_state_symbols
 from src.realtime.ls_limits import prioritize_ls_pairs
 
 
@@ -55,6 +55,10 @@ def plan_ls_shards(
     last_index = shard_count - 1
     reserves = [dynamic_reserve_symbols if index == last_index and index >= 1 else 0 for index in range(shard_count)]
     capacities = [max(0, base_capacity - reserve) for reserve in reserves]
+    if shard_count > LS_MARKET_STATE_SHARD:
+        capacities[LS_MARKET_STATE_SHARD] = max(
+            0, capacities[LS_MARKET_STATE_SHARD] - ls_market_state_symbols(len(streams))
+        )
     static = ordered_symbols[: sum(capacities)]
     members = _balanced_split(static, capacities, loads)
     rank = {symbol: position for position, symbol in enumerate(static)}

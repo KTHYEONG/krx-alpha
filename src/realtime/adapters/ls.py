@@ -7,7 +7,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from src.core.config import LS_MAX_SUBSCRIPTIONS_PER_SESSION
+from src.core.config import LS_MARKET_STATE_PAIRS, LS_MAX_SUBSCRIPTIONS_PER_SESSION
 from src.marketdata.host_token_store import AsyncRotatingTokenStore
 from src.marketdata.toss_token_store import TossTokenStore
 from src.realtime.adapters.json_ws import JsonWsOAuthAdapter, RejectedPairHold
@@ -31,6 +31,9 @@ LS_TR_CD: dict[tuple[str, str], str] = {
 }
 
 _REV_TR_CD: dict[str, str] = {v: k[0] for k, v in LS_TR_CD.items()}
+_MARKET_TR_BY_STREAM: dict[str, str] = {"LS_JIF": "JIF", "LS_VI": "VI_"}
+_MARKET_STREAM_BY_TR: dict[str, str] = {tr: stream for stream, tr in _MARKET_TR_BY_STREAM.items()}
+_MARKET_PAIRS: frozenset[tuple[str, str]] = frozenset(LS_MARKET_STATE_PAIRS)
 
 LS_NXT_STREAMS: tuple[str, str] = ("H0NXCNT0", "H0NXASP0")
 _NXT_TR_BY_STREAM: dict[str, str] = {"H0NXCNT0": "NS3", "H0NXASP0": "NH1"}
@@ -102,9 +105,13 @@ class LsRealtimeAdapter(JsonWsOAuthAdapter):
         )
 
     def _subscribe_body(self, symbol: str, stream: str) -> dict[str, str]:
+        if stream in _MARKET_TR_BY_STREAM:
+            return {"tr_cd": _MARKET_TR_BY_STREAM[stream], "tr_key": symbol}
         return {"tr_cd": LS_TR_CD[(stream, self._market_of[symbol])], "tr_key": symbol}
 
     def _invalid_key(self, symbol: str, stream: str) -> str | None:
+        if stream in _MARKET_TR_BY_STREAM:
+            return None if (symbol, stream) in _MARKET_PAIRS else "unknown_stream"
         if _KRX_SHORT_CODE.fullmatch(symbol) is None:
             return "invalid_tr_key"
         if (stream, self._market_of.get(symbol)) not in LS_TR_CD:
@@ -130,10 +137,13 @@ class LsRealtimeAdapter(JsonWsOAuthAdapter):
         return VendorAuthRejected(f"auth_rejected:subscribe_reset:{type(exc).__name__}")
 
     def _build_frame(self, o: dict[str, Any], raw: str) -> L0Frame:
+        header = o["header"]
+        if header["tr_cd"] in _MARKET_STREAM_BY_TR:
+            return self._build_market_frame(o, raw)
         return L0Frame(
             "ls",
-            _REV_TR_CD[o["header"]["tr_cd"]],
-            o["header"]["tr_key"],
+            _REV_TR_CD[header["tr_cd"]],
+            header["tr_key"],
             raw,
             time.monotonic_ns(),
             time.time_ns(),
@@ -141,11 +151,31 @@ class LsRealtimeAdapter(JsonWsOAuthAdapter):
             conn_id=self._conn_id,
         )
 
+    def _build_market_frame(self, o: dict[str, Any], raw: str) -> L0Frame:
+        stream = _MARKET_STREAM_BY_TR[o["header"]["tr_cd"]]
+        symbol = next(key for key, name in LS_MARKET_STATE_PAIRS if name == stream)
+        body = o.get("body")
+        event_time = body.get("time", "") if isinstance(body, dict) and stream == "LS_VI" else ""
+        return L0Frame(
+            "ls",
+            stream,
+            symbol,
+            raw,
+            time.monotonic_ns(),
+            time.time_ns(),
+            self._next_seq(),
+            conn_id=self._conn_id,
+            venue=MarketVenue.KRX,
+            exchange_event_time=event_time if len(str(event_time)) == 6 and str(event_time).isdigit() else "",
+        )
+
     @staticmethod
     def _is_data_frame(o: dict[str, Any]) -> bool:
         header = o.get("header", {})
         if not isinstance(header, dict):
             return False
+        if header.get("tr_cd") in _MARKET_STREAM_BY_TR and "rsp_cd" not in header:
+            return True
         return header.get("tr_cd") in _REV_TR_CD and "tr_key" in header
 
 

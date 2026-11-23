@@ -50,10 +50,10 @@ def test_second_shard_takes_next_priority_block_minus_reserve() -> None:
     )
 
     assert [shard.shard_index for shard in shards] == [0, 1]
-    # Without prior loads the static set is dealt snake-wise by rank until shard 1 (100 - reserve 40) is full.
-    assert shards[1].symbols == tuple(s for i, s in enumerate(symbols[:120]) if i % 4 in (1, 2))
+    # Without prior loads the static set is dealt snake-wise by rank until shard 1 (100 - reserve 40 - market 1) is full.
+    assert shards[1].symbols == tuple(s for i, s in enumerate(symbols[:118]) if i % 4 in (1, 2))
     assert shards[0].symbols == tuple(s for s in symbols if s not in shards[1].symbols)
-    assert (len(shards[0].symbols), len(shards[1].symbols)) == (90, 60)
+    assert (len(shards[0].symbols), len(shards[1].symbols)) == (91, 59)
     assert shards[0].window_standby is True
     assert shards[1].window_standby is False
     assert shards[0].dynamic_reserve_symbols == 0
@@ -73,8 +73,8 @@ def test_overflow_preserves_priority() -> None:
         pairs_per_session=200,
         dynamic_reserve_symbols=40,
     )
-    assert sorted(shards[0].symbols + shards[1].symbols) == list(symbols[:160])
-    assert overflow == symbols[160:]
+    assert sorted(shards[0].symbols + shards[1].symbols) == list(symbols[:159])
+    assert overflow == symbols[159:]
 
     demoted = symbols[0]
     shards, overflow = plan_ls_shards(
@@ -86,9 +86,9 @@ def test_overflow_preserves_priority() -> None:
         dynamic_reserve_symbols=40,
     )
     reordered = (*symbols[1:], demoted)
-    assert set(shards[0].symbols + shards[1].symbols) == set(reordered[:160])
+    assert set(shards[0].symbols + shards[1].symbols) == set(reordered[:159])
     assert all(list(s.symbols) == sorted(s.symbols, key=reordered.index) for s in shards)
-    assert overflow == reordered[160:]
+    assert overflow == reordered[159:]
 
 
 def test_session_count_validated() -> None:
@@ -133,10 +133,10 @@ def test_prior_loads_balance_shards_and_keep_priority_order_inside_each() -> Non
         dynamic_reserve_symbols=0, loads=loads,
     )
     sums = [sum(loads[s] for s in shard.symbols) for shard in shards]
-    assert overflow == ()
-    assert [len(shard.symbols) for shard in shards] == [100, 100]
+    assert overflow == symbols[199:]
+    assert [len(shard.symbols) for shard in shards] == [100, 99]
     assert max(sums) / min(sums) < 1.01
-    assert sorted(shards[0].symbols + shards[1].symbols) == list(symbols)
+    assert sorted(shards[0].symbols + shards[1].symbols) == list(symbols[:199])
     assert all(list(shard.symbols) == sorted(shard.symbols) for shard in shards)  # priority (rank) order kept
     # Same inputs give the same plan: daemon, resumed daemon and KIS child must agree.
     again, _ = plan_ls_shards(
@@ -154,9 +154,37 @@ def test_unknown_symbols_weigh_the_median_and_small_sets_stay_on_one_session() -
         dynamic_reserve_symbols=0, loads=loads,
     )
     assert symbols[0] in shards[0].symbols
-    assert [len(shard.symbols) for shard in shards] == [100, 100]
+    assert [len(shard.symbols) for shard in shards] == [100, 99]
     small, _ = plan_ls_shards(
         _symbols(80), tiers={}, streams=_STREAMS, active_sessions=2, pairs_per_session=200,
         dynamic_reserve_symbols=0, loads=dict.fromkeys(_symbols(80), 5),
     )
     assert [len(shard.symbols) for shard in small] == [80, 0]
+
+
+def test_market_state_shard_capacity() -> None:
+    symbols = _symbols(500)
+    shards, overflow = plan_ls_shards(
+        symbols,
+        tiers={},
+        streams=_STREAMS,
+        active_sessions=2,
+        pairs_per_session=400,
+        dynamic_reserve_symbols=0,
+    )
+    assert len(shards[0].symbols) == 200
+    assert len(shards[1].symbols) == 199
+    assert overflow == symbols[399:]
+
+
+def test_single_shard_no_market_reserve() -> None:
+    symbols = _symbols(300)
+    shards, _ = plan_ls_shards(
+        symbols,
+        tiers={},
+        streams=_STREAMS,
+        active_sessions=1,
+        pairs_per_session=400,
+        dynamic_reserve_symbols=0,
+    )
+    assert len(shards[0].symbols) == 200

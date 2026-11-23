@@ -1806,3 +1806,37 @@ def test_rejected_pair_hold_rejects_non_positive_duration() -> None:
 
     with pytest.raises(ValueError, match="hold_s must be positive"):
         RejectedPairHold(0.0)
+
+
+def test_market_state_pairs_subscribe_and_decode() -> None:
+    import json
+
+    from src.realtime.adapters.ls import LsRealtimeAdapter
+    from src.realtime.contracts import MarketVenue
+
+    adapter = LsRealtimeAdapter(app_key="k", app_secret="s", http=object(), market_of={}, token_store=object())
+    assert adapter._subscribe_body("0", "LS_JIF") == {"tr_cd": "JIF", "tr_key": "0"}
+    assert adapter._subscribe_body("000000", "LS_VI") == {"tr_cd": "VI_", "tr_key": "000000"}
+    assert adapter._invalid_key("0", "LS_VI") == "unknown_stream"
+    assert adapter._invalid_key("0", "LS_JIF") is None
+
+    jif = {"header": {"tr_cd": "JIF"}, "body": {"jangubun": "1", "jstatus": "30"}}
+    frame = adapter._data_frame(jif, jif["header"], json.dumps(jif))
+    assert frame is not None
+    assert (frame.stream, frame.symbol, frame.exchange_event_time, frame.venue) == (
+        "LS_JIF",
+        "0",
+        "",
+        MarketVenue.KRX,
+    )
+
+    vi = {
+        "header": {"tr_cd": "VI_", "tr_key": "000000"},
+        "body": {"shcode": "000000", "ref_shcode": "088340", "vi_gubun": "2", "time": "151206"},
+    }
+    frame = adapter._data_frame(vi, vi["header"], json.dumps(vi))
+    assert frame is not None
+    assert (frame.stream, frame.symbol, frame.exchange_event_time) == ("LS_VI", "000000", "151206")
+
+    ack = {"header": {"tr_cd": "VI_", "rsp_cd": "00000"}, "body": {}}
+    assert adapter._data_frame(ack, ack["header"], json.dumps(ack)) is None
