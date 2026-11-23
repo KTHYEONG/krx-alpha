@@ -18,6 +18,19 @@ _KST = ZoneInfo("Asia/Seoul")
 _EVENT_TIME_RE = re.compile(r'"(?:chetime|hotime)"\s*:\s*"(\d{6})"')
 _NS = 1_000_000_000
 LAG_DISCARD_BELOW_S = -60.0
+# DB stamps every pre-open book frame (08:30-08:50) with 000000; no KRX or NXT session trades at midnight.
+PLACEHOLDER_EVENT_TIME = "000000"
+
+
+def _event_stamp(frame: L0Frame) -> str | None:
+    """Frame's HHMMSS exchange event time, or None when absent, malformed or the vendor placeholder."""
+    stamp = frame.exchange_event_time
+    if len(stamp) != 6 or not stamp.isdigit():
+        match = _EVENT_TIME_RE.search(frame.raw)
+        if match is None:
+            return None
+        stamp = match.group(1)
+    return None if stamp == PLACEHOLDER_EVENT_TIME else stamp
 
 
 def delivery_lag_s(frame: L0Frame) -> float | None:
@@ -25,12 +38,9 @@ def delivery_lag_s(frame: L0Frame) -> float | None:
 
     Lags below ``LAG_DISCARD_BELOW_S`` are treated as clock or parse noise and discarded; other negatives clamp to 0.
     """
-    stamp = frame.exchange_event_time
-    if len(stamp) != 6 or not stamp.isdigit():
-        match = _EVENT_TIME_RE.search(frame.raw)
-        if match is None:
-            return None
-        stamp = match.group(1)
+    stamp = _event_stamp(frame)
+    if stamp is None:
+        return None
     received = dt.datetime.fromtimestamp(frame.recv_wall_ns / _NS, tz=_KST)
     event = received.replace(hour=int(stamp[:2]), minute=int(stamp[2:4]), second=int(stamp[4:]), microsecond=0)
     lag = (received - event).total_seconds()
@@ -38,13 +48,10 @@ def delivery_lag_s(frame: L0Frame) -> float | None:
 
 
 def event_second_of(frame: L0Frame) -> int | None:
-    """Return the frame's exchange event time as second-of-day, or None when absent or malformed."""
-    stamp = frame.exchange_event_time
-    if len(stamp) != 6 or not stamp.isdigit():
-        match = _EVENT_TIME_RE.search(frame.raw)
-        if match is None:
-            return None
-        stamp = match.group(1)
+    """Return the frame's exchange event time as second-of-day, or None when absent, malformed or a placeholder."""
+    stamp = _event_stamp(frame)
+    if stamp is None:
+        return None
     hour, minute, second = int(stamp[:2]), int(stamp[2:4]), int(stamp[4:])
     if hour > 23 or minute > 59 or second > 59:
         return None

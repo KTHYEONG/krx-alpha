@@ -161,3 +161,24 @@ def test_on_exceeded_fires_once_per_episode() -> None:
     _feed(monitor, 32420, 20, lag_s=30)
     _feed(monitor, 32440, 20, lag_s=40)
     assert calls == [1]
+
+
+def test_db_preopen_placeholder_event_time_is_not_a_lag(caplog: pytest.LogCaptureFixture) -> None:
+    """DB pre-open books carry 000000 (2026-11-23 L0: 958 frames 08:30-08:50); they must not read as 8.5 h lag."""
+    from src.realtime.lag_monitor import delivery_lag_s, event_second_of
+
+    opening = 8 * 3600 + 30 * 60
+    placeholder = L0Frame("db", "H0STASP0", "005930", "{}", 1, _ns(opening + 1), 1, "c", exchange_event_time="000000")
+    raw_placeholder = L0Frame("db", "H0STASP0", "005930", '{"body":{"hotime":"000000"}}', 1, _ns(opening + 1), 1, "c")
+    assert delivery_lag_s(placeholder) is None
+    assert delivery_lag_s(raw_placeholder) is None
+    assert event_second_of(placeholder) is None
+    monitor = LagMonitor(threshold_s=10.0, sample_every=1)
+    with caplog.at_level(logging.CRITICAL):
+        for sec in range(opening, opening + 30):
+            for _ in range(6):
+                monitor.observe(L0Frame("db", "H0STASP0", "005930", "{}", 1, _ns(sec + 0.5), 1, "c", exchange_event_time="000000"))
+    assert monitor.alerted is False
+    assert not caplog.records
+    # A genuine one-second stamp right after midnight is still a valid event time.
+    assert event_second_of(_frame(5.0, 1, field=True)) == 1
