@@ -189,6 +189,9 @@ jobs:
           scp $SSH_OPTS deploy/host/vps-disk-watch.service deploy/host/vps-disk-watch.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
           scp $SSH_OPTS deploy/host/krx-l1-reencode.service deploy/host/krx-l1-reencode.timer "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
 
+          # 창별 운영 probe 스크립트 스테이징 (배포 커밋과 VPS 사본이 일치하도록 동일 경로 규칙 사용)
+          scp $SSH_OPTS ops/probes/run_window.sh ops/probes/p_host.sh ops/probes/p_am.sh ops/probes/p_live.sh ops/probes/p_eod.sh ops/probes/p_week.sh "$REMOTE_USER@$HOST:~/krx-alpha/$STAGING_DIR/"
+
           # 런타임 환경 키 매니페스트 생성/스테이징: 키 이름만 담고 값은 담지 않는다
           # (단일 소스: src/core/runtime_env_provisioning.py). 검증기는 스테이징 전용.
           python3 -m src.core.runtime_env_provisioning emit-key-manifest --out "$RUNNER_TEMP/runtime-env-keys.txt"
@@ -319,6 +322,10 @@ jobs:
           install -m 644 "\$STAGING_DIR/vps-disk-watch.timer" ~/.config/systemd/user/vps-disk-watch.timer.new && mv -f ~/.config/systemd/user/vps-disk-watch.timer.new ~/.config/systemd/user/vps-disk-watch.timer
           install -m 644 "\$STAGING_DIR/krx-l1-reencode.service" ~/.config/systemd/user/krx-l1-reencode.service.new && mv -f ~/.config/systemd/user/krx-l1-reencode.service.new ~/.config/systemd/user/krx-l1-reencode.service
           install -m 644 "\$STAGING_DIR/krx-l1-reencode.timer" ~/.config/systemd/user/krx-l1-reencode.timer.new && mv -f ~/.config/systemd/user/krx-l1-reencode.timer.new ~/.config/systemd/user/krx-l1-reencode.timer
+          mkdir -p ~/krx-alpha/ops/probes
+          for probe in run_window.sh p_host.sh p_am.sh p_live.sh p_eod.sh p_week.sh; do
+            install -m 755 "\$STAGING_DIR/\$probe" ~/krx-alpha/ops/probes/\$probe.new && mv -f ~/krx-alpha/ops/probes/\$probe.new ~/krx-alpha/ops/probes/\$probe
+          done
           mkdir -p ~/.config/krx-secrets-escrow
           install -m 755 "\$STAGING_DIR/krx-secrets-escrow.sh" ~/krx-alpha/deploy/host/krx-secrets-escrow.sh.new && mv -f ~/krx-alpha/deploy/host/krx-secrets-escrow.sh.new ~/krx-alpha/deploy/host/krx-secrets-escrow.sh
           install -m 644 "\$STAGING_DIR/krx-secrets-escrow.service" ~/.config/systemd/user/krx-secrets-escrow.service.new && mv -f ~/.config/systemd/user/krx-secrets-escrow.service.new ~/.config/systemd/user/krx-secrets-escrow.service
