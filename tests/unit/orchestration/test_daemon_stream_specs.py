@@ -67,6 +67,7 @@ def test_spec_table_order_and_roles() -> None:
         daemon_mod.StreamChildKey.TOSS_SECONDARY_B,
         daemon_mod.StreamChildKey.LS_NXT_SECONDARY,
         daemon_mod.StreamChildKey.LS_AFTER_SECONDARY,
+        daemon_mod.StreamChildKey.LS_NXT_REGULAR,
         daemon_mod.StreamChildKey.KIWOOM_CROSSCHECK,
         daemon_mod.StreamChildKey.INTRADAY_DISCOVERY,
         daemon_mod.StreamChildKey.AFTERMARKET,
@@ -89,6 +90,7 @@ def test_spec_table_order_and_roles() -> None:
         daemon_mod.StreamChildKey.TOSS_SECONDARY_B,
         daemon_mod.StreamChildKey.LS_NXT_SECONDARY,
         daemon_mod.StreamChildKey.LS_AFTER_SECONDARY,
+        daemon_mod.StreamChildKey.LS_NXT_REGULAR,
         daemon_mod.StreamChildKey.KIWOOM_CROSSCHECK,
         daemon_mod.StreamChildKey.INTRADAY_DISCOVERY,
     ]
@@ -445,3 +447,82 @@ def test_ls_after_cmd_args(tmp_path) -> None:
     assert cmd[cmd.index("--dynamic-plan-path") + 1] == str(paths.dynamic_admissions(day))
     assert cmd[cmd.index("--manifest-path") + 1] == str(paths.ls_after_manifest_path(day))
     assert cmd[cmd.index("--market-map") + 1] == str(paths.market_map)
+
+
+def _ls_nxt_regular_spec():
+    return next(s for s in daemon_mod.DaemonRunner._STREAM_SPECS if s.key is daemon_mod.StreamChildKey.LS_NXT_REGULAR)
+
+
+def _nxt_regular_runtime(*, ls_active_sessions: int = 2, ls_max_sessions: int = 3, nxt_slots=("5",)):
+    collector = types.SimpleNamespace(
+        ls_active_sessions=ls_active_sessions,
+        ls_max_sessions=ls_max_sessions,
+        ls_capacity_pairs=200,
+        regular_open_standby_hold_s=300.0,
+    )
+    kis = types.SimpleNamespace(
+        enabled=True, nxt_credential_slots=tuple(nxt_slots), nxt_max_symbols=60, close_grace_s=120.0
+    )
+    return types.SimpleNamespace(collector=collector, regular_kis=kis)
+
+
+def test_ls_nxt_regular_window_bounds() -> None:
+    anchors = _anchors(dt.date(2026, 11, 24))
+    runtime = _nxt_regular_runtime()
+
+    def at(hm):
+        return dt.datetime(2026, 11, 24, hm[0], hm[1], hm[2], tzinfo=_KST)
+
+    window = daemon_mod._ls_nxt_regular_window
+    assert window(runtime, at((9, 9, 59)), anchors) is False
+    assert window(runtime, at((9, 10, 0)), anchors) is True
+    assert window(runtime, at((15, 21, 59)), anchors) is True
+    assert window(runtime, at((15, 22, 0)), anchors) is False
+
+
+def test_ls_nxt_regular_window_inactive_on_shifted_open() -> None:
+    base = _anchors(dt.date(2026, 11, 24))
+    shifted = dataclasses.replace(
+        base,
+        regular_open=dt.time(10, 0),
+        closing_auction_start=dt.time(16, 20),
+        regular_close=dt.time(16, 30),
+        after_market_end=dt.time(21, 0),
+    )
+    runtime = _nxt_regular_runtime()
+    assert all(
+        daemon_mod._ls_nxt_regular_window(runtime, dt.datetime(2026, 11, 24, hour, 30, tzinfo=_KST), shifted) is False
+        for hour in range(8, 18)
+    )
+
+
+def test_ls_nxt_regular_disabled_without_spare_session() -> None:
+    spec = _ls_nxt_regular_spec()
+    assert spec.enabled(_nxt_regular_runtime()) is True
+    assert spec.enabled(_nxt_regular_runtime(ls_active_sessions=3, ls_max_sessions=3)) is False
+    assert spec.enabled(_nxt_regular_runtime(nxt_slots=())) is False
+
+
+def test_ls_nxt_regular_spec_shape() -> None:
+    spec = _ls_nxt_regular_spec()
+    assert spec.role is daemon_mod.StreamRole.CROSSCHECK
+    assert spec.lifecycle is daemon_mod.ChildLifecycle.SESSION
+    assert spec.requires_primary
+    assert spec.demand is None
+    assert spec.journal_vendor(None) == "ls"
+
+
+def test_regular_nxt_pool_capacity_adds_spare_slots() -> None:
+    assert daemon_mod.regular_nxt_pool_capacity(_nxt_regular_runtime()) == 60 + 100
+    assert daemon_mod.regular_nxt_pool_capacity(_nxt_regular_runtime(ls_active_sessions=3, ls_max_sessions=3)) == 60
+
+
+def test_ls_nxt_regular_cmd_passes_kis_prefix(tmp_path) -> None:
+    from src.core.config import DataPaths
+
+    paths = DataPaths(tmp_path)
+    day = dt.date(2026, 11, 24)
+    cmd = daemon_mod._ls_nxt_regular_cmd(day, paths, kis_nxt_symbols=60)
+    assert cmd[cmd.index("--kis-nxt-symbols") + 1] == "60"
+    assert cmd[cmd.index("--manifest-path") + 1] == str(paths.ls_nxt_regular_manifest_path(day))
+    assert cmd[cmd.index("--candidates-path") + 1] == str(paths.regular_nxt_candidates(day))

@@ -448,3 +448,61 @@ def test_non_integer_standby_block_is_treated_as_corrupt(tmp_path: pathlib.Path)
 
     with pytest.raises(LeaseUnavailable, match="ledger_corrupt"):
         _ledger(tmp_path, now).acquire("p", LeaseRole.PRIMARY)
+
+
+def test_primary_preempts_spare_before_standby(tmp_path: pathlib.Path) -> None:
+    now, advance = _clock()
+    ledger = _ledger(tmp_path, now)
+    primary = ledger.acquire("p", LeaseRole.PRIMARY)
+    standby = ledger.acquire("s", LeaseRole.STANDBY)
+    advance(1)
+    spare = ledger.acquire("n", LeaseRole.SPARE)
+
+    with pytest.raises(LeaseUnavailable, match="preempt_pending"):
+        ledger.acquire("p2", LeaseRole.PRIMARY)
+
+    assert ledger.renew(spare) is False
+    assert ledger.renew(standby) is True
+    assert ledger.renew(primary) is True
+
+
+def test_standby_preempts_spare(tmp_path: pathlib.Path) -> None:
+    now, _ = _clock()
+    ledger = _ledger(tmp_path, now)
+    primary = ledger.acquire("p", LeaseRole.PRIMARY)
+    spare = ledger.acquire("n", LeaseRole.SPARE)
+    ledger.acquire("p2", LeaseRole.PRIMARY)
+
+    with pytest.raises(LeaseUnavailable, match="preempt_pending"):
+        ledger.acquire("s", LeaseRole.STANDBY)
+
+    assert ledger.renew(spare) is False
+    ledger.release(spare)
+    standby = ledger.acquire("s", LeaseRole.STANDBY)
+    assert standby.role is LeaseRole.STANDBY
+    assert ledger.renew(primary) is True
+
+
+def test_spare_never_preempts(tmp_path: pathlib.Path) -> None:
+    now, _ = _clock()
+    ledger = _ledger(tmp_path, now)
+    primaries = [ledger.acquire(f"p{i}", LeaseRole.PRIMARY) for i in range(_CAP - 1)]
+    standby = ledger.acquire("s", LeaseRole.STANDBY)
+
+    with pytest.raises(LeaseUnavailable, match="cap_reached"):
+        ledger.acquire("n", LeaseRole.SPARE)
+
+    assert ledger.renew(standby) is True
+    assert all(ledger.renew(lease) for lease in primaries)
+
+
+def test_spare_is_quarantined_like_standby(tmp_path: pathlib.Path) -> None:
+    now, _ = _clock()
+    ledger = _ledger(tmp_path, now)
+    (tmp_path / _LEDGER_FILE).write_bytes(b"{not json")
+    with pytest.raises(LeaseUnavailable, match="ledger_corrupt"):
+        ledger.acquire("p", LeaseRole.PRIMARY)
+
+    other_process = _ledger(tmp_path, now)
+    with pytest.raises(LeaseUnavailable, match="quarantine"):
+        other_process.acquire("n", LeaseRole.SPARE)

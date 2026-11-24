@@ -144,6 +144,7 @@ from src.orchestration.shard_watchdog import (
 from src.orchestration.supervisor import ProcessSupervisor, RestartCircuitBreaker, stop_supervisors
 from src.orchestration.symbol_silence import SymbolSilenceWatch
 from src.orchestration.trading_day_gate import TradingDayGate, TradingDayStatus, TradingDayView
+from src.realtime.adapters.ls import LS_NXT_STREAMS
 from src.realtime.contracts import MarketSession, MarketVenue
 from src.realtime.kis_lease import KisWebSocketLease
 from src.realtime.kis_sharding import (
@@ -1314,6 +1315,56 @@ def _ls_after_cmd(today: dt.date, paths: DataPaths) -> list[str]:
     ]
 
 
+# Clears the lag-handover standby refreshes observed up to 09:10; later grants preempt this spare child.
+_LS_NXT_REGULAR_SETTLE_S: Final[float] = 300.0
+
+
+def _ls_nxt_regular_enabled(runtime: CollectorRuntime) -> bool:
+    collector = runtime.collector
+    kis = getattr(runtime, "regular_kis", None) or RegularKisSettings()
+    return collector.ls_active_sessions < collector.ls_max_sessions and kis.enabled and bool(kis.nxt_credential_slots)
+
+
+def regular_nxt_pool_capacity(runtime: CollectorRuntime) -> int:
+    """Ranked NXT regular pool length: KIS NXT symbols plus the spare LS child's slots when that child is enabled."""
+    kis = getattr(runtime, "regular_kis", None) or RegularKisSettings()
+    ls_slots = runtime.collector.ls_capacity_pairs // len(LS_NXT_STREAMS) if _ls_nxt_regular_enabled(runtime) else 0
+    return kis.nxt_max_symbols + ls_slots
+
+
+def _ls_nxt_regular_window(runtime: CollectorRuntime, now: dt.datetime, anchors: SessionAnchors) -> bool:
+    """True from the post-standby settle point until the NXT regular close plus grace; never on shifted-open days."""
+    if anchors.open_shift != dt.timedelta(0):
+        return False
+    local = now.astimezone(_KST)
+    kis = getattr(runtime, "regular_kis", None) or RegularKisSettings()
+    settle_s = runtime.collector.regular_open_standby_hold_s + _LS_NXT_REGULAR_SETTLE_S
+    start = dt.datetime.combine(local.date(), anchors.regular_open, tzinfo=_KST) + dt.timedelta(seconds=settle_s)
+    end = dt.datetime.combine(local.date(), anchors.closing_auction_start, tzinfo=_KST) + dt.timedelta(
+        seconds=kis.close_grace_s
+    )
+    return start <= local < end
+
+
+def _ls_nxt_regular_cmd(today: dt.date, paths: DataPaths, kis_nxt_symbols: int) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "src.cli.main",
+        "collect-stream-ls-nxt-regular",
+        "--session-date",
+        today.isoformat(),
+        "--journal-root",
+        str(paths.journal_root),
+        "--manifest-path",
+        str(paths.ls_nxt_regular_manifest_path(today)),
+        "--candidates-path",
+        str(paths.regular_nxt_candidates(today)),
+        "--kis-nxt-symbols",
+        str(kis_nxt_symbols),
+    ]
+
+
 class StreamRole(StrEnum):
     PRIMARY = "primary"
     CROSSCHECK = "crosscheck"
@@ -1336,6 +1387,7 @@ class StreamChildKey(StrEnum):
     TOSS_SECONDARY_B = "toss_secondary_b"
     LS_NXT_SECONDARY = "ls_nxt_secondary"
     LS_AFTER_SECONDARY = "ls_after_secondary"
+    LS_NXT_REGULAR = "ls_nxt_regular"
     KIWOOM_CROSSCHECK = "kiwoom_crosscheck"
     AFTERMARKET = "aftermarket"
     PREMARKET = "premarket"
@@ -1904,6 +1956,11 @@ class DaemonRunner:
         circuit_open="[DAEMON] stage=ls_after_secondary status=FAIL reason=circuit_open",
         circuit_level=logging.WARNING,
     )
+    _LS_NXT_REGULAR_LOGS: ClassVar[SupervisionLogs] = SupervisionLogs(
+        restarted="[DAEMON] stage=ls_nxt_regular_secondary status=RESTARTED exit_code=%s",
+        circuit_open="[DAEMON] stage=ls_nxt_regular_secondary status=FAIL reason=circuit_open",
+        circuit_level=logging.WARNING,
+    )
     _STREAM_SPECS: ClassVar[tuple[StreamChildSpec, ...]] = (
         StreamChildSpec(
             key=StreamChildKey.REGULAR,
@@ -2030,6 +2087,21 @@ class DaemonRunner:
             requires_primary=True,
             journal_vendor=lambda cfg: "ls",
             manifest_path=lambda paths, day: paths.ls_after_manifest_path(day),
+        ),
+        StreamChildSpec(
+            key=StreamChildKey.LS_NXT_REGULAR,
+            role=StreamRole.CROSSCHECK,
+            lifecycle=ChildLifecycle.SESSION,
+            enabled=_ls_nxt_regular_enabled,
+            # The daemon overrides this in _session_child_cmd with the runtime KIS NXT slot count.
+            cmd=lambda today, paths, reason: _ls_nxt_regular_cmd(
+                today, paths, kis_nxt_symbols=RegularKisSettings().nxt_max_symbols
+            ),
+            active=_ls_nxt_regular_window,
+            logs=_LS_NXT_REGULAR_LOGS,
+            requires_primary=True,
+            journal_vendor=lambda cfg: "ls",
+            manifest_path=lambda paths, day: paths.ls_nxt_regular_manifest_path(day),
         ),
         StreamChildSpec(
             key=StreamChildKey.KIWOOM_CROSSCHECK,
@@ -3944,8 +4016,9 @@ class DaemonRunner:
                     target.isoformat(),
                 )
                 return
+            pool_capacity = regular_nxt_pool_capacity(self._runtime)
             if regular_nxt_pool_ready(
-                paths.regular_nxt_candidates(target), target_date=target, max_candidates=cfg.nxt_max_symbols
+                paths.regular_nxt_candidates(target), target_date=target, max_candidates=pool_capacity
             ):
                 st.regular_nxt_pool_day = today
                 logger.info(
@@ -3963,7 +4036,7 @@ class DaemonRunner:
                 effective_from=effective_from,
                 fetch=fetch_nxt_trade_amount_ranking_live,
                 out_path=paths.regular_nxt_candidates(target),
-                capacity=cfg.nxt_max_symbols,
+                capacity=pool_capacity,
                 excluded_symbols=excluded,
             )
             st.regular_nxt_pool_day = today
@@ -4172,7 +4245,7 @@ class DaemonRunner:
                 self._paths.regular_nxt_candidates(today),
                 expected_session_date=today,
                 expected_session="regular_nxt",
-                max_candidates=cfg.nxt_max_symbols,
+                max_candidates=regular_nxt_pool_capacity(self._runtime),
             )
         except CandidateFileError:
             st.regular_nxt_plan = ()
@@ -4182,7 +4255,8 @@ class DaemonRunner:
                 today.isoformat(),
             )
             return
-        symbols = tuple(str(row["symbol"]) for row in sorted(snapshot.candidates, key=lambda row: int(cast(int, row["rank"]))))
+        ranked = tuple(str(row["symbol"]) for row in sorted(snapshot.candidates, key=lambda row: int(cast(int, row["rank"]))))
+        symbols = ranked[: cfg.nxt_max_symbols]
         try:
             st.regular_nxt_plan = plan_regular_kis_shards(
                 symbols=symbols,
@@ -4383,6 +4457,10 @@ class DaemonRunner:
             index = _TOSS_SESSION_INDEX[spec.key]
             hot = dict(self._runtime.feed_control.hot_symbols).get(f"toss:{index}", 0)
             return _toss_cmd(today, self._paths, session_index=index, hot_symbols=hot)
+        if spec.key is StreamChildKey.LS_NXT_REGULAR:
+            return _ls_nxt_regular_cmd(
+                today, self._paths, kis_nxt_symbols=self._runtime.regular_kis.nxt_max_symbols
+            )
         if spec.key is not StreamChildKey.REGULAR:
             assert spec.cmd is not None
             return spec.cmd(today, self._paths, reason)

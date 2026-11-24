@@ -126,6 +126,7 @@ def test_feed_id_mapping(args, expected) -> None:
 
 def test_ls_after_feed_id_and_role_rejects_other_vendors() -> None:
     assert feed_id_for("ls", "krx", 0, role="after") == "ls-after:0"
+    assert feed_id_for("ls", "nxt", 0, role="nxt_regular") == "ls-nxt-regular:0"
     with pytest.raises(ValueError, match="only defined for ls aftermarket"):
         feed_id_for("kis", "krx", 0, role="after")
 

@@ -15,7 +15,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from enum import StrEnum
-from typing import TypeGuard
+from typing import NoReturn, TypeGuard
 
 from src.core.errors import KrxAlphaError
 from src.core.observability import EVENT
@@ -29,6 +29,7 @@ _IDENTIFIER = re.compile(r"[A-Za-z0-9_-]+")
 class LeaseRole(StrEnum):
     PRIMARY = "primary"
     STANDBY = "standby"
+    SPARE = "spare"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -93,7 +94,7 @@ class WsLeaseLedger:
         with self._locked():
             now = self._clock_ns()
             entries = self._drop_expired(self._load(), now)
-            if requested == LeaseRole.STANDBY and now < self._standby_blocked_until_ns:
+            if requested in (LeaseRole.STANDBY, LeaseRole.SPARE) and now < self._standby_blocked_until_ns:
                 self._store(entries)
                 self._log("DENY", owner, requested, len(entries), logging.WARNING)
                 raise LeaseUnavailable("quarantine")
@@ -103,20 +104,33 @@ class WsLeaseLedger:
                 self._store(entries)
                 self._log("GRANT", owner, requested, len(entries))
                 return self._lease(entry)
+            if requested in (LeaseRole.PRIMARY, LeaseRole.STANDBY):
+                spares = [entry for entry in entries if entry.role == LeaseRole.SPARE]
+                if spares:
+                    self._preempt_oldest(entries, spares, owner, requested)
             standbys = [entry for entry in entries if entry.role == LeaseRole.STANDBY]
             if requested == LeaseRole.PRIMARY and standbys:
-                if any(entry.preempt for entry in standbys):
-                    self._store(entries)
-                    self._log("DENY", owner, requested, len(entries), logging.WARNING)
-                    raise LeaseUnavailable("preempt_pending")
-                victim = min(standbys, key=lambda entry: entry.granted_ns)
-                victim.preempt = True
-                self._store(entries)
-                self._log("PREEMPT", victim.owner, victim.role, len(entries), logging.WARNING)
-                raise LeaseUnavailable("preempt_pending")
+                self._preempt_oldest(entries, standbys, owner, requested)
             self._store(entries)
             self._log("DENY", owner, requested, len(entries), logging.WARNING)
             raise LeaseUnavailable("cap_reached")
+
+    def _preempt_oldest(
+        self,
+        entries: list[_Entry],
+        victims: list[_Entry],
+        owner: str,
+        requested: LeaseRole,
+    ) -> NoReturn:
+        if any(entry.preempt for entry in victims):
+            self._store(entries)
+            self._log("DENY", owner, requested, len(entries), logging.WARNING)
+            raise LeaseUnavailable("preempt_pending")
+        victim = min(victims, key=lambda entry: entry.granted_ns)
+        victim.preempt = True
+        self._store(entries)
+        self._log("PREEMPT", victim.owner, victim.role, len(entries), logging.WARNING)
+        raise LeaseUnavailable("preempt_pending")
 
     def renew(self, lease: Lease) -> bool:
         """Extend a live, non-preempted lease; False means it is gone and the caller must close the connection."""

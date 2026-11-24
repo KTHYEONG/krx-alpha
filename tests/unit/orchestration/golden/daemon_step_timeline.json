@@ -2459,6 +2459,8 @@
     "[DAEMON] stage=ls_nxt_secondary status=RESTARTED exit_code=%s",
     "[DAEMON] stage=ls_after_secondary status=FAIL reason=circuit_open",
     "[DAEMON] stage=ls_after_secondary status=RESTARTED exit_code=%s",
+    "[DAEMON] stage=ls_nxt_regular_secondary status=FAIL reason=circuit_open",
+    "[DAEMON] stage=ls_nxt_regular_secondary status=RESTARTED exit_code=%s",
     "[DAEMON] stage=market_sweep status=FAIL reason=circuit_open",
     "[DAEMON] stage=market_sweep status=RESTARTED exit_code=%s",
     "[DAEMON] stage=nightly_%s status=FAIL exit_code=launch reason=%s",

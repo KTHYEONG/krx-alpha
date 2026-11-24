@@ -293,3 +293,71 @@ def test_runs_independent_of_premarket_flag(monkeypatch, tmp_path) -> None:
 
     # Then
     assert fetch.calls == 1
+
+
+def test_pool_is_built_at_capacity_including_spare_ls_slots(monkeypatch, tmp_path) -> None:
+    # Given: the spare LS child is enabled, so the pool must hold the KIS NXT prefix plus its slots
+    gate = _FakeGate(TradingDayStatus.BUSINESS, _trading_day(FRI, next_day=MON))
+    runner = _runner(monkeypatch, tmp_path, gate)
+    fetch = _Fetch(outcomes=[_rows(150)])
+    _wire(monkeypatch, fetch)
+    kis_nxt = runner._runtime.regular_kis.nxt_max_symbols
+    capacity = daemon_mod.regular_nxt_pool_capacity(runner._runtime)
+    assert capacity == kis_nxt + 100
+
+    # When
+    runner._maybe_select_regular_nxt(_at(FRI, 20, 10), standard_session_anchors(FRI))
+
+    # Then
+    snapshot = daemon_mod.read_candidate_snapshot(
+        runner._paths.regular_nxt_candidates(MON),
+        expected_session_date=MON,
+        expected_session="regular_nxt",
+        max_candidates=capacity,
+    )
+    assert snapshot.capacity == capacity
+    assert snapshot.selected_count == capacity
+
+
+def test_kis_nxt_plan_takes_only_the_kis_prefix_of_the_wider_pool(monkeypatch, tmp_path) -> None:
+    # Given: a pool built at full capacity and an orchestrated day
+    gate = _FakeGate(TradingDayStatus.BUSINESS, _trading_day(FRI, next_day=MON))
+    runner = _runner(monkeypatch, tmp_path, gate)
+    kis_nxt = runner._runtime.regular_kis.nxt_max_symbols
+    capacity = daemon_mod.regular_nxt_pool_capacity(runner._runtime)
+    daemon_mod.refresh_regular_nxt_pool(
+        target_date=MON,
+        generated_at=_at(FRI, 20, 10),
+        effective_from=_at(MON, 8, 0),
+        fetch=lambda: _rows(capacity + 10),
+        out_path=runner._paths.regular_nxt_candidates(MON),
+        capacity=capacity,
+    )
+    planned: list[tuple[str, ...]] = []
+
+    def _plan(**kwargs):
+        planned.append(tuple(kwargs["symbols"]))
+        return ()
+
+    monkeypatch.setattr(daemon_mod, "plan_regular_kis_shards", _plan)
+    runner.state.orchestrated_for = MON
+
+    # When
+    runner._ensure_regular_nxt_plan(MON)
+
+    # Then: the KIS plan holds ranks 1..kis_nxt only and the pool file was not truncated silently
+    assert planned == [tuple(f"{rank:06d}" for rank in range(1, kis_nxt + 1))]
+
+
+def test_session_child_command_carries_runtime_kis_prefix(monkeypatch, tmp_path) -> None:
+    # Given: the spare LS child is enabled in this runtime
+    gate = _FakeGate(TradingDayStatus.BUSINESS, _trading_day(FRI, next_day=MON))
+    runner = _runner(monkeypatch, tmp_path, gate)
+    spec = daemon_mod.DaemonRunner._stream_spec(daemon_mod.StreamChildKey.LS_NXT_REGULAR)
+
+    # When
+    cmd = runner._session_child_cmd(spec, MON, None)
+
+    # Then
+    assert cmd[cmd.index("--kis-nxt-symbols") + 1] == str(runner._runtime.regular_kis.nxt_max_symbols)
+    assert cmd[cmd.index("collect-stream-ls-nxt-regular") - 1] == "src.cli.main"

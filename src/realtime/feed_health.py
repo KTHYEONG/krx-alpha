@@ -28,14 +28,17 @@ TRADE_STREAMS: Final = frozenset({"H0STCNT0", "H0NXCNT0"})
 QUOTE_STREAMS: Final = frozenset({"H0STASP0", "H0NXASP0"})
 
 
+_LS_ROLE_FEEDS: Final = {"after": "ls-after", "nxt_regular": "ls-nxt-regular"}
+
+
 def feed_id_for(
     vendor: str, venue: str, shard_index: int, slot: str | None = None, role: str | None = None
 ) -> str:
-    """Return the stable feed id for a streaming child; `slot` selects the KIS dynamic feed, `role` the LS aftermarket child."""
+    """Return the stable feed id for a streaming child; `slot` selects the KIS dynamic feed, `role` an LS secondary child."""
     if role is not None:
-        if vendor != "ls" or role != "after":
-            raise ValueError(f"role {role!r} is only defined for ls aftermarket, got vendor {vendor!r}")
-        return f"ls-after:{shard_index}"
+        if vendor != "ls" or role not in _LS_ROLE_FEEDS:
+            raise ValueError(f"role {role!r} is only defined for ls aftermarket and ls nxt_regular, got vendor {vendor!r}")
+        return f"{_LS_ROLE_FEEDS[role]}:{shard_index}"
     if slot is not None:
         if vendor != "kis":
             raise ValueError(f"dynamic slot is only defined for kis, got {vendor!r}")

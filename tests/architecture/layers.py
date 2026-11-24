@@ -127,6 +127,7 @@ LAYER_RANK["src/cli/collect_stream_kiwoom.py"] = 7
 LAYER_RANK["src/cli/collect_stream_toss.py"] = 7
 LAYER_RANK["src/cli/collect_stream_ls_nxt.py"] = 7
 LAYER_RANK["src/cli/collect_stream_ls_after.py"] = 7
+LAYER_RANK["src/cli/collect_stream_ls_nxt_regular.py"] = 7
 LAYER_RANK["src/realtime/streaming_child.py"] = 5
 LAYER_RANK["src/orchestration/shard_watchdog.py"] = 5
 LAYER_RANK["src/orchestration/feed_control/model.py"] = 5
