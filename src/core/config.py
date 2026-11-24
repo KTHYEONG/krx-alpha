@@ -26,7 +26,9 @@ from src.core.paths import (
 from src.core.session_anchors import (
     STANDARD_CLOSING_AUCTION,
     STANDARD_NXT_AFTER_MARKET_OPEN,
+    STANDARD_NXT_PREMARKET_END,
     STANDARD_REGULAR_CLOSE,
+    STANDARD_REGULAR_OPEN,
 )
 
 __all__ = ["DataPaths"]
@@ -1261,7 +1263,15 @@ def resolve_collector_runtime(
             raise ValueError("regular_kis credential_slots must not overlap the premarket credential slot")
         if resolved_regular_kis.nxt_credential_slots:
             if resolved_premarket.enabled and resolved_premarket.credential_slot in resolved_regular_kis.nxt_credential_slots:
-                raise ValueError("regular_kis nxt_credential_slots must not overlap the premarket credential slot")
+                base = dt.date(2000, 1, 1)
+                premarket_end = dt.datetime.combine(base, STANDARD_NXT_PREMARKET_END) + dt.timedelta(
+                    seconds=float(resolved_premarket.close_grace_s)
+                )
+                nxt_arm = dt.datetime.combine(base, STANDARD_REGULAR_OPEN) - dt.timedelta(
+                    seconds=float(resolved_regular_kis.nxt_start_lead_s)
+                )
+                if not premarket_end < nxt_arm:
+                    raise ValueError("regular_kis nxt_credential_slots share the premarket slot but the windows overlap")
             if resolved_intraday.enabled and set(resolved_intraday.kis_dynamic_slots) & set(
                 resolved_regular_kis.nxt_credential_slots
             ):

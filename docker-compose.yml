@@ -29,21 +29,25 @@ services:
       - KRX_ALPHA_MARKET_SWEEP_KIS_DATA_SLOT=6
       # KIS 리테일 웹소켓 커넥션당 41스트림쌍 하드캡(docs/architecture/engineering-decisions.md 검증치)
       - KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION=41
+      # 애프터마켓은 슬롯 1~6 전부 사용 (venue당 상한 60종목 = 샤드 3개 × 20종목, 검증 후보 53~56종목 절단 없이 수용).
+      - KRX_ALPHA_AFTERMARKET_MAX_SYMBOLS=60
       # NXT 프리마켓(08:00~08:50) 단일 WS 커넥션. 스냅샷 REST=슬롯 2, k-closing-alpha 15:20 결정창 REST=슬롯 1·5(KIS_DECISION_SHARD_SLOTS=1,5).
       # 슬롯 5는 결정창(15:20)에만 REST로 쓰이고 프리마켓과 시간대·채널(WS)이 겹치지 않는다 (2026-10-03 VPS 실측).
+      # 슬롯 5 = 프리마켓 07:58-08:50, 이후 NXT 정규장 08:58-15:22 (시간 분리, 겹치지 않음).
       # 2026-10-06 첫 영업일부터 시험 수집 (V2 미검증, 실패는 프리마켓 자식에 한정)
       - KRX_ALPHA_PREMARKET_ENABLED=true
       - KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT=5
       - KRX_ALPHA_PREMARKET_PAIR_CAPACITY_PER_CONNECTION=41
       # KIS 정규장 코프라이머리 샤드 (정규 확장 Part4; 2026-10-22 G-MEM 통과 후 활성, G-KIS-HEAVY/LOSS/SLOT-COEXIST 관찰 중).
-      # 슬롯 1·2 NXT 정규장 WS 08:58-15:22, 슬롯 3·4·6 KRX 정규장 WS 08:28-15:32, 슬롯 5 프리마켓 후 장중 동적 편입 예약 (deploy/shared/kis_slot_assignments.toml).
+      # 슬롯 1·2·5 NXT 정규장 WS 08:58-15:22 (NXT 상위 60종목, 20종목×3), 슬롯 3·4·6 KRX 정규장 WS 08:28-15:32 (deploy/shared/kis_slot_assignments.toml).
+      # 장중 동적 편입(intraday)은 꺼져 있다. 켜려면 슬롯 5가 NXT 정규장에 배정돼 있으므로 슬롯 재배정이 먼저 필요하다.
       - KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS=["3","4","6"]
-      - KRX_ALPHA_REGULAR_KIS_NXT_CREDENTIAL_SLOTS=["1","2"]
+      - KRX_ALPHA_REGULAR_KIS_NXT_CREDENTIAL_SLOTS=["1","2","5"]
       - KRX_ALPHA_REGULAR_KIS_PAIR_CAPACITY_PER_CONNECTION=41
       - KRX_ALPHA_REGULAR_KIS_ENABLED=true
       # 피드 전환 컨트롤러: secondary_feeds가 차면 활성 모드. 개장 공백(11-18 123 s, 11-20 79 s)은 감지-편입 지연(약 1분)보다 짧아
       # 반응형 편입으로는 못 막으므로, DB 2세션이 KIS 중복 종목을 뺀 거래대금 상위 종목을 25종목씩 겹치지 않게 장 시작부터 핫 구독해 호가·체결을 이중 수신한다(세션당 50쌍=검증 한도).
-      - KRX_ALPHA_FEED_CONTROL_WATCH_GROUPS=["ls:0","ls:1","kis-krx:0","kis-krx:1","kis-nxt:0","kis-nxt:1"]
+      - KRX_ALPHA_FEED_CONTROL_WATCH_GROUPS=["ls:0","ls:1","kis-krx:0","kis-krx:1","kis-nxt:0","kis-nxt:1","kis-nxt:2"]
       - KRX_ALPHA_FEED_CONTROL_SECONDARY_FEEDS=["db:0","db:1"]
       - KRX_ALPHA_FEED_CONTROL_HOT_SYMBOLS=[["db:0",25],["db:1",25]]
       # 2층 유니버스 (Part5; 2026-10-22 G-UNIVERSE 오프라인 20일 재현 PASS: 코어 65-71, 교체율 최대 4.2%).

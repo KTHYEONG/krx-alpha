@@ -163,3 +163,25 @@ def test_fetch_failure_writes_nothing(tmp_path) -> None:
             capacity=40,
         )
     assert not path.exists()
+
+
+def test_pool_not_ready_when_capacity_smaller(tmp_path) -> None:
+    # Given: a valid day file built at capacity 40, read by a daemon now configured for 60
+    small = tmp_path / "small.json"
+    pool.refresh_regular_nxt_pool(
+        target_date=TARGET, generated_at=GEN, effective_from=EFF,
+        fetch=lambda: [_row(i, f"{i:06d}", 1000 - i) for i in range(1, 41)], out_path=small, capacity=40,
+    )
+
+    # Then: it is rebuilt at the current capacity
+    assert pool.regular_nxt_pool_ready(small, target_date=TARGET, max_candidates=60) is False
+
+    # Given: a thin ranking built at capacity 60 that selected only 40 names
+    thin = tmp_path / "thin.json"
+    pool.refresh_regular_nxt_pool(
+        target_date=TARGET, generated_at=GEN, effective_from=EFF,
+        fetch=lambda: [_row(i, f"{i:06d}", 1000 - i) for i in range(1, 41)], out_path=thin, capacity=60,
+    )
+
+    # Then: a short ranking at full capacity is still ready (no rebuild loop)
+    assert pool.regular_nxt_pool_ready(thin, target_date=TARGET, max_candidates=60) is True

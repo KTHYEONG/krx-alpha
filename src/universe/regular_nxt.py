@@ -101,9 +101,12 @@ def refresh_regular_nxt_pool(
 
 
 def regular_nxt_pool_ready(path: pathlib.Path, *, target_date: dt.date, max_candidates: int) -> bool:
-    """True when ``path`` holds a valid regular_nxt snapshot for ``target_date``; never raises on a bad file."""
+    """True when ``path`` holds a valid regular_nxt snapshot for ``target_date`` built at capacity >= ``max_candidates``.
+
+    Never raises on a bad file. A thin ranking (selected_count < capacity) still counts as ready.
+    """
     try:
-        read_candidate_snapshot(
+        snapshot = read_candidate_snapshot(
             path,
             expected_session_date=target_date,
             expected_session=_SESSION,
@@ -111,4 +114,4 @@ def regular_nxt_pool_ready(path: pathlib.Path, *, target_date: dt.date, max_cand
         )
     except (CandidateFileError, OSError, ValueError, KeyError, TypeError, AttributeError):
         return False
-    return True
+    return snapshot.capacity >= max_candidates

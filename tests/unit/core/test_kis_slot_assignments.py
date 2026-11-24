@@ -44,16 +44,17 @@ def _krx_rows() -> dict[str, dict[str, object]]:
         elif row["purpose"] == "regular_nxt_ws":
             name = "regular_nxt_ws"
             assert str(row["slot"]) in [str(slot) for slot in selectors["KRX_ALPHA_REGULAR_KIS_NXT_CREDENTIAL_SLOTS"]]
-        elif row["purpose"] == "regular_kis_dynamic_ws":
-            name = "regular_kis_dynamic_ws"
-            assert str(row["slot"]) not in [str(slot) for slot in selectors["KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS"]]
-        elif row["slot"] == selectors["KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT"]:
+        elif row["purpose"] == "premarket_ws":
             name = "premarket_ws"
+            assert str(row["slot"]) == str(selectors["KRX_ALPHA_PREMARKET_CREDENTIAL_SLOT"])
         else:
+            assert row["purpose"] == "aftermarket_ws", row["purpose"]
             name = "aftermarket_ws"
         group = groups.setdefault(name, {"channel": row["channel"], "slots": [], "window_kst": row["windows"][0].split("-")})
         assert row["windows"] == ["-".join(group["window_kst"])]
         group["slots"].append(str(row["slot"]))
+    for group in groups.values():
+        group["slots"].sort()
     return groups
 
 
@@ -137,7 +138,6 @@ def test_krx_rows_exact() -> None:
         "premarket_ws",
         "regular_nxt_ws",
         "regular_kis_ws",
-        "regular_kis_dynamic_ws",
         "aftermarket_ws",
     }
 
@@ -158,19 +158,15 @@ def test_krx_rows_exact() -> None:
     assert krx["premarket_ws"]["window_kst"] == ["07:58", "08:50"]
 
     assert krx["regular_nxt_ws"]["channel"] == "ws"
-    assert krx["regular_nxt_ws"]["slots"] == ["1", "2"]
+    assert krx["regular_nxt_ws"]["slots"] == ["1", "2", "5"]
     assert krx["regular_nxt_ws"]["window_kst"] == ["08:58", "15:22"]
 
     assert krx["regular_kis_ws"]["channel"] == "ws"
     assert krx["regular_kis_ws"]["slots"] == ["3", "4", "6"]
     assert krx["regular_kis_ws"]["window_kst"] == ["08:28", "15:32"]
 
-    assert krx["regular_kis_dynamic_ws"]["channel"] == "ws"
-    assert krx["regular_kis_dynamic_ws"]["slots"] == ["5"]
-    assert krx["regular_kis_dynamic_ws"]["window_kst"] == ["09:00", "15:32"]
-
     assert krx["aftermarket_ws"]["channel"] == "ws"
-    assert krx["aftermarket_ws"]["slots"] == ["1", "2", "3", "4"]
+    assert krx["aftermarket_ws"]["slots"] == ["1", "2", "3", "4", "5", "6"]
     assert krx["aftermarket_ws"]["window_kst"] == ["15:40", "20:00"]
 
 
@@ -202,7 +198,7 @@ def test_compose_regular_kis_slots_match_table(monkeypatch) -> None:
     resolved = RegularKisSettings()
     assert resolved.enabled is True
     assert resolved.credential_slots == ("3", "4", "6")
-    assert resolved.nxt_credential_slots == ("1", "2")
+    assert resolved.nxt_credential_slots == ("1", "2", "5")
 
 
 def test_aftermarket_derived_slots_match_table(caplog, monkeypatch) -> None:
@@ -219,7 +215,7 @@ def test_aftermarket_derived_slots_match_table(caplog, monkeypatch) -> None:
     env = _compose_env()
     slots = CANONICAL_SLOTS_LINE.split("=", 1)[1].split(",")
     credentials = tuple(KisDataCredential(slot, f"key-{slot}", "secret", f"hts-{slot}", f"id-{slot}") for slot in slots)
-    symbols = tuple(f"{index:06d}" for index in range(settings.max_symbols))
+    symbols = tuple(f"{index:06d}" for index in range(int(env["KRX_ALPHA_AFTERMARKET_MAX_SYMBOLS"])))
     pair_capacity = int(env["KRX_ALPHA_AFTERMARKET_PAIR_CAPACITY_PER_CONNECTION"])
 
     with caplog.at_level(logging.WARNING, logger="src.realtime.kis_sharding"):
@@ -251,10 +247,15 @@ def test_regular_slots_disjoint() -> None:
     krx = set(selectors["KRX_ALPHA_REGULAR_KIS_CREDENTIAL_SLOTS"])
     nxt = set(selectors["KRX_ALPHA_REGULAR_KIS_NXT_CREDENTIAL_SLOTS"])
     assert not krx & nxt
-    assert not (krx | nxt) & {5}
+    assert 5 not in krx
+    if 5 in nxt:
+        krx_rows = _krx_rows()
+        premarket_end = krx_rows["premarket_ws"]["window_kst"][1]
+        nxt_start = krx_rows["regular_nxt_ws"]["window_kst"][0]
+        assert premarket_end < nxt_start
 
 
 def test_canonical_table_hash_pinned() -> None:
     raw = TABLE_PATH.read_bytes()
     assert raw.splitlines()[0] == b"# canonical: krx-alpha/deploy/shared/kis_slot_assignments.toml schema=1"
-    assert hashlib.sha256(raw).hexdigest() == "26f0060e7889a66c3f936c1fdbfa9a5cb5689269bd80324512177ce96d7b2be5"
+    assert hashlib.sha256(raw).hexdigest() == "8c7a4f93b1db457a72a797c0831de9922bc94042041b252ee2440402f1adfd2c"

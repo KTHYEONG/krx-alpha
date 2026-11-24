@@ -614,3 +614,36 @@ def test_regular_krx_plan_keeps_contiguous_rank_blocks() -> None:
         pair_capacity_per_connection=41, streams=("H0STCNT0", "H0STASP0"), log_coverage=False,
     )
     assert [s.symbols for s in plan] == [ranked[:20], ranked[20:]]
+
+
+def test_aftermarket_plan_uses_six_credentials_with_no_symbol_dropped() -> None:
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import KisDataCredential, plan_aftermarket_shards
+
+    keys = tuple(KisDataCredential(str(i), f"key{i}", "secret", f"hts{i}", f"id{i}") for i in range(1, 7))
+    krx = tuple(f"{i:06d}" for i in range(56))
+    nxt = tuple(f"{i:06d}" for i in range(100000, 100053))
+    plan = plan_aftermarket_shards(
+        krx_symbols=krx, nxt_symbols=nxt, credentials=keys, pair_capacity_per_connection=41,
+        krx_streams=("H0STCNT0", "H0STASP0"), nxt_streams=("H0NXCNT0", "H0NXASP0"),
+    )
+    assert len(plan) == 6
+    assert [s.venue for s in plan] == [MarketVenue.NXT] * 3 + [MarketVenue.KRX] * 3
+    assert sorted(s.credential_slot for s in plan) == ["1", "2", "3", "4", "5", "6"]
+    assert sum(len(s.symbols) for s in plan if s.venue is MarketVenue.NXT) == len(nxt)
+    assert sum(len(s.symbols) for s in plan if s.venue is MarketVenue.KRX) == len(krx)
+
+
+def test_nxt_regular_plan_three_slots_deals_round_robin_one_per_slot() -> None:
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import KisDataCredential, plan_regular_kis_shards
+
+    keys = tuple(KisDataCredential(slot, f"key{slot}", "secret", f"hts{slot}", f"id{slot}") for slot in ("1", "2", "5"))
+    ranked = tuple(f"{i:06d}" for i in range(60))
+    plan = plan_regular_kis_shards(
+        symbols=ranked, credentials=keys, credential_slots=("1", "2", "5"),
+        pair_capacity_per_connection=41, streams=("H0NXCNT0", "H0NXASP0"), venue=MarketVenue.NXT,
+    )
+    assert [(s.shard_index, s.credential_slot) for s in plan] == [(0, "1"), (1, "2"), (2, "5")]
+    assert [s.symbols for s in plan] == [ranked[0::3], ranked[1::3], ranked[2::3]]
+    assert [len(s.symbols) for s in plan] == [20, 20, 20]

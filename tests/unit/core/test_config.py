@@ -1524,24 +1524,35 @@ def test_regular_kis_nxt_capacity_must_hold_one_symbol() -> None:
         )
 
 
-def test_regular_kis_nxt_rejects_premarket_and_intraday_slot_overlap() -> None:
-    from src.core.config import (
-        CollectorSettings,
-        IntradayAdmissionSettings,
-        PremarketSettings,
-        RegularKisSettings,
-        resolve_collector_runtime,
-    )
+def test_regular_kis_nxt_shares_premarket_slot_only_when_windows_are_disjoint() -> None:
+    from src.core.config import CollectorSettings, PremarketSettings, RegularKisSettings, resolve_collector_runtime
 
     regular = RegularKisSettings(
-        enabled=True, credential_slots=("1",), pair_capacity_per_connection=41, nxt_credential_slots=("5",)
+        enabled=True, credential_slots=("3", "4", "6"), pair_capacity_per_connection=41, nxt_credential_slots=("1", "2", "5")
     )
-    with pytest.raises(ValueError, match="premarket"):
+    runtime = resolve_collector_runtime(
+        collector=CollectorSettings(),
+        premarket=PremarketSettings(enabled=True, credential_slot="5", pair_capacity_per_connection=41),
+        regular_kis=regular,
+    )
+    assert runtime.regular_kis.nxt_credential_slots == ("1", "2", "5")
+
+    with pytest.raises(ValueError, match="windows overlap"):
         resolve_collector_runtime(
             collector=CollectorSettings(),
-            premarket=PremarketSettings(enabled=True, credential_slot="5", pair_capacity_per_connection=41),
+            premarket=PremarketSettings(
+                enabled=True, credential_slot="5", pair_capacity_per_connection=41, close_grace_s=600
+            ),
             regular_kis=regular,
         )
+
+
+def test_regular_kis_nxt_rejects_intraday_slot_overlap() -> None:
+    from src.core.config import CollectorSettings, IntradayAdmissionSettings, RegularKisSettings, resolve_collector_runtime
+
+    regular = RegularKisSettings(
+        enabled=True, credential_slots=("3", "4", "6"), pair_capacity_per_connection=41, nxt_credential_slots=("1", "2", "5")
+    )
     with pytest.raises(ValueError, match="kis_dynamic_slots"):
         resolve_collector_runtime(
             collector=CollectorSettings(),
