@@ -4,7 +4,7 @@ export TZ=Asia/Seoul LC_ALL=C
 cd "$HOME/krx-alpha/data" || { echo "CTX UNKNOWN reason=no_data_root"; exit 1; }
 D=${D:-$(date +%F)}; L0C=${L0C:-1}; PQRUN=${PQRUN:-1}; export D L0C
 PY=$(cat <<'EOF'
-import collections, datetime as dt, glob, json, os, re, statistics, subprocess, sys
+import collections, datetime as dt, functools, glob, json, os, re, statistics, subprocess, sys
 Q1_MAX_BITMAP_PAGES: int = 65_536
 
 class _SequenceBitmapLimitError(RuntimeError):
@@ -76,20 +76,36 @@ pr = ps[-1] if ps else ""
 v = "SKIP(holiday)" if not biz else "UNKNOWN" if not cover else ("PASS" if "status=OK exit_code=0" in pr else ("WARN" if "STARTED" in pr else "FAIL"))
 print(f"R7 {v} last={f(pr, 'status')} gaps={sum('program_trades_gap status=GAPS' in l for l in L)} stale={sum('program_trades_sync status=STALE' in l for l in L)}")
 u = jl(f"universe/premarket/{N}.json") if biz else None
-shifted_d = bool(biz and (jl(f"calendar/dt={D}.json") or {}).get("regular_open", "09:00:00") != "09:00:00")  # NXT premarket/regular are not collected on KRX-shifted days: C2/C3/C4 rows for them are SKIP(shifted)
-shifted_n = bool(biz and ((jl(f"calendar/dt={N}.json") or {}).get("regular_open", "09:00:00") != "09:00:00"))  # NXT premarket/regular pools are skipped on KRX-shifted days (logs: `premarket_pool status=SKIP reason=shifted_next_day`)
-print("R8 " + ("SKIP(holiday)" if not biz else f"SKIP(shifted_next_day) pool={N}" if shifted_n and not u else (f"{'PASS' if u and len(u['candidates']) == u['selected_count'] == min(u['capacity'], u['eligible_count']) else 'FAIL'} pool={N} n={len(u['candidates']) if u else 'MISSING'} generated={u['generated_at'][:16] if u else '-'}")))
+def nxt_pre_scheduled(day: str) -> bool | None:
+    c = jl(f"calendar/dt={day}.json")
+    if c is None: return None
+    if "nxt_premarket" in c: return c["nxt_premarket"] is not None
+    return c.get("regular_open", "09:00:00") == "09:00:00"
+def legacy_shifted(day: str) -> bool:
+    c = jl(f"calendar/dt={day}.json")
+    return c is not None and "nxt_premarket" not in c and c.get("regular_open", "09:00:00") != "09:00:00"
+def skip_reason(g: str) -> str | None:
+    if g == "kis/nxt/nxt_pre" and nxt_pre_scheduled(D) is False: return "no_premarket"
+    if g == "kis/nxt/regular" and legacy_shifted(D): return "shifted_legacy"
+    return None
+print("R8 " + ("SKIP(holiday)" if not biz else f"SKIP(no_premarket_next_day) pool={N}" if nxt_pre_scheduled(N) is False and not u else (f"{'PASS' if u and len(u['candidates']) == u['selected_count'] == min(u['capacity'], u['eligible_count']) else 'FAIL'} pool={N} n={len(u['candidates']) if u else 'MISSING'} generated={u['generated_at'][:16] if u else '-'}")))
 if not biz: sys.exit(0)
 # C3 manifests and C4 universe consistency
 def acked(m): return {(a["symbol"], a["tr_id"]) for a in m["subscription_acks"] if a.get("accepted")}
 cand = jl("candidates.json") or {"candidates": [], "rev": None}; cs = {c["symbol"] for c in cand["candidates"]}
-groups = {"ls/krx/regular": [f"manifest/{D}.json"] + sorted(glob.glob(f"manifest/ls/{D}.krx.shard-*.json")), "kis/krx/regular": sorted(glob.glob(f"manifest/regular_kis/{D}.krx.shard-*.json")),
-          "kis/krx/krx_after": sorted(glob.glob(f"manifest/aftermarket/{D}.krx.shard-*.json")), "kis/nxt/nxt_after": sorted(glob.glob(f"manifest/aftermarket/{D}.nxt.shard-*.json")),
-          "kis/nxt/nxt_pre": [f"manifest/premarket/{D}.nxt.shard-00.json"], "kis/nxt/regular": sorted(glob.glob(f"manifest/regular_kis/{D}.nxt.shard-*.json"))}
+@functools.lru_cache(maxsize=None)
+def manifests_by_group(day: str) -> dict[str, list[str]]:
+    return {"ls/krx/regular": [f"manifest/{day}.json"] + sorted(glob.glob(f"manifest/ls/{day}.krx.shard-*.json")), "kis/krx/regular": sorted(glob.glob(f"manifest/regular_kis/{day}.krx.shard-*.json")),
+            "kis/krx/krx_after": sorted(glob.glob(f"manifest/aftermarket/{day}.krx.shard-*.json")), "kis/nxt/nxt_after": sorted(glob.glob(f"manifest/aftermarket/{day}.nxt.shard-*.json")),
+            "kis/nxt/nxt_pre": [f"manifest/premarket/{day}.nxt.shard-00.json"], "kis/nxt/regular": sorted(glob.glob(f"manifest/regular_kis/{day}.nxt.shard-*.json"))}
+groups = manifests_by_group(D)
+def planned(g: str, day: str) -> bool:
+    ms = manifests_by_group(day)
+    return g not in ms or any(os.path.exists(p) for p in ms[g])
 syms = {}
 for g, fs in groups.items():
     ms = [(p, jl(p)) for p in fs]; ms = [(p, m) for p, m in ms if m]
-    if not ms and shifted_d and g in ("kis/nxt/nxt_pre", "kis/nxt/regular"): print(f"C3 SKIP(shifted) group={g}"); syms[g] = set(); continue
+    if not ms and (r := skip_reason(g)): print(f"C3 SKIP({r}) group={g}"); syms[g] = set(); continue
     if not ms: print(f"C3 FAIL group={g} manifest=MISSING"); syms[g] = set(); continue
     bad = []; un = 0; gapmax = 0.0; off = 0.0; boots = 0; late = 0.0
     for p, m in ms:
@@ -110,7 +126,7 @@ for venue, suf in (("krx", ""), ("nxt", ".nxt")):
     ok = len(s) == len(set(s)) == u["selected_count"] == min(u["capacity"], u["eligible_count"]) and plan == set(s) and syms.get(g) == plan
     print(f"C4 {'PASS' if ok else 'FAIL'} universe=aftermarket{suf or '.krx'} n={len(s)} want={min(u['capacity'], u['eligible_count'])} planned_eq={plan == set(s)} acked_eq={syms.get(g) == plan} generated={u['generated_at'][11:16]}")
 pm = jl(f"universe/premarket/{D}.json")
-print("C4 SKIP(shifted) universe=premarket" if shifted_d and not pm else f"C4 {'PASS' if pm and {c['symbol'] for c in pm['candidates']} == syms['kis/nxt/nxt_pre'] else 'FAIL'} universe=premarket n={len(pm['candidates']) if pm else 'MISSING'} acked={len(syms['kis/nxt/nxt_pre'])}")
+print("C4 SKIP(no_premarket) universe=premarket" if nxt_pre_scheduled(D) is False and not pm else f"C4 {'PASS' if pm and {c['symbol'] for c in pm['candidates']} == syms['kis/nxt/nxt_pre'] else 'FAIL'} universe=premarket n={len(pm['candidates']) if pm else 'MISSING'} acked={len(syms['kis/nxt/nxt_pre'])}")
 # C2 L0 hour coverage and size vs trailing local days (per acked symbol)
 H = {"ls/krx/regular": range(9, 20), "kis/krx/regular": range(9, 16), "kis/krx/krx_after": range(16, 20), "kis/nxt/nxt_after": range(16, 20), "kis/nxt/nxt_pre": [8], "kis/nxt/regular": range(9, 15)}
 def nsym(g, d):
@@ -120,7 +136,8 @@ for sdir in sorted(glob.glob("l0/*/*/*/*")):
     g = "/".join(sdir.split("/")[1:4]); fs = glob.glob(f"{sdir}/dt={D}/*.zst")
     hrs = {int(os.path.basename(x)[:2]) for x in fs}; miss = sorted(set(H.get(g, [])) - hrs); zero = sum(os.path.getsize(x) == 0 for x in fs)
     mb = sum(map(os.path.getsize, fs)) / 1e6
-    v = "SKIP(shifted)" if not fs and shifted_d and g in ("kis/nxt/nxt_pre", "kis/nxt/regular") else "FAIL" if not fs or miss or zero else "PASS"
+    sk = skip_reason(g)
+    v = f"SKIP({sk})" if not fs and sk else "FAIL" if not fs or miss or zero else "PASS"
     print(f"C2 {v} stream={sdir[3:]} files={len(fs)} missing_hours={miss or '-'} zero={zero} mb={mb:.1f} acked={nsym(g, D) or 0}")
 # C5 snapshot presence + run summary (row thresholds in Q container part)
 kinds = sorted(os.path.basename(k) for k in glob.glob("l1/snapshot/*")); miss = [k for k in kinds if not os.path.exists(f"l1/snapshot/{k}/dt={D}.parquet")]
@@ -148,9 +165,10 @@ miss = []
 for l1dir in sorted(glob.glob("l1/*/*/*/H0*")):
     have = sorted(x[-18:-8] for x in glob.glob(f"{l1dir}/dt=*.parquet"))
     if not have: continue
-    l0dir = "l0/" + l1dir[3:]; exp = [d for d in cal if have[0] <= d < cut and d < D]
+    l0dir = "l0/" + l1dir[3:]; g = "/".join(l1dir.split("/")[1:4])
+    exp = [d for d in cal if have[0] <= d < cut and d < D and planned(g, d)]
     miss += [f"{l1dir[3:]}@{d}" for d in exp if d not in have and not os.path.isdir(f"{l0dir}/dt={d}")]
-print(f"Q2 {'PASS' if not miss else 'FAIL'} rule=L1_exists_for_every_business_day_lt_D-3 missing={miss[:6] or '-'} (held L0 days are exempt until merged)")
+print(f"Q2 {'PASS' if not miss else 'FAIL'} rule=L1_exists_for_every_planned_day_lt_D-3 missing={miss[:6] or '-'} (held L0 days are exempt until merged)")
 # B4 offload parity of l1/ and manifest/ trees; B5 remote L0 vs local L0/L1
 def check(src, dst, extra=()):
     p = subprocess.run(["nice", "-n", "19", R, "check", src, dst, "--one-way", "--size-only", "--combined", "-", *extra], capture_output=True, text=True)

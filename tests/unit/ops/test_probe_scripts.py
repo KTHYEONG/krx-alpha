@@ -210,7 +210,10 @@ def test_eod_q1_fails_on_partial_decompression(tmp_path: Path) -> None:
 
 
 def test_eod_keeps_q2_fail_when_pq_execution_fails(tmp_path: Path) -> None:
-    _, env = _eod_fixture(tmp_path)
+    data, env = _eod_fixture(tmp_path)
+    manifests = data / "manifest" / "regular_kis"
+    manifests.mkdir(parents=True)
+    (manifests / "2026-11-20.nxt.shard-00.json").write_text("{}", encoding="utf-8")
     env.update(PQRUN="1", PQ_RC="137", L0C="0")
     result = _run_eod(env)
     assert result.returncode == 137, result.stderr
@@ -270,3 +273,77 @@ def test_eod_wrapper_retains_timeout_and_runs_host_probe(tmp_path: Path) -> None
     assert "krx partial" in result.stdout
     assert "script=p_eod rc=124" in result.stdout
     assert "script=p_host rc=0" in result.stdout
+
+
+def _calendar(data: Path, day: str, payload: dict[str, object]) -> None:
+    import json
+
+    (data / "calendar" / f"dt={day}.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _l1(data: Path, group: str, stream: str, day: str) -> None:
+    directory = data / "l1" / group / stream
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"dt={day}.parquet").touch()
+
+
+def test_q2_ignores_unplanned_day(tmp_path: Path) -> None:
+    data, env = _eod_fixture(tmp_path)
+    _calendar(data, "2026-11-18", {})
+    _l1(data, "kis/nxt/regular", "H0NXCNT0", "2026-11-18")
+    _l1(data, "kis/nxt/regular", "H0NXCNT0", "2026-11-20")
+    result = _run_eod(env)
+    assert result.returncode == 0, result.stderr
+    assert "Q2 PASS" in result.stdout
+
+
+def test_q2_fails_planned_day_without_l1(tmp_path: Path) -> None:
+    data, env = _eod_fixture(tmp_path)
+    _calendar(data, "2026-11-18", {})
+    _l1(data, "kis/nxt/regular", "H0NXCNT0", "2026-11-18")
+    _l1(data, "kis/nxt/regular", "H0NXCNT0", "2026-11-20")
+    manifests = data / "manifest" / "regular_kis"
+    manifests.mkdir(parents=True)
+    (manifests / "2026-11-19.nxt.shard-00.json").write_text("{}", encoding="utf-8")
+    result = _run_eod(env)
+    assert "Q2 FAIL" in result.stdout
+    assert "kis/nxt/regular/H0NXCNT0@2026-11-19" in result.stdout
+
+
+def test_q2_unmapped_group_keeps_calendar_rule(tmp_path: Path) -> None:
+    data, env = _eod_fixture(tmp_path)
+    _calendar(data, "2026-11-18", {})
+    _l1(data, "db/krx/regular", "H0STCNT0", "2026-11-18")
+    _l1(data, "db/krx/regular", "H0STCNT0", "2026-11-20")
+    result = _run_eod(env)
+    assert "Q2 FAIL" in result.stdout
+    assert "db/krx/regular/H0STCNT0@2026-11-19" in result.stdout
+
+
+def test_c3_no_premarket_day_skips(tmp_path: Path) -> None:
+    data, env = _eod_fixture(tmp_path)
+    _calendar(data, "2026-11-24", {"regular_open": "09:00:00", "nxt_premarket": None})
+    result = _run_eod(env)
+    assert "C3 SKIP(no_premarket) group=kis/nxt/nxt_pre" in result.stdout
+
+
+def test_c3_shifted_day_nxt_regular_missing_fails_once(tmp_path: Path) -> None:
+    data, env = _eod_fixture(tmp_path)
+    _calendar(data, "2026-11-24", {"regular_open": "10:00:00", "nxt_premarket": ["09:00:00", "09:50:00"]})
+    result = _run_eod(env)
+    assert result.stdout.count("C3 FAIL group=kis/nxt/regular manifest=MISSING") == 1
+
+
+def test_c3_legacy_shifted_calendar_skips(tmp_path: Path) -> None:
+    data, env = _eod_fixture(tmp_path)
+    _calendar(data, "2026-11-24", {"regular_open": "10:00:00"})
+    result = _run_eod(env)
+    assert "C3 SKIP(no_premarket) group=kis/nxt/nxt_pre" in result.stdout
+    assert "C3 SKIP(shifted_legacy) group=kis/nxt/regular" in result.stdout
+
+
+def test_r8_no_premarket_next_day_skips(tmp_path: Path) -> None:
+    data, env = _eod_fixture(tmp_path)
+    _calendar(data, "2026-11-25", {"nxt_premarket": None})
+    result = _run_eod(env)
+    assert "R8 SKIP(no_premarket_next_day) pool=2026-11-25" in result.stdout
