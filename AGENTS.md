@@ -12,7 +12,7 @@
 
 ## 2. Autonomy & Execution Contract
 - **Bias Toward Action & Diagnostic Autonomy:** Run data queries and scratch diagnostics without asking permission; for open-ended bug or anomaly questions, run experiments under `scratch/` to find the truth. Never modify production code or commit in response to open-ended diagnostic queries.
-- **Skills as On-Demand Tools:** Skills (`probe`, `spec`, `implement`, `check`, `refactor`, `commit`, `ship`) live in `~/.agents/skills`; project policy is §6. Slash invocations run only their skill and halt for review; `/ship` is the explicit autonomy opt-in. Specs live under `docs/specs/` (gitignored for model/tool handoffs).
+- **Skills as On-Demand Tools:** Skills (`probe`, `spec`, `implement`, `check`, `refactor`, `commit`, `land`) live in `~/.agents/skills`; project policy is §6. Slash invocations run only their skill and halt for review; `/land` is the explicit autonomy opt-in. Specs live under `docs/specs/` (gitignored for model/tool handoffs).
 
 ## 3. Project Toolchain & Verification
 Verify code changes against the project's native toolchains before concluding tasks:
