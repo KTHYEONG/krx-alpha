@@ -147,9 +147,9 @@ def regular_kis_collection_due(
 def regular_nxt_collection_due(
     now: dt.datetime, *, anchors: SessionAnchors, start_lead_s: float, close_grace_s: float
 ) -> bool:
-    """True iff KST weekday, unshifted anchors, and now in [regular_open - start_lead_s, closing_auction_start + close_grace_s)."""
+    """True iff KST weekday and now in [regular_open - start_lead_s, closing_auction_start + close_grace_s) of the day's anchors."""
     kst = now.astimezone(_KST)
-    if kst.weekday() >= 5 or anchors.open_shift != dt.timedelta(0):
+    if kst.weekday() >= 5:
         return False
     start_dt = dt.datetime.combine(kst.date(), anchors.regular_open, tzinfo=_KST) - dt.timedelta(
         seconds=start_lead_s

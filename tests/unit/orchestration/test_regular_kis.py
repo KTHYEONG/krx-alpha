@@ -71,7 +71,7 @@ def test_nxt_collection_due_window_and_shifted_day() -> None:
     import datetime as dt
     from zoneinfo import ZoneInfo
 
-    from src.core.session_anchors import SessionAnchors, AnchorSource, standard_session_anchors
+    from src.core.session_anchors import standard_session_anchors
     from src.orchestration.regular_kis import regular_nxt_collection_due
 
     kst = ZoneInfo("Asia/Seoul")
@@ -82,11 +82,6 @@ def test_nxt_collection_due_window_and_shifted_day() -> None:
         return regular_nxt_collection_due(now, anchors=a, start_lead_s=120.0, close_grace_s=120.0)
 
     assert (due(8, 57, 59), due(8, 58, 0), due(15, 21, 59), due(15, 22, 0)) == (False, True, True, False)
-    shifted = SessionAnchors(
-        date=DAY, regular_open=dt.time(9, 5), closing_auction_start=dt.time(15, 25),
-        regular_close=dt.time(15, 30), after_market_end=dt.time(18, 0), source=AnchorSource.DEFAULT,
-    )
-    assert due(9, 0, a=shifted) is False
 
 
 def test_disjoint_sets_skip_excluded_in_order() -> None:
@@ -161,3 +156,27 @@ def test_child_and_daemon_blocks_agree_with_prior_loads(tmp_path) -> None:
     assert blocks != ls_shard_blocks(pool, collector)
     # The lowest-priority name overflows: shard 1 gives one symbol to the LS market-state pairs.
     assert sorted(blocks[0] + blocks[1]) == symbols[:199]
+
+
+def test_nxt_collection_due_follows_shifted_anchors() -> None:
+    import dataclasses
+
+    from zoneinfo import ZoneInfo
+
+    from src.core.session_anchors import standard_session_anchors
+    from src.orchestration.regular_kis import regular_nxt_collection_due
+
+    kst = ZoneInfo("Asia/Seoul")
+    shifted = dataclasses.replace(
+        standard_session_anchors(DAY),
+        regular_open=dt.time(10, 0),
+        closing_auction_start=dt.time(16, 20),
+        regular_close=dt.time(16, 30),
+        after_market_end=dt.time(20, 0),
+    )
+
+    def due(hour: int, minute: int) -> bool:
+        now = dt.datetime(DAY.year, DAY.month, DAY.day, hour, minute, tzinfo=kst)
+        return regular_nxt_collection_due(now, anchors=shifted, start_lead_s=120.0, close_grace_s=120.0)
+
+    assert (due(10, 5), due(16, 15), due(9, 30), due(16, 40)) == (True, True, False, False)

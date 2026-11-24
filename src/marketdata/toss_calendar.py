@@ -17,6 +17,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt
 from src.core.config import KisTokenSettings
 from src.core.errors import KrxAlphaError
 from src.core.session_anchors import (
+    DERIVE_NXT_PREMARKET,
     STANDARD_AFTER_MARKET_END,
     AnchorSource,
     SessionAnchorError,
@@ -71,6 +72,21 @@ def _parse_vendor_time(day: dt.date, value: Any) -> dt.time | None:
     return kst.time()
 
 
+def _parse_nxt_premarket(day: dt.date, integrated: Mapping[str, Any], regular_open: dt.time) -> Any:
+    if "preMarket" not in integrated:
+        return DERIVE_NXT_PREMARKET
+    premarket = integrated["preMarket"]
+    if premarket is None:
+        return None
+    if not isinstance(premarket, Mapping):
+        return DERIVE_NXT_PREMARKET
+    start = _parse_vendor_time(day, premarket.get("startTime"))
+    end = _parse_vendor_time(day, premarket.get("singlePriceAuctionStartTime"))
+    if start is None or end is None or not (start < end <= regular_open):
+        return DERIVE_NXT_PREMARKET
+    return (start, end)
+
+
 def parse_session_anchors(day: dt.date, integrated: Mapping[str, Any] | None) -> SessionAnchors | None:
     """Parse Toss ``integrated`` session times into anchors for ``day``.
 
@@ -107,6 +123,7 @@ def parse_session_anchors(day: dt.date, integrated: Mapping[str, Any] | None) ->
             regular_close=regular_close,
             after_market_end=after_market_end,
             source=AnchorSource.VENDOR,
+            nxt_premarket=_parse_nxt_premarket(day, integrated, regular_open),
         )
     except (SessionAnchorError, AttributeError, TypeError, ValueError):
         return None

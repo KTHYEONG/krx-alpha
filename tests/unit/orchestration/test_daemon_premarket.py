@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import dataclasses
 import logging
 from zoneinfo import ZoneInfo
 
@@ -251,18 +252,10 @@ def test_friday_evening_targets_monday(monkeypatch, tmp_path) -> None:
     assert not runner._paths.premarket_candidates(FRI + dt.timedelta(days=1)).exists()
 
 
-def test_shifted_next_day_builds_no_pool(monkeypatch, tmp_path) -> None:
-    from src.core.session_anchors import SessionAnchors
-
-    shifted_next = SessionAnchors(
-        date=T,
-        regular_open=dt.time(10, 0),
-        closing_auction_start=dt.time(16, 20),
-        regular_close=dt.time(16, 30),
-        after_market_end=dt.time(21, 0),
-        source="default",
-    )
-    gate = _FakeGate(TradingDayStatus.BUSINESS, _trading_day(S, next_day=T, next_anchors=shifted_next))
+def test_no_premarket_next_day_builds_no_pool(monkeypatch, tmp_path, caplog) -> None:
+    caplog.set_level(logging.INFO)
+    no_premarket_next = dataclasses.replace(_anchors(T), regular_open=dt.time(10, 0), nxt_premarket=None)
+    gate = _FakeGate(TradingDayStatus.BUSINESS, _trading_day(S, next_day=T, next_anchors=no_premarket_next))
     runner = _runner(monkeypatch, tmp_path, gate)
     client = _FakeKisClient()
     monkeypatch.setattr(daemon_mod, "_build_kis_client", lambda *a, **k: client)
@@ -270,6 +263,7 @@ def test_shifted_next_day_builds_no_pool(monkeypatch, tmp_path) -> None:
     assert client.calls == []
     assert not runner._paths.premarket_candidates(T).exists()
     assert runner.state.premarket_pool_day == S
+    assert any("reason=no_premarket_next_day" in r.getMessage() for r in caplog.records)
 
 
 def test_pool_failure_retries_without_blocking(monkeypatch, tmp_path, caplog) -> None:
@@ -381,7 +375,7 @@ def test_unknown_calendar_still_collects(monkeypatch, tmp_path) -> None:
     assert runner.children.premarket is not None
 
 
-def test_shifted_session_skips_premarket(monkeypatch, tmp_path) -> None:
+def test_shifted_day_with_vendor_premarket_collects(monkeypatch, tmp_path) -> None:
     from src.core.session_anchors import SessionAnchors
 
     shifted = SessionAnchors(
@@ -391,11 +385,15 @@ def test_shifted_session_skips_premarket(monkeypatch, tmp_path) -> None:
         regular_close=dt.time(16, 30),
         after_market_end=dt.time(21, 0),
         source="default",
+        nxt_premarket=(dt.time(9, 0), dt.time(9, 50)),
     )
     runner = _runner(monkeypatch, tmp_path, _FakeGate(TradingDayStatus.BUSINESS, _trading_day(T, next_day=T)))
     _write_pool(runner._paths, T)
-    runner._supervise_premarket(_at(T, 8, 30), shifted)
+    runner._supervise_premarket(_at(T, 8, 57, 0), shifted)
     assert runner.children.premarket is None
+    runner._supervise_premarket(_at(T, 8, 58, 0), shifted)
+    assert runner.children.premarket is not None
+    assert "collect-premarket" in runner.children.premarket.cmd
 
 
 def test_circuit_open_alerts_once(monkeypatch, tmp_path, caplog) -> None:

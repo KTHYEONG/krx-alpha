@@ -142,11 +142,15 @@ class ShardWatchdog:
 def shard_window(
     venue: MarketVenue, session: MarketSession, *, day: dt.date, anchors: SessionAnchors
 ) -> tuple[dt.datetime, dt.datetime]:
-    """KST `[open, end)` of the shard's active window."""
+    """KST `[open, end)` of the shard's active window; an empty window when the day has no NXT premarket."""
     if session is MarketSession.NXT_PRE:
         if venue is not MarketVenue.NXT:
             raise ValueError(f"no premarket window for venue {venue!r}")
-        start, end = premarket_window(anchors)
+        window = premarket_window(anchors)
+        if window is None:
+            start = end = anchors.regular_open
+        else:
+            start, end = window
     elif session is MarketSession.NXT_AFTER:
         if venue is not MarketVenue.NXT:
             raise ValueError(f"no nxt_after window for venue {venue!r}")

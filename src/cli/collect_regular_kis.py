@@ -143,8 +143,6 @@ async def _run_stream(args: argparse.Namespace) -> int:
     if venue is MarketVenue.NXT:
         if not regular_kis.nxt_credential_slots:
             raise KrxAlphaError("nxt regular collection has no configured credential slots")
-        if anchors.open_shift != dt.timedelta(0):
-            raise KrxAlphaError(f"nxt regular collection is not verified for shifted session {session_date.isoformat()}")
         candidates_order = _nxt_candidate_symbols(
             pathlib.Path(str(args.candidates_path)), session_date, regular_kis.nxt_max_symbols
         )
@@ -311,8 +309,6 @@ async def _run_dynamic_stream(args: argparse.Namespace) -> int:
     session_date = dt.date.fromisoformat(str(args.session_date))
     paths = DataPaths(pathlib.Path(str(args.journal_root)).parent)
     anchors = resolve_session_anchors(paths.session_calendar_dir, session_date)
-    if venue is MarketVenue.NXT and anchors.open_shift != dt.timedelta(0):
-        raise KrxAlphaError(f"nxt regular collection is not verified for shifted session {session_date.isoformat()}")
     overrides = resolve_clock_overrides(getattr(args, "ntp_host", None), getattr(args, "max_clock_offset_ns", None), settings)
     if not 0 < overrides.max_clock_offset_ns <= 2_000_000_000:
         raise ValueError("max_clock_offset_ns must be positive and at most 2 seconds")

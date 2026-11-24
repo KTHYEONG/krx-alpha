@@ -733,3 +733,70 @@ def test_fetch_trading_day_does_not_resend_401_before_rotation(tmp_path) -> None
     with pytest.raises(TossCalendarError):
         fetch_trading_day(dt.date(2026, 9, 14), app_key="k", app_secret="s", session=session, cache_dir=tmp_path)
     assert len(gets) == 2
+
+
+def _premarket_payload(day: str, premarket) -> dict:
+    return {
+        "regularMarket": {
+            "startTime": f"{day}T10:00:00.000+09:00" if day == "2026-11-19" else f"{day}T09:00:00.000+09:00",
+            "singlePriceAuctionStartTime": f"{day}T16:20:00.000+09:00" if day == "2026-11-19" else f"{day}T15:20:00.000+09:00",
+            "endTime": f"{day}T16:30:00.000+09:00" if day == "2026-11-19" else f"{day}T15:30:00.000+09:00",
+        },
+        "preMarket": premarket,
+        "afterMarket": {"endTime": f"{day}T20:00:00.000+09:00"},
+    }
+
+
+def test_parse_csat_premarket_null() -> None:
+    import datetime as dt
+
+    from src.core.session_anchors import DERIVE_NXT_PREMARKET
+    from src.marketdata.toss_calendar import parse_session_anchors
+
+    anchors = parse_session_anchors(dt.date(2026, 11, 19), _premarket_payload("2026-11-19", None))
+
+    assert anchors is not None
+    assert anchors.regular_open == dt.time(10, 0)
+    assert anchors.nxt_premarket is None
+    assert anchors.nxt_premarket is not DERIVE_NXT_PREMARKET
+
+
+def test_parse_normal_premarket_window() -> None:
+    import datetime as dt
+
+    from src.marketdata.toss_calendar import parse_session_anchors
+
+    premarket = {
+        "startTime": "2026-11-18T08:00:00.000+09:00",
+        "singlePriceAuctionStartTime": "2026-11-18T08:50:00.000+09:00",
+    }
+    anchors = parse_session_anchors(dt.date(2026, 11, 18), _premarket_payload("2026-11-18", premarket))
+
+    assert anchors is not None
+    assert anchors.nxt_premarket == (dt.time(8, 0), dt.time(8, 50))
+
+
+def test_parse_malformed_premarket_keeps_sentinel() -> None:
+    import datetime as dt
+
+    from src.core.session_anchors import DERIVE_NXT_PREMARKET
+    from src.marketdata.toss_calendar import parse_session_anchors
+
+    anchors = parse_session_anchors(
+        dt.date(2026, 11, 18), _premarket_payload("2026-11-18", {"startTime": "bad"})
+    )
+
+    assert anchors is not None
+    assert anchors.nxt_premarket is DERIVE_NXT_PREMARKET
+
+
+def test_parse_non_mapping_premarket_keeps_sentinel() -> None:
+    import datetime as dt
+
+    from src.core.session_anchors import DERIVE_NXT_PREMARKET
+    from src.marketdata.toss_calendar import parse_session_anchors
+
+    anchors = parse_session_anchors(dt.date(2026, 11, 18), _premarket_payload("2026-11-18", "08:00"))
+
+    assert anchors is not None
+    assert anchors.nxt_premarket is DERIVE_NXT_PREMARKET

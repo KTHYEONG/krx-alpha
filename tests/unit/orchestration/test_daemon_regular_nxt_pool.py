@@ -154,9 +154,8 @@ def test_writes_next_business_day_file_once(monkeypatch, tmp_path, caplog) -> No
     assert ok == [f"[DATA] stage=regular_nxt_pool status=OK target={MON.isoformat()} symbols=3 top_value_krw={10**9 - 1}"]
 
 
-def test_shifted_next_day_skips(monkeypatch, tmp_path, caplog) -> None:
-    # Given: the next business day has shifted anchors
-    caplog.set_level(logging.INFO)
+def test_shifted_next_day_builds_pool(monkeypatch, tmp_path) -> None:
+    # Given: the next business day opens late (shifted), so the NXT regular pool must still be built
     shifted = dataclasses.replace(standard_session_anchors(MON), regular_open=dt.time(10, 0))
     gate = _FakeGate(TradingDayStatus.BUSINESS, _trading_day(FRI, next_day=MON, next_anchors=shifted))
     runner = _runner(monkeypatch, tmp_path, gate)
@@ -167,10 +166,9 @@ def test_shifted_next_day_skips(monkeypatch, tmp_path, caplog) -> None:
     runner._maybe_select_regular_nxt(_at(FRI, 20, 10), standard_session_anchors(FRI))
 
     # Then
-    assert fetch.calls == 0
-    assert not runner._paths.regular_nxt_candidates(MON).exists()
+    assert fetch.calls == 1
+    assert runner._paths.regular_nxt_candidates(MON).exists()
     assert runner.state.regular_nxt_pool_day == FRI
-    assert any("reason=shifted_next_day" in r.getMessage() for r in caplog.records)
 
 
 def test_existing_ready_file_not_overwritten(monkeypatch, tmp_path, caplog) -> None:

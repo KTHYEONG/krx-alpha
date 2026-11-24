@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 
 from src.core.session_anchors import standard_session_anchors
@@ -243,7 +244,7 @@ def test_window_computation_standard() -> None:
 
 
 def test_window_computation_shifted() -> None:
-    from src.core.session_anchors import AnchorSource, SessionAnchors
+    from src.core.session_anchors import DERIVE_NXT_PREMARKET, AnchorSource, SessionAnchors
 
     anchors = SessionAnchors(
         date=DAY,
@@ -252,9 +253,13 @@ def test_window_computation_shifted() -> None:
         regular_close=dt.time(16, 30),
         after_market_end=dt.time(21, 0),
         source=AnchorSource.VENDOR,
+        nxt_premarket=(dt.time(9, 0), dt.time(9, 50)),
     )
     pre_open, pre_end = shard_window(MarketVenue.NXT, MarketSession.NXT_PRE, day=DAY, anchors=anchors)
     assert (pre_open.time(), pre_end.time()) == (dt.time(9, 0), dt.time(9, 50))
+    unscheduled = dataclasses.replace(anchors, nxt_premarket=DERIVE_NXT_PREMARKET)
+    empty_open, empty_end = shard_window(MarketVenue.NXT, MarketSession.NXT_PRE, day=DAY, anchors=unscheduled)
+    assert empty_open == empty_end
     krx_open, krx_end = shard_window(MarketVenue.KRX, MarketSession.KRX_AFTER, day=DAY, anchors=anchors)
     assert (krx_open.time(), krx_end.time()) == (dt.time(17, 0), dt.time(21, 0))
     nxt_open, _ = shard_window(MarketVenue.NXT, MarketSession.NXT_AFTER, day=DAY, anchors=anchors)

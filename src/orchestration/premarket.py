@@ -9,11 +9,7 @@ from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 from src.core.paths import DataPaths
-from src.core.session_anchors import (
-    STANDARD_NXT_PREMARKET_END,
-    STANDARD_NXT_PREMARKET_OPEN,
-    SessionAnchors,
-)
+from src.core.session_anchors import SessionAnchors
 from src.realtime.kis_sharding import AftermarketShard
 from src.realtime.manifest import SessionManifest
 
@@ -22,23 +18,23 @@ _KST = ZoneInfo("Asia/Seoul")
 PREMARKET_POLL_S: float = 10.0
 
 
-def premarket_window(anchors: SessionAnchors) -> tuple[dt.time, dt.time]:
-    """Premarket [start, end) on the anchors' date: the NXT premarket constants shifted with ``shift_pre_open``."""
-    return (anchors.shift_pre_open(STANDARD_NXT_PREMARKET_OPEN), anchors.shift_pre_open(STANDARD_NXT_PREMARKET_END))
+def premarket_window(anchors: SessionAnchors) -> tuple[dt.time, dt.time] | None:
+    """Premarket [start, end) on the anchors' date, or None when the day's calendar schedules no NXT premarket."""
+    return anchors.nxt_premarket_window()
 
 
 def premarket_collection_due(now: dt.datetime, *, anchors: SessionAnchors, start_lead_s: float) -> bool:
-    """True iff the collector should run at ``now`` (KST weekday, unshifted session, inside [start - lead, end)).
+    """True iff the collector should run at ``now`` (KST weekday, inside [start - lead, end) of the day's premarket).
 
-    Shifted-session days (``anchors.open_shift != 0``) are never due: NXT premarket timing on special
-    days is unverified, so collection is skipped fail-closed instead of guessed.
+    Due only when the day's calendar schedules an NXT premarket; a day without one is never due.
     """
     kst = now.astimezone(_KST)
     if kst.weekday() >= 5:
         return False
-    if anchors.open_shift != dt.timedelta(0):
+    window = premarket_window(anchors)
+    if window is None:
         return False
-    start, end = premarket_window(anchors)
+    start, end = window
     start_dt = dt.datetime.combine(kst.date(), start, tzinfo=_KST) - dt.timedelta(seconds=start_lead_s)
     end_dt = dt.datetime.combine(kst.date(), end, tzinfo=_KST)
     return start_dt <= kst < end_dt
@@ -60,9 +56,10 @@ def premarket_wake_cap_s(now: dt.datetime, *, anchors: SessionAnchors, start_lea
     kst = now.astimezone(_KST)
     if kst.weekday() >= 5:
         return None
-    if anchors.open_shift != dt.timedelta(0):
+    window = premarket_window(anchors)
+    if window is None:
         return None
-    start, end = premarket_window(anchors)
+    start, end = window
     start_dt = dt.datetime.combine(kst.date(), start, tzinfo=_KST) - dt.timedelta(seconds=start_lead_s)
     end_dt = dt.datetime.combine(kst.date(), end, tzinfo=_KST)
     if kst < start_dt:

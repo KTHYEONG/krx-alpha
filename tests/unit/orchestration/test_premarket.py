@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 from zoneinfo import ZoneInfo
 
@@ -52,9 +53,20 @@ def test_weekend_is_never_due() -> None:
     assert premarket_pool_due(_at(SAT, 8, 10), anchors=anchors, settle_s=300.0) is False
 
 
-def test_shifted_session_day_is_skipped() -> None:
-    anchors = _shifted(D)
-    assert premarket_collection_due(_at(D, 9, 30), anchors=anchors, start_lead_s=120.0) is False
+def test_no_premarket_day_is_never_due() -> None:
+    anchors = dataclasses.replace(_shifted(D), nxt_premarket=None)
+    minutes = [(hour, minute) for hour in range(7, 11) for minute in range(60)]
+    assert not any(
+        premarket_collection_due(_at(D, hour, minute), anchors=anchors, start_lead_s=120.0)
+        for hour, minute in minutes
+    )
+    assert premarket_wake_cap_s(_at(D, 7, 0), anchors=anchors, start_lead_s=120.0) is None
+
+
+def test_vendor_premarket_window_on_shifted_day_is_due() -> None:
+    anchors = dataclasses.replace(_shifted(D), nxt_premarket=(dt.time(9, 0), dt.time(9, 50)))
+    assert premarket_collection_due(_at(D, 9, 10), anchors=anchors, start_lead_s=120.0) is True
+    assert premarket_collection_due(_at(D, 8, 10), anchors=anchors, start_lead_s=120.0) is False
 
 
 def test_pool_becomes_due_after_close_plus_settle() -> None:

@@ -185,15 +185,15 @@ def test_missing_or_stale_symbol_file_fails_closed(monkeypatch, tmp_path, caplog
     assert len(skips) == 1
 
 
-def test_shifted_day_skips_nxt(monkeypatch, tmp_path) -> None:
+def test_shifted_day_follows_shifted_open(monkeypatch, tmp_path) -> None:
     runner = _runner(monkeypatch, tmp_path)
     _ready(runner)
     shifted = _shifted(DAY)
 
-    runner._supervise_regular_nxt(_at(DAY, 9, 4), shifted)
-    runner._supervise_regular_nxt(_at(DAY, 9, 10), shifted)
-
+    runner._supervise_regular_nxt(_at(DAY, 9, 2, 59), shifted)
     assert runner.children.regular_nxt == {}
+    runner._supervise_regular_nxt(_at(DAY, 9, 3, 0), shifted)
+    assert sorted(runner.children.regular_nxt) == ["nxt-00", "nxt-01"]
 
 
 def test_window_and_stop(monkeypatch, tmp_path) -> None:

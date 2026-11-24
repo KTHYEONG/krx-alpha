@@ -117,14 +117,13 @@ def test_ls_nxt_child_starts_only_with_admissions(tmp_path) -> None:
     assert not _SPEC.demand(paths_, day)
 
 
-def test_ls_nxt_never_runs_on_a_krx_shifted_day(tmp_path) -> None:
+def test_ls_nxt_follows_krx_shifted_open(tmp_path) -> None:
     runtime = _runtime(tmp_path, ("ls-nxt:0",))
-    now = dt.datetime(2026, 11, 16, 10, 0, tzinfo=KST)
-    assert _SPEC.active(runtime, now, ANCHORS)
     shifted = dataclasses.replace(
         ANCHORS, regular_open=dt.time(10, 0), closing_auction_start=dt.time(15, 20), regular_close=dt.time(16, 30)
     )
-    assert not _SPEC.active(runtime, now, shifted)
+    assert _SPEC.active(runtime, dt.datetime(2026, 11, 16, 10, 15, tzinfo=KST), shifted)
+    assert not _SPEC.active(runtime, dt.datetime(2026, 11, 16, 9, 30, tzinfo=KST), shifted)
     assert not _SPEC.active(runtime, dt.datetime(2026, 11, 16, 8, 0, tzinfo=KST), ANCHORS)
 
 

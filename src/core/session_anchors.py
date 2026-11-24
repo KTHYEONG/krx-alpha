@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Final
 
 from src.core.errors import KrxAlphaError
 
@@ -31,6 +31,8 @@ STANDARD_AFTER_MARKET_END: dt.time = dt.time(20, 0)
 MAX_SESSION_SHIFT: dt.timedelta = dt.timedelta(hours=3)
 
 _BASE_DATE: dt.date = dt.date(2000, 1, 1)
+# Sentinel: premarket window derived from the standard schedule when the anchors carry no vendor premarket data.
+DERIVE_NXT_PREMARKET: Final[object] = object()
 
 
 class AnchorSource(StrEnum):
@@ -75,10 +77,15 @@ class SessionAnchors:
     regular_close: dt.time
     after_market_end: dt.time
     source: AnchorSource
+    nxt_premarket: tuple[dt.time, dt.time] | object | None = DERIVE_NXT_PREMARKET
 
     def __post_init__(self) -> None:
         if not (self.regular_open < self.closing_auction_start < self.regular_close < self.after_market_end):
             raise SessionAnchorError(f"anchors out of order for {self.date}: {self.regular_open!r} {self.closing_auction_start!r} {self.regular_close!r} {self.after_market_end!r}")
+        if isinstance(self.nxt_premarket, tuple):
+            premarket_open, premarket_end = self.nxt_premarket
+            if not (premarket_open < premarket_end <= self.regular_open):
+                raise SessionAnchorError(f"nxt premarket out of order for {self.date}: {premarket_open!r} {premarket_end!r}")
         if abs(self.open_shift) > MAX_SESSION_SHIFT or abs(self.close_shift) > MAX_SESSION_SHIFT:
             raise SessionAnchorError(f"session shift beyond cap for {self.date}: open={self.open_shift} close={self.close_shift}")
 
@@ -95,6 +102,15 @@ class SessionAnchors:
 
     def shift_post_close(self, standard: dt.time) -> dt.time:
         return _shift_time(standard, self.close_shift)
+
+    def nxt_premarket_window(self) -> tuple[dt.time, dt.time] | None:
+        if self.nxt_premarket is DERIVE_NXT_PREMARKET:
+            if self.open_shift != dt.timedelta(0):
+                return None
+            return (STANDARD_NXT_PREMARKET_OPEN, STANDARD_NXT_PREMARKET_END)
+        if self.nxt_premarket is None:
+            return None
+        return self.nxt_premarket  # type: ignore[return-value]
 
 
 def standard_session_anchors(day: dt.date) -> SessionAnchors:
@@ -156,11 +172,29 @@ def reconcile_verified_shift(day: dt.date, anchors: SessionAnchors | None) -> Se
             else STANDARD_AFTER_MARKET_END
         ),
         source=AnchorSource.VERIFIED,
+        nxt_premarket=anchors.nxt_premarket if anchors is not None else None,
     )
 
 
 def _anchor_file(directory: pathlib.Path, day: dt.date) -> pathlib.Path:
     return pathlib.Path(directory) / f"dt={day.isoformat()}.json"
+
+
+def _premarket_payload(value: tuple[dt.time, dt.time] | None) -> list[str] | None:
+    if value is None:
+        return None
+    return [value[0].strftime("%H:%M:%S"), value[1].strftime("%H:%M:%S")]
+
+
+def _load_premarket(raw: Mapping[str, Any]) -> tuple[dt.time, dt.time] | object | None:
+    if "nxt_premarket" not in raw:
+        return DERIVE_NXT_PREMARKET
+    value = raw["nxt_premarket"]
+    if value is None:
+        return None
+    if not isinstance(value, list) or len(value) != 2:
+        raise TypeError("nxt_premarket must be null or a 2-item list")
+    return (dt.time.fromisoformat(str(value[0])), dt.time.fromisoformat(str(value[1])))
 
 
 def save_session_anchors(directory: pathlib.Path, anchors: SessionAnchors) -> None:
@@ -174,6 +208,8 @@ def save_session_anchors(directory: pathlib.Path, anchors: SessionAnchors) -> No
         "after_market_end": anchors.after_market_end.strftime("%H:%M:%S"),
         "source": anchors.source.value,
     }
+    if anchors.nxt_premarket is not DERIVE_NXT_PREMARKET:
+        payload["nxt_premarket"] = _premarket_payload(anchors.nxt_premarket)  # type: ignore[arg-type]
     tmp = target.parent / f".{target.name}.tmp"
     tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, target)
@@ -193,6 +229,7 @@ def load_session_anchors(directory: pathlib.Path, day: dt.date) -> SessionAnchor
             regular_close=dt.time.fromisoformat(str(raw["regular_close"])),
             after_market_end=dt.time.fromisoformat(str(raw["after_market_end"])),
             source=AnchorSource(str(raw["source"])),
+            nxt_premarket=_load_premarket(raw),
         )
     except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError, SessionAnchorError):
         return None

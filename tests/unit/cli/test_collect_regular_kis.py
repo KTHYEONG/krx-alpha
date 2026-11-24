@@ -316,7 +316,7 @@ def _write_nxt_snapshot(path: pathlib.Path, *, day: dt.date, symbols: tuple[str,
     )
 
 
-def test_nxt_stream_refuses_without_slots_or_on_shifted_day(monkeypatch, tmp_path) -> None:
+def test_nxt_stream_refuses_without_slots_and_allows_shifted_day(monkeypatch, tmp_path) -> None:
     from src.core.session_anchors import AnchorSource, SessionAnchors
 
     day = dt.date(2026, 9, 16)
@@ -336,8 +336,13 @@ def test_nxt_stream_refuses_without_slots_or_on_shifted_day(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(collect_regular_kis, "resolve_collector_runtime", lambda **kw: _runtime(nxt_slots=("2",)))
     monkeypatch.setattr(collect_regular_kis, "resolve_session_anchors", lambda *a, **kw: shifted)
-    with pytest.raises(KrxAlphaError, match="shifted session"):
+    try:
         asyncio.run(collect_regular_kis._run_stream(args))
+    except Exception as exc:  # noqa: BLE001 - later guards may still refuse this environment
+        message = str(exc)
+    else:
+        message = ""
+    assert "shifted session" not in message
 
 
 def test_nxt_stream_rejects_stale_snapshot_and_symbol_mismatch(monkeypatch, tmp_path) -> None:

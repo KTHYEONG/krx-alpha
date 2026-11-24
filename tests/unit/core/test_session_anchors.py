@@ -1,12 +1,16 @@
+import dataclasses
 import datetime as dt
+import json
 
 import pytest
 
 from src.core.session_anchors import (
+    DERIVE_NXT_PREMARKET,
     AnchorSource,
     SessionAnchorError,
     SessionAnchors,
     load_session_anchors,
+    reconcile_verified_shift,
     resolve_session_anchors,
     save_session_anchors,
     standard_session_anchors,
@@ -310,3 +314,77 @@ def test_verified_shift_replaces_vendor_after_market_end_that_precedes_shifted_c
     assert out is not None
     assert out.regular_close == dt.time(16, 30)
     assert out.after_market_end == STANDARD_AFTER_MARKET_END
+
+
+def test_premarket_window_standard_day() -> None:
+    assert standard_session_anchors(dt.date(2026, 11, 18)).nxt_premarket_window() == (dt.time(8, 0), dt.time(8, 50))
+
+
+def test_premarket_window_sentinel_on_shifted_day_is_none() -> None:
+    assert _csat_anchors().nxt_premarket_window() is None
+
+
+def test_premarket_explicit_none_and_tuple_roundtrip(tmp_path) -> None:
+    base = _csat_anchors()
+    for premarket in (None, (dt.time(9, 0), dt.time(9, 50))):
+        case = dataclasses.replace(base, nxt_premarket=premarket)
+        save_session_anchors(tmp_path, case)
+        assert load_session_anchors(tmp_path, case.date) == case
+
+    save_session_anchors(tmp_path, base)
+    raw = json.loads((tmp_path / f"dt={base.date.isoformat()}.json").read_text(encoding="utf-8"))
+    assert "nxt_premarket" not in raw
+    assert load_session_anchors(tmp_path, base.date).nxt_premarket is DERIVE_NXT_PREMARKET
+
+
+def test_legacy_file_without_key_loads_sentinel(tmp_path) -> None:
+    day = dt.date(2025, 11, 13)
+    payload = {
+        "date": day.isoformat(),
+        "regular_open": "10:00:00",
+        "closing_auction_start": "16:20:00",
+        "regular_close": "16:30:00",
+        "after_market_end": "20:00:00",
+        "source": "vendor",
+    }
+    (tmp_path / f"dt={day.isoformat()}.json").write_text(json.dumps(payload), encoding="utf-8")
+    loaded = load_session_anchors(tmp_path, day)
+    assert loaded is not None
+    assert loaded.nxt_premarket is DERIVE_NXT_PREMARKET
+
+
+def test_premarket_tuple_after_open_rejected() -> None:
+    with pytest.raises(SessionAnchorError):
+        dataclasses.replace(_csat_anchors(), nxt_premarket=(dt.time(9, 0), dt.time(10, 30)))
+
+
+def test_verified_override_carries_premarket() -> None:
+    day = dt.date(2026, 11, 19)
+    wrong = SessionAnchors(
+        date=day,
+        regular_open=dt.time(9, 0),
+        closing_auction_start=dt.time(15, 20),
+        regular_close=dt.time(15, 30),
+        after_market_end=dt.time(20, 0),
+        source=AnchorSource.VENDOR,
+        nxt_premarket=None,
+    )
+    overridden = reconcile_verified_shift(day, wrong)
+    assert overridden is not None
+    assert overridden.regular_open == dt.time(10, 0)
+    assert overridden.nxt_premarket is None
+
+
+def test_malformed_premarket_shape_loads_as_none(tmp_path) -> None:
+    day = dt.date(2025, 11, 13)
+    payload = {
+        "date": day.isoformat(),
+        "regular_open": "10:00:00",
+        "closing_auction_start": "16:20:00",
+        "regular_close": "16:30:00",
+        "after_market_end": "20:00:00",
+        "source": "vendor",
+        "nxt_premarket": "08:00:00",
+    }
+    (tmp_path / f"dt={day.isoformat()}.json").write_text(json.dumps(payload), encoding="utf-8")
+    assert load_session_anchors(tmp_path, day) is None

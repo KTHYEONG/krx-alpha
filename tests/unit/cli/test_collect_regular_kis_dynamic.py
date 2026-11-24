@@ -218,15 +218,20 @@ def test_dynamic_nxt_child_routes_nxt_streams_and_nxt_entries_only(monkeypatch, 
     assert not [pair for pair in replay if pair[0] == "000660"]  # type: ignore[union-attr]
 
 
-def test_dynamic_nxt_child_refused_on_shifted_session(monkeypatch, tmp_path) -> None:
+def test_nxt_shifted_session_does_not_raise(monkeypatch, tmp_path) -> None:
     _env(monkeypatch, intraday=False, slots=("5",), regular_slots=("1", "2"))
     monkeypatch.setenv("KRX_ALPHA_FEED_CONTROL_WATCH_GROUPS", json.dumps(["kis-nxt:0"]))
     monkeypatch.setenv("KRX_ALPHA_FEED_CONTROL_SECONDARY_FEEDS", json.dumps(["kis:5"]))
-    shifted = types.SimpleNamespace(open_shift=dt.timedelta(minutes=10))
+    shifted = types.SimpleNamespace(open_shift=dt.timedelta(minutes=10), regular_open=dt.time(10, 0))
     monkeypatch.setattr(crk, "resolve_session_anchors", lambda *a, **k: shifted)
 
-    with pytest.raises(KrxAlphaError, match="not verified for shifted session"):
+    try:
         _run(_nxt_args(tmp_path))
+    except Exception as exc:  # noqa: BLE001 - later guards may still refuse this environment
+        message = str(exc)
+    else:
+        message = ""
+    assert "not verified for shifted session" not in message
 
 
 def _nxt_args(tmp_path: pathlib.Path) -> argparse.Namespace:

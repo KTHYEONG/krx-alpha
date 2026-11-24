@@ -68,7 +68,6 @@ from src.core.observability import (
     shutdown_logging,
 )
 from src.core.session_anchors import (
-    STANDARD_NXT_PREMARKET_OPEN,
     AnchorSource,
     SessionAnchors,
     resolve_session_anchors,
@@ -1333,9 +1332,7 @@ def regular_nxt_pool_capacity(runtime: CollectorRuntime) -> int:
 
 
 def _ls_nxt_regular_window(runtime: CollectorRuntime, now: dt.datetime, anchors: SessionAnchors) -> bool:
-    """True from the post-standby settle point until the NXT regular close plus grace; never on shifted-open days."""
-    if anchors.open_shift != dt.timedelta(0):
-        return False
+    """True from the post-standby settle point until the NXT regular close plus grace, following the day's anchors."""
     local = now.astimezone(_KST)
     kis = getattr(runtime, "regular_kis", None) or RegularKisSettings()
     settle_s = runtime.collector.regular_open_standby_hold_s + _LS_NXT_REGULAR_SETTLE_S
@@ -3901,7 +3898,7 @@ class DaemonRunner:
         """Build the next business day's premarket pool once per business evening.
 
         Runs only when enabled and ``premarket_pool_due``; needs a BUSINESS view of today with a resolved
-        ``next_business_day``. Skips (INFO, marks done) when the next day's anchors are shifted or a valid
+        ``next_business_day``. Skips (INFO, marks done) when the next day's calendar has no NXT premarket or a valid
         pool for the target already exists, so restarts are idempotent. Vendor/file failures retry every
         ``pool_retry_s``; the first failure per source day logs WARNING, later retries DEBUG. Never raises.
         """
@@ -3926,10 +3923,11 @@ class DaemonRunner:
             next_anchors = view.trading_day.next_anchors
             if next_anchors is None:
                 next_anchors = resolve_session_anchors(paths.session_calendar_dir, target)
-            if next_anchors.open_shift != dt.timedelta(0):
+            next_window = next_anchors.nxt_premarket_window()
+            if next_window is None:
                 st.premarket_pool_day = today
                 logger.info(
-                    "[DATA] stage=premarket_pool status=SKIP reason=shifted_next_day target=%s",
+                    "[DATA] stage=premarket_pool status=SKIP reason=no_premarket_next_day target=%s",
                     target.isoformat(),
                 )
                 return
@@ -3942,7 +3940,7 @@ class DaemonRunner:
                     target.isoformat(),
                 )
                 return
-            effective_from = dt.datetime.combine(target, STANDARD_NXT_PREMARKET_OPEN, tzinfo=_KST) - dt.timedelta(
+            effective_from = dt.datetime.combine(target, next_window[0], tzinfo=_KST) - dt.timedelta(
                 seconds=cfg.start_lead_s
             )
             excluded = self._aftermarket_excluded_symbols(today)
@@ -3985,7 +3983,7 @@ class DaemonRunner:
         """Build the next business day's NXT regular symbol pool once per business evening.
 
         Mirrors ``_maybe_refresh_premarket_pool`` for the regular_nxt session and never raises. Skips
-        (INFO, marks done) when the next day's anchors are shifted or a valid pool already exists; vendor
+        (INFO, marks done) when a valid pool already exists; vendor
         and file failures retry every ``nxt_pool_retry_s``, with WARNING only on the first failure per day.
         """
         cfg = getattr(self._runtime, "regular_kis", None) or RegularKisSettings()
@@ -4009,13 +4007,6 @@ class DaemonRunner:
             next_anchors = view.trading_day.next_anchors
             if next_anchors is None:
                 next_anchors = resolve_session_anchors(paths.session_calendar_dir, target)
-            if next_anchors.open_shift != dt.timedelta(0):
-                st.regular_nxt_pool_day = today
-                logger.info(
-                    "[DATA] stage=regular_nxt_pool status=SKIP reason=shifted_next_day target=%s",
-                    target.isoformat(),
-                )
-                return
             pool_capacity = regular_nxt_pool_capacity(self._runtime)
             if regular_nxt_pool_ready(
                 paths.regular_nxt_candidates(target), target_date=target, max_candidates=pool_capacity

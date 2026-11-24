@@ -480,7 +480,7 @@ def test_ls_nxt_regular_window_bounds() -> None:
     assert window(runtime, at((15, 22, 0)), anchors) is False
 
 
-def test_ls_nxt_regular_window_inactive_on_shifted_open() -> None:
+def test_ls_nxt_regular_window_follows_shifted_open() -> None:
     base = _anchors(dt.date(2026, 11, 24))
     shifted = dataclasses.replace(
         base,
@@ -490,10 +490,11 @@ def test_ls_nxt_regular_window_inactive_on_shifted_open() -> None:
         after_market_end=dt.time(21, 0),
     )
     runtime = _nxt_regular_runtime()
-    assert all(
-        daemon_mod._ls_nxt_regular_window(runtime, dt.datetime(2026, 11, 24, hour, 30, tzinfo=_KST), shifted) is False
-        for hour in range(8, 18)
-    )
+
+    def active(hour: int, minute: int) -> bool:
+        return daemon_mod._ls_nxt_regular_window(runtime, dt.datetime(2026, 11, 24, hour, minute, tzinfo=_KST), shifted)
+
+    assert (active(10, 15), active(16, 15), active(9, 30), active(16, 40)) == (True, True, False, False)
 
 
 def test_ls_nxt_regular_disabled_without_spare_session() -> None:
