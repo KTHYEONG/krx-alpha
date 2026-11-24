@@ -168,6 +168,7 @@ def run_market_sweep_job(
     symbols: tuple[str, ...],
     now_fn: Callable[[], dt.datetime],
     wall_ns: Callable[[], int] = time.time_ns,
+    workers: int = 1,
 ) -> SnapshotJobResult:
     """Run one bounded sweep pass from ``offset`` and persist rows to the job's ``*_market`` dataset.
 
@@ -184,12 +185,14 @@ def run_market_sweep_job(
             phase = "open" if job.kind is SnapshotJobKind.AUCTION_OPEN else "close"
             rows = [
                 {**result, "phase": phase, "session_date": session_date, "observed_at_ns": observed}
-                for result, observed in budget.each(ordered, source.get_auction_book)
+                for result, observed in budget.each_concurrent(ordered, source.get_auction_book, workers=workers)
             ]
         case SnapshotJobKind.INVESTOR_ESTIMATE:
             rows = [
                 {**row, "session_date": session_date, "observed_at_ns": observed}
-                for result, observed in budget.each(ordered, source.get_investor_estimate)
+                for result, observed in budget.each_concurrent(
+                    ordered, source.get_investor_estimate, workers=workers
+                )
                 for row in result
             ]
         case _:
@@ -270,7 +273,14 @@ def run_market_sweep_session(
             executed += 1
             try:
                 result = run_market_sweep_job(
-                    job, offset=offset, source=source, store=store, symbols=symbols, now_fn=now_fn, wall_ns=wall_ns
+                    job,
+                    offset=offset,
+                    source=source,
+                    store=store,
+                    symbols=symbols,
+                    now_fn=now_fn,
+                    wall_ns=wall_ns,
+                    workers=settings.concurrency,
                 )
             except SnapshotStoreError as exc:
                 logger.error("[DATA] stage=market_sweep_job job=%s status=STORE_FAIL reason=%s", job.job_id, str(exc))

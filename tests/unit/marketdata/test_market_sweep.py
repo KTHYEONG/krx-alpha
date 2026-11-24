@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import logging
 import math
+import threading
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -243,7 +244,7 @@ def test_session_writes_only_market_datasets_via_two_endpoints(tmp_path) -> None
     symbols = _symbols(3)
 
     result = run_market_sweep_session(
-        settings=MarketSweepSettings(),
+        settings=MarketSweepSettings(concurrency=1),
         session_date=DAY,
         source=source,
         store=store,
@@ -275,7 +276,7 @@ def test_truncated_passes_rotate_to_cover_whole_window(tmp_path, caplog) -> None
 
     with caplog.at_level(logging.INFO, logger="src.marketdata.market_sweep"):
         run_market_sweep_session(
-            settings=MarketSweepSettings(),
+            settings=MarketSweepSettings(concurrency=1),
             session_date=DAY,
             source=source,
             store=_store(tmp_path),
@@ -304,7 +305,7 @@ def test_late_start_expires_past_jobs_without_calls(tmp_path, caplog) -> None:
 
     with caplog.at_level(logging.INFO, logger="src.marketdata.market_sweep"):
         result = run_market_sweep_session(
-            settings=MarketSweepSettings(),
+            settings=MarketSweepSettings(concurrency=1),
             session_date=DAY,
             source=source,
             store=_store(tmp_path),
@@ -326,7 +327,7 @@ def test_session_past_run_end_makes_no_calls(tmp_path) -> None:
     source = _FakeSweepSource(clock)
 
     result = run_market_sweep_session(
-        settings=MarketSweepSettings(),
+        settings=MarketSweepSettings(concurrency=1),
         session_date=DAY,
         source=source,
         store=_store(tmp_path),
@@ -346,7 +347,7 @@ def test_all_failed_pass_counts_as_failed_job(tmp_path, caplog) -> None:
 
     with caplog.at_level(logging.WARNING, logger="src.marketdata.market_sweep"):
         result = run_market_sweep_session(
-            settings=MarketSweepSettings(),
+            settings=MarketSweepSettings(concurrency=1),
             session_date=DAY,
             source=source,
             store=_store(tmp_path),
@@ -372,7 +373,7 @@ def test_store_failure_is_logged_and_session_continues(tmp_path, caplog) -> None
 
     with caplog.at_level(logging.ERROR, logger="src.marketdata.market_sweep"):
         result = run_market_sweep_session(
-            settings=MarketSweepSettings(),
+            settings=MarketSweepSettings(concurrency=1),
             session_date=DAY,
             source=_FakeSweepSource(clock),
             store=_BrokenStore(),  # type: ignore[arg-type]
@@ -431,7 +432,7 @@ def test_quiet_check_only_when_idle(tmp_path) -> None:
     spy = _QuietSpy()
 
     result = run_market_sweep_session(
-        settings=MarketSweepSettings(),
+        settings=MarketSweepSettings(concurrency=1),
         session_date=DAY,
         source=source,
         store=_store(tmp_path),
@@ -445,3 +446,37 @@ def test_quiet_check_only_when_idle(tmp_path) -> None:
 
     assert result.executed > 0
     assert spy.seen == [len(source.calls)]
+
+
+class _LockedSweepSource(_FakeSweepSource):
+    def __init__(self, clock: _Clock) -> None:
+        super().__init__(clock)
+        self._lock = threading.Lock()
+
+    def _call(self, name: str, symbol: str) -> None:
+        with self._lock:
+            super()._call(name, symbol)
+
+
+def test_session_passes_concurrency(tmp_path) -> None:
+    clock = _Clock(_t(8, 40))
+    source = _LockedSweepSource(clock)
+    store = _store(tmp_path)
+    symbols = _symbols(12)
+
+    run_market_sweep_session(
+        settings=MarketSweepSettings(concurrency=3),
+        session_date=DAY,
+        source=source,
+        store=store,
+        symbols=symbols,
+        now_fn=clock.now_fn,
+        sleep_fn=clock.sleep,
+        wall_ns=clock.wall_ns,
+        max_iterations=1,
+    )
+
+    open_calls = [symbol for name, symbol, _ in source.calls if name == "auction_book"][:12]
+    assert sorted(open_calls) == sorted(symbols)
+    auction = store.frame(SnapshotDataset.AUCTION_BOOK_MARKET)
+    assert auction.filter(auction["phase"] == "open").height == 12

@@ -802,6 +802,8 @@ class MarketSweepSettings(BaseSettings):
     rest_rate_per_s: float = Field(default=18.0, gt=0, allow_inf_nan=False)
     request_timeout_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
     transport_retry_backoff_s: float = Field(default=0.5, ge=0, allow_inf_nan=False)
+    # In-flight calls under the same host pacer; the pacer, not this value, bounds the rate.
+    concurrency: int = Field(default=3, ge=1, le=4)
     # Host-wide KIS pacing reservation lead (standard work, same as snapshots).
     rest_max_lead_s: float = Field(default=1.0, gt=0)
     markets: tuple[str, ...] = ("KOSPI", "KOSDAQ")

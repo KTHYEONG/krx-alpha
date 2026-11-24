@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import threading
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Protocol, TypeVar, assert_never, cast
@@ -163,6 +165,62 @@ class _JobBudget:
                     self.failed_keys.append(key)
             elif self.truncated:
                 return
+
+    def each_concurrent(
+        self, keys: Sequence[str], fetch: Callable[[str], _T], *, workers: int
+    ) -> list[tuple[_T, int]]:
+        """Fetch keys with up to ``workers`` in flight; return successes in key order, same counters as ``each``."""
+        if workers <= 1:
+            return list(self.each(keys, fetch))
+        thread_count = min(workers, len(keys))
+        if thread_count == 0:
+            return []
+        lock = threading.Lock()
+        stop = threading.Event()
+        next_index = 0
+        results: dict[int, tuple[_T, int]] = {}
+        fatal: list[BaseException] = []
+
+        def worker() -> None:
+            nonlocal next_index
+            while True:
+                with lock:
+                    if stop.is_set() or self.truncated:
+                        return
+                    if self.now_fn() >= self.not_after:
+                        self.truncated = True
+                        return
+                    if next_index >= len(keys):
+                        return
+                    index = next_index
+                    next_index += 1
+                    key = keys[index]
+                    self.attempted += 1
+                try:
+                    result = fetch(key)
+                except KisApiError as exc:
+                    with lock:
+                        self.failed += 1
+                        if self.first_error is None:
+                            self.first_error = str(exc)
+                        if key not in self.failed_keys:
+                            self.failed_keys.append(key)
+                    continue
+                except BaseException as exc:
+                    with lock:
+                        fatal.append(exc)
+                    stop.set()
+                    return
+                with lock:
+                    self.succeeded += 1
+                    results[index] = (result, self.wall_ns())
+
+        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+            for future in [executor.submit(worker) for _ in range(thread_count)]:
+                future.result()
+        if fatal:
+            raise fatal[0]
+        return [results[index] for index in sorted(results)]
 
 
 def run_snapshot_job(

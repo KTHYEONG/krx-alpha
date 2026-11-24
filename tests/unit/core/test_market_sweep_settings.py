@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from src.core.config import MarketSweepSettings, SnapshotSettings, resolve_collector_runtime
 
@@ -91,3 +92,12 @@ def test_runtime_rejects_sweep_on_snapshot_slot() -> None:
     runtime = resolve_collector_runtime(market_sweep=MarketSweepSettings(enabled=True, kis_data_slot="6"))
 
     assert runtime.market_sweep.kis_data_slot == "6"
+
+
+def test_concurrency_default_and_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert MarketSweepSettings().concurrency == 3
+    for bad in (0, 5):
+        with pytest.raises(ValidationError):
+            MarketSweepSettings(concurrency=bad)
+    monkeypatch.setenv("KRX_ALPHA_MARKET_SWEEP_CONCURRENCY", "2")
+    assert MarketSweepSettings().concurrency == 2

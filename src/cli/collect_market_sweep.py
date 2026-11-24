@@ -62,7 +62,9 @@ def run(args: argparse.Namespace) -> int:
         session=requests,
         now=now_fn,
     )
-    logger.info("[DATA] stage=market_sweep status=READY symbols=%d", len(symbols))
+    logger.info(
+        "[DATA] stage=market_sweep status=READY symbols=%d concurrency=%d", len(symbols), settings.concurrency
+    )
     run_market_sweep_session(
         settings=settings,
         session_date=session_date,
