@@ -1,10 +1,34 @@
 #!/usr/bin/env bash
 # Krx window probe (EOD). Read-only; prints verdict lines only. Run from $HOME/krx-alpha.
 export TZ=Asia/Seoul LC_ALL=C
-cd "$HOME/krx-alpha/data" || { echo "CTX UNKNOWN reason=no_data_root"; exit 0; }
+cd "$HOME/krx-alpha/data" || { echo "CTX UNKNOWN reason=no_data_root"; exit 1; }
 D=${D:-$(date +%F)}; L0C=${L0C:-1}; PQRUN=${PQRUN:-1}; export D L0C
 PY=$(cat <<'EOF'
 import collections, datetime as dt, glob, json, os, re, statistics, subprocess, sys
+Q1_MAX_BITMAP_PAGES: int = 65_536
+
+class _SequenceBitmapLimitError(RuntimeError):
+    pass
+
+class _SequenceBitmap:
+    def __init__(self, max_pages: int) -> None:
+        if max_pages <= 0: raise ValueError("max_pages must be positive")
+        self.max_pages = max_pages
+        self.pages: dict[tuple[str, int], bytearray] = {}
+
+    def test_and_set(self, conn_id: str, conn_seq: int) -> bool:
+        page_index, offset = divmod(conn_seq, 4096)
+        key = (conn_id, page_index)
+        page = self.pages.get(key)
+        if page is None:
+            if len(self.pages) >= self.max_pages: raise _SequenceBitmapLimitError()
+            page = self.pages[key] = bytearray(512)
+        index, bit = divmod(offset, 8)
+        mask = 1 << bit
+        duplicate = bool(page[index] & mask)
+        page[index] |= mask
+        return duplicate
+
 K = dt.timezone(dt.timedelta(hours=9)); now = dt.datetime.now(K); D = os.environ["D"]; Dd = dt.date.fromisoformat(D)
 R = os.path.expanduser("~/.local/bin/rclone"); RR = "gdrive:quant-lake/live/krx-alpha/data"
 cal = sorted(f[-15:-5] for f in glob.glob("calendar/dt=*.json")); biz = D in cal
@@ -136,8 +160,8 @@ for src, dst, ex in (("l1", f"{RR}/l1", ("--exclude", "/history/minute/kis/**"))
     c, st, rc = check(src, dst, ex)
     v = "UNKNOWN" if c["!"] or rc not in (0, 1) else ("FAIL" if st else "PASS")
     print(f"B4 {v} tree={src} match={c['=']} local_only={c['+']} size_diff={c['*']} err={c['!']} stale_before_eod={st[:4] or '-'}")
-rl0 = subprocess.run([R, "lsf", "-R", "--dirs-only", "--max-depth", "5", f"{RR}/l0"], capture_output=True, text=True).stdout.split()
-rl1 = set(subprocess.run([R, "lsf", "-R", "--files-only", f"{RR}/l1"], capture_output=True, text=True).stdout.split())
+rl0 = subprocess.run([R, "lsf", "-R", "--dirs-only", "--max-depth", "5", f"{RR}/l0"], stdout=subprocess.PIPE, text=True, check=True).stdout.split()
+rl1 = set(subprocess.run([R, "lsf", "-R", "--files-only", f"{RR}/l1"], stdout=subprocess.PIPE, text=True, check=True).stdout.split())
 loss = []; pend = []
 for x in rl0:
     if "/dt=" not in x: continue
@@ -151,26 +175,41 @@ WIN = {"regular": ("083000", "200059"), "krx_after": ("154000", "200059"), "nxt_
 for sdir in sorted(glob.glob(f"l0/*/*/*/*/dt={D}")):
     vendor, venue, session, stream = sdir.split("/")[1:5]
     if vendor == "db": print(f"Q1 SKIP(db_format) stream={sdir[3:-14]}"); continue
-    quote = stream.endswith("ASP0"); lo, hi = WIN[session]
-    n = bad = dup = reg = hmis = emp = ow = px0 = cr = size = 0; sym = collections.Counter(); last = {}; seen = set()
+    quote = stream.endswith("ASP0"); lo, hi = WIN[session]; stream_label = sdir[3:-14]
+    n = bad = dup = reg = hmis = emp = ow = px0 = cr = size = 0; sym = collections.Counter(); last = {}; seen = _SequenceBitmap(Q1_MAX_BITMAP_PAGES)
     for fz in sorted(glob.glob(f"{sdir}/*.zst")):
         size += os.path.getsize(fz); fh = os.path.basename(fz)[:2]
-        for line in subprocess.Popen(["nice", "-n", "19", "zstdcat", fz], stdout=subprocess.PIPE).stdout:
-            n += 1
-            try:
-                r = json.loads(line)
-                if vendor == "ls":
-                    j = json.loads(r["raw"]); b = j["body"]; s = j["header"]["tr_key"]; t = b["hotime" if quote else "chetime"]
-                    a1, b1, px = (int(b["offerho1"]), int(b["bidho1"]), 1) if quote else (0, 0, int(b["price"]))
-                else:
-                    p = r["raw"].split("^"); s, t = p[0], p[1]; a1, b1, px = (int(p[3]), int(p[13]), 1) if quote else (0, 0, int(p[2]))
-            except (ValueError, KeyError, IndexError, TypeError): bad += 1; continue
-            sym[s] += 1; k = (r["conn_id"], r["conn_seq"]); dup += k in seen; seen.add(k)
-            reg += r["conn_seq"] < last.get(r["conn_id"], -1); last[r["conn_id"]] = r["conn_seq"]
-            hmis += dt.datetime.fromtimestamp(r["recv_wall_ns"] / 1e9, K).strftime("%H") != fh
-            if not t: emp += 1
-            else: ow += not lo <= t <= hi
-            px0 += px <= 0; cr += a1 > 0 and b1 > 0 and b1 >= a1
+        with subprocess.Popen(["nice", "-n", "19", "zstdcat", fz], stdout=subprocess.PIPE) as process:
+            for line in process.stdout:
+                n += 1
+                try:
+                    r = json.loads(line)
+                    if vendor == "ls":
+                        j = json.loads(r["raw"]); b = j["body"]; s = j["header"]["tr_key"]; t = b["hotime" if quote else "chetime"]
+                        a1, b1, px = (int(b["offerho1"]), int(b["bidho1"]), 1) if quote else (0, 0, int(b["price"]))
+                    else:
+                        p = r["raw"].split("^"); s, t = p[0], p[1]; a1, b1, px = (int(p[3]), int(p[13]), 1) if quote else (0, 0, int(p[2]))
+                except (ValueError, KeyError, IndexError, TypeError): bad += 1; continue
+                conn_id, conn_seq = r.get("conn_id"), r.get("conn_seq")
+                if not isinstance(conn_id, str) or not conn_id or type(conn_seq) is not int:
+                    process.stdout.close(); process.terminate()
+                    print(f"Q1 FAIL stream={stream_label} reason=invalid_sequence_key")
+                    sys.exit(1)
+                try: dup += seen.test_and_set(conn_id, conn_seq)
+                except _SequenceBitmapLimitError:
+                    process.stdout.close(); process.terminate()
+                    print(f"Q1 FAIL stream={stream_label} reason=bitmap_page_limit limit_pages={Q1_MAX_BITMAP_PAGES}")
+                    sys.exit(1)
+                sym[s] += 1
+                reg += conn_seq < last.get(conn_id, -1); last[conn_id] = conn_seq
+                hmis += dt.datetime.fromtimestamp(r["recv_wall_ns"] / 1e9, K).strftime("%H") != fh
+                if not t: emp += 1
+                else: ow += not lo <= t <= hi
+                px0 += px <= 0; cr += a1 > 0 and b1 > 0 and b1 >= a1
+            rc = process.wait()
+            if rc:
+                print(f"Q1 FAIL stream={stream_label} reason=zstd_exit rc={rc}")
+                sys.exit(1)
     g = f"{vendor}/{venue}/{session}"; pl = syms.get(g, set())
     v = "FAIL" if dup or reg else ("WARN" if bad or hmis or ow or px0 or cr or (emp and not (vendor == "ls" and quote and emp <= n * 1e-4)) else "PASS")
     print(f"Q1 {v} stream={sdir[3:-14]} rec={n} B_per_rec={size // max(n, 1)} parse_fail={bad} dup_seq={dup} seq_regress={reg} hour_mismatch={hmis} evt_empty={emp} out_win={ow} px_le0={px0} crossed={cr}")
@@ -235,6 +274,17 @@ nb = b["n"].to_list(); med = statistics.median(nb[:-1]); dup = bd.group_by(["dat
 print(f"C7 {'PASS' if abs(nb[-1] / med - 1) <= 0.005 and not b['hl'].sum() and not b['c0'].sum() and not dup else 'FAIL'} bars_latest={b['date'][-1]} n={nb[-1]} median={med} dup={dup} program_latest={p['date'][-1]} program_n={p['len'][-1]}")
 EOF
 )
-nice -n 19 docker logs --since 16h krx-collector 2>&1 | grep -E 'level=CRITICAL|stage=(digest|program_trades_sync|program_trades_gap|snapshot_summary|snapshot_expired|snapshot_dq|snapshot_job)' | python3 -c "$PY"
+nice -n 19 docker logs --since 16h krx-collector 2>&1 | grep -E 'level=CRITICAL|stage=(digest|program_trades_sync|program_trades_gap|snapshot_summary|snapshot_expired|snapshot_dq|snapshot_job)' | python3 -u -c "$PY"
+statuses=("${PIPESTATUS[@]}")
+result=0
+if [ "${statuses[0]}" -ne 0 ]; then result="${statuses[0]}"
+elif [ "${statuses[1]}" -gt 1 ]; then result="${statuses[1]}"
+elif [ "${statuses[2]}" -ne 0 ]; then result="${statuses[2]}"
+fi
 echo "A4 INFO $(docker exec krx-collector cat /app/data/work/alert_ledger.json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print("ledger_day=%s sent_today=%s keys=%d cap_reached=%s" % (d["day"], d["sent_today"], len(d["keys"]), d["sent_today"] >= 20))' 2>/dev/null || echo ledger_unreadable)"
-[ "${PQRUN:-1}" = 1 ] && nice -n 19 docker run --rm -i -m 384m --memory-swap 384m --network none -e D -e POLARS_MAX_THREADS=2 -v "$HOME/krx-alpha/data:/app/data:ro" --entrypoint /app/.venv/bin/python ghcr.io/kthyeong/krx-collector:latest -c "$PQ" 2>&1 | tail -n 60
+if [ "${PQRUN:-1}" = 1 ]; then
+  nice -n 19 docker run --rm -i -m 384m --memory-swap 384m --network none -e D -e POLARS_MAX_THREADS=2 -v "$HOME/krx-alpha/data:/app/data:ro" --entrypoint /app/.venv/bin/python ghcr.io/kthyeong/krx-collector:latest -u -c "$PQ" 2>&1
+  rc=$?
+  [ "$result" -eq 0 ] && result="$rc"
+fi
+exit "$result"

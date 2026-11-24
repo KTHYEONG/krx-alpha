@@ -31,12 +31,16 @@ fi
 
 cd "$HOME/krx-alpha" || { echo "krx PROBE_ABORT reason=base_missing"; exit 1; }
 
+result=0
 for entry in $plan; do
   name="${entry%%:*}"
   budget="${entry##*:}"
   start="$(date +%s)"
-  nice -n 19 timeout "$budget" bash "$SCRIPT_DIR/$name.sh" | sed 's/^/krx /'
-  rc="${PIPESTATUS[0]}"
+  nice -n 19 timeout "$budget" bash "$SCRIPT_DIR/$name.sh" | sed -u 's/^/krx /'
+  statuses=("${PIPESTATUS[@]}")
+  rc="${statuses[0]}"
+  [ "$rc" -eq 0 ] && rc="${statuses[1]}"
+  [ "$result" -eq 0 ] && result="$rc"
   echo "krx PROBE_DONE script=$name rc=$rc elapsed_s=$(( $(date +%s) - start ))"
 done
-exit 0
+exit "$result"
