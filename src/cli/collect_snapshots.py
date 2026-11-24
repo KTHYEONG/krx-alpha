@@ -15,6 +15,7 @@ import requests
 from src.brokers.kis.stack import build_kis_data_slot_stack
 from src.core.config import KisTokenSettings, resolve_collector_runtime
 from src.core.session_anchors import resolve_session_anchors
+from src.marketdata.market_sweep import sweep_covered_investor_symbols
 from src.marketdata.snapshot_plan import shift_snapshot_settings
 from src.marketdata.snapshot_service import run_snapshot_session
 from src.realtime.kis_sharding import load_kis_data_credentials
@@ -32,6 +33,7 @@ def add_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) 
     parser.add_argument("--session-date", required=True)
     parser.add_argument("--candidates-path", required=True)
     parser.add_argument("--max-iterations", type=int, default=None)
+    parser.add_argument("--market-map-path", default=None)
     parser.set_defaults(handler=run)
 
 
@@ -55,6 +57,20 @@ def run(args: argparse.Namespace) -> int:
         candidates = cast("list[dict[str, Any]]", data.get("candidates") or [])
         symbols = tuple(str(row["symbol"]) for row in candidates)
     store = SnapshotStore(paths=runtime.paths, session_date=session_date)
+    market_map_path = pathlib.Path(str(args.market_map_path)) if args.market_map_path is not None else None
+    investor_symbols, dedupe_reason = sweep_covered_investor_symbols(
+        symbols,
+        snapshot=settings,
+        sweep=runtime.market_sweep,
+        market_map_path=market_map_path,
+    )
+    kept = len(symbols) if investor_symbols is None else len(investor_symbols)
+    logger.info(
+        "[DATA] stage=snapshot_sweep_dedupe kind=investor_estimate kept=%d skipped=%d reason=%s",
+        kept,
+        len(symbols) - kept,
+        dedupe_reason,
+    )
     run_snapshot_session(
         settings=shift_snapshot_settings(
             settings, resolve_session_anchors(runtime.paths.session_calendar_dir, session_date)
@@ -63,6 +79,7 @@ def run(args: argparse.Namespace) -> int:
         source=client,
         store=store,
         symbols=symbols,
+        investor_estimate_symbols=investor_symbols,
         now_fn=lambda: dt.datetime.now(_KST),
         sleep_fn=time.sleep,
         max_iterations=args.max_iterations,

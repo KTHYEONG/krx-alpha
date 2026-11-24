@@ -6,12 +6,13 @@ import datetime as dt
 import json
 import logging
 import math
+import pathlib
 import threading
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.core.config import DataPaths, MarketSweepSettings
+from src.core.config import DataPaths, MarketSweepSettings, SnapshotSettings
 from src.core.session_anchors import AnchorSource, SessionAnchors, standard_session_anchors
 from src.execution.contracts import KisApiError
 from src.marketdata.market_sweep import (
@@ -25,6 +26,7 @@ from src.marketdata.market_sweep import (
     run_market_sweep_job,
     run_market_sweep_session,
     shift_market_sweep_settings,
+    sweep_covered_investor_symbols,
 )
 from src.marketdata.snapshot_plan import SnapshotJob, SnapshotJobKind
 from src.marketdata.snapshot_schema import SNAPSHOT_SCHEMAS, SnapshotDataset
@@ -480,3 +482,63 @@ def test_session_passes_concurrency(tmp_path) -> None:
     assert sorted(open_calls) == sorted(symbols)
     auction = store.frame(SnapshotDataset.AUCTION_BOOK_MARKET)
     assert auction.filter(auction["phase"] == "open").height == 12
+
+
+def _covered_map(tmp_path, codes: tuple[str, ...]) -> pathlib.Path:
+    path = tmp_path / "market_map.json"
+    path.write_text(json.dumps(dict.fromkeys(codes, "KOSPI")), encoding="utf-8")
+    return path
+
+
+def test_dedupe_skips_covered_symbols_in_order(tmp_path) -> None:
+    path = _covered_map(tmp_path, ("005930", "000660"))
+
+    result = sweep_covered_investor_symbols(
+        ("005930", "035720", "000660"),
+        snapshot=SnapshotSettings(),
+        sweep=MarketSweepSettings(enabled=True, kis_data_slot="6", markets=("KOSPI",)),
+        market_map_path=path,
+    )
+
+    assert result == (("035720",), "sweep_covered")
+
+
+def test_dedupe_off_when_sweep_disabled(tmp_path) -> None:
+    path = _covered_map(tmp_path, ("005930",))
+
+    result = sweep_covered_investor_symbols(
+        ("005930",), snapshot=SnapshotSettings(), sweep=MarketSweepSettings(enabled=False), market_map_path=path
+    )
+
+    assert result == (None, "sweep_disabled")
+
+
+def test_dedupe_off_when_no_market_map_path() -> None:
+    result = sweep_covered_investor_symbols(
+        ("005930",), snapshot=SnapshotSettings(), sweep=MarketSweepSettings(enabled=True, kis_data_slot="6"), market_map_path=None
+    )
+
+    assert result == (None, "sweep_disabled")
+
+
+def test_dedupe_off_when_times_differ(tmp_path) -> None:
+    path = _covered_map(tmp_path, ("005930",))
+    snapshot = SnapshotSettings(investor_estimate_times=(dt.time(9, 35), dt.time(12, 0)))
+
+    result = sweep_covered_investor_symbols(
+        ("005930",), snapshot=snapshot, sweep=MarketSweepSettings(enabled=True, kis_data_slot="6"), market_map_path=path
+    )
+
+    assert result == (None, "times_differ")
+
+
+def test_dedupe_off_on_bad_map(tmp_path) -> None:
+    result = sweep_covered_investor_symbols(
+        ("005930",),
+        snapshot=SnapshotSettings(),
+        sweep=MarketSweepSettings(enabled=True, kis_data_slot="6"),
+        market_map_path=tmp_path / "missing.json",
+    )
+
+    assert result == (None, "market_map_unreadable")
+

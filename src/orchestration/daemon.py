@@ -1064,6 +1064,8 @@ def _snapshot_cmd(today: dt.date, paths: DataPaths) -> list[str]:
         today.isoformat(),
         "--candidates-path",
         str(paths.candidates),
+        "--market-map-path",
+        str(paths.market_map),
     ]
 
 

@@ -18,6 +18,7 @@ def _args(tmp_path, **overrides):
         "session_date": "2026-09-17",
         "candidates_path": str(tmp_path / "candidates.json"),
         "max_iterations": 1,
+        "market_map_path": None,
     }
     params.update(overrides)
     return argparse.Namespace(**params)
@@ -102,3 +103,17 @@ def test_run_continues_with_empty_symbols_when_candidates_corrupt(tmp_path, monk
     assert exit_code == 0
     assert seen["symbols"] == ()
     assert any("corrupt candidates file" in rec.message for rec in caplog.records)
+
+
+def test_parser_market_map_path_defaults_to_none() -> None:
+    import argparse
+
+    from src.cli.collect_snapshots import add_parser
+
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+    base = ["collect-snapshots", "--session-date", "2026-11-24", "--candidates-path", "c.json"]
+
+    assert parser.parse_args(base).market_map_path is None
+    assert parser.parse_args([*base, "--market-map-path", "m.json"]).market_map_path == "m.json"
+

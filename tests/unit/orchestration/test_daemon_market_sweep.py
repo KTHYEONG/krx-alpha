@@ -110,3 +110,14 @@ def test_holiday_and_new_day_stop_the_sweep(tmp_path, monkeypatch) -> None:
     runner._stop_session_children()
 
     assert runner.children.get(daemon_mod.StreamChildKey.MARKET_SWEEP) is None
+
+
+def test_snapshot_cmd_passes_market_map(tmp_path) -> None:
+    from src.core.config import DataPaths
+
+    paths = DataPaths(tmp_path)
+
+    cmd = daemon_mod._snapshot_cmd(_DAY, paths)
+
+    assert cmd[-2:] == ["--market-map-path", str(paths.market_map)]
+

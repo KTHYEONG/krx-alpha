@@ -230,6 +230,7 @@ def run_snapshot_job(
     store: SnapshotStore,
     settings: SnapshotSettings,
     symbols: tuple[str, ...],
+    investor_estimate_symbols: tuple[str, ...] | None = None,
     news_seen: set[str],
     now_fn: Callable[[], dt.datetime],
     wall_ns: Callable[[], int] = time.time_ns,
@@ -253,9 +254,10 @@ def run_snapshot_job(
         return append(SnapshotDataset.AUCTION_BOOK, rows)
 
     def investor_estimate() -> int:
+        targets = symbols if investor_estimate_symbols is None else investor_estimate_symbols
         rows = [
             stamp(row, observed)
-            for result, observed in budget.each(symbols, source.get_investor_estimate)
+            for result, observed in budget.each(targets, source.get_investor_estimate)
             for row in result
         ]
         return append(SnapshotDataset.INVESTOR_ESTIMATE, rows)
@@ -415,6 +417,7 @@ def run_snapshot_session(
     source: SnapshotSource,
     store: SnapshotStore,
     symbols: tuple[str, ...],
+    investor_estimate_symbols: tuple[str, ...] | None = None,
     now_fn: Callable[[], dt.datetime],
     sleep_fn: Callable[[float], None],
     wall_ns: Callable[[], int] = time.time_ns,
@@ -477,6 +480,7 @@ def run_snapshot_session(
                     store=store,
                     settings=settings,
                     symbols=symbols,
+                    investor_estimate_symbols=investor_estimate_symbols,
                     news_seen=news_seen,
                     now_fn=now_fn,
                     wall_ns=wall_ns,

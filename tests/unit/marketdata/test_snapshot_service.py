@@ -1159,3 +1159,47 @@ def test_partial_index_failure_log_includes_key_and_reason(tmp_path, caplog) -> 
     messages = [r.message for r in caplog.records if "job=index_snapshot@" in r.message]
     assert len(messages) == 1
     assert "failed_keys=1001 reason=TRANSPORT: Timeout" in messages[0]
+
+
+def test_investor_job_uses_override_while_auction_keeps_full_symbols(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    source = _FakeSource()
+    source.investor = {"C": ()}
+    source.auction = {"*": lambda: _auction_row("x")}
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    symbols = ("A", "B", "C")
+
+    investor = run_snapshot_job(
+        _job(SnapshotJobKind.INVESTOR_ESTIMATE, _t(9, 35), _t(10, 5)),
+        source=source, store=store, settings=SnapshotSettings(), symbols=symbols,
+        investor_estimate_symbols=("C",), news_seen=set(), now_fn=lambda: _t(9, 35, 5), wall_ns=_counter(),
+    )
+    auction = run_snapshot_job(
+        _job(SnapshotJobKind.AUCTION_OPEN, _t(8, 40), _t(8, 50)),
+        source=source, store=store, settings=SnapshotSettings(), symbols=symbols,
+        investor_estimate_symbols=("C",), news_seen=set(), now_fn=lambda: _t(8, 40, 5), wall_ns=_counter(),
+    )
+
+    assert [call for call in source.calls if call[0] == "investor"] == [("investor", "C")]
+    assert [call[1] for call in source.calls if call[0] == "auction"] == ["A", "B", "C"]
+    assert (investor.attempted, auction.attempted) == (1, 3)
+
+
+def test_empty_investor_override_makes_no_calls_and_no_failure(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    source = _FakeSource()
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+
+    result = run_snapshot_job(
+        _job(SnapshotJobKind.INVESTOR_ESTIMATE, _t(9, 35), _t(10, 5)),
+        source=source, store=store, settings=SnapshotSettings(), symbols=("A", "B"),
+        investor_estimate_symbols=(), news_seen=set(), now_fn=lambda: _t(9, 35, 5), wall_ns=_counter(),
+    )
+
+    assert source.calls == []
+    assert (result.attempted, result.succeeded, result.failed, result.rows_added) == (0, 0, 0, 0)
+

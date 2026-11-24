@@ -12,7 +12,7 @@ from typing import Final, Protocol
 from zoneinfo import ZoneInfo
 
 from src.core.calendar import SessionSchedule, schedule_for
-from src.core.config import MarketSweepSettings, validate_market_sweep_order
+from src.core.config import MarketSweepSettings, SnapshotSettings, validate_market_sweep_order
 from src.core.errors import KrxAlphaError
 from src.core.session_anchors import SessionAnchors
 from src.core.symbols import is_krx_short_code
@@ -71,6 +71,31 @@ def load_market_symbols(path: pathlib.Path, *, markets: Sequence[str]) -> tuple[
     if not symbols:
         raise MarketMapError("market_map_empty")
     return tuple(symbols)
+
+
+def sweep_covered_investor_symbols(
+    symbols: tuple[str, ...],
+    *,
+    snapshot: SnapshotSettings,
+    sweep: MarketSweepSettings,
+    market_map_path: pathlib.Path | None,
+) -> tuple[tuple[str, ...] | None, str]:
+    """Return the symbols the snapshot must still fetch for investor estimates, or None to keep all, with the reason.
+
+    Symbols on the full-market sweep listing are skipped only when the sweep samples investor estimates at every
+    snapshot investor time; the comparison uses unshifted settings because both sides shift the same way.
+    """
+    if market_map_path is None or not sweep.enabled:
+        return None, "sweep_disabled"
+    snapshot_times = {*snapshot.investor_estimate_times, snapshot.eod_collect_time}
+    sweep_times = {*sweep.investor_estimate_times, sweep.investor_estimate_close_time}
+    if not snapshot_times <= sweep_times:
+        return None, "times_differ"
+    try:
+        covered = frozenset(load_market_symbols(market_map_path, markets=sweep.markets))
+    except MarketMapError:
+        return None, "market_map_unreadable"
+    return tuple(symbol for symbol in symbols if symbol not in covered), "sweep_covered"
 
 
 def _shift_time(value: dt.time, delta: dt.timedelta) -> dt.time:
@@ -348,4 +373,5 @@ __all__ = [
     "run_market_sweep_job",
     "run_market_sweep_session",
     "shift_market_sweep_settings",
+    "sweep_covered_investor_symbols",
 ]
