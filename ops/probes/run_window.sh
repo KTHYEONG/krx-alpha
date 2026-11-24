@@ -13,7 +13,7 @@ fi
 case "$1" in
   MORNING) plan="p_host:180 p_am:180" ;;
   OPEN|CLOSE) plan="p_live:180" ;;
-  EOD) plan="p_eod:900 p_host:180" ;;
+  EOD) plan="p_eod:1200 p_host:180" ;;
   WEEKLY) plan="p_week:180 p_host:180" ;;
   *) echo "unknown window: $1" >&2; exit 2 ;;
 esac
