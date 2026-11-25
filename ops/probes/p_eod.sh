@@ -140,7 +140,9 @@ for sdir in sorted(glob.glob("l0/*/*/*/*")):
     v = f"SKIP({sk})" if not fs and sk else "FAIL" if not fs or miss or zero else "PASS"
     print(f"C2 {v} stream={sdir[3:]} files={len(fs)} missing_hours={miss or '-'} zero={zero} mb={mb:.1f} acked={nsym(g, D) or 0}")
 # C5 snapshot presence + run summary (row thresholds in Q container part)
-kinds = sorted(os.path.basename(k) for k in glob.glob("l1/snapshot/*")); miss = [k for k in kinds if not os.path.exists(f"l1/snapshot/{k}/dt={D}.parquet")]
+kinds = sorted(os.path.basename(k) for k in glob.glob("l1/snapshot/*"))
+def _snap_present(k): return os.path.exists(f"l1/snapshot/{k}/dt={D}.parquet") or (k == "investor_estimate" and os.path.exists(f"l1/snapshot/investor_estimate_market/dt={D}.parquet"))
+miss = [k for k in kinds if not _snap_present(k)]
 sm = [l for l in L if "stage=snapshot_summary" in l and (t := ts(l)) and t.date() == Dd]; ex = [l for l in L if "stage=snapshot_expired" in l and (t := ts(l)) and t.date() == Dd]
 late_exp = [l for l in ex if ts(l).strftime("%H%M") > "0830"]; s = sm[-1] if sm else ""
 v = "UNKNOWN" if not cover else "FAIL" if miss or not sm or f(s, "failed_jobs") != "0" or late_exp else ("WARN" if int(f(s, "expired") if f(s, "expired") != "-" else 0) > 45 else "PASS")

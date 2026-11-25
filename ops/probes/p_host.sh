@@ -11,7 +11,7 @@ if [ -z "$o" ]; then v "X1 UNKNOWN reason=chronyc_unavailable"; else
 read -r pct avail <<<"$(df -BG --output=pcent,avail / | tail -1 | tr -d '%G')"
 s=PASS; [ "$pct" -ge 70 ] && s=WARN; [ "$pct" -gt 85 ] || [ "$avail" -lt 5 ] && s=FAIL; v "X2 $s used_pct=$pct free_gb=$avail"
 # X3 failed units + alert template
-fu=$(systemctl --user --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ','); fs=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ',')
+fu=$(systemctl --user --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | grep -v '^quant-ops-probe@' | tr '\n' ','); fs=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ',')
 tpl=$(systemctl --user cat kca-alert@.service >/dev/null 2>&1 && echo ok || echo MISSING)
 s=PASS; [ -n "$fu$fs" ] && s=WARN; echo "$fu" | grep -qE 'krx-|vps-image-gc' && s=FAIL; [ "$tpl" != ok ] && s=FAIL
 v "X3 $s user_failed=${fu:--} system_failed=${fs:--} alert_template=$tpl"

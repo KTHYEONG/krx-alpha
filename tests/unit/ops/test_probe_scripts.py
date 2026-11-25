@@ -112,7 +112,7 @@ def _eod_fixture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     docker = bindir / "docker"
     docker.write_text(
         '#!/bin/sh\ncase "$1" in\n'
-        'logs) exit "${LOG_RC:-0}" ;;\n'
+        'logs) [ -n "${LOG_TEXT:-}" ] && printf \'%s\\n\' "$LOG_TEXT"; exit "${LOG_RC:-0}" ;;\n'
         'exec) echo \'{"day":"2026-11-24","sent_today":0,"keys":[]}\' ;;\n'
         'run) echo "Q3 PASS first"; seq 1 70; exit "${PQ_RC:-0}" ;;\n'
         'esac\n',
@@ -347,3 +347,80 @@ def test_r8_no_premarket_next_day_skips(tmp_path: Path) -> None:
     _calendar(data, "2026-11-25", {"nxt_premarket": None})
     result = _run_eod(env)
     assert "R8 SKIP(no_premarket_next_day) pool=2026-11-25" in result.stdout
+
+
+_SNAPSHOT_SUMMARY = "2026-11-24T08:00:00.000+09:00 stage=snapshot_summary executed=5 expired=0 failed_jobs=0"
+
+
+def _snapshot_dirs(data: Path, dirs: tuple[str, ...]) -> None:
+    for name in dirs:
+        (data / "l1" / "snapshot" / name).mkdir(parents=True, exist_ok=True)
+
+
+def test_c5_investor_estimate_covered_by_market_snapshot(tmp_path: Path) -> None:
+    data, env = _eod_fixture(tmp_path)
+    _snapshot_dirs(data, ("investor_estimate", "investor_estimate_market", "ohlcv"))
+    for name in ("investor_estimate_market", "ohlcv"):
+        (data / "l1" / "snapshot" / name / "dt=2026-11-24.parquet").touch()
+    env["LOG_TEXT"] = _SNAPSHOT_SUMMARY
+    result = _run_eod(env)
+    c5 = [line for line in result.stdout.splitlines() if line.startswith("C5 ")]
+    assert len(c5) == 1
+    assert c5[0].startswith("C5 PASS ")
+    assert "missing=-" in c5[0]
+
+
+def test_c5_investor_estimate_without_any_snapshot_fails(tmp_path: Path) -> None:
+    data, env = _eod_fixture(tmp_path)
+    _snapshot_dirs(data, ("investor_estimate", "ohlcv"))
+    (data / "l1" / "snapshot" / "ohlcv" / "dt=2026-11-24.parquet").touch()
+    env["LOG_TEXT"] = _SNAPSHOT_SUMMARY
+    result = _run_eod(env)
+    assert "C5 FAIL" in result.stdout
+    assert "missing=['investor_estimate']" in result.stdout
+
+
+def _host_env(tmp_path: Path, user_failed: str) -> dict[str, str]:
+    home = tmp_path / "home"
+    home.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    systemctl = bindir / "systemctl"
+    systemctl.write_text(
+        '#!/bin/sh\n'
+        'if [ "$1" = --user ] && [ "$2" = --failed ] && [ -n "${USER_FAILED:-}" ]; then printf \'%s\\n\' $USER_FAILED; fi\n'
+        'exit 0\n',
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+    for name in ("chronyc", "docker", "journalctl"):
+        stub = bindir / name
+        stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        stub.chmod(0o755)
+    return _hermetic_env(HOME=str(home), PATH=f"{bindir}:/usr/bin:/bin", USER_FAILED=user_failed)
+
+
+def _run_host(env: dict[str, str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - fixed argv, hermetic probe
+        [_BASH, str(_PROBES_DIR / "p_host.sh")],
+        capture_output=True, text=True, env=env, cwd=cwd, timeout=30, check=False,
+    )
+
+
+def _x3_line(stdout: str) -> str:
+    return next(line for line in stdout.splitlines() if line.startswith("X3 "))
+
+
+def test_x3_ignores_quant_ops_probe_unit_failure(tmp_path: Path) -> None:
+    env = _host_env(tmp_path, "quant-ops-probe@EOD.service")
+    x3 = _x3_line(_run_host(env, tmp_path).stdout)
+    assert x3.startswith("X3 PASS ")
+    assert "user_failed=-" in x3
+
+
+def test_x3_warns_only_on_non_probe_unit_failure(tmp_path: Path) -> None:
+    env = _host_env(tmp_path, "quant-ops-probe@EOD.service foo.service")
+    x3 = _x3_line(_run_host(env, tmp_path).stdout)
+    assert x3.startswith("X3 WARN ")
+    assert "user_failed=foo.service," in x3
+    assert "quant-ops-probe" not in x3
