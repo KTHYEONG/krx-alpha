@@ -4,7 +4,7 @@
 
 ## 1. Domain Ground Truth & Hard Boundaries
 - **Lossless Ingestion & Append-Only:** Zero tick loss. Raw L0 market data must be written to append-only zstd journals before parsing.
-- **Trading Session Freeze:** Strictly defer deployments and heavy maintenance during market hours (08:10~22:00 KST).
+- **Deploy Windows (KST, business days):** never deploy 08:10~09:40 or 15:10~15:45; low-risk changes (docs, tests, probes, backup/timer, research batch) may deploy 09:40~15:10; kca trading-path changes 15:45~20:30; `krx-collector` recreate only by the 22:00 deferred timer; project deploy gates must pass. Heavy maintenance stays outside 08:10~22:00.
 - **Clock Drift & Fail-Closed:** NTP clock drift must stay $\le 2.0s$. On drift violation, abort safely (Fail-Closed, `ClockUnsyncedError`). Paper mode sockets must never reach real broker gateways.
 - **Workspace Hygiene:** Keep exploratory experiments and temporary files strictly isolated under `scratch/`. Never commit raw cache or scratch files.
 - **Core Quant Invariants (details: `.agents/rules/domain.md`):** Point-in-time data only, no lookahead; historical universe including delisted names; results net of friction with capacity limits; no magic numbers (typed `Spec`/`Config`); ledgers conserve exactly (integer KRW/`Decimal`); on anomalies fail closed to `NO_TRADE`.
@@ -41,7 +41,7 @@ Verify code changes against the project's native toolchains before concluding ta
 - spec_dir: `docs/specs` (untracked; archive finished specs to `docs/specs/_done/`)
 - scratch_dir: `scratch/` (never commit)
 - high_risk_paths: `src/data/**`, ingestion/journal writers, OMS and broker gateway code, clock/NTP guards, ledger/accounting code
-- hard_stops: deploy or heavy maintenance during market hours (08:10~22:00 KST); any order TR on live keys (`KIS_APP_KEY`); changes to append-only journal semantics; weakening `ClockUnsyncedError` fail-closed or paper/real socket separation; any `rm` without previewing exact targets
+- hard_stops: deploy outside the §1 deploy windows, `krx-collector` recreate before 22:00 KST, or heavy maintenance 08:10~22:00 KST; any order TR on live keys (`KIS_APP_KEY`); changes to append-only journal semantics; weakening `ClockUnsyncedError` fail-closed or paper/real socket separation; any `rm` without previewing exact targets
 - commit_style: Korean `<type>: <summary <=50 chars>` + `- **Why:** <rationale>`; types feat/fix/refactor/chore/docs; no AI or co-author trailers; every commit via `/commit`
 - report_language: Korean (card keys stay English)
 - rules: `.agents/rules/*.md`
