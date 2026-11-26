@@ -259,7 +259,7 @@ def test_plan_aftermarket_shards_truncation_caps_both_lists_by_rank(caplog) -> N
     )
 
 
-def test_plan_aftermarket_shards_identical_lists_reproduce_legacy_plan() -> None:
+def test_plan_aftermarket_shards_identical_lists_deal_ranks_round_robin() -> None:
     from src.realtime.contracts import MarketVenue
     from src.realtime.kis_sharding import KisDataCredential, plan_aftermarket_shards
 
@@ -272,11 +272,74 @@ def test_plan_aftermarket_shards_identical_lists_reproduce_legacy_plan() -> None
     )
 
     assert [(shard.venue, shard.shard_index, shard.symbols, shard.streams, shard.credential_slot, shard.credential_key_id) for shard in plan] == [
-        (MarketVenue.NXT, 0, symbols[:20], ("H0NXCNT0", "H0NXASP0"), "0", "id0"),
-        (MarketVenue.NXT, 1, symbols[20:], ("H0NXCNT0", "H0NXASP0"), "1", "id1"),
-        (MarketVenue.KRX, 0, symbols[:20], ("H0STCNT0", "H0STASP0"), "2", "id2"),
-        (MarketVenue.KRX, 1, symbols[20:], ("H0STCNT0", "H0STASP0"), "3", "id3"),
+        (MarketVenue.NXT, 0, symbols[0::2], ("H0NXCNT0", "H0NXASP0"), "0", "id0"),
+        (MarketVenue.NXT, 1, symbols[1::2], ("H0NXCNT0", "H0NXASP0"), "1", "id1"),
+        (MarketVenue.KRX, 0, symbols[0::2], ("H0STCNT0", "H0STASP0"), "2", "id2"),
+        (MarketVenue.KRX, 1, symbols[1::2], ("H0STCNT0", "H0STASP0"), "3", "id3"),
     ]
+
+
+def test_plan_aftermarket_shards_round_robin_spreads_top_ranks() -> None:
+    from src.realtime.contracts import MarketVenue
+    from src.realtime.kis_sharding import KisDataCredential, plan_aftermarket_shards
+
+    keys = tuple(KisDataCredential(str(i), f"key{i}", "s", "h", f"id{i}") for i in range(6))
+    krx = tuple(f"{i:06d}" for i in range(52))
+    plan = plan_aftermarket_shards(
+        krx_symbols=krx, nxt_symbols=(), credentials=keys, pair_capacity_per_connection=41,
+        krx_streams=("H0STCNT0", "H0STASP0"), nxt_streams=("H0NXCNT0", "H0NXASP0"),
+    )
+    shards = [shard for shard in plan if shard.venue is MarketVenue.KRX]
+    assert [len(shard.symbols) for shard in shards] == [18, 17, 17]
+    assert [shard.symbols[0] for shard in shards] == [krx[0], krx[1], krx[2]]
+
+
+def test_plan_aftermarket_shards_round_robin_keeps_rank_order_within_shard() -> None:
+    from src.realtime.kis_sharding import KisDataCredential, plan_aftermarket_shards
+
+    keys = tuple(KisDataCredential(str(i), f"key{i}", "s", "h", f"id{i}") for i in range(6))
+    nxt = tuple(f"1{i:05d}" for i in range(33))
+    krx = tuple(f"2{i:05d}" for i in range(52))
+    plan = plan_aftermarket_shards(
+        krx_symbols=krx, nxt_symbols=nxt, credentials=keys, pair_capacity_per_connection=41,
+        krx_streams=("H0STCNT0", "H0STASP0"), nxt_streams=("H0NXCNT0", "H0NXASP0"),
+    )
+    for venue_list in (nxt, krx):
+        for shard in (s for s in plan if s.symbols and s.symbols[0] in venue_list):
+            ranks = [venue_list.index(symbol) for symbol in shard.symbols]
+            assert ranks == sorted(ranks)
+            assert len(set(ranks)) == len(ranks)
+
+
+def test_plan_aftermarket_shards_single_shard_keeps_full_order() -> None:
+    from src.realtime.kis_sharding import KisDataCredential, plan_aftermarket_shards
+
+    keys = tuple(KisDataCredential(str(i), f"key{i}", "s", "h", f"id{i}") for i in range(2))
+    krx = tuple(f"{i:06d}" for i in range(20))
+    plan = plan_aftermarket_shards(
+        krx_symbols=krx, nxt_symbols=(), credentials=keys, pair_capacity_per_connection=41,
+        krx_streams=("H0STCNT0", "H0STASP0"), nxt_streams=("H0NXCNT0", "H0NXASP0"),
+    )
+    assert len(plan) == 1
+    assert plan[0].symbols == krx
+
+
+def test_plan_aftermarket_shards_round_robin_union_disjoint_and_capped() -> None:
+    from src.realtime.kis_sharding import KisDataCredential, plan_aftermarket_shards
+
+    keys = tuple(KisDataCredential(str(i), f"key{i}", "s", "h", f"id{i}") for i in range(12))
+    for length in range(1, 61):
+        krx = tuple(f"{i:06d}" for i in range(length))
+        plan = plan_aftermarket_shards(
+            krx_symbols=krx, nxt_symbols=(), credentials=keys, pair_capacity_per_connection=41,
+            krx_streams=("H0STCNT0", "H0STASP0"), nxt_streams=("H0NXCNT0", "H0NXASP0"),
+        )
+        sizes = [len(shard.symbols) for shard in plan]
+        assert all(size <= 20 for size in sizes)
+        assert max(sizes) - min(sizes) <= 1
+        dealt = [symbol for shard in plan for symbol in shard.symbols]
+        assert len(dealt) == len(set(dealt))
+        assert set(dealt) == set(krx)
 
 
 def test_aftermarket_rank_cap_is_maximal_for_unequal_and_empty_venue_lists() -> None:
@@ -311,7 +374,9 @@ def test_aftermarket_rank_cap_is_maximal_for_unequal_and_empty_venue_lists() -> 
         assert len(plan) <= available
         for venue, symbols in (("nxt", nxt), ("krx", krx)):
             shards = [shard for shard in plan if shard.venue.value == venue]
-            assert tuple(symbol for shard in shards for symbol in shard.symbols) == symbols[:cap]
+            dealt = [symbol for shard in shards for symbol in shard.symbols]
+            assert len(dealt) == len(set(dealt))
+            assert set(dealt) == set(symbols[:cap])
             assert [shard.shard_index for shard in shards] == list(range(len(shards)))
         assert [shard.credential_slot for shard in plan] == [str(i) for i in range(len(plan))]
 

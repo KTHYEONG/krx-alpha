@@ -83,6 +83,8 @@ def plan_aftermarket_shards(
 ) -> tuple[AftermarketShard, ...]:
     """Assign each venue's rank-ordered list to its own shards (NXT first, then KRX).
 
+    Ranks are dealt round-robin so every shard carries liquid names; a contiguous tail shard churned on reconnects.
+
     Raises:
         KrxAlphaError: On empty (both venues) or duplicate symbols within one venue.
         SlotBudgetExceededError: When capacity cannot hold one symbol or the
@@ -140,7 +142,7 @@ def plan_aftermarket_shards(
             AftermarketShard(
                 MarketVenue.NXT,
                 index,
-                nxt_ordered[index * nxt_per_shard : (index + 1) * nxt_per_shard],
+                nxt_ordered[index::nxt_shard_count],
                 nxt_streams,
                 credential.slot,
                 credential.key_id,
@@ -152,7 +154,7 @@ def plan_aftermarket_shards(
             AftermarketShard(
                 MarketVenue.KRX,
                 index,
-                krx_ordered[index * krx_per_shard : (index + 1) * krx_per_shard],
+                krx_ordered[index::krx_shard_count],
                 krx_streams,
                 credential.slot,
                 credential.key_id,
