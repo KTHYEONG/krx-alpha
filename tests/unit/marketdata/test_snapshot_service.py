@@ -1,4 +1,5 @@
 import datetime as dt
+import threading
 from zoneinfo import ZoneInfo
 
 from src.core.config import SnapshotSettings
@@ -233,7 +234,7 @@ def test_auction_job_stamps_phase_and_survives_symbol_failure(tmp_path) -> None:
     job = _job(SnapshotJobKind.AUCTION_OPEN, _t(8, 40), _t(8, 50))
 
     result = run_snapshot_job(
-        job, source=source, store=store, settings=SnapshotSettings(), symbols=symbols,
+        job, source=source, store=store, settings=SnapshotSettings(concurrency=1), symbols=symbols,
         news_seen=set(), now_fn=lambda: _t(8, 40, 5), wall_ns=_counter(101),
     )
 
@@ -258,7 +259,7 @@ def test_job_stops_calling_after_window_closes(tmp_path) -> None:
     ticks = [_t(15, 21, 5), _t(15, 21, 6), _t(15, 25, 1)]
 
     result = run_snapshot_job(
-        job, source=source, store=store, settings=SnapshotSettings(), symbols=("A", "B", "C"),
+        job, source=source, store=store, settings=SnapshotSettings(concurrency=1), symbols=("A", "B", "C"),
         news_seen=set(), now_fn=lambda: ticks.pop(0), wall_ns=_counter(),
     )
 
@@ -1203,3 +1204,95 @@ def test_empty_investor_override_makes_no_calls_and_no_failure(tmp_path) -> None
     assert source.calls == []
     assert (result.attempted, result.succeeded, result.failed, result.rows_added) == (0, 0, 0, 0)
 
+
+
+class _AuctionProbeSource:
+    def __init__(self, *, barrier: threading.Barrier | None = None) -> None:
+        self.barrier = barrier
+        self.lock = threading.Lock()
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self.calls: list[str] = []
+
+    def get_auction_book(self, symbol: str) -> dict:
+        with self.lock:
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            self.calls.append(symbol)
+        try:
+            if self.barrier is not None:
+                self.barrier.wait(timeout=5)
+            return _auction_row(symbol)
+        finally:
+            with self.lock:
+                self.in_flight -= 1
+
+
+def test_auction_job_overlaps_calls_and_keeps_symbol_order(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    symbols = ("A1", "B2", "C3")
+    source = _AuctionProbeSource(barrier=threading.Barrier(3))
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    job = _job(SnapshotJobKind.AUCTION_OPEN, _t(8, 40), _t(8, 50))
+
+    result = run_snapshot_job(
+        job, source=source, store=store, settings=SnapshotSettings(concurrency=3), symbols=symbols,
+        news_seen=set(), now_fn=lambda: _t(8, 40, 5), wall_ns=_counter(101),
+    )
+
+    assert source.max_in_flight == 3
+    assert (result.attempted, result.succeeded, result.failed, result.truncated) == (3, 3, 0, False)
+    assert store.frame(SnapshotDataset.AUCTION_BOOK)["symbol"].to_list() == list(symbols)
+
+
+def test_auction_job_with_concurrency_one_calls_sequentially(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    source = _AuctionProbeSource()
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    job = _job(SnapshotJobKind.AUCTION_OPEN, _t(8, 40), _t(8, 50))
+
+    run_snapshot_job(
+        job, source=source, store=store, settings=SnapshotSettings(concurrency=1), symbols=("A1", "B2", "C3"),
+        news_seen=set(), now_fn=lambda: _t(8, 40, 5), wall_ns=_counter(),
+    )
+
+    assert source.max_in_flight == 1
+    assert source.calls == ["A1", "B2", "C3"]
+
+
+def test_auction_job_concurrent_deadline_issues_no_call_after_window(tmp_path) -> None:
+    from src.core.config import DataPaths
+    from src.storage.snapshot_store import SnapshotStore
+
+    source = _AuctionProbeSource()
+    store = SnapshotStore(paths=DataPaths(tmp_path), session_date=SESSION_DATE)
+    job = _job(SnapshotJobKind.AUCTION_CLOSE, _t(15, 21), _t(15, 25))
+    open_ticks = [_t(15, 21, 5), _t(15, 21, 5)]
+
+    def now() -> dt.datetime:
+        return open_ticks.pop(0) if open_ticks else _t(15, 25, 1)
+
+    result = run_snapshot_job(
+        job, source=source, store=store, settings=SnapshotSettings(concurrency=3),
+        symbols=("A1", "B2", "C3", "D4", "E5"), news_seen=set(), now_fn=now, wall_ns=_counter(),
+    )
+
+    assert len(source.calls) == 2
+    assert (result.attempted, result.succeeded, result.truncated) == (2, 2, True)
+    assert result.rows_added == 2
+
+
+def test_snapshot_concurrency_config_bound() -> None:
+    import pytest
+
+    from pydantic import ValidationError
+
+    assert SnapshotSettings().concurrency == 3
+    with pytest.raises(ValidationError):
+        SnapshotSettings(concurrency=0)
+    with pytest.raises(ValidationError):
+        SnapshotSettings(concurrency=5)

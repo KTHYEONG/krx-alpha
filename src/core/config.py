@@ -708,6 +708,8 @@ class SnapshotSettings(BaseSettings):
     idle_sleep_cap_s: float = 5.0
     # Host-wide KIS pacing reservation lead for snapshot collection (standard work).
     rest_max_lead_s: float = Field(default=1.0, gt=0)
+    # In-flight calls under the same host pacer; the pacer, not this value, bounds the rate.
+    concurrency: int = Field(default=3, ge=1, le=4)
 
     @model_validator(mode="after")
     def check_snapshot_contract(self) -> SnapshotSettings:

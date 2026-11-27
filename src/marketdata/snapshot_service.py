@@ -249,7 +249,9 @@ def run_snapshot_job(
     def auction(phase: str) -> int:
         rows: list[dict[str, object]] = [
             {**result, "phase": phase, "session_date": session_date, "observed_at_ns": observed}
-            for result, observed in budget.each(symbols, source.get_auction_book)
+            for result, observed in budget.each_concurrent(
+                symbols, source.get_auction_book, workers=settings.concurrency
+            )
         ]
         return append(SnapshotDataset.AUCTION_BOOK, rows)
 
