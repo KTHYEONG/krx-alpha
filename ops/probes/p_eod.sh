@@ -165,7 +165,8 @@ v = "FAIL" if bad or q else ("WARN" if max(ret.values(), default=0) > 4 or l1old
 print(f"B6 {v} l0_dates_ge_cutoff_max={max(ret.values(), default=0)} cutoff={cut} unexpected_old_l0={bad[:4] or '-'} held_days={sorted(held) or '-'} quarantine_files={q} l1_older_30d={len(l1old)}")
 miss = []
 for l1dir in sorted(glob.glob("l1/*/*/*/H0*")):
-    have = sorted(x[-18:-8] for x in glob.glob(f"{l1dir}/dt=*.parquet"))
+    sec = [f"l1_local/{l1dir[3:]}", f"l1/derived/secondary_patch/{l1dir[3:]}"]  # secondary feeds after 82a004f: full L1 in l1_local, patch in derived
+    have = sorted({x[-18:-8] for x in glob.glob(f"{l1dir}/dt=*.parquet")} | {x[-18:-8] for z in sec for x in glob.glob(f"{z}/dt=*.parquet")})
     if not have: continue
     l0dir = "l0/" + l1dir[3:]; g = "/".join(l1dir.split("/")[1:4])
     exp = [d for d in cal if have[0] <= d < cut and d < D and planned(g, d)]
@@ -182,13 +183,15 @@ for src, dst, ex in (("l1", f"{RR}/l1", ("--exclude", "/history/minute/kis/**"))
     print(f"B4 {v} tree={src} match={c['=']} local_only={c['+']} size_diff={c['*']} err={c['!']} stale_before_eod={st[:4] or '-'}")
 rl0 = subprocess.run([R, "lsf", "-R", "--dirs-only", "--max-depth", "5", f"{RR}/l0"], stdout=subprocess.PIPE, text=True, check=True).stdout.split()
 rl1 = set(subprocess.run([R, "lsf", "-R", "--files-only", f"{RR}/l1"], stdout=subprocess.PIPE, text=True, check=True).stdout.split())
-loss = []; pend = []
+loss = []; pend = []; seck = []
 for x in rl0:
     if "/dt=" not in x: continue
     part = x.rstrip("/"); s, d = part.rsplit("/dt=", 1); l1 = f"{s}/dt={d}.parquet"
     if os.path.isdir(f"l0/{part}") or os.path.isdir(f"quarantine/{part}"): continue
+    sp = f"derived/secondary_patch/{l1}"
+    if l1 not in rl1 and (sp in rl1 or os.path.exists(f"l1_local/{l1}")): seck.append(part); continue  # secondary feed (82a004f): full L1 never uploaded, so remote L0 is not purged
     (pend if (l1 in rl1 or os.path.exists(f"l1/{l1}")) else loss).append(part)
-print(f"B5 {'FAIL' if loss else ('WARN' if pend else 'PASS')} remote_l0_without_local_l0_and_any_l1={loss[:4] or '-'} purge_pending={pend[:4] or '-'} remote_l0_dirs={sum('/dt=' in x for x in rl0)}")
+print(f"B5 {'FAIL' if loss else ('WARN' if pend else 'PASS')} remote_l0_without_local_l0_and_any_l1={loss[:4] or '-'} purge_pending={pend[:4] or '-'} secondary_remote_l0_kept={len(seck)} remote_l0_dirs={sum('/dt=' in x for x in rl0)}")
 # Q1 + C6 L0 content of D (heavy, nice; skip with L0C=0)
 if os.environ.get("L0C") != "1": print("Q1 SKIP(L0C=0)"); sys.exit(0)
 WIN = {"regular": ("083000", "200059"), "krx_after": ("154000", "200059"), "nxt_after": ("153000", "200059"), "nxt_pre": ("075800", "085059")}
@@ -263,7 +266,9 @@ for mf in [f"/app/data/manifest/{D}.json", *sorted(glob.glob(f"/app/data/manifes
     except OSError: pass
 for k in sorted(glob.glob("/app/data/l1/snapshot/*")):
     kind = os.path.basename(k); f = f"{k}/dt={D}.parquet"
-    if not os.path.exists(f): print(f"C5 FAIL kind={kind} MISSING"); continue
+    if not os.path.exists(f):
+        if kind == "investor_estimate" and os.path.exists(f"/app/data/l1/snapshot/investor_estimate_market/dt={D}.parquet"): continue  # c080e73: per-symbol file retired, market sweep owns it
+        print(f"C5 FAIL kind={kind} MISSING"); continue
     df = pl.read_parquet(f, columns=[x for x in ("symbol", "session_date", "observed_at_ns") if x in pq.read_schema(f).names]); n = df.height
     if kind in PER: exp, lo = PER[kind][0] * len(plan), PER[kind][1]
     elif kind in FIX: exp, lo = FIX[kind]
